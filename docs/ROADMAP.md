@@ -11,6 +11,9 @@
   history (Super+N) and clear-on-lock.
 - **1.7** `SYS_CLIPBOARD`: label-aware, capability-gated, taint-raising and
   cleared on lock; Notes and Files use it.
+- **1.8** Trash and undo in Files, with a Trash place, unique names,
+  label-preserving renames, and confirmation only for permanent deletion.
+  Trusted file reads now raise DLP taint like every other read.
 
 - **1.0** Session lock and idle auto-lock; per-thread system dialogs; focus
   theft, window-slot and DLP metadata fixes; hostile-superblock and truncate

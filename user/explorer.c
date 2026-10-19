@@ -35,6 +35,7 @@
 #define SNIPPET_MAX 2048
 #define VIEW_MAX 65536
 #define MAX_DEPTH 12 /* folders nested deeper than this aren't copied or deleted as a whole */
+#define TRASH_DIR "/home/.trash"
 #define CHUNK 4096
 #define DOUBLE_CLICK_MS 450
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -89,6 +90,7 @@ static char view_name[NAME_MAX + 2];
 static char clip[PATH_MAX];
 static int clip_cut;
 static char pastebuf[CLIP_MAX + 1];
+static char undo_src[PATH_MAX], undo_dst[PATH_MAX];
 
 /* In-window dialogs. */
 enum { M_NONE, M_NEWDIR, M_RENAME, M_DELETE, M_LABEL };
@@ -192,6 +194,39 @@ static int name_cmp(const char *a, const char *b) {
 static int exists(const char *path) {
     struct file_stat st;
     return sys_stat(path, &st) == 0;
+}
+
+static int unique_path(char *out, const char *dir, const char *name);
+static void reload(void);
+
+static int ensure_trash(void) {
+    if (exists(TRASH_DIR)) return 1;
+    int64_t r = sys_mkdir(TRASH_DIR);
+    return r == 0 || r == -E_EXIST;
+}
+
+/* Move to Trash, never delete in place. `src` is already a full path. */
+static int64_t move_to_trash(const char *src, const char *name) {
+    if (!ensure_trash()) return -E_PERM;
+    char dst[PATH_MAX];
+    if (!unique_path(dst, TRASH_DIR, name)) return -E_INVAL;
+    int64_t r = sys_rename(src, dst);
+    if (!r) {
+        strlcpy(undo_src, src, sizeof undo_src);
+        strlcpy(undo_dst, dst, sizeof undo_dst);
+    }
+    return r;
+}
+
+static void undo_trash(void) {
+    if (!undo_dst[0]) return say(C_DIM, "Nothing to undo");
+    if (!exists(undo_dst)) return say(C_ERR, "That item is no longer in Trash");
+    if (exists(undo_src)) return say(C_ERR, "Something already occupies the old name");
+    int64_t r = sys_rename(undo_dst, undo_src);
+    if (r < 0) return say(C_ERR, "Can't undo: %s", why(r));
+    say(C_OK, "Restored %s", base_name(undo_src));
+    undo_dst[0] = undo_src[0] = 0;
+    reload();
 }
 
 /* A free name in `dir` based on `name`: "report.txt", "report 2.txt", ... */
@@ -343,6 +378,9 @@ static int64_t load_dir(const char *keep) {
             truncated = 1;
             break;
         }
+        /* The trash is reachable from Places, not shown as an ordinary home
+         * entry (so it can't be copied into itself by accident). */
+        if (!strcmp(de.name, ".trash") && strcmp(cwd, TRASH_DIR)) continue;
         struct entry *e = &ents[nents++];
         strlcpy(e->name, de.name, sizeof e->name);
         e->type = de.type;
@@ -613,7 +651,7 @@ static void open_modal(int kind) {
         char path[PATH_MAX];
         int n = e->type == FT_DIR && join(path, cwd, e->name) ? count_tree(path, 0, 10000) : 0;
         if (e->type == FT_FILE) {
-            snprintf(modal_msg[0], sizeof modal_msg[0], "\"%s\" will be gone for good.", e->name);
+            snprintf(modal_msg[0], sizeof modal_msg[0], "\"%s\" will be permanently deleted.", e->name);
         } else if (!n) {
             snprintf(modal_msg[0], sizeof modal_msg[0], "The folder \"%s\" is empty.", e->name);
         } else {
@@ -687,8 +725,8 @@ enum { HIT_BUTTON = 0, HIT_PLACE = 100, HIT_CRUMB = 200, HIT_ROW = 1000, HIT_PRE
 
 static const struct {
     const char *name, *path;
-} places[] = {{"Home", "/home"}, {"Apps", "/apps"}, {"All files", "/"}};
-#define NPLACES 3
+} places[] = {{"Home", "/home"}, {"Apps", "/apps"}, {"All files", "/"}, {"Trash", TRASH_DIR}};
+#define NPLACES 4
 
 static struct rect button_rect(int i) {
     if (i == B_UP) return (struct rect){PAD, 12, 44, 28};
@@ -911,11 +949,14 @@ static void draw_sidebar(void) {
     for (int i = 0; i < NPLACES; i++) {
         struct rect r = place_rect(i);
         /* The place we're in: the longest one that contains cwd. */
-        int here = path_within(cwd, places[i].path) && (i == 2 ? !path_within(cwd, "/home") && !path_within(cwd, "/apps") : 1);
+        int here = path_within(cwd, places[i].path);
+        if (i == 0) here = here && !path_within(cwd, TRASH_DIR);
+        if (i == 2) here = !path_within(cwd, "/home") && !path_within(cwd, "/apps");
+        if (i == 3) here = path_within(cwd, TRASH_DIR);
         if (here) gfx_round_rect(s, r.x, r.y, r.w, r.h, 8, C_SEL, 255);
         else if (hot == HIT_PLACE + i) gfx_round_rect(s, r.x, r.y, r.w, r.h, 8, C_ROW_HOT, 255);
         if (here) gfx_fill(s, r.x, r.y + 6, 3, r.h - 12, C_ACCENT);
-        icon_folder(r.x + 12, r.y + 5, i == 0 ? C_FOLDER : i == 1 ? 0xB794FF : 0x8C96B8);
+        icon_folder(r.x + 12, r.y + 5, i == 0 ? C_FOLDER : i == 1 ? 0xB794FF : i == 3 ? C_WARN : 0x8C96B8);
         gfx_text(s, r.x + 40, r.y + 6, places[i].name, here ? C_FG : C_DIM, FONT_SMALL);
     }
 
@@ -1212,7 +1253,7 @@ static void draw(void) {
     int rw = gfx_text_width(fitted, FONT_SMALL);
     gfx_text(s, ww - PAD - rw, sy + 7, fitted, C_DIM, FONT_SMALL);
     char msg[128];
-    fit(msg, sizeof msg, status[0] ? status : "Enter opens   Backspace goes up   Del deletes   Ctrl+C/X/V copy, cut, paste",
+    fit(msg, sizeof msg, status[0] ? status : "Enter opens   Backspace goes up   Del moves to Trash   Ctrl+Z undoes   Ctrl+C/X/V",
         ww - 2 * PAD - rw - 20);
     gfx_text(s, PAD, sy + 7, msg, status[0] ? status_color : C_FAINT, FONT_SMALL);
     if (modal) draw_modal();
@@ -1227,7 +1268,21 @@ static void press_button(int i) {
     case B_UP: go_up(); break;
     case B_NEWDIR: open_modal(M_NEWDIR); break;
     case B_RENAME: open_modal(M_RENAME); break;
-    case B_DELETE: open_modal(M_DELETE); break;
+    case B_DELETE:
+        if (!strcmp(cwd, TRASH_DIR)) open_modal(M_DELETE); /* permanent: always asks */
+        else {
+            struct entry *e = selected();
+            char path[PATH_MAX];
+            if (!e || !join(path, cwd, e->name)) break;
+            int64_t r = move_to_trash(path, e->name);
+            if (r < 0) say(C_ERR, "Can't move %s to Trash: %s", e->name, why(r));
+            else say(C_OK, "Moved %s to Trash (Ctrl+Z undoes)", e->name);
+            if (path_within(clip, path)) clip[0] = 0;
+            int keep = sel;
+            reload();
+            select_row(keep);
+        }
+        break;
     case B_COPY: do_copy(0); break;
     case B_CUT: do_copy(1); break;
     case B_PASTE: do_paste(); break;
@@ -1269,6 +1324,7 @@ static void key(uint32_t k, uint32_t mods) {
         case 'x': press_button(B_CUT); break;
         case 'v': do_paste(); break;
         case 'l': press_button(B_LABEL); break;
+        case 'z': undo_trash(); break;
         }
         return;
     }
@@ -1319,6 +1375,10 @@ static void click(int x, int y) {
         if (strcmp(path, cwd)) go(path, 0);
     } else if (h >= HIT_PLACE && h < HIT_PLACE + NPLACES) {
         view_open = 0;
+        if (h - HIT_PLACE == 3 && !ensure_trash()) {
+            say(C_ERR, "Can't create Trash in your home folder");
+            return;
+        }
         go(places[h - HIT_PLACE].path, 0);
     } else if (h == HIT_VIEW_CLOSE) {
         view_open = 0;

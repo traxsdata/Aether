@@ -16,6 +16,19 @@ Workstation and real laptops today.
 - The Security page now combines auto-lock, Lock Now, passphrase change and
   the storage/protection status.
 
+## What's new in 1.8
+
+- **Trash and undo in Files.** Delete moves an item to `/home/.trash` instead
+  of removing it; **Ctrl+Z** restores the last one. The new **Trash** place
+  and sidebar icon open the folder, and permanent deletion (only inside
+  Trash) still asks first. Paths and labels survive the move. See
+  [docs/TRASH.md](docs/TRASH.md).
+
+- **DLP follows reads for trusted apps too.** Files now gains the label of a
+  file or folder entry it reads, so previewing Confidential data cannot leave
+  its badge saying Public. This closes an inconsistency between the explorer
+  guide and the kernel.
+
 ## What's new in 1.7
 
 - **A label-aware clipboard.** `SYS_CLIPBOARD` is kernel memory with a DLP

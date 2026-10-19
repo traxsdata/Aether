@@ -83,7 +83,10 @@ static int storage_root(struct proc *p, uint32_t *out) {
 static int meta_tracked(void) { return current->trust == TRUST_UNTRUSTED; }
 
 static void meta_read(const struct afs_inode *n, const char *what) {
-    if (meta_tracked()) dlp_taint(current, n->label, what);
+    /* Content and its label follow the data for trusted apps too. The earlier
+     * exception let Files preview Secret data while still claiming to hold
+     * only Personal data, which made its own badge and the audit log lie. */
+    dlp_taint(current, n->label, what);
 }
 
 static int dir_changed(uint32_t dir) {

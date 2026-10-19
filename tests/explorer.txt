@@ -100,14 +100,18 @@ wait 0.5
 shot 06-moved
 key backspace
 wait 0.3
-# Delete reports: it isn't empty, and the dialog says so
+# Delete moves reports to Trash without a permanent-delete dialog, then Ctrl+Z
+# restores it. Deleting it again leaves it in Trash for the Trash place.
 type r
 key delete
 wait 0.3
-shot 07-delete-confirm
-key ret
+shot 07-trash
+key ctrl-z
 wait 0.5
-shot 08-deleted
+shot 08-undone
+type r
+key delete
+wait 0.3
 # Raise plan-a.txt to Confidential (free), then try to lower it to Public (the kernel asks; keep)
 type p
 key ctrl-l
@@ -170,4 +174,4 @@ wait 0.8
 shot 18-home
 expect explorer raised plan-a.txt from Personal to Confidential
 expect you kept plan-a.txt as Confidential (asked by explorer)
-expect now holds Secret data (read a file)
+expect now holds Secret data
