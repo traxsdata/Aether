@@ -1,0 +1,89 @@
+# Boot architecture
+
+## Flow
+
+1. **Firmware.** OVMF scans the FAT image and loads
+   `/EFI/BOOT/BOOTX64.EFI`, a PE32+ UEFI application.
+2. **Loader entry.** `efi_main` initializes COM1 and prints
+   `AETHER_LOADER_OK stage=entry`.
+3. **Image validation.** The loader parses the embedded kernel ELF:
+   - ELF64, little-endian, `ET_EXEC`, `EM_X86_64`;
+   - fixed 64-byte header and 56-byte program headers;
+   - at most 16 `PT_LOAD` segments;
+   - every file range inside the embedded image;
+   - `p_filesz <= p_memsz`, non-zero memory size, and no overlaps;
+   - physical addresses above the first page and page-aligned consistently
+     with file offsets;
+   - an entry point inside a loadable segment.
+4. **Loading.** The loader allocates the image's aligned physical range with
+   `AllocateAddress`, copies file bytes, and zeroes the remainder of each
+   segment.
+5. **Hand-off construction.** It allocates pages for `BootInfo`, a 64 KiB
+   firmware-map buffer, and a fixed region array (`MAX_MEMORY_REGIONS = 256`).
+   UEFI descriptors are converted to `MemoryRegion` entries and adjacent
+   regions of the same kind are merged.
+6. **Boot-services exit.** `ExitBootServices` is retried a bounded number of
+   times if firmware reports a stale map key. The final successful call is
+   followed immediately by the kernel jump.
+7. **Kernel entry.** `_start` disables interrupts, installs a 64 KiB stack, and
+   calls `kernel_main` with the `BootInfo` pointer in `RDI`.
+8. **Validation and report.** The kernel checks magic, version, structure size,
+   region count, kernel range, entry point, and every region. It prints the
+   memory summary and `AETHER_BOOT_OK`, then halts.
+
+## ABI
+
+`aether-abi` defines `BootInfo` and `MemoryRegion`. The layout is `repr(C)`
+with fixed-width fields and a size assertion in host tests. Any change to field
+order, size, or semantics requires a `BOOT_INFO_VERSION` bump.
+
+Rules:
+
+- Pointers are **physical addresses**; the kernel starts on the identity map
+  left by firmware.
+- The kernel does not call UEFI boot services.
+- Unused fields are zero.
+- The region array is bounded; the loader fails closed rather than truncating.
+- Memory kinds are stored as raw `u32` values and decoded with
+  `MemoryKind::from_raw`, so an invalid discriminant becomes an error instead
+  of undefined behaviour.
+
+## Kernel image constraints
+
+The kernel links at `0x04000000` and is built as a static `ET_EXEC` image with
+a 64 KiB BSS stack. The loader does not process relocations. This keeps the
+first boot path small, but it also means:
+
+- the load address is fixed and must remain free in firmware's map;
+- the image must not require dynamic linking or position-independent
+  relocations;
+- the image is embedded in the loader, so the loader and kernel are rebuilt
+  together.
+
+Removing these constraints is future work (relocatable kernel, separate image
+on the ESP, and a verified image format).
+
+## QEMU target
+
+`make test` runs:
+
+```text
+qemu-system-x86_64 -machine q35,accel=tcg -cpu max -m 1024M \
+  -drive if=pflash,format=raw,readonly=on,file=OVMF_CODE_4M.fd \
+  -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+  -drive file=build/aether.img,format=raw,if=virtio \
+  -display none -serial file:build/serial.log -no-reboot
+```
+
+The harness waits for `AETHER_BOOT_OK`, fails on loader/kernel failure markers,
+and prints the serial transcript. It uses TCG so it works without KVM or root.
+
+## Failure behaviour
+
+- Malformed or oversized images are rejected before any kernel bytes are
+  written.
+- Allocation failure, address mismatch, or a memory map that exceeds the
+  bounded array stops in the loader with an `AETHER_LOADER_FAILED` line.
+- Kernel validation failure prints `AETHER_BOOT_FAILED reason=...` and halts.
+- An unexpected kernel exception currently has no IDT and will reset under
+  QEMU. Structured fault reporting is the next kernel milestone.
