@@ -29,17 +29,25 @@ versioning scheme until the kernel ABI stabilises.
 - `docs/architecture/scheduler.md`.
 - An emergency stack for exception reporting when the interrupted stack is
   unusable.
+- `aether-ipc`: host-tested generation-checked capability tables and bounded
+  endpoint queues.
+- Per-task capability tables, endpoint rights, kernel-mediated capability
+  transfer, and a boot-time capability/IPC test with insufficient-rights and
+  forged-handle checks.
+- `AETHER_CAP_OK` and `AETHER_IPC_OK` boot markers.
 
 ### Changed
 
-- Boot tests require `AETHER_MM_OK`, `AETHER_SCHED_OK`,
-  `AETHER_ISOLATION_OK`, and `AETHER_BOOT_OK`.
+- Boot tests require `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`,
+  `AETHER_CAP_OK`, `AETHER_IPC_OK`, and `AETHER_BOOT_OK`.
 - `make ci` runs the exception-path test in addition to the boot test.
 
 ### Known limitations
 
-- Tasks are ring-0 kernel tasks; there is no user mode, capability table, IPC,
-  filesystem, storage driver, networking, graphics, or desktop.
+- Tasks are ring-0 kernel tasks; there is no user mode, filesystem, storage
+  driver, networking, graphics, or desktop.
+- Capability and IPC enforcement is kernel-internal; there is no syscall
+  boundary yet.
 - Identity map only; no higher-half kernel or user/kernel split.
 - No IST/TSS for double-fault and stack-overflow recovery.
 - The kernel image is embedded in the loader, so updating the kernel requires
@@ -47,7 +55,7 @@ versioning scheme until the kernel ABI stabilises.
 - The frame bitmap covers at most 16 GiB.
 - Single-core only; no SMP startup.
 - The scheduler has no priorities, sleeping/wakeup queues, or dynamic task
-  creation.
+  creation; IPC is polled rather than blocking.
 - No Secure Boot signing, measured boot, or update/recovery path yet.
 
 ## [0.1.0] - 2026-10-19

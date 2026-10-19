@@ -34,16 +34,17 @@ scheduling slice:
 - structured exception reports with vector, error code, RIP, RFLAGS, and CR2;
 - a 100 Hz PIT/PIC timer and preemptive round-robin scheduler;
 - per-task PML4 address spaces and CR3 switching;
-- a boot-time isolation test across three kernel tasks;
-- explicit `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, and
-  `AETHER_BOOT_OK` markers.
+- per-task capability tables, bounded IPC endpoints, and capability transfer;
+- a boot-time isolation and capability/IPC test across three kernel tasks;
+- explicit `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`,
+  `AETHER_CAP_OK`, `AETHER_IPC_OK`, and `AETHER_BOOT_OK` markers.
 
 What is deliberately absent:
 
 - user mode, TSS/RSP0, syscall entry, and user/supervisor page permissions;
 - a kernel heap and dynamic task creation;
-- priorities, sleeping/wakeup, SMP, and per-CPU scheduler state;
-- capability objects, tables, rights checks, and IPC;
+- priorities, sleeping/wakeup, blocking IPC, SMP, and per-CPU scheduler state;
+- capability revocation and broader object types;
 - higher-half kernel mapping and guard pages;
 - local APIC/high-resolution timers.
 

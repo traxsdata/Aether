@@ -11,7 +11,8 @@ isolation. User mode, capabilities, and IPC build on this slice.
 - Round-robin preemptive scheduling on every timer tick.
 - A per-task PML4 and private physical frame mapped at the same virtual address.
 - A CR3 switch on every task switch.
-- An isolation self-test that runs in the normal boot path.
+- Per-task capability tables and two endpoints.
+- An isolation self-test plus a capability/IPC self-test in the normal boot path.
 
 There is no kernel heap. Task control blocks and stacks are static, and the
 frame allocator supplies address-space page tables and private frames during
@@ -76,6 +77,24 @@ If CR3 were not switched, another task would overwrite the shared virtual
 address and the test would fail with
 `AETHER_BOOT_FAILED reason=isolation ...`.
 
+## Capability and IPC test
+
+After the isolation rounds the workers exercise the capability and IPC path:
+
+- Worker 1 receives on endpoint A.
+- Worker 2 sends data, then transfers its endpoint B send capability through a
+  message.
+- Worker 1 installs the transferred capability and uses it to send on endpoint
+  B; worker 2 receives that reply.
+- Worker 3's send with a receive-only capability is denied, and a forged handle
+  is rejected. It then sends one valid message.
+- The idle task checks that exactly two operations were denied and three
+  messages were received before printing `AETHER_CAP_OK` and `AETHER_IPC_OK`.
+
+Capabilities are per task, handles are generation-checked, and transfer
+requires `TRANSFER`. This is still a kernel-internal API; user mode and a
+syscall boundary are the next step.
+
 This demonstrates hardware address-space isolation between kernel tasks. It is
 not yet user/kernel isolation: all tasks run at CPL0 and share the kernel
 mapping. User-accessible page permissions, a TSS, and user-mode entry are the
@@ -89,6 +108,8 @@ next step.
 AETHER_MM_OK
 AETHER_SCHED_OK workers=3 ticks=N
 AETHER_ISOLATION_OK tasks=3
+AETHER_CAP_OK denials=2
+AETHER_IPC_OK messages=3
 AETHER_BOOT_OK
 ```
 
@@ -109,8 +130,8 @@ scheduler starts.
 
 1. User-mode entry: TSS/RSP0, user page permissions, syscall gate.
 2. Per-task kernel stacks and guard pages.
-3. Capability tables attached to tasks.
-4. Bounded IPC endpoints and capability transfer.
+3. Expose capability and IPC operations through validated syscalls.
+4. Blocking send/receive with wakeup queues and timeouts.
 5. User-space loader and `initd` supervision.
-6. Adversarial scheduler and isolation tests, including a deliberately shared
-   address space that must fail the isolation check.
+6. Adversarial scheduler, capability, IPC, and isolation tests, including a
+   deliberately shared address space that must fail the isolation check.

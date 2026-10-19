@@ -22,7 +22,7 @@ The first Cargo invocation downloads Rust 1.99.1 and the
 ## Common commands
 
 ```sh
-make unittest   # host tests for abi/, boot/common/, and kernel/memory
+make unittest   # host tests for abi/, boot/common/, kernel/memory/, kernel/ipc/
 make test       # build the image and boot it under QEMU/OVMF
 make fault-test # boot a kernel that executes int3 after paging is enabled
 make lint       # rustfmt + clippy (host, kernel, loader)
@@ -32,9 +32,10 @@ make clean
 ```
 
 `make test` requires `AETHER_MM_OK`, `AETHER_SCHED_OK`,
-`AETHER_ISOLATION_OK`, and `AETHER_BOOT_OK` and fails on any failure marker.
-`make fault-test` requires the exception handler to report `breakpoint (3)` and
-`AETHER_BOOT_FAILED`. Both use TCG and need no KVM or root access.
+`AETHER_ISOLATION_OK`, `AETHER_CAP_OK`, `AETHER_IPC_OK`, and `AETHER_BOOT_OK`
+and fails on any failure marker. `make fault-test` requires the exception
+handler to report `breakpoint (3)` and `AETHER_BOOT_FAILED`. Both use TCG and
+need no KVM or root access.
 
 ## Toolchain pinning
 
@@ -112,7 +113,8 @@ remain release-engineering work.
    self-test configuration.
 2. `cargo test --locked` — host unit tests.
 3. `make test` — real QEMU boot with required `AETHER_MM_OK`,
-   `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, and `AETHER_BOOT_OK` markers.
+   `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`, `AETHER_IPC_OK`,
+   and `AETHER_BOOT_OK` markers.
 4. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
    and failure marker.
 
