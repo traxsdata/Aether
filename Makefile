@@ -16,7 +16,7 @@ LOADER_TARGET := x86_64-unknown-uefi
 AETHER_GIT_COMMIT := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 export AETHER_GIT_COMMIT
 
-.PHONY: all kernel loader image test unittest lint clean
+.PHONY: all kernel loader image test unittest lint ci clean
 
 all: image
 
@@ -50,6 +50,9 @@ lint: kernel
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		$(CARGO) clippy -p aether-bootloader --release --target $(LOADER_TARGET) --locked -- -D warnings
+
+ci:
+	sh tools/ci.sh
 
 clean:
 	$(CARGO) clean

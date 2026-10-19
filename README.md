@@ -71,6 +71,7 @@ artifacts cannot drift apart.
 make unittest   # host unit tests (ABI, ELF parser, memory arithmetic)
 make test       # QEMU/OVMF boot test; prints the serial transcript and PASS
 make lint       # rustfmt, host clippy, kernel clippy, loader clippy
+make ci         # formatting + unit tests + boot test (the PR gate)
 make clean
 ```
 
