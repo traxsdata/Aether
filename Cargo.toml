@@ -6,10 +6,11 @@ members = [
     "boot/loader",
     "kernel",
     "kernel/memory",
+    "kernel/ipc",
 ]
 # The kernel and loader require bare-metal/UEFI targets, so only the
 # host-testable crates are part of a default `cargo test`.
-default-members = ["abi", "boot/common", "kernel/memory"]
+default-members = ["abi", "boot/common", "kernel/memory", "kernel/ipc"]
 
 [workspace.package]
 version = "0.1.0"

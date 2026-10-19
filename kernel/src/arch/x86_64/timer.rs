@@ -93,7 +93,46 @@ pub fn enable_interrupts() {
 /// Disables interrupts on the current CPU.
 pub fn disable_interrupts() {
     // SAFETY: Disabling interrupts is always valid at CPL 0.
-    unsafe { asm!("cli", options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("cli", options(nomem, nostack)) };
+}
+
+/// Restores the interrupt flag saved by [`InterruptGuard`].
+fn restore_interrupt_flag(flags: u64) {
+    if flags & (1 << 9) != 0 {
+        // SAFETY: The saved RFLAGS had IF set, so restoring it is valid.
+        unsafe { asm!("sti", options(nomem, nostack)) };
+    }
+}
+
+/// RAII guard that masks interrupts and restores the previous IF state.
+pub struct InterruptGuard {
+    flags: u64,
+}
+
+impl InterruptGuard {
+    /// Enters a critical section.
+    #[must_use]
+    pub fn enter() -> Self {
+        let flags: u64;
+        // SAFETY: `pushfq`/`pop` read RFLAGS and `cli` masks interrupts at
+        // CPL 0. The saved value is restored on drop.
+        unsafe {
+            asm!(
+                "pushfq",
+                "pop {flags}",
+                "cli",
+                flags = out(reg) flags,
+                options(nomem, nostack)
+            );
+        }
+        Self { flags }
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        restore_interrupt_flag(self.flags);
+    }
 }
 
 /// Waits for the next interrupt with interrupts enabled.

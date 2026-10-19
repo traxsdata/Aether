@@ -22,10 +22,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-ipc"
+version = "0.1.0"
+
+[[package]]
 name = "aether-kernel"
 version = "0.1.0"
 dependencies = [
  "aether-abi",
+ "aether-ipc",
  "aether-memory",
 ]
 

@@ -16,6 +16,7 @@ use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::{halt, timer};
 use crate::memory::paging::{self, PagingError};
 use crate::serial_line;
+use aether_ipc::{CapError, CapHandle, CapTable, IpcError, ObjectType, Rights};
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, PhysFrame};
 use core::cell::UnsafeCell;
@@ -38,19 +39,37 @@ enum TaskState {
     Done,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
+struct TaskHandles {
+    ep_a_send: Option<CapHandle>,
+    ep_a_recv: Option<CapHandle>,
+    ep_b_send: Option<CapHandle>,
+    ep_b_recv: Option<CapHandle>,
+}
+
 struct Task {
     state: TaskState,
     saved_rsp: u64,
     pml4: u64,
+    caps: CapTable,
+    handles: TaskHandles,
 }
 
 impl Task {
-    const EMPTY: Self = Self {
-        state: TaskState::Empty,
-        saved_rsp: 0,
-        pml4: 0,
-    };
+    const fn new() -> Self {
+        Self {
+            state: TaskState::Empty,
+            saved_rsp: 0,
+            pml4: 0,
+            caps: CapTable::new(),
+            handles: TaskHandles {
+                ep_a_send: None,
+                ep_a_recv: None,
+                ep_b_send: None,
+                ep_b_recv: None,
+            },
+        }
+    }
 }
 
 /// Minimal `Sync` wrapper for boot-time globals that are only mutated while
@@ -61,13 +80,16 @@ struct Global<T>(UnsafeCell<T>);
 // masking; see the module documentation.
 unsafe impl<T> Sync for Global<T> {}
 
-static TASKS: Global<[Task; MAX_TASKS]> = Global(UnsafeCell::new([Task::EMPTY; MAX_TASKS]));
+static TASKS: Global<[Task; MAX_TASKS]> =
+    Global(UnsafeCell::new([const { Task::new() }; MAX_TASKS]));
 static STACKS: Global<[[u8; STACK_SIZE]; WORKER_COUNT]> =
     Global(UnsafeCell::new([[0; STACK_SIZE]; WORKER_COUNT]));
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static DONE: AtomicUsize = AtomicUsize::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
+static DENIED: AtomicUsize = AtomicUsize::new(0);
+static MESSAGES: AtomicUsize = AtomicUsize::new(0);
 
 /// Scheduler initialization failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,11 +100,21 @@ pub enum SchedulerError {
     OutOfMemory,
     /// Address-space construction failed.
     Paging(PagingError),
+    /// No endpoint object was available.
+    NoEndpoint,
+    /// Capability table initialization failed.
+    Capability(CapError),
 }
 
 impl From<PagingError> for SchedulerError {
     fn from(error: PagingError) -> Self {
         Self::Paging(error)
+    }
+}
+
+impl From<CapError> for SchedulerError {
+    fn from(error: CapError) -> Self {
+        Self::Capability(error)
     }
 }
 
@@ -103,12 +135,20 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
     loop {
         if DONE.load(Ordering::Acquire) == WORKER_COUNT {
             timer::disable_interrupts();
+            let denied = DENIED.load(Ordering::Acquire);
+            let messages = MESSAGES.load(Ordering::Acquire);
+            if denied != 2 || messages != 3 {
+                serial_line!("AETHER_BOOT_FAILED reason=ipc denials={denied} messages={messages}");
+                halt()
+            }
             serial_line!(
                 "AETHER_SCHED_OK workers={} ticks={}",
                 WORKER_COUNT,
                 TICKS.load(Ordering::Relaxed)
             );
             serial_line!("AETHER_ISOLATION_OK tasks={WORKER_COUNT}");
+            serial_line!("AETHER_CAP_OK denials={denied}");
+            serial_line!("AETHER_IPC_OK messages={messages}");
             serial_line!(
                 "AETHER_BOOT_OK stage=kernel version={}",
                 env!("CARGO_PKG_VERSION")
@@ -126,11 +166,10 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
 
     // Task 0 is the idle task: it is the boot context and keeps the kernel
     // address space.
-    tasks[0] = Task {
-        state: TaskState::Running,
-        saved_rsp: 0,
-        pml4: kernel_pml4.start_address(),
-    };
+    let mut idle = Task::new();
+    idle.state = TaskState::Running;
+    idle.pml4 = kernel_pml4.start_address();
+    tasks[0] = idle;
 
     for (index, stack) in stacks.iter_mut().enumerate() {
         let task_id = index + 1;
@@ -142,17 +181,45 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         let stack_top = stack.as_mut_ptr() as u64 + STACK_SIZE as u64;
         let saved_rsp = prepare_stack(stack_top, worker_entry, task_id as u64);
 
-        tasks[task_id] = Task {
-            state: TaskState::Ready,
-            saved_rsp,
-            pml4: pml4.start_address(),
-        };
+        let mut task = Task::new();
+        task.state = TaskState::Ready;
+        task.saved_rsp = saved_rsp;
+        task.pml4 = pml4.start_address();
+        tasks[task_id] = task;
         serial_line!(
             "sched: task {task_id} ready pml4={:#018x} private={:#018x}",
             pml4.start_address(),
             private.start_address()
         );
     }
+
+    // Create two endpoints and grant table-local capabilities. Worker 3 gets a
+    // receive-only capability on endpoint A to exercise insufficient rights.
+    let endpoint_a = crate::ipc::create_endpoint().ok_or(SchedulerError::NoEndpoint)?;
+    let endpoint_b = crate::ipc::create_endpoint().ok_or(SchedulerError::NoEndpoint)?;
+    let rights = ObjectType::Endpoint;
+
+    tasks[1].handles.ep_a_recv = Some(tasks[1].caps.grant(endpoint_a, rights, Rights::RECEIVE)?);
+    tasks[1].handles.ep_b_recv = Some(tasks[1].caps.grant(endpoint_b, rights, Rights::RECEIVE)?);
+
+    tasks[2].handles.ep_a_send = Some(tasks[2].caps.grant(
+        endpoint_a,
+        rights,
+        Rights::SEND | Rights::TRANSFER,
+    )?);
+    tasks[2].handles.ep_b_send = Some(tasks[2].caps.grant(
+        endpoint_b,
+        rights,
+        Rights::SEND | Rights::TRANSFER,
+    )?);
+    tasks[2].handles.ep_b_recv = Some(tasks[2].caps.grant(endpoint_b, rights, Rights::RECEIVE)?);
+
+    tasks[3].handles.ep_a_recv = Some(tasks[3].caps.grant(endpoint_a, rights, Rights::RECEIVE)?);
+    tasks[3].handles.ep_a_send = Some(tasks[3].caps.grant(
+        endpoint_a,
+        rights,
+        Rights::SEND | Rights::TRANSFER,
+    )?);
 
     Ok(())
 }
@@ -211,9 +278,192 @@ extern "C" fn worker_entry(task_id: u64) -> ! {
         }
     }
 
+    match task_id {
+        1 => ipc_receiver(),
+        2 => ipc_sender(),
+        3 => ipc_denied(),
+        _ => {}
+    }
+
     finish_current();
     loop {
         timer::halt_until_interrupt();
+    }
+}
+
+/// Runs `f` with the current task's capability table and assigned handles.
+///
+/// Interrupts are masked so a preemption cannot observe a half-updated table.
+fn with_current<R>(f: impl FnOnce(&mut CapTable, &TaskHandles) -> R) -> R {
+    let _guard = timer::InterruptGuard::enter();
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &mut tasks[current];
+    f(&mut task.caps, &task.handles)
+}
+
+fn ipc_fail(operation: &str, error: IpcError) -> ! {
+    serial_line!("AETHER_BOOT_FAILED reason=ipc operation={operation} error={error:?}");
+    halt()
+}
+
+/// Worker 1 receives two data messages and a transferred capability, then
+/// uses that capability to send a message on endpoint B.
+fn ipc_receiver() {
+    let mut got_normal = false;
+    let mut got_from3 = false;
+    let mut transferred = None;
+
+    while !(got_normal && got_from3 && transferred.is_some()) {
+        let result = with_current(|caps, handles| {
+            crate::ipc::receive(caps, handles.ep_a_recv.expect("receiver capability"))
+        });
+        match result {
+            Ok(message) => {
+                MESSAGES.fetch_add(1, Ordering::Release);
+                let payload = message.payload();
+                if message.sender == 2 && payload == b"normal" {
+                    got_normal = true;
+                } else if message.sender == 3 && payload == b"from3" {
+                    got_from3 = true;
+                } else if message.sender == 2 && payload == b"transfer" {
+                    transferred = message.transferred;
+                } else {
+                    serial_line!(
+                        "AETHER_BOOT_FAILED reason=ipc unexpected message sender={} len={}",
+                        message.sender,
+                        message.len
+                    );
+                    halt()
+                }
+            }
+            Err(IpcError::Empty) => timer::halt_until_interrupt(),
+            Err(error) => ipc_fail("receive-a", error),
+        }
+    }
+
+    let transferred = transferred.expect("transfer capability");
+    loop {
+        let result = with_current(|caps, _handles| {
+            crate::ipc::send(caps, transferred, 1, b"transferred", None)
+        });
+        match result {
+            Ok(()) => break,
+            Err(IpcError::Full) => timer::halt_until_interrupt(),
+            Err(error) => ipc_fail("send-b", error),
+        }
+    }
+}
+
+/// Worker 2 sends data, transfers its endpoint B send capability, and then
+/// receives the message that worker 1 sends using the transferred capability.
+fn ipc_sender() {
+    loop {
+        let result = with_current(|caps, handles| {
+            crate::ipc::send(
+                caps,
+                handles.ep_a_send.expect("send capability"),
+                2,
+                b"normal",
+                None,
+            )
+        });
+        match result {
+            Ok(()) => break,
+            Err(IpcError::Full) => timer::halt_until_interrupt(),
+            Err(error) => ipc_fail("send-normal", error),
+        }
+    }
+
+    loop {
+        let result = with_current(|caps, handles| {
+            crate::ipc::send(
+                caps,
+                handles.ep_a_send.expect("send capability"),
+                2,
+                b"transfer",
+                handles.ep_b_send,
+            )
+        });
+        match result {
+            Ok(()) => break,
+            Err(IpcError::Full) => timer::halt_until_interrupt(),
+            Err(error) => ipc_fail("send-transfer", error),
+        }
+    }
+
+    loop {
+        let result = with_current(|caps, handles| {
+            crate::ipc::receive(caps, handles.ep_b_recv.expect("receive capability"))
+        });
+        match result {
+            Ok(message) if message.sender == 1 && message.payload() == b"transferred" => break,
+            Ok(message) => {
+                serial_line!(
+                    "AETHER_BOOT_FAILED reason=ipc unexpected transfer reply sender={} len={}",
+                    message.sender,
+                    message.len
+                );
+                halt()
+            }
+            Err(IpcError::Empty) => timer::halt_until_interrupt(),
+            Err(error) => ipc_fail("receive-b", error),
+        }
+    }
+}
+
+/// Worker 3 verifies that insufficient rights and forged handles are rejected,
+/// then sends one valid message.
+fn ipc_denied() {
+    let result = with_current(|caps, handles| {
+        crate::ipc::send(
+            caps,
+            handles.ep_a_recv.expect("receive-only capability"),
+            3,
+            b"bad",
+            None,
+        )
+    });
+    match result {
+        Err(IpcError::Capability(CapError::InsufficientRights)) => {
+            DENIED.fetch_add(1, Ordering::Release);
+        }
+        other => {
+            serial_line!("AETHER_BOOT_FAILED reason=ipc rights check: {other:?}");
+            halt()
+        }
+    }
+
+    let forged = CapHandle {
+        index: 15,
+        generation: 1,
+    };
+    let result = with_current(|caps, _handles| crate::ipc::send(caps, forged, 3, b"forged", None));
+    match result {
+        Err(IpcError::Capability(CapError::InvalidHandle)) => {
+            DENIED.fetch_add(1, Ordering::Release);
+        }
+        other => {
+            serial_line!("AETHER_BOOT_FAILED reason=ipc forged check: {other:?}");
+            halt()
+        }
+    }
+
+    loop {
+        let result = with_current(|caps, handles| {
+            crate::ipc::send(
+                caps,
+                handles.ep_a_send.expect("send capability"),
+                3,
+                b"from3",
+                None,
+            )
+        });
+        match result {
+            Ok(()) => break,
+            Err(IpcError::Full) => timer::halt_until_interrupt(),
+            Err(error) => ipc_fail("send-from3", error),
+        }
     }
 }
 

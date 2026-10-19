@@ -10,6 +10,7 @@
 #![no_main]
 
 mod arch;
+mod ipc;
 mod memory;
 mod scheduler;
 
