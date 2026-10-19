@@ -54,6 +54,7 @@ pub fn init() -> Result<(), FsError> {
         "apps/other/private",
         "system",
         "system/images",
+        "system/updates",
         "home",
         "portal",
     ] {
@@ -68,6 +69,11 @@ pub fn init() -> Result<(), FsError> {
     filesystem.write_file("/", "/system/policy.txt", b"aether policy v1\n")?;
     filesystem.write_file("/", "/system/images/current", b"aether-0.1.0\n")?;
     filesystem.write_file("/", "/system/images/previous", b"aether-0.0.9\n")?;
+    filesystem.write_file(
+        "/",
+        "/system/install.txt",
+        b"version=0.1.0\ncounter=1\nchannel=developer\n",
+    )?;
     filesystem.write_file("/", "/home/welcome.txt", b"welcome to aether\n")?;
     filesystem.write_file("/", "/portal/README.txt", b"file portal grants\n")?;
 
@@ -305,6 +311,11 @@ pub fn sys_list(
             .map_err(map_error)
     });
     Some(result.unwrap_or(errno::EBADF))
+}
+
+/// Creates a directory for the kernel console (no user pointer involved).
+pub fn create_dir(path: &str) -> Result<(), FsError> {
+    with_fs(|filesystem| filesystem.mkdir("/", path))
 }
 
 /// Lists a directory for the kernel console (no user pointer involved).

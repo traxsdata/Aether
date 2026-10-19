@@ -63,10 +63,13 @@ version = "0.1.0"
 dependencies = [
  "aether-abi",
  "aether-boot-common",
+ "aether-crypto",
  "aether-fs",
  "aether-ipc",
  "aether-memory",
+ "aether-packaging",
  "aether-services",
+ "aether-update",
 ]
 
 [[package]]
@@ -93,6 +96,9 @@ dependencies = [
 [[package]]
 name = "aether-services"
 version = "0.1.0"
+dependencies = [
+ "aether-packaging",
+]
 
 [[package]]
 name = "aether-update"

@@ -8,6 +8,8 @@
 
 #![no_std]
 
+pub mod runtime;
+
 /// Maximum registered services.
 pub const MAX_SERVICES: usize = 12;
 /// Maximum registered applications.

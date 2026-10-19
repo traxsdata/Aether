@@ -23,6 +23,7 @@ use aether_ipc::{CapError, CapHandle, CapTable, IpcError, ObjectType, Rights};
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, PhysFrame};
 use aether_services::ServiceError;
+use aether_services::runtime::RuntimeError;
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -140,6 +141,12 @@ pub enum SchedulerError {
     Filesystem(FsError),
     /// A service could not be registered or started.
     Service(ServiceError),
+    /// The embedded package failed verification or installation.
+    Package(&'static str),
+    /// Runtime isolation policy failed.
+    Runtime(RuntimeError),
+    /// Update verification policy failed.
+    Update(&'static str),
 }
 
 impl From<PagingError> for SchedulerError {
@@ -303,6 +310,9 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     )?);
 
     crate::fs::init().map_err(SchedulerError::Filesystem)?;
+    crate::packaging::init().map_err(SchedulerError::Package)?;
+    crate::runtime::init().map_err(SchedulerError::Runtime)?;
+    crate::updates::init().map_err(SchedulerError::Update)?;
     crate::supervisor::init().map_err(SchedulerError::Service)?;
     crate::recovery::init().map_err(SchedulerError::Filesystem)?;
     crate::portal::init();
