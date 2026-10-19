@@ -10,9 +10,9 @@
 
 | Command | Result |
 |---|---|
-| `make unittest` | |
-| `make test` | |
-| `make lint` | |
+| `make ci` | |
+| `make docs-check` | |
+| `make license-check` | |
 | Manual QEMU scenario | |
 
 <!-- Paste the serial transcript or the AETHER_BOOT_OK marker for boot changes. -->
