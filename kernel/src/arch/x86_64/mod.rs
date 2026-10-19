@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! x86-64 architecture support.
 
+pub mod cpu;
 pub mod gdt;
 pub mod idt;
 pub mod serial;

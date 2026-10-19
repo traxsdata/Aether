@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Aether kernel entry point.
 //!
-//! Phase 1: validate the loader hand-off, take ownership of the CPU
-//! descriptor/interrupt tables, initialize physical memory, install kernel page
-//! tables, and report the result on the serial console. There is no scheduler,
-//! capability system, or user space yet.
+//! Validate the loader hand-off, take ownership of the CPU descriptor/interrupt
+//! tables, configure the protections required by the page tables, initialize
+//! physical memory, install kernel page tables, and hand control to the
+//! scheduler. There is no user space yet.
 
 #![no_std]
 #![no_main]
@@ -75,6 +75,9 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     if boot_info.is_null() {
         boot_failure("null boot information pointer");
     }
+    if !(boot_info as usize).is_multiple_of(core::mem::align_of::<BootInfo>()) {
+        boot_failure("misaligned boot information pointer");
+    }
 
     // SAFETY: The loader guarantees a readable structure; validation below
     // checks its contents before the memory map is trusted.
@@ -111,6 +114,13 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     );
 
     arch::x86_64::init();
+    // SAFETY: Boot is single-threaded, interrupts are disabled, and this runs
+    // before the kernel loads page tables containing NO_EXECUTE entries.
+    if let Err(error) = unsafe { arch::x86_64::cpu::init() } {
+        serial_line!("AETHER_BOOT_FAILED reason=cpu: {error:?}");
+        arch::x86_64::halt();
+    }
+    serial_line!("boot: cpu: NX and write-protect enabled");
 
     let mut frames = memory::frame_allocator();
     let _initial_stats = frames.initialize(regions, info.kernel_start, info.kernel_end);
