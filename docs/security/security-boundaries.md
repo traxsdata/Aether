@@ -20,12 +20,17 @@ validation, capability checks.
 **Evidence:** Address-space isolation tests (AT-002), fault-containment tests
 (AT-010), adversarial syscall tests.
 
-**Current status:** Kernel tasks have separate PML4s and a private mapping, and
-the boot test verifies that one task's write is invisible to another after
-timer-driven preemption. Kernel-internal capability tables and IPC enforce
-rights, handle generations, endpoint identity, and bounded queues. User-mode
-isolation, user/kernel memory separation, and syscall pointer validation do not
-exist yet, so the capability checks are not a user-visible security boundary.
+**Current status:** A ring-3 native application runs in a private PML4 whose
+only user mappings are in the validated user window. TSS `RSP0` supplies a
+per-task kernel stack, the `int 0x80` gate validates every pointer, length,
+handle, generation, object type, and right, and a user fault retires only the
+faulting task. The boot test attempts a cross-root read and a kernel-pointer
+syscall and requires both to be denied. Kernel text, stacks, page tables, and
+the identity map remain supervisor-only.
+
+**Remaining gap:** services still execute as kernel modules; moving them to
+ring 3 is the next boundary slice. There is no kernel heap, SMP, or general
+capability revocation yet.
 
 ## 2. Application / application boundary
 
@@ -39,7 +44,13 @@ private storage.
   service APIs.
 - Sharing occurs only through explicit capabilities or mediated services.
 
-**Evidence:** AT-005 and sandbox-escape regression tests (AET-056).
+**Current status:** Each application has a kernel-owned root
+(`/apps/demo`, `/apps/other`). Path resolution rejects `..`, and file handles
+are per-task generation-checked capabilities. The native sandbox test attempts
+a sibling path and a root escape; both fail with `EPERM`. The filesystem is a
+volatile RAM disk, so this is not yet persistent private storage.
+
+**Evidence:** AT-005 and the boot-time sandbox test (`AETHER_SANDBOX_OK`).
 
 ## 3. Application / user data boundary
 
@@ -53,7 +64,13 @@ private storage.
 - Persistent grants are visible and revocable.
 - Revocation prevents future access according to documented semantics.
 
-**Evidence:** AT-006 and AT-007.
+**Current status:** The portal holds exact `(process root, path, rights)`
+grants. The native application receives one read grant for
+`/home/welcome.txt`; it cannot name other user files. Grant records are visible
+in the Security Center. Interactive consent and revocation UI are follow-up
+work.
+
+**Evidence:** AT-006 and the `AETHER_PORTAL_OK` boot marker.
 
 ## 4. Service / service boundary
 
@@ -67,7 +84,15 @@ private storage.
 - Unrelated services continue operating when one is compromised or crashes,
   where dependencies allow.
 
-**Evidence:** AT-008 and per-service review.
+**Current status:** The supervisor registers storaged, fsd, appd, consoled,
+inputd, displayd, desktopd, portald, and securityd with declared capability
+profiles and dependency order. A failing probe is restarted once and then
+quarantined; the boot test requires that outcome. Service bodies still run in
+the kernel, so this is a policy prototype rather than a completed isolation
+boundary.
+
+**Evidence:** AT-008, `AETHER_SUPERVISOR_OK`, and host tests for dependency
+and restart rules.
 
 ## 5. Desktop / policy boundary
 
@@ -79,7 +104,12 @@ private storage.
 - UI consent is an input to policy, not proof of authorization.
 - A compromised desktop cannot silently grant filesystem or device access.
 
-**Evidence:** Code review and adversarial desktop tests.
+**Current status:** The compositor paints pixels and displays supervisor,
+filesystem, application, and portal state. It cannot mint a file capability or
+bypass the filesystem root check; portal opens are decided by the portal
+service. There is no interactive consent dialog yet.
+
+**Evidence:** Code review and the portal/sandbox boot markers.
 
 ## 6. Boot boundary
 
@@ -106,7 +136,13 @@ test; exception-path self-test.
 - Interrupted updates are recoverable.
 - User data is preserved across rollback.
 
-**Evidence:** AT-011, AT-012, AT-013.
+**Current status:** The recovery prototype verifies current/previous image
+markers, selects the previous marker when the current one is missing, records
+the selection, and checks that the user-data sentinel is readable. Artifact
+signatures, rollback counters, and interrupted-update recovery are not
+implemented.
+
+**Evidence:** AT-012 prototype (`AETHER_RECOVERY_OK`).
 
 ## Non-boundaries
 

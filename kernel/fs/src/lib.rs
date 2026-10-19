@@ -119,7 +119,10 @@ impl Default for RamDisk {
 impl BlockDevice for RamDisk {
     fn read_block(&mut self, index: u16, out: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
         let start = usize::from(index) * BLOCK_SIZE;
-        let source = self.data.get(start..start + BLOCK_SIZE).ok_or(FsError::Io)?;
+        let source = self
+            .data
+            .get(start..start + BLOCK_SIZE)
+            .ok_or(FsError::Io)?;
         out.copy_from_slice(source);
         Ok(())
     }
@@ -306,7 +309,7 @@ impl<D: BlockDevice> AetherFs<D> {
 
         // Reserve the superblock, inode table, and root directory block.
         for block in 0..DATA_START_BLOCK {
-            self.set_block_used(u16::from(block), true)?;
+            self.set_block_used(block, true)?;
         }
         let root_block = self.allocate_block()?;
         let root = Inode {
@@ -425,12 +428,7 @@ impl<D: BlockDevice> AetherFs<D> {
     }
 
     /// Opens a file. `CREATE` creates an empty file when it is missing.
-    pub fn open(
-        &mut self,
-        scope: &str,
-        path: &str,
-        access: Access,
-    ) -> Result<OpenId, FsError> {
+    pub fn open(&mut self, scope: &str, path: &str, access: Access) -> Result<OpenId, FsError> {
         let resolved = resolve(scope, path)?;
         let inode_number = match self.lookup(&resolved) {
             Ok(inode) => inode,

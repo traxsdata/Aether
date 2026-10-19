@@ -30,6 +30,7 @@ fn image(segments: &[(u64, &[u8], u64)]) -> Vec<u8> {
         bytes.extend_from_slice(contents);
         let header = ELF_HEADER_SIZE + index * PROGRAM_HEADER_SIZE;
         write_u32(&mut bytes, header, PT_LOAD);
+        write_u32(&mut bytes, header + 4, PF_R | PF_W | PF_X);
         write_u64(&mut bytes, header + 8, file_offset);
         write_u64(&mut bytes, header + 16, *address);
         write_u64(&mut bytes, header + 24, *address);

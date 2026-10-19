@@ -25,15 +25,10 @@ fn formats_and_persists_directories_and_files() {
         .read_file("/apps/demo", "private/notes.txt", &mut buffer)
         .expect("read");
     assert_eq!(&buffer[..length], b"hello");
-    assert_eq!(
-        fs.stat("/apps/demo", "private/notes.txt").expect("stat"),
-        5
-    );
+    assert_eq!(fs.stat("/apps/demo", "private/notes.txt").expect("stat"), 5);
 
     let mut list = [0u8; 128];
-    let length = fs
-        .list("/apps/demo", "private", &mut list)
-        .expect("list");
+    let length = fs.list("/apps/demo", "private", &mut list).expect("list");
     assert_eq!(&list[..length], b"notes.txt\tf\t5\n");
 }
 
@@ -146,14 +141,24 @@ fn debug_directory_layout() {
         resolved.components().collect::<Vec<_>>()
     );
     match fs.lookup(&resolved) {
-        Ok(inode) => std::println!("lookup inode={inode} mode={}", fs.read_inode(inode).expect("inode").mode),
+        Ok(inode) => std::println!(
+            "lookup inode={inode} mode={}",
+            fs.read_inode(inode).expect("inode").mode
+        ),
         Err(error) => std::println!("lookup error={error:?}"),
     }
     let (parent_path, name) = resolved.parent_and_name().expect("parent");
     std::println!("parent={} name={name}", parent_path.as_str());
     let parent = fs.lookup(&parent_path).expect("parent inode");
-    std::println!("parent inode={parent} dir={}", fs.read_inode(parent).expect("p").is_dir());
-    if fs.dir_find(parent, name.as_bytes()).expect("find").is_none() {
+    std::println!(
+        "parent inode={parent} dir={}",
+        fs.read_inode(parent).expect("p").is_dir()
+    );
+    if fs
+        .dir_find(parent, name.as_bytes())
+        .expect("find")
+        .is_none()
+    {
         let inode = fs.allocate_inode().expect("alloc inode");
         std::println!("new inode={inode}");
         fs.write_inode(
@@ -171,7 +176,12 @@ fn debug_directory_layout() {
         let parent_inode = fs.read_inode(parent).expect("parent2");
         let entries = fs.dir_entries(parent_inode).expect("entries");
         for entry in entries.into_iter().flatten() {
-            std::println!("entry {} inode={} dir={}", entry.name_len, entry.inode, entry.is_dir);
+            std::println!(
+                "entry {} inode={} dir={}",
+                entry.name_len,
+                entry.inode,
+                entry.is_dir
+            );
         }
     }
     for path in ["/", "/apps", "/apps/demo", "/apps/demo/private"] {

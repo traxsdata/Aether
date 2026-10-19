@@ -74,7 +74,8 @@ pub fn poll() {
 fn execute_line() {
     // SAFETY: The line buffer and length are single-threaded shell state.
     let length = unsafe { LINE_LEN };
-    let line = unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(LINE).cast::<u8>(), length) };
+    let line =
+        unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(LINE).cast::<u8>(), length) };
     unsafe { LINE_LEN = 0 };
     let line = core::str::from_utf8(line).unwrap_or("").trim();
     if line.is_empty() {
@@ -94,6 +95,7 @@ fn execute_line() {
         "apps" => apps::print_table(),
         "services" => supervisor::print_security(),
         "security" => security(),
+        "input" => serial_line!("input: dropped={}", crate::input::dropped()),
         "uptime" => serial_line!("uptime: {} ticks", scheduler::ticks()),
         "recovery" => recovery(),
         "desktop" => desktop(),
@@ -111,6 +113,7 @@ fn print_help() {
     serial_line!("  apps             application lifecycle table");
     serial_line!("  services         service profiles and states");
     serial_line!("  security         permission and sandbox status");
+    serial_line!("  input            keyboard queue status");
     serial_line!("  uptime           timer ticks");
     serial_line!("  recovery         system image and rollback status");
     serial_line!("  desktop          compositor and desktop status");
@@ -176,25 +179,26 @@ fn security() {
         fs::DEMO_ROOT,
         fs::OTHER_ROOT
     );
+    serial_line!("security: portal_grants={}", crate::portal::grant_count());
     supervisor::print_security();
+    crate::portal::print_grants();
     apps::print_table();
+    crate::desktop::redraw();
+    serial_line!("security: desktop_focus={}", crate::desktop::focus());
 }
 
 fn recovery() {
-    let mut current = [0u8; 64];
-    let mut previous = [0u8; 64];
-    let current_length = fs::read_path("/system/images/current", &mut current).unwrap_or(0);
-    let previous_length = fs::read_path("/system/images/previous", &mut previous).unwrap_or(0);
-    let current_text = core::str::from_utf8(&current[..current_length])
-        .unwrap_or("unknown")
-        .trim();
-    let previous_text = core::str::from_utf8(&previous[..previous_length])
-        .unwrap_or("unknown")
-        .trim();
-    serial_line!("recovery: current={current_text} previous={previous_text}");
+    crate::recovery::print_status();
     serial_line!("recovery: user data is outside the image set");
 }
 
 fn desktop() {
-    serial_line!("desktop: framebuffer service not active in this build");
+    crate::desktop::redraw();
+    serial_line!(
+        "desktop: focus={} checksum={:#010x} mode={}x{}",
+        crate::desktop::focus(),
+        crate::graphics::checksum(),
+        crate::graphics::width(),
+        crate::graphics::height()
+    );
 }

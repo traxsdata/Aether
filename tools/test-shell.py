@@ -62,7 +62,9 @@ def qemu_command(code: Path, variables: Path | None) -> list[str]:
         "-m",
         "1024M",
         "-display",
-        "none",
+        "vnc=127.0.0.1:9",
+        "-device",
+        "VGA",
         "-monitor",
         "none",
         "-no-reboot",
@@ -150,6 +152,9 @@ def main() -> int:
             ("apps", "app demo"),
             ("security", "security: open_files="),
             ("services", "service storaged"),
+            ("recovery", "IMAGES: CURRENT + PREVIOUS"),
+            ("desktop", "desktop: focus="),
+            ("input", "input: dropped="),
             ("uptime", "uptime:"),
         ):
             output = send_command(client, command)

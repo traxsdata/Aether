@@ -24,7 +24,7 @@ pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"AETHEROS");
 ///
 /// Bump this for any layout or semantic change. The kernel refuses versions it
 /// does not implement.
-pub const BOOT_INFO_VERSION: u32 = 1;
+pub const BOOT_INFO_VERSION: u32 = 2;
 
 /// Maximum number of memory regions passed to the kernel.
 ///
@@ -87,6 +87,123 @@ impl MemoryKind {
             9 => Some(Self::Other),
             _ => None,
         }
+    }
+}
+
+/// Framebuffer pixel format reported by the firmware.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelFormat {
+    /// Blue, green, red, reserved byte order.
+    BlueGreenRedReserved = 0,
+    /// Red, green, blue, reserved byte order.
+    RedGreenBlueReserved = 1,
+    /// Hardware bit masks; the kernel falls back to text-only output.
+    BitMask = 2,
+    /// No linear framebuffer is available.
+    BltOnly = 3,
+}
+
+impl PixelFormat {
+    /// Decodes a raw firmware value.
+    #[must_use]
+    pub const fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::BlueGreenRedReserved),
+            1 => Some(Self::RedGreenBlueReserved),
+            2 => Some(Self::BitMask),
+            3 => Some(Self::BltOnly),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if the format has a linear 32-bit pixel layout.
+    #[must_use]
+    pub const fn is_linear(self) -> bool {
+        matches!(
+            self,
+            Self::BlueGreenRedReserved | Self::RedGreenBlueReserved
+        )
+    }
+}
+
+/// Linear framebuffer description passed by the loader.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FramebufferInfo {
+    /// Physical base address, or zero when no linear framebuffer exists.
+    pub base: u64,
+    /// Mapped byte length reported by firmware.
+    pub size: u64,
+    /// Visible horizontal pixels.
+    pub width: u32,
+    /// Visible vertical pixels.
+    pub height: u32,
+    /// Pixels per scan line, at least `width`.
+    pub stride: u32,
+    /// Raw [`PixelFormat`] value.
+    pub format: u32,
+    /// Must be zero.
+    pub reserved: u32,
+}
+
+impl FramebufferInfo {
+    /// An absent framebuffer.
+    pub const NONE: Self = Self {
+        base: 0,
+        size: 0,
+        width: 0,
+        height: 0,
+        stride: 0,
+        format: 0,
+        reserved: 0,
+    };
+
+    /// Returns `true` if a usable linear framebuffer is present.
+    #[must_use]
+    pub const fn is_present(&self) -> bool {
+        self.base != 0 && self.width != 0 && self.height != 0 && self.stride >= self.width
+    }
+
+    /// Validates the descriptor without touching the framebuffer.
+    pub fn validate(&self) -> Result<(), BootInfoError> {
+        if self.reserved != 0 {
+            return Err(BootInfoError::InvalidFramebuffer);
+        }
+        if self.base == 0 {
+            if self.size != 0
+                || self.width != 0
+                || self.height != 0
+                || self.stride != 0
+                || self.format != 0
+            {
+                return Err(BootInfoError::InvalidFramebuffer);
+            }
+            return Ok(());
+        }
+        let Some(format) = PixelFormat::from_raw(self.format) else {
+            return Err(BootInfoError::InvalidFramebuffer);
+        };
+        if !format.is_linear() || self.width == 0 || self.height == 0 || self.stride < self.width {
+            return Err(BootInfoError::InvalidFramebuffer);
+        }
+        let Some(row_bytes) = (self.stride as u64).checked_mul(4) else {
+            return Err(BootInfoError::InvalidFramebuffer);
+        };
+        let Some(required) = row_bytes.checked_mul(u64::from(self.height)) else {
+            return Err(BootInfoError::InvalidFramebuffer);
+        };
+        if self.size < required {
+            return Err(BootInfoError::InvalidFramebuffer);
+        }
+        if self
+            .base
+            .checked_add(self.size)
+            .is_none_or(|end| end > (1u64 << 52))
+        {
+            return Err(BootInfoError::InvalidFramebuffer);
+        }
+        Ok(())
     }
 }
 
@@ -160,6 +277,8 @@ pub enum BootInfoError {
     RegionsNotSorted { index: u64 },
     /// Two regions overlap.
     OverlappingRegions { index: u64 },
+    /// The framebuffer descriptor is inconsistent or unsupported.
+    InvalidFramebuffer,
 }
 
 impl fmt::Display for BootInfoError {
@@ -192,6 +311,7 @@ impl fmt::Display for BootInfoError {
             Self::OverlappingRegions { index } => {
                 write!(f, "memory region at index {index} overlaps its predecessor")
             }
+            Self::InvalidFramebuffer => write!(f, "invalid framebuffer descriptor"),
         }
     }
 }
@@ -226,6 +346,8 @@ pub struct BootInfo {
     /// UEFI system table physical address, retained for a future runtime
     /// services design. Zero when not available.
     pub system_table: u64,
+    /// Linear framebuffer, or [`FramebufferInfo::NONE`].
+    pub framebuffer: FramebufferInfo,
     /// Reserved; must be zero.
     pub reserved: [u64; 4],
 }
@@ -244,6 +366,7 @@ impl BootInfo {
             kernel_end: 0,
             entry_point: 0,
             system_table: 0,
+            framebuffer: FramebufferInfo::NONE,
             reserved: [0; 4],
         }
     }
@@ -290,6 +413,7 @@ impl BootInfo {
         if self.entry_point < self.kernel_start || self.entry_point >= self.kernel_end {
             return Err(BootInfoError::EntryOutsideKernel);
         }
+        self.framebuffer.validate()?;
         Ok(())
     }
 
@@ -490,7 +614,8 @@ mod tests {
         // These sizes are part of the loader/kernel contract.
         assert_eq!(size_of::<MemoryKind>(), 4);
         assert_eq!(size_of::<MemoryRegion>(), 24);
-        assert_eq!(size_of::<BootInfo>(), 96);
+        assert_eq!(size_of::<FramebufferInfo>(), 40);
+        assert_eq!(size_of::<BootInfo>(), 136);
     }
 
     #[test]

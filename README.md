@@ -8,14 +8,15 @@ The project's security goal is simple to state and hard to build: applications
 receive only the capabilities they need, user files are opened through explicit
 grants, and the desktop is not a security authority.
 
-> **Status: kernel prototype, Phase 2 in progress.** The tree now has a
-> reproducible UEFI boot path, a validated physical memory map, a bitmap frame
-> allocator, kernel-owned page tables with NX and write-protect enforcement,
-> structured exception reporting, a 100 Hz preemptive scheduler,
-> hardware-enforced address-space isolation between kernel tasks, per-task
-> capability tables, and bounded IPC with capability transfer. There is no user
-> mode, filesystem, graphics stack, or Windows compatibility yet. Do not use
-> this tree for real data.
+> **Status: native desktop prototype, Phase 3 complete and the Phase 4
+> prototype in place.** The tree has a reproducible UEFI boot path and ISO, a validated
+> physical memory map, kernel-owned page tables with NX and write-protect
+> enforcement, a 100 Hz preemptive scheduler, a ring-3 user/kernel boundary,
+> validated syscalls, a bounded filesystem with per-process roots and
+> generation-checked file capabilities, supervised services, a console shell, a
+> linear framebuffer compositor, keyboard input, a file portal, and a recovery
+> prototype. Windows compatibility, networking, persistent storage, audio, and
+> GPU acceleration are not implemented. Do not use this tree for real data.
 
 ## What works today
 
@@ -43,47 +44,83 @@ grants, and the desktop is not a security authority.
   transfer.
 - A boot-time capability/IPC test covering successful transfer, insufficient
   rights, forged handles, and endpoint confusion.
+- A ring-3 native application loaded from an embedded ELF image into a private
+  PML4, with TSS/RSP0 kernel stacks, an `int 0x80` syscall gate, user-pointer
+  validation, and fault containment.
+- A bounded virtual block device and filesystem with directories, files, open
+  handles, path traversal rejection, quotas, and per-process roots.
+- Generation-checked file capabilities; `open`, `read`, `write`, `close`,
+  `list`, and `stat` syscalls; and a kernel-mediated file portal grant.
+- A host-tested service supervisor with dependency order, restart budgets, and
+  quarantine, plus an application lifecycle table.
+- A serial console shell with filesystem, service, application, recovery, and
+  desktop commands.
+- A linear GOP framebuffer service, software compositor, six-window desktop,
+  PS/2 keyboard input, Security Center, file manager, settings, portal view,
+  and current/previous image recovery view.
+- A native application SDK (`sdk/`) for the initial syscall surface.
 - Host unit tests for ABI layout and region validation, memory arithmetic, the
-  frame allocator, page-table encoding, capability tables, IPC endpoints, and a
-  defensive ELF parser.
+  frame allocator, page-table encoding, capability tables, IPC endpoints, the
+  filesystem, service supervision, application lifecycle, and the defensive
+  ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
-  `AETHER_IPC_OK`, and `AETHER_BOOT_OK`.
+  `AETHER_IPC_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`, `AETHER_SANDBOX_OK`,
+  `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`, `AETHER_GRAPHICS_OK`,
+  `AETHER_DESKTOP_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
+  `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
+- `make shell-test`, which drives the console over a QEMU serial socket and
+  checks filesystem, service, recovery, desktop, and input commands.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
 - `make negative-test`, which proves the boot harness rejects a deliberately
   failing kernel.
+- `make iso`, which builds a timestamped UEFI El Torito ISO under
+  `build/ISOs/`.
 - A local CI gate (`make ci`) that runs formatting, clippy, documentation and
-  licence checks, unit tests, the boot test, the fault test, and the negative
-  boot test. A GitHub Actions workflow will publish the same gate in a
-  follow-up; until then, run the gate locally before opening a pull request.
+  licence checks, unit tests, the boot test, the shell test, the fault test, and
+  the negative boot test. A GitHub Actions workflow will publish the same gate
+  in a follow-up; until then, run the gate locally before opening a pull
+  request.
 
 A representative serial transcript from a successful boot (region counts and
 frame addresses vary with firmware, build, and feature set):
 
 ```text
 AETHER_LOADER_OK stage=entry version=0.1.0
-loader: kernel elf start=0x4000000 end=0x40a9000 entry=0x4000000 segments=4
-loader: memory regions=39 usable=1016 MiB
+loader: GOP 1280x800 stride=1280 format=1
+loader: framebuffer base=0x80000000 size=4096000 mode=1280x800 stride=1280 format=1
+loader: kernel elf start=0x4000000 end=0x41c4000 entry=0x4000000 segments=4
+loader: memory regions=39 usable=1013 MiB
 loader: boot services exited after 1 attempt(s)
 AETHER_LOADER_HANDOFF entry=0x4000000
 AETHER_KERNEL_OK stage=entry version=0.1.0 commit=...
-boot: hand-off validated (version 1, 96 bytes)
-boot: memory map: 39 regions, 1016 MiB allocatable
-boot: kernel image [0x0000000004000000, 0x00000000040a9000), entry 0x0000000004000000
+boot: hand-off validated (version 2, 136 bytes)
 boot: cpu: NX and write-protect enabled
-boot: paging: identity map to 1024 MiB, 6 page-table frames, CR3=0x0000000000100000
-boot: frame allocator: 1015 MiB free (259944 frames), bitmap capacity 16384 MiB
+boot: paging: identity map to 1024 MiB, CR3=0x0000000000100000
+boot: framebuffer mapped 1280x800 stride=1280 format=1
 AETHER_MM_OK
-boot: x86-64 execution environment ready
-sched: task 1 ready pml4=0x0000000000107000 private=0x0000000000106000
-sched: task 2 ready pml4=0x000000000010c000 private=0x000000000010b000
-sched: task 3 ready pml4=0x0000000000111000 private=0x0000000000110000
-sched: timer started at 100 Hz
+sched: user task ready pid=4 entry=0x0000020000000230 stack=0x0000020004000000
+AETHER_SUPERVISOR_OK starts=11 running=9 quarantined=1
+AETHER_RECOVERY_OK current=aether-0.1.0 previous=aether-0.0.9 selected=aether-0.1.0 rollback=false user_data=true
+AETHER_GRAPHICS_OK mode=1280x800 format=linear
+AETHER_DESKTOP_OK windows=6 checksum=0xc3c51a73
+AETHER_INPUT_OK keys=6 dropped=0 queue=32
+AETHER_SHELL_OK
+AETHER_APP_ENTRY cpl=3
+init: private write ok
+init: sibling-private: denied EPERM
+init: root-escape: denied EPERM
+init: portal=welcome to aether
+AETHER_PORTAL_OK
+AETHER_APP_OK
 AETHER_SCHED_OK workers=3 ticks=23
 AETHER_ISOLATION_OK tasks=3
 AETHER_CAP_OK denials=2
 AETHER_IPC_OK messages=3
+AETHER_USER_OK tasks=4 exits=1 faults=0
+AETHER_FS_OK opens=4 denials=0
+AETHER_SANDBOX_OK escapes=2 access_denials=0
 AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
 
@@ -96,6 +133,7 @@ Prerequisites on a Linux host:
 - `mtools` (`mformat`, `mmd`, `mcopy`).
 - QEMU (`qemu-system-x86_64`) and OVMF firmware for `make test`.
 - GNU Make and Python 3.
+- `xorriso` for `make iso`.
 
 ```sh
 git clone https://github.com/traxsdata/Aether.git
@@ -106,37 +144,50 @@ make                        # build build/aether.img
 
 `make` produces a 64 MiB FAT image containing
 `/EFI/BOOT/BOOTX64.EFI`. The kernel ELF is embedded in the loader, so the two
-artifacts cannot drift apart.
+artifacts cannot drift apart. `make iso` builds a UEFI El Torito ISO containing
+a small EFI system image and writes it to `build/ISOs/aether-<UTC>.iso`.
 
 ### Tests
 
 ```sh
-make unittest      # host unit tests (ABI, ELF parser, memory arithmetic, allocator)
+make unittest      # host unit tests (ABI, ELF, filesystem, services, IPC, memory)
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
+make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # exception-path test: int3 after paging must reach the IDT
 make negative-test # boot harness must detect a deliberately failing kernel
 make docs-check    # relative Markdown links
 make license-check # workspace and dependency licence metadata
-make lint          # rustfmt, host clippy, kernel clippy, loader clippy
+make lint          # rustfmt, host/kernel/user/loader clippy
+make iso           # timestamped UEFI El Torito ISO under build/ISOs
 make ci            # full pull-request gate
 make clean
 ```
 
-`make test` uses QEMU TCG and needs no KVM or root access. Override the
-firmware paths with `OVMF_CODE` and `OVMF_VARS` if they are not in a standard
-location.
+`make test` uses QEMU TCG and needs no KVM or root access. The graphics test
+needs a display device for OVMF to expose GOP; the harness starts a headless
+VNC server and an emulated VGA adapter. Override the firmware paths with
+`OVMF_CODE` and `OVMF_VARS` if they are not in a standard location.
 
 ## Repository layout
 
 ```text
-abi/                 loader/kernel hand-off ABI (no_std, host-testable)
+abi/                 boot ABI and user syscall ABI (no_std, host-testable)
 boot/common/         architecture-independent boot logic and ELF validation
 boot/loader/         UEFI application (no_std, target x86_64-unknown-uefi)
+kernel/fs/           host-testable virtual block device and filesystem
 kernel/memory/       host-testable frame allocator and page-table encoding
 kernel/ipc/          host-testable capability tables and IPC endpoints
+kernel/services/     host-testable supervisor and application lifecycle rules
 kernel/              Aether kernel (no_std, target x86_64-unknown-none)
-  src/scheduler.rs   preemptive kernel scheduler, isolation and IPC tests
-tools/               boot test harness
+  src/scheduler.rs   scheduler, ring-3 process, isolation and IPC tests
+  src/syscall.rs     validated user syscall gate
+  src/desktop.rs     software compositor and desktop shell
+  src/input.rs       PS/2 keyboard service
+  src/portal.rs      scoped file portal grants
+  src/recovery.rs    current/previous image selection
+sdk/                 native application SDK
+user/                ring-3 native init and sandbox test
+tools/               boot, shell, ISO, and repository test harnesses
 docs/                architecture, security, and decision records
 ```
 
@@ -152,35 +203,51 @@ by the specification.
 3. It allocates the kernel at the image's linked physical address (`0x4000000`
    today), copies `PT_LOAD` segments, and zeroes BSS.
 4. It allocates the hand-off block, map buffer, and region array below 4 GiB,
-   converts the UEFI memory map into a fixed, bounded array, validates it, and
-   writes a `BootInfo` block.
+   converts the UEFI memory map into a fixed, bounded array, queries GOP, and
+   writes a versioned `BootInfo` block.
 5. It exits boot services and jumps to the kernel with the `BootInfo` pointer.
-6. The kernel installs its own GDT and IDT, validates the hand-off and region
-   ordering, enables NX and write-protect, initializes the frame allocator,
-   builds page tables, switches CR3, and reports memory and image state.
-7. It starts a 100 Hz timer, preemptively runs three tasks in separate address
-   spaces, verifies that private mappings survive preemption, exercises
-   capability rights and bounded IPC including a transfer, prints
-   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
-   `AETHER_IPC_OK`, and `AETHER_BOOT_OK`, then halts.
+6. The kernel installs its own GDT, TSS, and IDT, validates the hand-off and
+   region ordering, enables NX and write-protect, initializes the frame
+   allocator, maps RAM and the framebuffer, switches CR3, and reports memory and
+   image state.
+7. It starts a 100 Hz timer, preemptively runs three ring-0 workers in separate
+   address spaces, verifies that private mappings survive preemption, exercises
+   capability rights and bounded IPC including a transfer, and loads a ring-3
+   native application into its own PML4.
+8. The application exercises its private root, denied sibling access, denied
+   root escape, kernel-pointer rejection, and a portal-granted read.
+9. The supervisor starts the filesystem, application, input, display, desktop,
+   portal, and security services; the compositor paints the desktop; the input
+   self-test drives focus; and recovery verifies the current/previous image
+   records without touching user data. The console shell stays available after
+   the boot markers.
 
 The loader and kernel are separate programs with a versioned ABI. Internal
 kernel structures are not exposed to the loader.
 
 ## Security posture
 
-This prototype is **not** a sandbox yet. It validates and bounds the boot
-hand-off and the kernel image parser, owns its page tables, explicitly enables
-NX and write-protect so kernel text is read-execute-only and data is
-non-executable, reports exceptions instead of resetting silently, isolates
-kernel tasks in separate address spaces, and enforces generation-checked
-capability rights and endpoint identity on bounded IPC. It still has no user
-mode or user/kernel memory split, so kernel tasks share the kernel mapping and
-all run at CPL0.
+The prototype now has a real CPU privilege boundary: user code runs at CPL3 in
+a private PML4 whose only user mappings are in the user window; kernel text,
+stacks, page tables, and the identity map remain supervisor-only. System calls
+validate every user range, length, handle, generation, object type, and right
+before copying. A ring-3 fault retires only the faulting task. Files are opened
+through generation-checked capabilities; a process root rejects `..`, and the
+portal grants one exact outside file for one process and one right set.
 
-See [`docs/security/threat-model.md`](docs/security/threat-model.md) for the
-current threat model, including what is deliberately out of scope for the
-prototype.
+The desktop is not a policy authority: it can display grants and request
+capabilities, but the filesystem and portal services make the decision. Service
+profiles are declared and the supervisor quarantines a service that exhausts
+its restart budget.
+
+This is still a prototype. Storage is a volatile RAM disk, there is one native
+application, portal grants are seeded rather than interactively consented, and
+there is no capability revocation UI, blocking IPC, SMP, networking, audio,
+persistent storage, or GPU acceleration. Do not store real data on it.
+
+See [`docs/security/threat-model.md`](docs/security/threat-model.md) and
+[`docs/security/security-boundaries.md`](docs/security/security-boundaries.md)
+for the current boundaries and deliberate exclusions.
 
 ## Contributing
 
@@ -198,6 +265,8 @@ The Windows compatibility feasibility plan is in
 Further reading: [memory and paging](docs/architecture/memory.md),
 [scheduler and address spaces](docs/architecture/scheduler.md),
 [capabilities](docs/architecture/capabilities.md), [IPC](docs/architecture/ipc.md),
+[filesystem and file handles](docs/architecture/filesystem.md),
+[compositor and desktop](docs/architecture/desktop.md),
 [security boundaries](docs/security/security-boundaries.md), and the
 [development environment](docs/development.md).
 

@@ -168,16 +168,43 @@ fn decode_handle(value: u64) -> Option<CapHandle> {
 }
 
 /// Opens a path for the calling process.
-pub fn sys_open(
-    pml4: PhysFrame,
-    pointer: u64,
-    length: u64,
-    rights: u64,
-) -> Option<i64> {
+pub fn sys_open(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) -> Option<i64> {
     let path = user_str(pml4, pointer, length)?;
     let access = access_from_rights(rights)?;
     match scheduler::with_current_caps(|root, caps| {
         let open = match with_fs(|filesystem| filesystem.open(root, path, access)) {
+            Ok(open) => open,
+            Err(error) => return Err(map_error(error)),
+        };
+        let object = ObjectId {
+            index: u16::from(open.index),
+            generation: open.generation,
+        };
+        match caps.grant(object, ObjectType::File, cap_rights(access)) {
+            Ok(handle) => {
+                OPENS.fetch_add(1, Ordering::Release);
+                Ok(encode_handle(handle))
+            }
+            Err(error) => {
+                let _ = with_fs(|filesystem| filesystem.close(open));
+                Err(map_cap_error(error))
+            }
+        }
+    }) {
+        Ok(handle) => Some(handle as i64),
+        Err(error) => Some(error),
+    }
+}
+
+/// Opens a file outside the process root through a portal grant.
+pub fn sys_portal_open(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) -> Option<i64> {
+    let path = user_str(pml4, pointer, length)?;
+    let access = access_from_rights(rights)?;
+    match scheduler::with_current_caps(|root, caps| {
+        if crate::portal::check(root, path, rights).is_err() {
+            return Err(errno::ENOGRANT);
+        }
+        let open = match with_fs(|filesystem| filesystem.open("/", path, access)) {
             Ok(open) => open,
             Err(error) => return Err(map_error(error)),
         };
@@ -254,8 +281,7 @@ pub fn sys_close(handle: u64) -> Option<i64> {
             generation: object.generation,
         };
         let _ = caps.remove(cap);
-        with_fs(|filesystem| filesystem.close(open))
-            .map_err(map_error)
+        with_fs(|filesystem| filesystem.close(open)).map_err(map_error)
     });
     Some(match result {
         Ok(()) => 0,
@@ -299,11 +325,6 @@ pub fn write_path(path: &str, data: &[u8]) -> Result<(), FsError> {
 /// Deletes a file for the kernel console.
 pub fn remove_path(path: &str) -> Result<(), FsError> {
     with_fs(|filesystem| filesystem.unlink("/", path))
-}
-
-/// Returns a file's size.
-pub fn stat_path(path: &str) -> Result<usize, FsError> {
-    with_fs(|filesystem| filesystem.stat("/", path))
 }
 
 /// Returns a file's size.

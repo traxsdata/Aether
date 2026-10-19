@@ -70,5 +70,7 @@ Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
 - Host tests cover bounded messages, rights, forged handles, endpoint
   confusion, queue capacity, table exhaustion, and transfer.
 
-The kernel-internal API is not yet exposed through a user-mode syscall
-boundary.
+The endpoint API is not yet exposed through a user-mode syscall boundary.
+File operations have a separate validated syscall path and per-task file
+capabilities; endpoint syscalls, blocking receives, and timeouts remain
+follow-up work.

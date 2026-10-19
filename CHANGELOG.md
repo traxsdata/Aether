@@ -44,6 +44,40 @@ versioning scheme until the kernel ABI stabilises.
   `make negative-test`; a GitHub Actions workflow publication remains a
   follow-up.
 - ADR-005 through ADR-010 and a Windows compatibility feasibility plan.
+- Ring-3 native application support: user GDT/TSS descriptors, TSS `RSP0`
+  kernel stacks, user PML4s, an `int 0x80` syscall gate, `InterruptFrame`
+  user-context fields, and fault containment that retires only the faulting
+  task.
+- User syscall ABI and `aether-sdk`: yield, exit, console write, pid, uptime,
+  file open/read/write/close/list/stat, portal open, and diagnostics.
+- `aether-fs`: a 128 KiB RAM block device and bounded filesystem with 32
+  inodes, contiguous file blocks, directories, generation-checked open handles,
+  root-scoped path resolution, quotas, and host tests.
+- Kernel file service with per-process roots, file capabilities, and denied
+  cross-application and root-escape checks (`AETHER_APP_OK`, `AETHER_FS_OK`,
+  `AETHER_SANDBOX_OK`).
+- `aether-services`: host-tested service supervisor with dependency order,
+  restart budgets, and quarantine; application lifecycle table.
+- Console shell with `help`, `ls`, `cat`, `write`, `rm`, `apps`, `services`,
+  `security`, `input`, `uptime`, `recovery`, `desktop`, and `clear`.
+- `make shell-test` socket-driven console acceptance test.
+- BootInfo version 2 with a validated `FramebufferInfo` descriptor and loader
+  GOP query.
+- Framebuffer mapping (cache-disabled, non-executable) and a linear graphics
+  service with a 5x7 font and pixel checksum.
+- Software compositor with Files, Security Center, File Portal, Settings,
+  Recovery, and System Log windows; focus and keyboard movement.
+- PS/2 IRQ1 keyboard service with a bounded queue and a deterministic boot
+  self-test (`AETHER_INPUT_OK`).
+- Exact-path file portal grants and a portal-granted read from the native
+  application (`AETHER_PORTAL_OK`).
+- Recovery prototype with current/previous image markers, selection, and
+  preserved user data (`AETHER_RECOVERY_OK`).
+- `make iso`: timestamped UEFI El Torito ISO with an embedded FAT EFI system
+  image under `build/ISOs/`.
+- Architecture notes for the filesystem and desktop.
+- Boot markers for graphics, desktop, input, portal, recovery, supervisor, and
+  shell.
 
 ### Changed
 
@@ -51,30 +85,42 @@ versioning scheme until the kernel ABI stabilises.
 - The identity map is built from mappable regions only; reserved holes and
   device MMIO stay unmapped, and a machine with more than 16 GiB still boots
   using the low 16 GiB.
-- Boot tests require `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`,
-  `AETHER_CAP_OK`, `AETHER_IPC_OK`, and `AETHER_BOOT_OK`.
-- `make ci` runs documentation and licence checks, the exception-path test, and
-  the negative boot test in addition to the normal boot test.
+- Boot tests require the full Phase 1–4 marker set: memory, scheduler,
+  isolation, capabilities, IPC, native application, filesystem, sandbox,
+  supervisor, recovery, graphics, desktop, input, portal, shell, and boot.
+- `make ci` runs documentation and licence checks, the shell test, the
+  exception-path test, and the negative boot test in addition to the normal
+  boot test.
+- The loader now queries GOP and writes BootInfo version 2 (136 bytes).
+- QEMU test harnesses start a headless VNC display and emulated VGA adapter so
+  OVMF exposes a linear framebuffer.
 
 ### Known limitations
 
-- Tasks are ring-0 kernel tasks; there is no user mode, filesystem, storage
-  driver, networking, graphics, or desktop.
-- Capability and IPC enforcement is kernel-internal; there is no syscall
-  boundary yet.
-- Identity map only; no higher-half kernel or user/kernel split.
-- No IST/TSS for double-fault and stack-overflow recovery.
+- Services and the desktop still execute as kernel modules; only the native
+  application runs at CPL3. Moving service bodies into supervised user
+  processes is follow-up work.
+- Storage is a volatile RAM disk. There is no persistent block device,
+  networking, audio, GPU acceleration, or package manager.
+- The filesystem is a bring-up format: 32 inodes, 4 KiB per file, one
+  directory block per directory, and no crash-consistency protocol.
+- Portal grants are seeded at boot; there is no interactive consent UI,
+  persistent grant store, or revocation UI.
+- The scheduler has no priorities, sleeping/wakeup queues, or dynamic task
+  creation; IPC is polled rather than blocking.
+- Capability revocation, endpoint destruction, and complete object-lifetime
+  behavior are not implemented.
+- Identity map only; no higher-half kernel, guard pages, or kernel heap.
+- No IST for double-fault and stack-overflow recovery.
 - The kernel image is embedded in the loader, so updating the kernel requires
   rebuilding the loader and boot image.
 - The frame bitmap covers at most 16 GiB.
 - Single-core only; no SMP startup.
-- The scheduler has no priorities, sleeping/wakeup queues, or dynamic task
-  creation; IPC is polled rather than blocking.
-- Capability revocation, endpoint destruction, and object-lifetime behavior are
-  not implemented.
 - NX and WP are enabled, but there is no fault-injection test that attempts to
   write kernel text or execute data.
-- No Secure Boot signing, measured boot, or update/recovery path yet.
+- No Secure Boot signing, measured boot, artifact signature verification, or
+  rollback counter yet.
+- The ISO is generated but automated CD/ISO boot is not part of `make ci`.
 
 ## [0.1.0] - 2026-10-19
 

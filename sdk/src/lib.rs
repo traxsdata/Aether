@@ -107,7 +107,11 @@ pub fn open(path: &str, rights: u64) -> Result<u64, i64> {
             0,
         )
     };
-    if result < 0 { Err(result) } else { Ok(result as u64) }
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as u64)
+    }
 }
 
 /// Opens a path through the file portal.
@@ -122,7 +126,11 @@ pub fn portal_open(path: &str, rights: u64) -> Result<u64, i64> {
             0,
         )
     };
-    if result < 0 { Err(result) } else { Ok(result as u64) }
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as u64)
+    }
 }
 
 /// Reads from a file handle.

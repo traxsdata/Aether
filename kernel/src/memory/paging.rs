@@ -11,7 +11,7 @@
 //! Address-space isolation arrives with the task model in Phase 2.
 
 use aether_abi::user::{USER_BASE, USER_LIMIT, USER_STACK_PAGES, USER_STACK_TOP};
-use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
+use aether_abi::{BootInfo, FramebufferInfo, MemoryKind, MemoryRegion};
 use aether_boot_common::elf::{Image, PF_W, PF_X};
 use aether_memory::frame::{FrameAllocator, PhysFrame};
 use aether_memory::paging::{PAGE_TABLE_ENTRIES, PageFlags, PageTable, PageTableEntry};
@@ -31,6 +31,8 @@ pub struct PagingStats {
     pub page_table_frames: u64,
     /// Physical address installed in CR3.
     pub pml4_address: u64,
+    /// Whether the linear framebuffer was mapped for the graphics service.
+    pub framebuffer_mapped: bool,
 }
 
 /// Failure while building or activating the identity map.
@@ -56,6 +58,8 @@ pub enum PagingError {
     InvalidUserSegment,
     /// A user page table contains an unexpected huge-page entry.
     UnexpectedUserHugePage,
+    /// The framebuffer overlaps an existing huge-page mapping.
+    FramebufferHugePage,
 }
 
 unsafe extern "C" {
@@ -225,16 +229,15 @@ pub fn create_user_address_space(
             // Copy the intersection of this page and the segment's file data.
             let page_end = virtual_address.saturating_add(PAGE_SIZE);
             let copy_start = segment.physical_address.max(virtual_address);
-            let copy_end = physical_end.min(page_end).min(
-                segment
-                    .physical_address
-                    .saturating_add(segment.file_size),
-            );
+            let copy_end = physical_end
+                .min(page_end)
+                .min(segment.physical_address.saturating_add(segment.file_size));
             if copy_start < copy_end {
                 let source_offset = segment
                     .file_offset
                     .checked_add(copy_start - segment.physical_address)
-                    .ok_or(PagingError::InvalidUserSegment)? as usize;
+                    .ok_or(PagingError::InvalidUserSegment)?
+                    as usize;
                 let length = (copy_end - copy_start) as usize;
                 let source = bytes
                     .get(source_offset..source_offset.saturating_add(length))
@@ -305,7 +308,7 @@ pub fn map_user_page(
     physical: PhysFrame,
     flags: PageFlags,
 ) -> Result<(), PagingError> {
-    if virtual_address < USER_BASE || virtual_address >= USER_LIMIT {
+    if !(USER_BASE..USER_LIMIT).contains(&virtual_address) {
         return Err(PagingError::UserImageOutsideWindow);
     }
     let [pml4_index, pdpt_index, pd_index, pt_index] =
@@ -314,8 +317,9 @@ pub fn map_user_page(
     let pdpt = ensure_user_table(pml4, pml4_index, allocator)?;
     let pd = ensure_user_table(pdpt, pdpt_index, allocator)?;
     let pt = ensure_user_table(pd, pd_index, allocator)?;
-    let entry = PageTableEntry::new(physical.start_address(), flags | PageFlags::USER)
-        .ok_or(PagingError::UnrepresentableAddress(physical.start_address()))?;
+    let entry = PageTableEntry::new(physical.start_address(), flags | PageFlags::USER).ok_or(
+        PagingError::UnrepresentableAddress(physical.start_address()),
+    )?;
     // SAFETY: `pt` was validated or allocated above and is identity-mapped.
     unsafe { (*table_ptr(pt)).set_entry(pt_index, entry) };
     Ok(())
@@ -413,12 +417,14 @@ pub fn init(
     tables.map_low_memory()?;
     tables.map_kernel()?;
     tables.map_large_pages(end, regions)?;
+    let framebuffer_mapped = tables.map_framebuffer(&info.framebuffer)?;
 
     let pml4_address = tables.pml4.start_address();
     let stats = PagingStats {
         mapped_bytes: end,
         page_table_frames: tables.allocated,
         pml4_address,
+        framebuffer_mapped,
     };
     tables.activate();
     Ok(stats)
@@ -637,6 +643,50 @@ impl<'a, 'b> Tables<'a, 'b> {
             base = next;
         }
         Ok(())
+    }
+
+    /// Maps the linear framebuffer identity with write-combining disabled.
+    ///
+    /// Firmware memory maps classify the framebuffer as MMIO, which the
+    /// general identity map deliberately skips. The graphics service needs it,
+    /// so it is mapped explicitly, non-executable and cache-disabled.
+    fn map_framebuffer(&mut self, framebuffer: &FramebufferInfo) -> Result<bool, PagingError> {
+        if !framebuffer.is_present() {
+            return Ok(false);
+        }
+        let end = framebuffer
+            .base
+            .checked_add(framebuffer.size)
+            .ok_or(PagingError::InvalidMemoryMap)?;
+        if end > crate::memory::MAX_PHYSICAL_BYTES {
+            return Ok(false);
+        }
+        let start = framebuffer.base & !(PAGE_SIZE - 1);
+        let end = align_up_page(end)?;
+        let flags = PageFlags::PRESENT
+            | PageFlags::WRITABLE
+            | PageFlags::CACHE_DISABLE
+            | PageFlags::NO_EXECUTE;
+
+        let mut address = start;
+        while address < end {
+            let [pml4_index, pdpt_index, pd_index, pt_index] =
+                aether_memory::paging::indices(address);
+            let pdpt = self.ensure(self.pml4, pml4_index)?;
+            let pd = self.ensure(pdpt, pdpt_index)?;
+            let pd_entry = unsafe { (*table_ptr(pd)).entry(pd_index) };
+            if pd_entry.is_present() && pd_entry.is_huge() {
+                return Err(PagingError::FramebufferHugePage);
+            }
+            let pt = self.ensure(pd, pd_index)?;
+            let entry = PageTableEntry::new(address, flags)
+                .ok_or(PagingError::UnrepresentableAddress(address))?;
+            // SAFETY: The leaf table is identity-mapped and owned by the
+            // kernel.
+            unsafe { (*table_ptr(pt)).set_entry(pt_index, entry) };
+            address = address.saturating_add(PAGE_SIZE);
+        }
+        Ok(true)
     }
 
     /// Returns the child table at `index`, allocating and linking it if absent.

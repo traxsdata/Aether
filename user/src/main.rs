@@ -60,7 +60,7 @@ fn write_note() {
     match sdk::open(PRIVATE_NOTE, sdk::WRITE | sdk::CREATE) {
         Ok(handle) => {
             match sdk::write_file(handle, b"hello from ring 3\n") {
-                Ok(count) if count == 18 => puts("init: private write ok\n"),
+                Ok(18) => puts("init: private write ok\n"),
                 Ok(_) => puts("init: private write truncated\n"),
                 Err(error) => {
                     puts("init: private write failed ");
@@ -98,8 +98,34 @@ pub extern "C" fn _start() -> ! {
     puts_i64(bad);
     puts("\n");
 
+    portal_read();
+
     puts("AETHER_APP_OK\n");
     sdk::exit(0)
+}
+
+fn portal_read() {
+    match sdk::portal_open("/home/welcome.txt", sdk::READ) {
+        Ok(handle) => {
+            let mut buffer = [0u8; 64];
+            if let Ok(count) = sdk::read(handle, &mut buffer) {
+                puts("init: portal=");
+                puts(
+                    core::str::from_utf8(&buffer[..count])
+                        .unwrap_or("?")
+                        .trim_end(),
+                );
+                puts("\n");
+                puts("AETHER_PORTAL_OK\n");
+            }
+            let _ = sdk::close(handle);
+        }
+        Err(error) => {
+            puts("init: portal denied ");
+            puts(sdk::error_name(error));
+            puts("\n");
+        }
+    }
 }
 
 fn puts_u64(mut value: u64) {

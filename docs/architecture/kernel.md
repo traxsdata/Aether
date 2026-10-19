@@ -20,38 +20,44 @@ services.
 
 ## Current state
 
-The kernel implements the Phase 1 boot/memory slice and the Phase 2
-scheduling, isolation, capability, and IPC slices:
+The kernel implements the Phase 1 through Phase 4 prototype slices:
 
-- x86-64 long mode, ring 0, interrupts enabled after scheduler setup;
+- x86-64 long mode, ring 0/3, interrupts enabled after scheduler setup;
 - explicit `IA32_EFER.NXE` and `CR0.WP` setup, with boot failure if NX is
   unsupported;
-- a dedicated 64 KiB boot stack and 16 KiB per-task stacks;
-- a flat kernel GDT and a 32-entry architectural exception IDT;
-- COM1 serial output and panic reporting;
-- `BootInfo` header, kernel-range, and memory-region validation;
+- a dedicated 64 KiB boot stack, 16 KiB worker stacks, and 32 KiB per-task
+  kernel stacks used through TSS `RSP0`;
+- a flat kernel GDT with ring-3 code/data descriptors, a 64-bit TSS, and a
+  32-entry architectural exception IDT plus timer, keyboard, and `int 0x80`
+  gates;
+- COM1 serial output, keyboard IRQ1 input, and panic reporting;
+- `BootInfo` header, kernel-range, memory-region, and framebuffer validation;
 - a 16 GiB bitmap frame allocator over validated RAM;
-- kernel-owned four-level page tables with a 4 KiB W^X kernel mapping and
-  2 MiB/4 KiB identity mappings for kernel-accessible regions only;
-- structured exception reports with vector, error code, RIP, RFLAGS, and CR2;
+- kernel-owned four-level page tables with a 4 KiB W^X kernel mapping,
+  2 MiB/4 KiB identity mappings for kernel-accessible RAM, and an explicit
+  cache-disabled framebuffer mapping;
+- user PML4s with only the user window marked user-accessible, and a TSS-backed
+  privilege transition;
+- structured exception reports; ring-3 faults retire the task and reschedule;
 - a 100 Hz PIT/PIC timer and preemptive round-robin scheduler;
-- per-task PML4 address spaces and CR3 switching;
 - per-task capability tables, endpoint identity checks, bounded IPC endpoints,
-  atomic receives, and capability transfer;
-- a boot-time isolation and capability/IPC test across three kernel tasks;
-- explicit `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`,
-  `AETHER_CAP_OK`, `AETHER_IPC_OK`, and `AETHER_BOOT_OK` markers.
+  atomic receives, capability transfer, and file capabilities;
+- validated syscalls for console output, process identity, yield, file
+  open/read/write/close/list/stat, portal open, and diagnostics;
+- a boot-time isolation, capability/IPC, ring-3 sandbox, filesystem,
+  supervisor, recovery, graphics, desktop, input, portal, and shell test;
+- a volatile RAM block device and bounded filesystem service.
 
 What is deliberately absent:
 
-- user mode, TSS/RSP0, syscall entry, and user/supervisor page permissions;
 - a kernel heap and dynamic task creation;
 - priorities, sleeping/wakeup, blocking IPC, SMP, and per-CPU scheduler state;
-- capability revocation and broader object types;
+- general capability revocation and interactive grant management;
 - higher-half kernel mapping and guard pages;
-- local APIC/high-resolution timers.
+- local APIC/high-resolution timers;
+- persistent block storage, networking, audio, and GPU acceleration.
 
-These gaps are tracked in the technical specification backlog (Epics C–D).
+These gaps are tracked in the technical specification backlog.
 
 ## Entry contract
 
@@ -72,13 +78,14 @@ any pointed-to memory.
 
 The critical path from the specification is:
 
-1. User-mode entry: TSS/RSP0, user page permissions, syscall gate.
-2. Per-task kernel stacks and guard pages.
-3. Higher-half kernel mapping and per-address-space user regions.
-4. Capability revocation, object destruction, and stale-reference behavior.
-5. User-space loader, `initd` supervision, and the first native task.
-6. User-visible syscalls for capability and IPC operations.
-7. Blocking IPC, timeouts, cancellation, and broader adversarial tests.
+1. Move service bodies out of the kernel into supervised ring-3 processes.
+2. Higher-half kernel mapping, guard pages, and a kernel heap.
+3. Capability revocation, object destruction, and stale-reference behavior for
+   every object type, including live file grants.
+4. Persistent block storage and crash-consistent filesystem updates.
+5. Interactive portal consent and persistent, auditable grant storage.
+6. Blocking IPC, timeouts, cancellation, and broader adversarial tests.
+7. SMP, per-CPU scheduler state, and local APIC timers.
 
 Each step needs tests that fail closed and an ADR if it changes a trust
 boundary.

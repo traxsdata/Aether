@@ -101,19 +101,3 @@ pub fn print_table() {
         }
     }
 }
-
-/// Returns the number of normal exits (diagnostics only).
-#[must_use]
-pub fn exit_count() -> u32 {
-    let _guard = InterruptGuard::enter();
-    // SAFETY: Interrupts are masked for the read.
-    unsafe { (*APPS.0.get()).exits() }
-}
-
-/// Returns the number of fault terminations (diagnostics only).
-#[must_use]
-pub fn fault_count() -> u32 {
-    let _guard = InterruptGuard::enter();
-    // SAFETY: Interrupts are masked for the read.
-    unsafe { (*APPS.0.get()).faults() }
-}

@@ -80,7 +80,7 @@ struct DescriptorTablePointer {
 }
 
 fn tss_descriptor(base: u64, limit: u16) -> (u64, u64) {
-    let low = u64::from(limit & 0xffff)
+    let low = u64::from(limit)
         | ((base & 0x00ff_ffff) << 16)
         | (0x89u64 << 40)
         | ((u64::from(limit) >> 16 & 0xf) << 48)

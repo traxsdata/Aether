@@ -142,12 +142,19 @@ isr_\num:
     isr_err \n
 .endr
 
-/* IRQ0 (timer) from the remapped PIC. */
+/* IRQ0 (timer) and IRQ1 (keyboard) from the remapped PIC. */
 .global irq_0
 .type irq_0, @function
 irq_0:
     push 0
     push 32
+    jmp irq_common
+
+.global irq_1
+.type irq_1, @function
+irq_1:
+    push 0
+    push 33
     jmp irq_common
 
 /* Save the full interrupted context, call Rust, restore the selected frame. */
@@ -288,6 +295,7 @@ unsafe extern "C" {
     fn isr_30();
     fn isr_31();
     fn irq_0();
+    fn irq_1();
     fn syscall_entry();
 }
 
@@ -348,7 +356,7 @@ pub struct InterruptFrame {
 impl InterruptFrame {
     /// Returns `true` if the frame will return to privilege level 3.
     #[must_use]
-    pub const fn from_user(&self) -> bool {
+    pub const fn is_user(&self) -> bool {
         self.cs & 3 == 3
     }
 }
@@ -370,9 +378,13 @@ pub fn init() {
         unsafe { (*idt.add(index)).set_handler(*handler as usize as u64) };
     }
 
-    // IRQ0 (timer) is vector 32 after the PIC remap.
-    // SAFETY: Index 32 is inside the IDT.
-    unsafe { (*idt.add(32)).set_handler(irq_0 as *const () as usize as u64) };
+    // IRQ0 (timer) and IRQ1 (keyboard) are vectors 32 and 33 after the PIC
+    // remap.
+    // SAFETY: Both indices are inside the IDT.
+    unsafe {
+        (*idt.add(32)).set_handler(irq_0 as *const () as usize as u64);
+        (*idt.add(33)).set_handler(irq_1 as *const () as usize as u64);
+    }
 
     // The syscall gate is callable from ring 3.
     // SAFETY: Index 128 is inside the IDT.
@@ -426,7 +438,7 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
         cr2
     );
 
-    if saved.from_user() {
+    if saved.is_user() {
         serial_line!(
             "user: fault terminated task vector={} rip={:#018x} cr2={:#018x}",
             saved.vector,
@@ -443,10 +455,18 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
     crate::arch::x86_64::halt()
 }
 
-/// Timer interrupt entry, called from `irq_common`.
+/// PIC interrupt entry, called from `irq_common`.
 extern "C" fn irq_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     crate::arch::x86_64::timer::acknowledge();
-    crate::scheduler::on_tick(frame)
+    // SAFETY: The assembly stub passes a complete live frame.
+    match unsafe { (*frame).vector } {
+        32 => crate::scheduler::on_tick(frame),
+        33 => {
+            crate::input::on_irq();
+            frame
+        }
+        _ => crate::arch::x86_64::halt(),
+    }
 }
 
 /// System call entry, called from `syscall_common`.

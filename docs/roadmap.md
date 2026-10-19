@@ -44,25 +44,41 @@ It is a planning model, not a delivery promise.
 - [x] Bounded IPC endpoints and kernel-mediated capability transfer.
 - [x] Host tests for capability and IPC validation plus boot-time adversarial
   rights/forged-handle/endpoint-confusion checks.
-- [ ] User/kernel separation and user-space loader.
-- [ ] Expose capability and IPC operations through validated syscalls.
-- [ ] Revocation and object-lifetime rules.
+- [x] User/kernel separation, TSS/RSP0, user page permissions, and a ring-3
+  native init process.
+- [x] Syscall gate with user pointer, length, handle, and rights validation.
+- [x] Per-task kernel stacks for ring-3 interrupts and syscalls.
+- [x] Fault containment: a ring-3 fault retires the task instead of the kernel.
+- [ ] Revocation and complete object-lifetime rules for every object type.
 - [ ] Blocking IPC, wakeup queues, timeouts, and broader adversarial IPC tests.
 
 ## Phase 3 — Minimal operating system
 
-- [ ] Supervisor and service startup/failure rules.
-- [ ] Virtual storage driver and filesystem service.
-- [ ] File handles and access checks.
-- [ ] Console shell and application lifecycle manager.
-- [ ] Private application storage and sandbox tests.
+- [x] Supervisor and service startup/failure rules with restart budgets and
+  quarantine.
+- [x] Virtual storage driver and filesystem service over a RAM block device.
+- [x] File handles and per-process access checks with generation-checked
+  capabilities.
+- [x] Console shell and application lifecycle manager.
+- [x] Security-domain implementation through private application roots and
+  service capability profiles.
+- [x] Private application storage and automated sandbox tests.
+- [x] Boot markers for the native application, filesystem, supervisor, shell,
+  and sandbox boundary.
 
 ## Phase 4 — Native desktop prototype
 
-- [ ] Graphics/input service and basic compositor.
-- [ ] Shell, file manager, settings, security center.
-- [ ] File portal and native SDK.
-- [ ] Image/recovery prototype.
+- [x] Graphics and input services over a linear GOP framebuffer and PS/2 IRQ1.
+- [x] Basic software compositor with bounded windows and focus handling.
+- [x] Desktop shell, file manager, settings, and Security Center views.
+- [x] File portal with per-process, per-file, revocable grant records.
+- [x] Initial native application SDK (`sdk/`) and user syscall ABI.
+- [x] System image and recovery prototype with current/previous selection and
+  preserved user data.
+- [x] Timestamped UEFI El Torito ISO build (`make iso`).
+- [ ] Interactive portal consent UI and persistent grant storage.
+- [ ] GPU acceleration, audio, networking, and multi-window application
+  rendering.
 
 ## Phase 5 and later
 
@@ -72,10 +88,11 @@ Aether interfaces it depends on exist.
 
 ## Current milestone
 
-Phase 1 is complete and Phase 2 is underway: a clean checkout builds an image,
-boots under QEMU, owns its page tables with NX and write-protect enabled,
-reports exceptions, preemptively runs tasks in separate address spaces, and
-enforces capability rights, endpoint identity, and bounded IPC with a boot-time
-transfer test. The next milestone is user-mode entry: TSS/RSP0, user page
-permissions, a syscall gate for capability/IPC operations, and per-task kernel
-stacks.
+The tree now reaches the Phase 4 prototype exit criterion on the QEMU platform:
+a clean checkout builds a FAT image and a UEFI ISO, boots through the loader,
+enforces a ring-3 user/kernel boundary, runs a native application in a private
+storage root, reports denied cross-application access, starts supervised
+services, paints a composited desktop, accepts keyboard input, grants one file
+through the portal, and verifies the current/previous image records without
+touching user data. Persistent storage, interactive consent, SMP, blocking IPC,
+and capability revocation remain follow-up work.

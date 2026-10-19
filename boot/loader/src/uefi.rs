@@ -37,6 +37,68 @@ pub struct TableHeader {
     pub reserved: u32,
 }
 
+/// UEFI GUID.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Guid {
+    pub data1: u32,
+    pub data2: u16,
+    pub data3: u16,
+    pub data4: [u8; 8],
+}
+
+/// `EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID`.
+pub const GRAPHICS_OUTPUT_GUID: Guid = Guid {
+    data1: 0x9042_a9de,
+    data2: 0x23dc,
+    data3: 0x4a38,
+    data4: [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a],
+};
+
+/// UEFI pixel bit mask.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PixelBitmask {
+    pub red_mask: u32,
+    pub green_mask: u32,
+    pub blue_mask: u32,
+    pub reserved_mask: u32,
+}
+
+/// `EFI_GRAPHICS_OUTPUT_MODE_INFORMATION`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GraphicsOutputModeInformation {
+    pub version: u32,
+    pub horizontal_resolution: u32,
+    pub vertical_resolution: u32,
+    pub pixel_format: u32,
+    pub pixel_information: [PixelBitmask; 4],
+    pub pixels_per_scan_line: u32,
+}
+
+/// `EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE`.
+#[repr(C)]
+pub struct GraphicsOutputMode {
+    pub max_mode: u32,
+    pub mode: u32,
+    pub info: *mut GraphicsOutputModeInformation,
+    pub size_of_info: usize,
+    pub frame_buffer_base: u64,
+    pub frame_buffer_size: usize,
+}
+
+/// `EFI_GRAPHICS_OUTPUT_PROTOCOL`.
+///
+/// Only the mode field is consumed; query/set/blt are kept in their ABI slots.
+#[repr(C)]
+pub struct GraphicsOutput {
+    pub query_mode: usize,
+    pub set_mode: usize,
+    pub blt: usize,
+    pub mode: *mut GraphicsOutputMode,
+}
+
 /// UEFI boot services table. Fields before `exit_boot_services` are ordered
 /// exactly as in the UEFI specification.
 #[repr(C)]
@@ -85,7 +147,8 @@ pub struct BootServices {
     pub open_protocol_information: usize,
     pub protocols_per_handle: usize,
     pub locate_handle_buffer: usize,
-    pub locate_protocol: usize,
+    pub locate_protocol:
+        unsafe extern "efiapi" fn(*const Guid, *mut c_void, *mut *mut c_void) -> Status,
     pub install_multiple_protocol_interfaces: usize,
     pub uninstall_multiple_protocol_interfaces: usize,
     pub calculate_crc32: usize,

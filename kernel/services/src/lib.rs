@@ -166,7 +166,6 @@ impl Supervisor {
     }
 
     /// Returns a service specification.
-    #[must_use]
     pub fn spec(&self, id: ServiceId) -> Result<ServiceSpec, ServiceError> {
         self.specs
             .get(id)
@@ -249,14 +248,20 @@ impl<const N: usize> AppTable<N> {
 
     /// Marks an application running.
     pub fn started(&mut self, pid: usize) -> Option<usize> {
-        let slot = self.specs.iter().position(|spec| spec.is_some_and(|s| s.pid == pid))?;
+        let slot = self
+            .specs
+            .iter()
+            .position(|spec| spec.is_some_and(|s| s.pid == pid))?;
         self.states[slot] = AppState::Running;
         Some(slot)
     }
 
     /// Records a normal exit.
     pub fn exited(&mut self, pid: usize, status: i64) -> Option<usize> {
-        let slot = self.specs.iter().position(|spec| spec.is_some_and(|s| s.pid == pid))?;
+        let slot = self
+            .specs
+            .iter()
+            .position(|spec| spec.is_some_and(|s| s.pid == pid))?;
         self.states[slot] = AppState::Exited(status);
         self.exits = self.exits.saturating_add(1);
         Some(slot)
@@ -264,7 +269,10 @@ impl<const N: usize> AppTable<N> {
 
     /// Records a fault.
     pub fn faulted(&mut self, pid: usize, vector: u64) -> Option<usize> {
-        let slot = self.specs.iter().position(|spec| spec.is_some_and(|s| s.pid == pid))?;
+        let slot = self
+            .specs
+            .iter()
+            .position(|spec| spec.is_some_and(|s| s.pid == pid))?;
         self.states[slot] = AppState::Faulted(vector);
         self.faults = self.faults.saturating_add(1);
         Some(slot)

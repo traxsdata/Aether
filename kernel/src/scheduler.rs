@@ -20,9 +20,9 @@ use aether_abi::user::{USER_STACK_TOP, UserTestResult};
 use aether_boot_common::elf;
 use aether_fs::FsError;
 use aether_ipc::{CapError, CapHandle, CapTable, IpcError, ObjectType, Rights};
-use aether_services::ServiceError;
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, PhysFrame};
+use aether_services::ServiceError;
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -304,7 +304,12 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
 
     crate::fs::init().map_err(SchedulerError::Filesystem)?;
     crate::supervisor::init().map_err(SchedulerError::Service)?;
+    crate::recovery::init().map_err(SchedulerError::Filesystem)?;
+    crate::portal::init();
     crate::apps::init();
+    crate::desktop::init();
+    crate::input::init();
+    crate::input::self_test();
     crate::shell::init();
 
     // Load the native user program into its own PML4. The kernel identity map

@@ -36,6 +36,31 @@ const SHELL_PROFILE: CapabilityProfile = CapabilityProfile {
     name: "console",
     capabilities: &["file.read", "file.write", "process.observe"],
 };
+const INPUT_PROFILE: CapabilityProfile = CapabilityProfile {
+    name: "input",
+    capabilities: &["input.keyboard"],
+};
+const DISPLAY_PROFILE: CapabilityProfile = CapabilityProfile {
+    name: "display",
+    capabilities: &["framebuffer", "surface.compose"],
+};
+const DESKTOP_PROFILE: CapabilityProfile = CapabilityProfile {
+    name: "desktop",
+    capabilities: &[
+        "surface.compose",
+        "input.read",
+        "portal.request",
+        "policy.observe",
+    ],
+};
+const PORTAL_PROFILE: CapabilityProfile = CapabilityProfile {
+    name: "portal",
+    capabilities: &["file.read", "grant.issue", "grant.revoke"],
+};
+const SECURITY_PROFILE: CapabilityProfile = CapabilityProfile {
+    name: "security",
+    capabilities: &["policy.observe", "grant.observe"],
+};
 const PROBE_PROFILE: CapabilityProfile = CapabilityProfile {
     name: "probe",
     capabilities: &[],
@@ -45,11 +70,10 @@ static NO_DEPS: [ServiceId; 0] = [];
 static FSD_DEPS: [ServiceId; 1] = [0];
 static APP_DEPS: [ServiceId; 1] = [1];
 static CONSOLE_DEPS: [ServiceId; 1] = [1];
-
-static mut STORAGE: ServiceId = 0;
-static mut FILESYSTEM: ServiceId = 0;
-static mut APP_MANAGER: ServiceId = 0;
-static mut CONSOLE: ServiceId = 0;
+static DISPLAY_DEPS: [ServiceId; 1] = [4];
+static DESKTOP_DEPS: [ServiceId; 3] = [1, 2, 5];
+static PORTAL_DEPS: [ServiceId; 2] = [1, 6];
+static SECURITY_DEPS: [ServiceId; 2] = [1, 6];
 
 /// Starts the Phase 3 services and runs the failure-policy self-test.
 pub fn init() -> Result<(), ServiceError> {
@@ -82,10 +106,46 @@ pub fn init() -> Result<(), ServiceError> {
         restart_limit: 0,
     })?;
 
+    let input = supervisor.register(ServiceSpec {
+        name: "inputd",
+        profile: INPUT_PROFILE,
+        dependencies: &NO_DEPS,
+        restart_limit: 1,
+    })?;
+    let display = supervisor.register(ServiceSpec {
+        name: "displayd",
+        profile: DISPLAY_PROFILE,
+        dependencies: &DISPLAY_DEPS,
+        restart_limit: 1,
+    })?;
+    let desktop = supervisor.register(ServiceSpec {
+        name: "desktopd",
+        profile: DESKTOP_PROFILE,
+        dependencies: &DESKTOP_DEPS,
+        restart_limit: 1,
+    })?;
+    let portal = supervisor.register(ServiceSpec {
+        name: "portald",
+        profile: PORTAL_PROFILE,
+        dependencies: &PORTAL_DEPS,
+        restart_limit: 1,
+    })?;
+    let security = supervisor.register(ServiceSpec {
+        name: "securityd",
+        profile: SECURITY_PROFILE,
+        dependencies: &SECURITY_DEPS,
+        restart_limit: 1,
+    })?;
+
     supervisor.start(storage)?;
     supervisor.start(filesystem)?;
     supervisor.start(app_manager)?;
     supervisor.start(console)?;
+    supervisor.start(input)?;
+    supervisor.start(display)?;
+    supervisor.start(desktop)?;
+    supervisor.start(portal)?;
+    supervisor.start(security)?;
 
     // Failure-policy probe: one restart is allowed, then quarantine. This is a
     // deliberate boot-time test of the supervisor, not a production service.
@@ -100,14 +160,6 @@ pub fn init() -> Result<(), ServiceError> {
     supervisor.restart(probe)?;
     supervisor.fail(probe)?;
     let quarantined = supervisor.restart(probe) == Err(ServiceError::RestartLimit);
-
-    // SAFETY: Interrupts are masked and these ids are written once.
-    unsafe {
-        STORAGE = storage;
-        FILESYSTEM = filesystem;
-        APP_MANAGER = app_manager;
-        CONSOLE = console;
-    }
 
     if !quarantined || supervisor.state(probe) != ServiceState::Quarantined {
         serial_line!("AETHER_BOOT_FAILED reason=supervisor quarantine check");
@@ -144,25 +196,18 @@ pub fn print_security() {
     }
 }
 
-/// Returns a service state by name.
+/// Returns the number of running services.
 #[must_use]
-pub fn state(name: &str) -> ServiceState {
+pub fn running_count() -> usize {
     let _guard = InterruptGuard::enter();
-    // SAFETY: Interrupts are masked for the duration of the read.
-    let supervisor = unsafe { &*SUPERVISOR.0.get() };
-    for index in 0..aether_services::MAX_SERVICES {
-        if let Ok(spec) = supervisor.spec(index)
-            && spec.name == name
-        {
-            return supervisor.state(index);
-        }
-    }
-    ServiceState::Empty
+    // SAFETY: Interrupts are masked for the read.
+    unsafe { (*SUPERVISOR.0.get()).count(ServiceState::Running) }
 }
 
-/// Returns the ids used by the boot system (diagnostics only).
+/// Returns the number of quarantined services.
 #[must_use]
-pub fn ids() -> (ServiceId, ServiceId, ServiceId, ServiceId) {
-    // SAFETY: These values are written once during boot and then immutable.
-    unsafe { (STORAGE, FILESYSTEM, APP_MANAGER, CONSOLE) }
+pub fn quarantined_count() -> usize {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the read.
+    unsafe { (*SUPERVISOR.0.get()).count(ServiceState::Quarantined) }
 }

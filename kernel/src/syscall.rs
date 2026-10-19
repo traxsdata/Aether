@@ -23,7 +23,7 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // SAFETY: The assembly stub passes a complete InterruptFrame on the current
     // kernel stack and does not move it for the duration of the call.
     let saved = unsafe { *frame };
-    if !saved.from_user() {
+    if !saved.is_user() {
         serial_line!("AETHER_BOOT_FAILED reason=syscall from ring 0");
         crate::arch::x86_64::halt()
     }
@@ -52,7 +52,10 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         Syscall::GetPid => scheduler::current_task() as i64,
         Syscall::Uptime => scheduler::ticks() as i64,
         Syscall::TaskCount => scheduler::task_count() as i64,
-        Syscall::Open => crate::fs::sys_open(pml4, saved.rdi, saved.rsi, saved.rdx)
+        Syscall::Open => {
+            crate::fs::sys_open(pml4, saved.rdi, saved.rsi, saved.rdx).unwrap_or(errno::EINVAL)
+        }
+        Syscall::PortalOpen => crate::fs::sys_portal_open(pml4, saved.rdi, saved.rsi, saved.rdx)
             .unwrap_or(errno::EINVAL),
         Syscall::Read => {
             crate::fs::sys_read(pml4, saved.rdi, saved.rsi, saved.rdx).unwrap_or(errno::EINVAL)
@@ -63,9 +66,7 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         Syscall::Close => crate::fs::sys_close(saved.rdi).unwrap_or(errno::EBADF),
         Syscall::List => crate::fs::sys_list(pml4, saved.rdi, saved.rsi, saved.rdx, saved.r10)
             .unwrap_or(errno::EINVAL),
-        Syscall::Stat => {
-            crate::fs::sys_stat(pml4, saved.rdi, saved.rsi).unwrap_or(errno::EINVAL)
-        }
+        Syscall::Stat => crate::fs::sys_stat(pml4, saved.rdi, saved.rsi).unwrap_or(errno::EINVAL),
         _ => errno::ENOSYS,
     };
 
@@ -94,12 +95,7 @@ fn write_console(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) ->
 ///
 /// The returned slice aliases user memory. The caller must not hold it across a
 /// context switch and must not use it after the task's address space changes.
-pub fn user_bytes<'a>(
-    pml4: PhysFrame,
-    pointer: u64,
-    length: u64,
-    write: bool,
-) -> Option<&'a [u8]> {
+pub fn user_bytes<'a>(pml4: PhysFrame, pointer: u64, length: u64, write: bool) -> Option<&'a [u8]> {
     if length as usize > MAX_SYSCALL_IO {
         return None;
     }
