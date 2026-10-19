@@ -7,7 +7,8 @@ prototype. Release notes must say so plainly.
 
 ## Mandatory gates
 
-Every pull request runs the gate in `.github/workflows/ci.yml`:
+Every pull request runs the local gate (`make ci`); the same gate is intended
+to run in GitHub Actions once the workflow is published:
 
 1. Formatting check.
 2. Clippy with warnings denied for host, kernel, and loader targets.

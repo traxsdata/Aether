@@ -26,8 +26,9 @@ git push -u origin feat/<short-topic>
 
 `make ci` runs formatting, clippy, documentation link checks, licence checks,
 host unit tests, the QEMU boot test, the fault-path test, and a negative boot
-test that proves the harness rejects a deliberately failing kernel. The same
-gate runs in GitHub Actions on every pull request.
+test that proves the harness rejects a deliberately failing kernel. The gate is
+intended to run in GitHub Actions; until the workflow is published, run it
+locally before opening the pull request.
 
 Open a pull request against `main`. Keep the branch rebased on current `main`;
 do not force-push a branch that someone else is reviewing unless you have

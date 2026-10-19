@@ -57,7 +57,7 @@ remain planned work rather than mitigated today.
 | Kernel task → IPC | Oversized message, queue exhaustion, capability forgery, table exhaustion, sender impersonation | 32-byte bound, four-message queues, critical sections, `TRANSFER` check, atomic receive, kernel-supplied sender identity | Implemented, host- and QEMU-tested |
 | Kernel task → kernel | Task corrupts kernel state | Kernel and tasks share the kernel mapping; all tasks run at CPL0 | **Not isolated yet** (planned user mode) |
 | Diagnostics | Secret leakage | Boot code prints only version, addresses, and memory sizes | Policy; no secrets exist yet |
-| Build | Malformed image reaches CI as “passing” | GitHub Actions runs `make ci`; boot, fault, and negative tests require markers on a real boot | Implemented |
+| Build | Malformed image reaches CI as “passing” | Local `make ci` gate; boot, fault, and negative tests require markers on a real boot; GitHub Actions publication pending | Implemented locally |
 | Kernel → user | User reads another task's memory | Not implemented | Planned (Epic C) |
 | App → files | App reads ungranted files | Not implemented | Planned (Epic F) |
 | Service → service | Impersonation or capability forgery | Not implemented | Planned (Epic D) |

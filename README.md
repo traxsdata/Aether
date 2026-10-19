@@ -55,8 +55,8 @@ grants, and the desktop is not a security authority.
   failing kernel.
 - A local CI gate (`make ci`) that runs formatting, clippy, documentation and
   licence checks, unit tests, the boot test, the fault test, and the negative
-  boot test. The same gate runs on every pull request in
-  [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+  boot test. A GitHub Actions workflow will publish the same gate in a
+  follow-up; until then, run the gate locally before opening a pull request.
 
 A representative serial transcript from a successful boot (region counts and
 frame addresses vary with firmware, build, and feature set):

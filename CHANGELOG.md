@@ -40,8 +40,9 @@ versioning scheme until the kernel ABI stabilises.
 - Hand-off validation for reserved fields, memory-map alignment, region
   ordering, and overlapping regions.
 - Endpoint identity checks and atomic capability receive on table exhaustion.
-- GitHub Actions CI workflow for pull requests and `main`.
-- `make docs-check`, `make license-check`, and `make negative-test`.
+- Expanded local CI gate with `make docs-check`, `make license-check`, and
+  `make negative-test`; a GitHub Actions workflow publication remains a
+  follow-up.
 - ADR-005 through ADR-010 and a Windows compatibility feasibility plan.
 
 ### Changed

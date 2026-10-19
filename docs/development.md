@@ -110,9 +110,9 @@ remain release-engineering work.
 
 ## CI
 
-`tools/ci.sh` is the pull-request gate, and
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same script
-on GitHub Actions for every pull request and every push to `main`:
+`tools/ci.sh` is the pull-request gate. The same script is intended to run in
+GitHub Actions; until the workflow is published, run it locally before opening
+a pull request:
 
 1. `make lint` — formatting and clippy for host, kernel, loader, and the fault
    self-test configuration.
@@ -127,6 +127,6 @@ on GitHub Actions for every pull request and every push to `main`:
 7. `make negative-test` — a deliberately failing kernel must be rejected by the
    same harness used for the normal boot test.
 
-The workflow installs `qemu-system-x86`, `ovmf`, and `mtools` on the runner.
-The gate does not require KVM, root access, secrets, or network access beyond
-package installation.
+The gate does not require KVM, root access, or secrets. A GitHub Actions
+workflow will install `qemu-system-x86`, `ovmf`, and `mtools` and run the same
+script once it is published.

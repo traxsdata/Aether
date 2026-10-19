@@ -17,7 +17,8 @@ It is a planning model, not a delivery promise.
 - [x] Windows compatibility feasibility plan
   ([`specifications/windows-compatibility.md`](specifications/windows-compatibility.md)).
   The host-interface report remains an Epic H deliverable.
-- [x] GitHub Actions CI gate for pull requests and `main`.
+- [x] Local CI gate and repository checks for pull requests.
+- [ ] GitHub Actions workflow publication.
 
 ## Phase 1 — Bootable kernel
 
