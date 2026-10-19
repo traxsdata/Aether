@@ -70,14 +70,18 @@ scheduler test:
 - Generation-checked handles: a forged index or stale generation fails.
 - Endpoint object IDs carry their own generation, and an operation rejects a
   capability whose object identity does not match the endpoint.
-- Rights: `SEND`, `RECEIVE`, `TRANSFER`.
+- Rights: `SEND`, `RECEIVE`, `TRANSFER`, `READ`, and `WRITE`.
+- Object types: `Endpoint` and `File`.
 - Kernel-mediated transfer that removes `TRANSFER` from the new capability and
   commits the receiver slot before consuming the queued message.
 - Tests for insufficient rights, forged/stale handles, wrong endpoints, table
-  exhaustion, queue capacity, and capability transfer.
+  exhaustion, queue capacity, capability transfer, file rights/type checks, and
+  removal/generation reuse.
+- File capabilities are exposed to ring-3 code through `open`, `read`, `write`,
+  and `close` syscalls. A userspace handle is only a slot index and generation;
+  the kernel checks the object type and right before every operation.
 
-This is still a kernel-internal interface. A user-mode syscall boundary will
-expose these operations to applications in a later Phase 2 slice; until then,
-the tests demonstrate mechanism correctness, not a user-visible security
-boundary. Revocation and object destruction are not implemented yet; the
-generation counters prepare the table for them.
+The endpoint operations are still a kernel-internal interface. File operations
+cross the user boundary and are validated against the current task's table.
+Revocation of endpoint capabilities and complete object destruction are not
+implemented yet; the generation counters prepare the table for them.

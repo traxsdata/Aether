@@ -1,0 +1,17 @@
+[package]
+name = "aether-init"
+description = "Aether native user-space init and sandbox self-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "aether-init"
+path = "src/main.rs"
+
+[dependencies]
+aether-abi = { path = "../abi" }
+aether-sdk = { path = "../sdk" }

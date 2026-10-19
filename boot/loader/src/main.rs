@@ -12,7 +12,7 @@
 mod serial;
 mod uefi;
 
-use aether_abi::{BootInfo, MAX_MEMORY_REGIONS, MemoryKind, MemoryRegion};
+use aether_abi::{BootInfo, FramebufferInfo, MAX_MEMORY_REGIONS, MemoryKind, MemoryRegion};
 use aether_boot_common::elf;
 use aether_boot_common::{PAGE_SIZE, pages_for};
 use core::ffi::c_void;
@@ -20,8 +20,9 @@ use core::fmt;
 use core::panic::PanicInfo;
 use core::ptr;
 use uefi::{
-    ALLOCATE_ADDRESS, ALLOCATE_MAX_ADDRESS, BUFFER_TOO_SMALL, BootServices, Handle,
-    MEMORY_TYPE_LOADER_DATA, MemoryDescriptor, SUCCESS, Status, SystemTable,
+    ALLOCATE_ADDRESS, ALLOCATE_MAX_ADDRESS, BUFFER_TOO_SMALL, BootServices, GRAPHICS_OUTPUT_GUID,
+    GraphicsOutput, Handle, MEMORY_TYPE_LOADER_DATA, MemoryDescriptor, SUCCESS, Status,
+    SystemTable,
 };
 
 /// Kernel image embedded by the build. The path is supplied by `build.rs`, so
@@ -163,6 +164,20 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
     let boot_info = boot_info_page as *mut BootInfo;
     let regions = region_page as *mut MemoryRegion;
     let count = unsafe { read_memory_map(services, map_page, regions)? };
+    let framebuffer = unsafe { query_framebuffer(services) };
+    if framebuffer.is_present() {
+        serial_line!(
+            "loader: framebuffer base={:#x} size={} mode={}x{} stride={} format={}",
+            framebuffer.base,
+            framebuffer.size,
+            framebuffer.width,
+            framebuffer.height,
+            framebuffer.stride,
+            framebuffer.format
+        );
+    } else {
+        serial_line!("loader: no linear framebuffer reported by firmware");
+    }
 
     // SAFETY: Both pages were allocated above and are large enough.
     unsafe {
@@ -178,6 +193,7 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
                 kernel_end: kernel.end(),
                 entry_point: kernel.entry(),
                 system_table: system_table as u64,
+                framebuffer,
                 reserved: [0; 4],
             },
         );
@@ -336,6 +352,84 @@ fn check_map_status(status: Status, size: usize) -> Result<(), LoadError> {
             LoadError::MemoryMap { status }
         }),
         other => Err(LoadError::MemoryMap { status: other }),
+    }
+}
+
+/// Queries the firmware's linear framebuffer.
+///
+/// Returns [`FramebufferInfo::NONE`] when GOP is absent or only supports
+/// blitting. The loader does not change the mode: the kernel accepts whatever
+/// mode the firmware selected, which keeps the boot path robust on real
+/// hardware and on QEMU.
+unsafe fn query_framebuffer(services: &BootServices) -> FramebufferInfo {
+    let mut interface: *mut c_void = ptr::null_mut();
+    // SAFETY: Firmware supplies the boot-services table and the GOP GUID is
+    // architectural. A null interface is treated as an absent framebuffer.
+    let status = unsafe {
+        (services.locate_protocol)(&GRAPHICS_OUTPUT_GUID, ptr::null_mut(), &mut interface)
+    };
+    if status != SUCCESS || interface.is_null() {
+        serial_line!(
+            "loader: GOP lookup status={status:#x} interface={:#x}",
+            interface as usize
+        );
+        return FramebufferInfo::NONE;
+    }
+
+    // SAFETY: LocateProtocol returned a live GOP interface for this boot. Its
+    // mode and mode-information pointers are valid until ExitBootServices.
+    unsafe {
+        let gop = &*(interface as *const GraphicsOutput);
+        if gop.mode.is_null() {
+            serial_line!("loader: GOP mode pointer is null");
+            return FramebufferInfo::NONE;
+        }
+        let mode = &*gop.mode;
+        if mode.info.is_null() || mode.frame_buffer_base == 0 {
+            serial_line!("loader: GOP mode has no linear framebuffer");
+            return FramebufferInfo::NONE;
+        }
+        let info = &*mode.info;
+        if info.pixel_format > 1 || info.horizontal_resolution == 0 || info.vertical_resolution == 0
+        {
+            serial_line!(
+                "loader: GOP mode unsupported {}x{} format={}",
+                info.horizontal_resolution,
+                info.vertical_resolution,
+                info.pixel_format
+            );
+            return FramebufferInfo::NONE;
+        }
+
+        // Some firmware revisions report the mode information without the
+        // trailing scan-line field. The frame-buffer size is authoritative;
+        // fall back to the visible width when the field is not present.
+        let mut stride = info.horizontal_resolution;
+        if mode.size_of_info as usize >= core::mem::size_of::<uefi::GraphicsOutputModeInformation>()
+        {
+            stride = info.pixels_per_scan_line.max(info.horizontal_resolution);
+        }
+        let required = u64::from(stride)
+            .saturating_mul(u64::from(info.vertical_resolution))
+            .saturating_mul(4);
+        let size = (mode.frame_buffer_size as u64).max(required);
+        serial_line!(
+            "loader: GOP {}x{} stride={} format={}",
+            info.horizontal_resolution,
+            info.vertical_resolution,
+            stride,
+            info.pixel_format
+        );
+
+        FramebufferInfo {
+            base: mode.frame_buffer_base,
+            size,
+            width: info.horizontal_resolution,
+            height: info.vertical_resolution,
+            stride,
+            format: info.pixel_format,
+            reserved: 0,
+        }
     }
 }
 

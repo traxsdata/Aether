@@ -10,8 +10,11 @@ authors.workspace = true
 
 [dependencies]
 aether-abi = { path = "../abi" }
+aether-boot-common = { path = "../boot/common" }
+aether-fs = { path = "fs" }
 aether-memory = { path = "memory" }
 aether-ipc = { path = "ipc" }
+aether-services = { path = "services" }
 
 [features]
 # Boot with a deliberate breakpoint to exercise the exception path.

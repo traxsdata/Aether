@@ -65,8 +65,9 @@ pub fn init() {
         outb(PIC2_DATA, 0x01);
         io_wait();
 
-        // Mask everything except IRQ0 (timer) on the master, all on the slave.
-        outb(PIC1_DATA, 0xfe);
+        // Mask everything except IRQ0 (timer) and IRQ1 (keyboard) on the
+        // master, all on the slave.
+        outb(PIC1_DATA, 0xfc);
         outb(PIC2_DATA, 0xff);
 
         // PIT channel 0, mode 2 (rate generator), binary.

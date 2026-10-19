@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Interrupt Descriptor Table and CPU-exception reporting.
+//! Interrupt Descriptor Table, exceptions, timer, and syscall entry.
 //!
-//! Only the 32 architectural exception vectors are installed. Interrupts stay
-//! disabled until the timer and interrupt controller work in Phase 2. The goal
-//! here is diagnosability: a page fault or general-protection fault must print
-//! its vector, error code, and instruction pointer instead of silently
-//! resetting the machine.
+//! The kernel installs all 32 architectural exception vectors, the PIC timer
+//! IRQ, and a ring-3 `int 0x80` system call gate. Every path saves a complete
+//! [`InterruptFrame`]; the timer and syscall paths may return a different frame
+//! so the scheduler can switch address spaces. A kernel fault is fatal, while
+//! a user fault terminates only the faulting task.
 
 use core::arch::asm;
 
@@ -13,6 +13,10 @@ use crate::serial_line;
 
 const CODE_SELECTOR: u16 = 0x08;
 const INTERRUPT_GATE: u8 = 0x8e;
+/// Present, DPL 3, 64-bit interrupt gate.
+const USER_INTERRUPT_GATE: u8 = 0xee;
+/// System call vector.
+pub const SYSCALL_VECTOR: u8 = 0x80;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -48,6 +52,11 @@ impl IdtEntry {
         self.offset_high = (handler >> 32) as u32;
         self.reserved = 0;
     }
+
+    fn set_user_handler(&mut self, handler: u64) {
+        self.set_handler(handler);
+        self.type_attr = USER_INTERRUPT_GATE;
+    }
 }
 
 #[repr(C, packed)]
@@ -58,30 +67,55 @@ struct DescriptorTablePointer {
 
 static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
 
-/// Emergency stack for exception reporting when the interrupted stack is bad.
-static mut EMERGENCY_STACK: [u8; 8192] = [0; 8192];
-
 core::arch::global_asm!(
     r#"
+    /* Common tail for exceptions: save the full context, dispatch to Rust,
+       restore the frame selected by the dispatcher, and return. */
     .section .text
     .p2align 4
     .global isr_common
     .type isr_common, @function
 isr_common:
-    /* [rbp+0]=vector, [rbp+8]=error, [rbp+16]=RIP, [rbp+24]=CS, [rbp+32]=RFLAGS */
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
     mov rbp, rsp
-    lea rsp, [rip + {emergency_stack}]
-    add rsp, {emergency_size}
     and rsp, -16
-    mov rdi, [rbp]
-    mov rsi, [rbp + 8]
-    mov rdx, [rbp + 16]
-    mov rcx, [rbp + 24]
-    mov r8,  [rbp + 32]
-    call {handler}
-1:
-    hlt
-    jmp 1b
+    mov rdi, rbp
+    call {exception_handler}
+    mov rsp, rax
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    add rsp, 16
+    iretq
 
 .macro isr_noerr num
     .global isr_\num
@@ -108,12 +142,19 @@ isr_\num:
     isr_err \n
 .endr
 
-/* IRQ0 (timer) from the remapped PIC. */
+/* IRQ0 (timer) and IRQ1 (keyboard) from the remapped PIC. */
 .global irq_0
 .type irq_0, @function
 irq_0:
     push 0
     push 32
+    jmp irq_common
+
+.global irq_1
+.type irq_1, @function
+irq_1:
+    push 0
+    push 33
     jmp irq_common
 
 /* Save the full interrupted context, call Rust, restore the selected frame. */
@@ -161,11 +202,63 @@ irq_common:
 
     add rsp, 16
     iretq
+
+/* Ring-3 system call gate. */
+.global syscall_entry
+.type syscall_entry, @function
+syscall_entry:
+    push 0
+    push 128
+    jmp syscall_common
+
+.p2align 4
+.global syscall_common
+.type syscall_common, @function
+syscall_common:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rbp, rsp
+    and rsp, -16
+    mov rdi, rbp
+    call {syscall_handler}
+    mov rsp, rax
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    add rsp, 16
+    iretq
     "#,
-    handler = sym exception_handler,
+    exception_handler = sym exception_handler,
     irq_handler = sym irq_handler,
-    emergency_stack = sym EMERGENCY_STACK,
-    emergency_size = const 8192,
+    syscall_handler = sym syscall_handler,
 );
 
 unsafe extern "C" {
@@ -202,11 +295,15 @@ unsafe extern "C" {
     fn isr_30();
     fn isr_31();
     fn irq_0();
+    fn irq_1();
+    fn syscall_entry();
 }
 
 /// Saved general-purpose and interrupt-return context.
 ///
-/// Field order matches the push order in `irq_common`, lowest address first.
+/// Field order matches the push order in the assembly stubs, lowest address
+/// first. `rsp` and `ss` are present only when the interrupted context was
+/// ring 3; `iretq` ignores them for a ring-0 frame.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InterruptFrame {
@@ -250,6 +347,18 @@ pub struct InterruptFrame {
     pub cs: u64,
     /// RFLAGS to resume.
     pub rflags: u64,
+    /// User stack pointer; only meaningful when returning to ring 3.
+    pub rsp: u64,
+    /// User stack segment; only meaningful when returning to ring 3.
+    pub ss: u64,
+}
+
+impl InterruptFrame {
+    /// Returns `true` if the frame will return to privilege level 3.
+    #[must_use]
+    pub const fn is_user(&self) -> bool {
+        self.cs & 3 == 3
+    }
 }
 
 const HANDLERS: [unsafe extern "C" fn(); 32] = [
@@ -258,7 +367,7 @@ const HANDLERS: [unsafe extern "C" fn(); 32] = [
     isr_25, isr_26, isr_27, isr_28, isr_29, isr_30, isr_31,
 ];
 
-/// Installs the exception handlers and loads the IDT.
+/// Installs the exception handlers, timer, and syscall gate, then loads the IDT.
 pub fn init() {
     // SAFETY: Boot is single-threaded, interrupts are disabled, and this is
     // the only code that mutates the static IDT.
@@ -269,9 +378,20 @@ pub fn init() {
         unsafe { (*idt.add(index)).set_handler(*handler as usize as u64) };
     }
 
-    // IRQ0 (timer) is vector 32 after the PIC remap.
-    // SAFETY: Index 32 is inside the IDT.
-    unsafe { (*idt.add(32)).set_handler(irq_0 as *const () as usize as u64) };
+    // IRQ0 (timer) and IRQ1 (keyboard) are vectors 32 and 33 after the PIC
+    // remap.
+    // SAFETY: Both indices are inside the IDT.
+    unsafe {
+        (*idt.add(32)).set_handler(irq_0 as *const () as usize as u64);
+        (*idt.add(33)).set_handler(irq_1 as *const () as usize as u64);
+    }
+
+    // The syscall gate is callable from ring 3.
+    // SAFETY: Index 128 is inside the IDT.
+    unsafe {
+        (*idt.add(usize::from(SYSCALL_VECTOR)))
+            .set_user_handler(syscall_entry as *const () as usize as u64);
+    }
 
     let pointer = DescriptorTablePointer {
         limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -291,15 +411,11 @@ pub fn init() {
 
 /// Common exception entry point.
 ///
-/// This function never returns. Phase 1 has no task to terminate, so a fault
-/// stops the machine after producing a diagnostic.
-extern "C" fn exception_handler(
-    vector: u64,
-    error: u64,
-    instruction_pointer: u64,
-    code_segment: u64,
-    flags: u64,
-) -> ! {
+/// A kernel fault is fatal. A user fault terminates only the current task and
+/// returns the next runnable frame, so a misbehaving application cannot take
+/// the kernel down.
+extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    let saved = unsafe { *frame };
     let cr2: u64;
     // SAFETY: Reading CR2 is valid at CPL 0 and has no side effects. It is
     // meaningful for page faults and harmless for other vectors.
@@ -312,18 +428,50 @@ extern "C" fn exception_handler(
     }
 
     serial_line!(
-        "KERNEL EXCEPTION: {} ({vector}) error={error:#x} rip={instruction_pointer:#018x} \
-         cs={code_segment:#x} rflags={flags:#018x} cr2={cr2:#018x}",
-        exception_name(vector)
+        "KERNEL EXCEPTION: {} ({}) error={:#x} rip={:#018x} cs={:#x} rflags={:#018x} cr2={:#018x}",
+        exception_name(saved.vector),
+        saved.vector,
+        saved.error,
+        saved.rip,
+        saved.cs,
+        saved.rflags,
+        cr2
     );
-    serial_line!("AETHER_BOOT_FAILED reason=exception vector={vector}");
+
+    if saved.is_user() {
+        serial_line!(
+            "user: fault terminated task vector={} rip={:#018x} cr2={:#018x}",
+            saved.vector,
+            saved.rip,
+            cr2
+        );
+        return crate::scheduler::on_user_fault(frame, saved.vector);
+    }
+
+    serial_line!(
+        "AETHER_BOOT_FAILED reason=exception vector={}",
+        saved.vector
+    );
     crate::arch::x86_64::halt()
 }
 
-/// Timer interrupt entry, called from `irq_common`.
+/// PIC interrupt entry, called from `irq_common`.
 extern "C" fn irq_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     crate::arch::x86_64::timer::acknowledge();
-    crate::scheduler::on_tick(frame)
+    // SAFETY: The assembly stub passes a complete live frame.
+    match unsafe { (*frame).vector } {
+        32 => crate::scheduler::on_tick(frame),
+        33 => {
+            crate::input::on_irq();
+            frame
+        }
+        _ => crate::arch::x86_64::halt(),
+    }
+}
+
+/// System call entry, called from `syscall_common`.
+extern "C" fn syscall_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    crate::syscall::dispatch(frame)
 }
 
 fn exception_name(vector: u64) -> &'static str {

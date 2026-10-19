@@ -38,6 +38,8 @@ pub enum ObjectType {
     Endpoint = 1,
     /// Physical frame object (future memory sharing).
     Frame = 2,
+    /// Open file object owned by the file service.
+    File = 3,
 }
 
 /// Capability rights.
@@ -51,6 +53,10 @@ impl Rights {
     pub const RECEIVE: Self = Self(1 << 1);
     /// Transfer the capability through IPC.
     pub const TRANSFER: Self = Self(1 << 2);
+    /// Read the referenced object.
+    pub const READ: Self = Self(1 << 3);
+    /// Write the referenced object.
+    pub const WRITE: Self = Self(1 << 4);
 
     /// No rights.
     #[must_use]
@@ -200,6 +206,35 @@ impl CapTable {
             },
             cap.rights,
         ))
+    }
+
+    /// Returns the file object referenced by a handle.
+    pub fn file(&self, handle: CapHandle, required: Rights) -> Result<ObjectId, CapError> {
+        let cap = self.check(handle, required)?;
+        if !matches!(cap.kind, ObjectType::File) {
+            return Err(CapError::WrongObjectType);
+        }
+        Ok(ObjectId {
+            index: cap.object_index,
+            generation: cap.object_generation,
+        })
+    }
+
+    /// Revokes a capability. The slot generation advances so a stale handle
+    /// cannot name a future capability that reuses the slot.
+    pub fn remove(&mut self, handle: CapHandle) -> Result<(), CapError> {
+        let slot = self
+            .slots
+            .get_mut(usize::from(handle.index))
+            .ok_or(CapError::InvalidHandle)?;
+        if slot.is_empty() || slot.slot_generation != handle.generation {
+            return Err(CapError::InvalidHandle);
+        }
+        *slot = Capability {
+            slot_generation: slot.slot_generation.wrapping_add(1).max(1),
+            ..Capability::EMPTY
+        };
+        Ok(())
     }
 
     /// Captures a capability for transfer.
@@ -355,6 +390,62 @@ mod tests {
         assert_eq!(
             receiver.check(new_handle, Rights::TRANSFER),
             Err(CapError::InsufficientRights)
+        );
+    }
+
+    #[test]
+    fn file_capabilities_check_rights_and_type() {
+        let mut table = CapTable::new();
+        let handle = table
+            .grant(
+                ObjectId {
+                    index: 4,
+                    generation: 9,
+                },
+                ObjectType::File,
+                Rights::READ | Rights::WRITE,
+            )
+            .expect("slot");
+        assert_eq!(
+            table.file(handle, Rights::READ),
+            Ok(ObjectId {
+                index: 4,
+                generation: 9
+            })
+        );
+        assert_eq!(
+            table.file(handle, Rights::TRANSFER),
+            Err(CapError::InsufficientRights)
+        );
+
+        let endpoint = table
+            .grant(object(0), ObjectType::Endpoint, Rights::SEND)
+            .expect("slot");
+        assert_eq!(
+            table.file(endpoint, Rights::SEND),
+            Err(CapError::WrongObjectType)
+        );
+    }
+
+    #[test]
+    fn removal_invalidates_the_handle_and_preserves_the_generation_boundary() {
+        let mut table = CapTable::new();
+        let handle = table
+            .grant(object(0), ObjectType::File, Rights::READ)
+            .expect("slot");
+        table.remove(handle).expect("remove");
+        assert_eq!(
+            table.file(handle, Rights::READ),
+            Err(CapError::InvalidHandle)
+        );
+        let replacement = table
+            .grant(object(1), ObjectType::File, Rights::READ)
+            .expect("slot");
+        assert_eq!(replacement.index, handle.index);
+        assert_ne!(replacement.generation, handle.generation);
+        assert_eq!(
+            table.file(handle, Rights::READ),
+            Err(CapError::InvalidHandle)
         );
     }
 

@@ -22,6 +22,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-fs"
+version = "0.1.0"
+
+[[package]]
+name = "aether-init"
+version = "0.1.0"
+dependencies = [
+ "aether-abi",
+ "aether-sdk",
+]
+
+[[package]]
 name = "aether-ipc"
 version = "0.1.0"
 
@@ -30,8 +42,11 @@ name = "aether-kernel"
 version = "0.1.0"
 dependencies = [
  "aether-abi",
+ "aether-boot-common",
+ "aether-fs",
  "aether-ipc",
  "aether-memory",
+ "aether-services",
 ]
 
 [[package]]
@@ -40,3 +55,14 @@ version = "0.1.0"
 dependencies = [
  "aether-abi",
 ]
+
+[[package]]
+name = "aether-sdk"
+version = "0.1.0"
+dependencies = [
+ "aether-abi",
+]
+
+[[package]]
+name = "aether-services"
+version = "0.1.0"

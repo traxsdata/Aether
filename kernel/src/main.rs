@@ -4,15 +4,26 @@
 //! Validate the loader hand-off, take ownership of the CPU descriptor/interrupt
 //! tables, configure the protections required by the page tables, initialize
 //! physical memory, install kernel page tables, and hand control to the
-//! scheduler. There is no user space yet.
+//! scheduler. The scheduler starts ring-0 service tests and the first ring-3
+//! process created from an embedded native ELF image.
 
 #![no_std]
 #![no_main]
 
+mod apps;
 mod arch;
+mod desktop;
+mod fs;
+mod graphics;
+mod input;
 mod ipc;
 mod memory;
+mod portal;
+mod recovery;
 mod scheduler;
+mod shell;
+mod supervisor;
+mod syscall;
 
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
 use core::panic::PanicInfo;
@@ -133,7 +144,7 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         .saturating_mul(core::mem::size_of::<MemoryRegion>() as u64);
     frames.reserve_range(info.memory_regions, map_bytes);
 
-    match memory::paging::init(&mut frames, info, regions) {
+    let framebuffer_mapped = match memory::paging::init(&mut frames, info, regions) {
         Ok(paging) => {
             serial_line!(
                 "boot: paging: identity map to {} MiB, {} page-table frames, CR3={:#018x}",
@@ -141,9 +152,30 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                 paging.page_table_frames,
                 paging.pml4_address
             );
+            if paging.framebuffer_mapped {
+                serial_line!(
+                    "boot: framebuffer mapped {}x{} stride={} format={}",
+                    info.framebuffer.width,
+                    info.framebuffer.height,
+                    info.framebuffer.stride,
+                    info.framebuffer.format
+                );
+            } else {
+                serial_line!("boot: framebuffer unavailable; graphics disabled");
+            }
+            paging.framebuffer_mapped
         }
         Err(error) => {
             serial_line!("AETHER_BOOT_FAILED reason=paging: {error:?}");
+            arch::x86_64::halt();
+        }
+    };
+
+    match graphics::init(&info.framebuffer, framebuffer_mapped) {
+        Ok(true) => serial_line!("boot: graphics service ready"),
+        Ok(false) => serial_line!("boot: graphics service headless"),
+        Err(error) => {
+            serial_line!("AETHER_BOOT_FAILED reason=graphics: {error:?}");
             arch::x86_64::halt();
         }
     }

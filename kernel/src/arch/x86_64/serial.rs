@@ -38,6 +38,21 @@ pub fn init() {
     }
 }
 
+/// Reads one byte if the UART has data ready.
+///
+/// Non-blocking: the idle loop polls this while the shell is active.
+#[must_use]
+pub fn try_read() -> Option<u8> {
+    // SAFETY: COM1 is valid on the supported platform.
+    unsafe {
+        if inb(COM1 + 5) & 1 == 0 {
+            None
+        } else {
+            Some(inb(COM1))
+        }
+    }
+}
+
 /// Writes one byte, dropping it if the UART is not ready.
 pub fn write_byte(byte: u8) {
     let mut spins = 0u32;
@@ -55,11 +70,20 @@ pub fn write_byte(byte: u8) {
 
 /// Writes a string with LF converted to CRLF.
 pub fn write_str(value: &str) {
-    for byte in value.bytes() {
-        if byte == b'\n' {
+    write_bytes(value.as_bytes());
+}
+
+/// Writes bytes with LF converted to CRLF.
+///
+/// This is the only console write path used by user output, so a native
+/// application cannot smuggle terminal control sequences through a different
+/// newline convention.
+pub fn write_bytes(value: &[u8]) {
+    for byte in value {
+        if *byte == b'\n' {
             write_byte(b'\r');
         }
-        write_byte(byte);
+        write_byte(*byte);
     }
 }
 

@@ -27,7 +27,16 @@ pub struct Segment {
     pub memory_size: u64,
     /// Physical destination address.
     pub physical_address: u64,
+    /// ELF segment flags: read, write, and execute bits.
+    pub flags: u32,
 }
+
+/// Segment is executable.
+pub const PF_X: u32 = 1;
+/// Segment is writable.
+pub const PF_W: u32 = 2;
+/// Segment is readable.
+pub const PF_R: u32 = 4;
 
 impl Segment {
     /// Exclusive physical end address, or `None` on overflow.
@@ -161,6 +170,7 @@ pub fn parse(bytes: &[u8]) -> Result<Image, ParseError> {
         file_size: 0,
         memory_size: 0,
         physical_address: 0,
+        flags: 0,
     }; MAX_SEGMENTS];
     let mut count = 0usize;
     let mut start = u64::MAX;
@@ -177,6 +187,7 @@ pub fn parse(bytes: &[u8]) -> Result<Image, ParseError> {
             return Err(ParseError::TooManySegments);
         }
 
+        let flags = read_u32(header, 4).ok_or(ParseError::BadSegment { index })?;
         let file_offset = read_u64(header, 8).ok_or(ParseError::BadSegment { index })?;
         let virtual_address = read_u64(header, 16).ok_or(ParseError::BadSegment { index })?;
         let physical_address = read_u64(header, 24).ok_or(ParseError::BadSegment { index })?;
@@ -211,6 +222,7 @@ pub fn parse(bytes: &[u8]) -> Result<Image, ParseError> {
             file_size,
             memory_size,
             physical_address,
+            flags,
         };
         // Reject overlaps instead of letting program-header order decide which
         // bytes win.
