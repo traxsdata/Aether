@@ -11,7 +11,7 @@ Desktop and native SDK               (not implemented)
 Essential user-space services        (not implemented)
   initd / devd / storaged / fsd / netd / securityd / portald / sessiond
         |
-Capability-based microkernel         (boot, memory, exceptions)
+Capability-based microkernel         (boot, memory, exceptions, scheduler)
   memory / tasks / IPC / capabilities / interrupts / timer
         |
 Hardware and UEFI firmware
@@ -43,7 +43,8 @@ The tree implements the lowest layer needed to prove the boot and memory model:
 - `kernel/memory/` contains the host-tested frame allocator and page-table
   encoding.
 - `kernel/` contains the entry point, GDT/IDT, serial output, hand-off
-  validation, physical-memory initialization, and kernel page tables.
+  validation, physical-memory initialization, kernel page tables, timer, and
+  preemptive scheduler with per-task address spaces.
 
 There is no general-purpose filesystem, network stack, package manager, GUI
 toolkit, or permission dialog in the kernel. That remains a design rule, not

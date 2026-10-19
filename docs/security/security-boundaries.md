@@ -20,6 +20,11 @@ validation, capability checks.
 **Evidence:** Address-space isolation tests (AT-002), fault-containment tests
 (AT-010), adversarial syscall tests.
 
+**Current status:** Kernel tasks have separate PML4s and a private mapping, and
+the boot test verifies that one task's write is invisible to another after
+timer-driven preemption. User-mode isolation and syscall validation do not
+exist yet.
+
 ## 2. Application / application boundary
 
 **Enforced by:** separate address spaces, separate capability spaces, separate

@@ -8,14 +8,13 @@ The project's security goal is simple to state and hard to build: applications
 receive only the capabilities they need, user files are opened through explicit
 grants, and the desktop is not a security authority.
 
-> **Status: early kernel prototype.** The current tree implements the first
-> sprint from the
-> [technical specification](Technical%20Specification%20and%20Initial%20Development%20Backlog.txt)
-> plus the Phase 1 memory milestone: a reproducible UEFI boot path, a validated
-> physical memory map, a bitmap frame allocator, kernel-owned page tables with
-> W^X, structured exception reporting, and serial diagnostics. There is no
-> scheduler, user space, filesystem, graphics stack, or Windows compatibility
-> yet. Do not use this tree for real data.
+> **Status: kernel prototype, Phase 2 in progress.** The tree now has a
+> reproducible UEFI boot path, a validated physical memory map, a bitmap frame
+> allocator, kernel-owned page tables with W^X, structured exception reporting,
+> a 100 Hz preemptive scheduler, and hardware-enforced address-space isolation
+> between kernel tasks. There is no user mode, capability system, filesystem,
+> graphics stack, or Windows compatibility yet. Do not use this tree for real
+> data.
 
 ## What works today
 
@@ -31,10 +30,17 @@ grants, and the desktop is not a security authority.
   and 2 MiB identity mappings for RAM.
 - Handlers for all 32 architectural exception vectors with vector, error code,
   RIP, RFLAGS, and CR2 diagnostics.
+- A 100 Hz PIT/PIC timer interrupt, preemptive round-robin scheduler, and static
+  task/thread control blocks.
+- Per-task PML4 address spaces with a private physical frame mapped at the same
+  virtual address, switched in CR3 by the scheduler.
+- A boot-time isolation test that verifies each task's private mapping survives
+  preemption by another task.
 - Host unit tests for ABI layout, memory arithmetic, the frame allocator, page
   table encoding, and a defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
-  `AETHER_MM_OK` and `AETHER_BOOT_OK`.
+  `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, and
+  `AETHER_BOOT_OK`.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
 - A local CI gate (`make ci`) that runs lint, unit tests, the boot test, and the
@@ -55,7 +61,12 @@ boot: kernel image [0x0000000004000000, 0x0000000004097000), entry 0x00000000040
 boot: paging: identity map to 1024 MiB, 5 page-table frames, CR3=0x0000000000100000
 boot: frame allocator: 1015 MiB free (260000 frames), bitmap capacity 16384 MiB
 AETHER_MM_OK
-boot: x86-64 execution environment ready
+sched: task 1 ready pml4=0x0000000000106000 private=0x0000000000105000
+sched: task 2 ready pml4=0x000000000010b000 private=0x000000000010a000
+sched: task 3 ready pml4=0x0000000000110000 private=0x000000000010f000
+sched: timer started at 100 Hz
+AETHER_SCHED_OK workers=3 ticks=20
+AETHER_ISOLATION_OK tasks=3
 AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
 
@@ -103,6 +114,7 @@ boot/common/         architecture-independent boot logic and ELF validation
 boot/loader/         UEFI application (no_std, target x86_64-unknown-uefi)
 kernel/memory/       host-testable frame allocator and page-table encoding
 kernel/              Aether kernel (no_std, target x86_64-unknown-none)
+  src/scheduler.rs   preemptive kernel scheduler and isolation test
 tools/               boot test harness
 docs/                architecture, security, and decision records
 ```
@@ -124,7 +136,10 @@ by the specification.
 6. The kernel installs its own GDT and IDT, validates the hand-off, initializes
    the frame allocator, builds page tables, switches CR3, and reports memory and
    image state.
-7. It prints `AETHER_MM_OK` and `AETHER_BOOT_OK`, then halts.
+7. It starts a 100 Hz timer, preemptively runs three tasks in separate address
+   spaces, verifies that private mappings survive preemption, prints
+   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, and
+   `AETHER_BOOT_OK`, then halts.
 
 The loader and kernel are separate programs with a versioned ABI. Internal
 kernel structures are not exposed to the loader.
@@ -133,9 +148,9 @@ kernel structures are not exposed to the loader.
 
 This prototype is **not** a sandbox yet. It validates and bounds the boot
 hand-off and the kernel image parser, owns its page tables, maps kernel text
-read-execute-only and data non-executable, and reports exceptions instead of
-resetting silently. It still has no user mode, capability system, or
-address-space isolation.
+read-execute-only and data non-executable, reports exceptions instead of
+resetting silently, and isolates kernel tasks in separate address spaces. It
+still has no user mode, capability system, or user/kernel memory split.
 
 See [`docs/security/threat-model.md`](docs/security/threat-model.md) for the
 current threat model, including what is deliberately out of scope for the
@@ -153,6 +168,7 @@ The backlog and acceptance tests are in the
 [technical specification](Technical%20Specification%20and%20Initial%20Development%20Backlog.txt).
 
 Further reading: [memory and paging](docs/architecture/memory.md),
+[scheduler and address spaces](docs/architecture/scheduler.md),
 [capabilities](docs/architecture/capabilities.md), [IPC](docs/architecture/ipc.md),
 [security boundaries](docs/security/security-boundaries.md), and the
 [development environment](docs/development.md).

@@ -20,10 +20,11 @@ services.
 
 ## Current state
 
-The kernel implements the Phase 1 boot and memory slice:
+The kernel implements the Phase 1 boot/memory slice and the first Phase 2
+scheduling slice:
 
-- x86-64 long mode, ring 0, interrupts disabled at entry;
-- a dedicated 64 KiB stack in `.bss`;
+- x86-64 long mode, ring 0, interrupts enabled after scheduler setup;
+- a dedicated 64 KiB boot stack and 16 KiB per-task stacks;
 - a flat kernel GDT and a 32-entry architectural exception IDT;
 - COM1 serial output and panic reporting;
 - `BootInfo` header, kernel-range, and memory-region validation;
@@ -31,19 +32,20 @@ The kernel implements the Phase 1 boot and memory slice:
 - kernel-owned four-level page tables with a 4 KiB W^X kernel mapping and 2 MiB
   identity mappings for the rest of RAM;
 - structured exception reports with vector, error code, RIP, RFLAGS, and CR2;
-- explicit `AETHER_MM_OK` and `AETHER_BOOT_OK` markers for the boot test;
-- a `fault-selftest` feature that executes `int3` after paging for the
-  exception-path test.
+- a 100 Hz PIT/PIC timer and preemptive round-robin scheduler;
+- per-task PML4 address spaces and CR3 switching;
+- a boot-time isolation test across three kernel tasks;
+- explicit `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, and
+  `AETHER_BOOT_OK` markers.
 
 What is deliberately absent:
 
-- a higher-half mapping and per-address-space page tables;
-- IST/TSS setup for double-fault and stack-overflow recovery;
-- user-mode entry and user/kernel page permissions;
-- task/thread objects, context switching, and scheduling;
-- timer and interrupt controllers;
+- user mode, TSS/RSP0, syscall entry, and user/supervisor page permissions;
+- a kernel heap and dynamic task creation;
+- priorities, sleeping/wakeup, SMP, and per-CPU scheduler state;
 - capability objects, tables, rights checks, and IPC;
-- SMP startup.
+- higher-half kernel mapping and guard pages;
+- local APIC/high-resolution timers.
 
 These gaps are tracked in the technical specification backlog (Epics C–D).
 
@@ -66,13 +68,12 @@ any pointed-to memory.
 
 The critical path from the specification is:
 
-1. Higher-half kernel mapping and per-address-space page tables.
-2. IST/TSS for double-fault and stack-overflow diagnostics.
-3. Interrupt controller and timer initialization.
-4. Task/address-space objects and user/kernel separation.
-5. Preemptive scheduling and fault containment.
-6. Capability objects, tables, rights checks, IPC endpoints, and transfer.
-7. User-space loader and supervisor.
+1. User-mode entry: TSS/RSP0, user page permissions, syscall gate.
+2. Per-task kernel stacks and guard pages.
+3. Higher-half kernel mapping and per-address-space user regions.
+4. Capability objects, tables, rights checks, IPC endpoints, and transfer.
+5. User-space loader, `initd` supervision, and the first native task.
+6. Adversarial isolation, capability, and IPC tests.
 
 Each step needs tests that fail closed and an ADR if it changes a trust
 boundary.
