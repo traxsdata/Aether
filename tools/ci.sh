@@ -7,6 +7,6 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-cargo fmt --all --check
+make lint
 cargo test --locked
 make test
