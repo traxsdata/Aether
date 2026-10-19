@@ -478,6 +478,9 @@ struct config_info {
     int ecm, ecm_ctrl_ok;
     uint8_t ecm_ctrl, ecm_data, ecm_alt, ecm_in, ecm_out, mac_index;
     uint16_t ecm_in_mps, ecm_out_mps;
+    int ms; /* USB mass storage, bulk-only transport (class 8/6/50) */
+    uint8_t ms_iface, ms_alt, ms_in, ms_out;
+    uint16_t ms_in_mps, ms_out_mps;
 };
 
 static int is_hid_boot(uint8_t cls, uint8_t sub, uint8_t proto) {
@@ -487,7 +490,7 @@ static int is_hid_boot(uint8_t cls, uint8_t sub, uint8_t proto) {
 static void parse_config(const uint8_t *buf, size_t len, struct config_info *ci) {
     memset(ci, 0, sizeof *ci);
     uint8_t iface_cls = 0, iface_sub = 0, iface_proto = 0, iface_num = 0, iface_alt = 0;
-    int iface_ecm = 0, iface_data = 0;
+    int iface_ecm = 0, iface_data = 0, iface_ms = 0;
     for (size_t off = 0; off + 2 <= len;) {
         uint8_t blen = buf[off], btype = buf[off + 1];
         if (blen < 2 || off + blen > len) break;
@@ -502,6 +505,14 @@ static void parse_config(const uint8_t *buf, size_t len, struct config_info *ci)
             iface_proto = p[7];
             iface_ecm = iface_cls == 2 && iface_sub == 6 && iface_proto == 0;
             iface_data = iface_cls == 10;
+            /* Bulk-only transport: mass storage, SCSI transparent command
+             * set, BBB protocol. Other protocols (CBI/UAS) are not driven. */
+            iface_ms = iface_cls == 8 && iface_sub == 6 && iface_proto == 0x50;
+            if (iface_ms) {
+                ci->ms = 1;
+                ci->ms_iface = iface_num;
+                ci->ms_alt = iface_alt;
+            }
             if (iface_ecm) {
                 ci->ecm_ctrl_ok = 1;
                 ci->ecm_ctrl = iface_num;
@@ -538,6 +549,16 @@ static void parse_config(const uint8_t *buf, size_t len, struct config_info *ci)
                     ci->ecm_out_mps = mps;
                 }
             }
+            if ((attr & 3) == 2 && iface_ms) {
+                ci->ms = 1;
+                if (addr & 0x80) {
+                    ci->ms_in = addr & 0x0F;
+                    ci->ms_in_mps = mps;
+                } else {
+                    ci->ms_out = addr & 0x0F;
+                    ci->ms_out_mps = mps;
+                }
+            }
         } else if (btype == 0x24 && blen >= 13 && p[2] == 0x0F) {
             ci->mac_index = p[3];
         }
@@ -547,6 +568,7 @@ static void parse_config(const uint8_t *buf, size_t len, struct config_info *ci)
     /* A CDC data interface alone is not ECM: require the Ethernet control
      * interface too, so a RNDIS configuration is never mistaken for one. */
     if (!ci->ecm_ctrl_ok || !ci->ecm || !ci->ecm_in || !ci->ecm_out) ci->ecm = 0;
+    if (!ci->ms || !ci->ms_in || !ci->ms_out) ci->ms = 0;
 }
 
 /* ---- xHCI bring-up ----------------------------------------------------- */
@@ -871,7 +893,7 @@ static int read_config_descriptor(struct usb_device *d, struct config_info *out)
             first = ci;
             have_first = 1;
         }
-        if (ci.hid || ci.ecm) {
+        if (ci.hid || ci.ecm || ci.ms) {
             *out = ci;
             return 0;
         }
@@ -967,10 +989,11 @@ static void enumerate_port(unsigned port, uint8_t speed) {
         d->used = 0;
         return;
     }
+    unsigned ifaces = (unsigned)(!!ci.hid + !!ci.ecm + !!ci.ms);
     kprintf("[usb] slot %u: %04x:%04x %s speed, %u interface%s\n", d->slot, d->vendor, d->product,
             speed == USB_SPEED_SUPER ? "super" : speed == USB_SPEED_HIGH ? "high" : speed == USB_SPEED_LOW ? "low" : "full",
-            ci.hid ? 1 : ci.ecm ? 2 : 0, (ci.hid || ci.ecm) ? "" : "s");
-    if (!ci.hid && !ci.ecm) {
+            ifaces, ifaces == 1 ? "" : "s");
+    if (!ifaces) {
         kprintf("[usb] slot %u: no supported class\n", d->slot);
         return;
     }
@@ -1014,6 +1037,21 @@ static void enumerate_port(unsigned port, uint8_t speed) {
         d->neps++;
         if (configure_endpoints(d, d->eps, d->neps)) return;
         usb_net_probe(d, ci.ecm_ctrl, ci.ecm_data, ci.ecm_alt, in, out, ci.mac_index);
+        return;
+    }
+
+    if (ci.ms) {
+        d->iface = ci.ms_iface;
+        d->alt = ci.ms_alt;
+        if (ci.ms_alt) control(d, 0x01, 11, ci.ms_alt, ci.ms_iface, 0, 0); /* SET_INTERFACE */
+        struct usb_endpoint *in = &d->eps[d->neps];
+        if (endpoint_init(d, in, ci.ms_in, 1, USB_EP_BULK, ci.ms_in_mps, 0)) return;
+        d->neps++;
+        struct usb_endpoint *out = &d->eps[d->neps];
+        if (endpoint_init(d, out, ci.ms_out, 0, USB_EP_BULK, ci.ms_out_mps, 0)) return;
+        d->neps++;
+        if (configure_endpoints(d, d->eps, d->neps)) return;
+        usb_storage_probe(d, ci.ms_iface, in, out);
         return;
     }
 }

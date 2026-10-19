@@ -4,6 +4,9 @@
 
 - **1.4** Signed app packages and a publisher key; Secure Boot loader
   signing; reproducible image builds; a release/key-rotation checklist.
+- **1.5** USB mass storage over bulk-only transport, registered as a normal
+  block device. Wi-Fi, audio, battery/lid, cameras, Bluetooth and suspend
+  remain open hardware work.
 
 - **1.0** Session lock and idle auto-lock; per-thread system dialogs; focus
   theft, window-slot and DLP metadata fixes; hostile-superblock and truncate

@@ -16,6 +16,20 @@ Workstation and real laptops today.
 - The Security page now combines auto-lock, Lock Now, passphrase change and
   the storage/protection status.
 
+## What's new in 1.5
+
+- **USB storage.** A bulk-only transport driver speaks the SCSI transparent
+  command set (`INQUIRY`-free readiness, `READ CAPACITY(10)`, `READ(10)`,
+  `WRITE(10)`, `SYNCHRONIZE CACHE(10)`). A USB stick or external drive
+  registers as `usb0` in the block layer, so AFS, the unlock screen and the
+  installer treat it like SATA or NVMe. `make test-usb-storage` exercises
+  enumeration, capacity and the blank-disk setup path in QEMU.
+
+- **The rest of 1.5 is still hardware work.** Wi-Fi, audio, battery/lid,
+  cameras, Bluetooth and suspend/resume need ACPI AML or vendor firmware and
+  are tracked in `docs/DRIVERS.md`; this slice deliberately does not pretend
+  they work.
+
 ## What's new in 1.4
 
 - **Signed app packages.** A package can carry an RSA-2048 publisher

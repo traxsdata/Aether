@@ -88,3 +88,6 @@ void usb_hid_poll(void);
 void usb_net_probe(struct usb_device *d, uint8_t ctrl_iface, uint8_t data_iface, uint8_t data_alt,
                    struct usb_endpoint *in, struct usb_endpoint *out, uint8_t mac_index);
 struct nic_ops *usb_net_init(void);
+/* USB mass storage: bulk-only transport with the SCSI transparent command
+ * set. Registers a blkdev ("usb0", ...) when the disk answers READ CAPACITY. */
+void usb_storage_probe(struct usb_device *d, uint8_t iface, struct usb_endpoint *in, struct usb_endpoint *out);

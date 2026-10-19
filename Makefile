@@ -43,7 +43,7 @@ KERNEL_SRCS := kernel/entry.S kernel/main.c kernel/lib.c kernel/log.c kernel/ser
                kernel/heap.c kernel/proc.c kernel/switch.S kernel/syscall.c kernel/wm.c kernel/apps.c \
                kernel/apps.S kernel/rng.c kernel/crypto.c kernel/afs.c kernel/vfs.c kernel/dlp.c kernel/umem.c kernel/storage.c kernel/pci.c kernel/blk.c kernel/ahci.c \
                kernel/elf.c kernel/linux.c kernel/ktest.c kernel/e1000.c kernel/net.c kernel/firewall.c \
-               kernel/usb.c kernel/usb_hid.c kernel/usb_net.c kernel/i2c_hid.c \
+               kernel/usb.c kernel/usb_hid.c kernel/usb_net.c kernel/usb_storage.c kernel/i2c_hid.c \
                kernel/appstore.c kernel/settings.c kernel/update.c kernel/power.c kernel/drivers.c common/gpt.c common/rsa_verify.c
 ULIB_SRCS := user/lib/crt0.S user/lib/ui.c user/lib/runtime.c
 # Native C apps, built into the kernel image. Settings and App Store are
@@ -205,6 +205,9 @@ unittest: $(BUILD)/aether.iso
 
 test-lock: $(BUILD)/aether.iso
 	tools/test-lock.sh
+
+test-usb-storage: $(BUILD)/aether.iso
+	tools/test-usb-storage.sh
 
 test-power: $(BUILD)/aether.iso
 	tools/test-power.sh

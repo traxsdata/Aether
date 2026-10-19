@@ -167,3 +167,18 @@ The full network path also passes with the ordinary `make test` e1000e card.
 Each of these follows the same rules: no third-party driver code, DMA only
 from owned pages, bounded queues, explicit timeouts, and a Rust `unsafe`
 surface kept to MMIO/ABI access.
+
+
+## USB mass storage (1.5)
+
+`kernel/usb_storage.c` drives bulk-only transport (class 8, subclass 6,
+protocol 0x50). It supports LUN 0 and 512-byte sectors, with one BOT command
+outstanding at a time. The SCSI commands are limited to what a block device
+needs: TEST UNIT READY, READ CAPACITY(10), READ(10), WRITE(10) and
+SYNCHRONIZE CACHE(10). The disk appears as `usb0`, `usb1`, ... through
+`blk.h`; the partition and AFS code is unchanged.
+
+Not covered yet: UAS, USB hubs, multiple LUNs, CD-ROM/ATAPI-style devices,
+and devices that report a block size other than 512 bytes. A failed transfer
+marks the disk failed rather than retrying forever. `make test-usb-storage`
+checks QEMU's `usb-storage` device and the blank-disk setup prompt.
