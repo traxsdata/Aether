@@ -10,11 +10,14 @@
 #![no_std]
 #![no_main]
 
+mod apps;
 mod arch;
 mod fs;
 mod ipc;
 mod memory;
 mod scheduler;
+mod shell;
+mod supervisor;
 mod syscall;
 
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};

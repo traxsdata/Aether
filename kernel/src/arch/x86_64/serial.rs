@@ -38,6 +38,21 @@ pub fn init() {
     }
 }
 
+/// Reads one byte if the UART has data ready.
+///
+/// Non-blocking: the idle loop polls this while the shell is active.
+#[must_use]
+pub fn try_read() -> Option<u8> {
+    // SAFETY: COM1 is valid on the supported platform.
+    unsafe {
+        if inb(COM1 + 5) & 1 == 0 {
+            None
+        } else {
+            Some(inb(COM1))
+        }
+    }
+}
+
 /// Writes one byte, dropping it if the UART is not ready.
 pub fn write_byte(byte: u8) {
     let mut spins = 0u32;

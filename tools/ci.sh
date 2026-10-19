@@ -12,5 +12,6 @@ make docs-check
 make license-check
 make unittest
 make test
+make shell-test
 make fault-test
 make negative-test

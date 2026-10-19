@@ -20,6 +20,7 @@ use aether_abi::user::{USER_STACK_TOP, UserTestResult};
 use aether_boot_common::elf;
 use aether_fs::FsError;
 use aether_ipc::{CapError, CapHandle, CapTable, IpcError, ObjectType, Rights};
+use aether_services::ServiceError;
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, PhysFrame};
 use core::cell::UnsafeCell;
@@ -137,6 +138,8 @@ pub enum SchedulerError {
     UserImage(elf::ParseError),
     /// The virtual filesystem could not be formatted or seeded.
     Filesystem(FsError),
+    /// A service could not be registered or started.
+    Service(ServiceError),
 }
 
 impl From<PagingError> for SchedulerError {
@@ -219,8 +222,15 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
                 "AETHER_BOOT_OK stage=kernel version={}",
                 env!("CARGO_PKG_VERSION")
             );
-            halt()
+            // The boot self-tests are complete. Keep the console alive so the
+            // shell test and a human can inspect the running system.
+            timer::enable_interrupts();
+            loop {
+                crate::shell::poll();
+                timer::halt_until_interrupt();
+            }
         }
+        crate::shell::poll();
         timer::halt_until_interrupt();
     }
 }
@@ -293,6 +303,9 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     )?);
 
     crate::fs::init().map_err(SchedulerError::Filesystem)?;
+    crate::supervisor::init().map_err(SchedulerError::Service)?;
+    crate::apps::init();
+    crate::shell::init();
 
     // Load the native user program into its own PML4. The kernel identity map
     // is copied supervisor-only; only USER_BASE..USER_LIMIT is user-accessible.
@@ -309,6 +322,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     user.kernel_stack_top = user_kernel_top;
     user.root = crate::fs::DEMO_ROOT;
     tasks[USER_TASK] = user;
+    crate::apps::started(USER_TASK);
 
     // SAFETY: Interrupts are disabled during boot and the idle task is current.
     unsafe { gdt::set_kernel_stack(tasks[0].kernel_stack_top) };
@@ -664,6 +678,7 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
         UserTestResult::Failed
     };
     USER_RESULT.store(result as usize, Ordering::Release);
+    crate::apps::exited(current, status as i64);
     serial_line!("user: exit pid={} status={status}", current);
 
     schedule_next(current)
@@ -683,6 +698,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     tasks[current].saved_rsp = frame as u64;
     USER_FAULTS.fetch_add(1, Ordering::Release);
     USER_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+    crate::apps::faulted(current, vector);
     serial_line!("sched: user task {current} faulted vector={vector}");
 
     schedule_next(current)

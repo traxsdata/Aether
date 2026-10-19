@@ -25,8 +25,8 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image test fault-test negative-test unittest lint \
-	docs-check license-check ci clean
+.PHONY: all kernel user loader image test shell-test fault-test negative-test \
+	unittest lint docs-check license-check ci clean
 
 all: image
 
@@ -56,6 +56,9 @@ image: loader
 
 test: image
 	$(PYTHON) tools/test-boot.py
+
+shell-test: image
+	$(PYTHON) tools/test-shell.py
 
 fault-test:
 	$(MAKE) KERNEL_FEATURES=fault-selftest image

@@ -281,6 +281,31 @@ pub fn sys_list(
     Some(result.unwrap_or(errno::EBADF))
 }
 
+/// Lists a directory for the kernel console (no user pointer involved).
+pub fn list_path(path: &str, out: &mut [u8]) -> Result<usize, FsError> {
+    with_fs(|filesystem| filesystem.list("/", path, out))
+}
+
+/// Reads a file for the kernel console.
+pub fn read_path(path: &str, out: &mut [u8]) -> Result<usize, FsError> {
+    with_fs(|filesystem| filesystem.read_file("/", path, out))
+}
+
+/// Replaces a file for the kernel console.
+pub fn write_path(path: &str, data: &[u8]) -> Result<(), FsError> {
+    with_fs(|filesystem| filesystem.write_file("/", path, data))
+}
+
+/// Deletes a file for the kernel console.
+pub fn remove_path(path: &str) -> Result<(), FsError> {
+    with_fs(|filesystem| filesystem.unlink("/", path))
+}
+
+/// Returns a file's size.
+pub fn stat_path(path: &str) -> Result<usize, FsError> {
+    with_fs(|filesystem| filesystem.stat("/", path))
+}
+
 /// Returns a file's size.
 pub fn sys_stat(pml4: PhysFrame, path_pointer: u64, path_length: u64) -> Option<i64> {
     let path = user_str(pml4, path_pointer, path_length)?;

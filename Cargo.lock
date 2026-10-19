@@ -46,6 +46,7 @@ dependencies = [
  "aether-fs",
  "aether-ipc",
  "aether-memory",
+ "aether-services",
 ]
 
 [[package]]
@@ -61,3 +62,7 @@ version = "0.1.0"
 dependencies = [
  "aether-abi",
 ]
+
+[[package]]
+name = "aether-services"
+version = "0.1.0"
