@@ -70,6 +70,10 @@ fn endpoint_mut(id: ObjectId) -> Result<&'static mut Endpoint, IpcError> {
 }
 
 /// Sends a message through an endpoint capability.
+///
+/// `sender` is the kernel's authenticated task identity. A user-mode syscall
+/// wrapper must derive it from the current task and must never copy it from a
+/// user-supplied message field.
 pub fn send(
     caps: &CapTable,
     endpoint_cap: CapHandle,
@@ -79,12 +83,12 @@ pub fn send(
 ) -> Result<(), IpcError> {
     let (id, _) = caps.endpoint(endpoint_cap, Rights::SEND)?;
     let _guard = InterruptGuard::enter();
-    endpoint_mut(id)?.send(caps, endpoint_cap, sender, payload, transfer)
+    endpoint_mut(id)?.send(id, caps, endpoint_cap, sender, payload, transfer)
 }
 
 /// Receives a message through an endpoint capability.
 pub fn receive(caps: &mut CapTable, endpoint_cap: CapHandle) -> Result<ReceivedMessage, IpcError> {
     let (id, _) = caps.endpoint(endpoint_cap, Rights::RECEIVE)?;
     let _guard = InterruptGuard::enter();
-    endpoint_mut(id)?.receive(caps, endpoint_cap)
+    endpoint_mut(id)?.receive(id, caps, endpoint_cap)
 }

@@ -23,6 +23,8 @@ pub enum IpcError {
     Empty,
     /// The endpoint object is no longer alive or its generation is stale.
     EndpointGone,
+    /// The capability refers to a different endpoint object.
+    WrongEndpoint,
     /// Payload exceeds [`MAX_MESSAGE_BYTES`].
     MessageTooLong,
 }
@@ -98,10 +100,14 @@ impl Endpoint {
 
     /// Sends a bounded message.
     ///
-    /// `transfer` names a capability in `caps`; it must carry `TRANSFER` and
-    /// is installed in the receiver's table when the message is received.
+    /// `endpoint_id` is this endpoint's object identity; `endpoint_cap` must
+    /// refer to the same object. `sender` is the kernel-authenticated sender
+    /// identity, never a value taken from an untrusted payload. `transfer`
+    /// names a capability in `caps`; it must carry `TRANSFER` and is installed
+    /// in the receiver's table when the message is received.
     pub fn send(
         &mut self,
+        endpoint_id: ObjectId,
         caps: &CapTable,
         endpoint_cap: CapHandle,
         sender: u16,
@@ -111,7 +117,10 @@ impl Endpoint {
         if payload.len() > MAX_MESSAGE_BYTES {
             return Err(IpcError::MessageTooLong);
         }
-        caps.endpoint(endpoint_cap, Rights::SEND)?;
+        let (capability_endpoint, _) = caps.endpoint(endpoint_cap, Rights::SEND)?;
+        if capability_endpoint != endpoint_id {
+            return Err(IpcError::WrongEndpoint);
+        }
         let transfer = match transfer {
             Some(handle) => Some(Transfer {
                 cap: caps.capture_transfer(handle)?,
@@ -137,24 +146,32 @@ impl Endpoint {
     }
 
     /// Receives a message, installing any transferred capability in `caps`.
+    ///
+    /// The capability install happens before the queue head advances. If the
+    /// receiver's table is full, the message stays queued and can be received
+    /// after the receiver makes room; a resource-exhaustion failure must not
+    /// destroy a message or its capability.
     pub fn receive(
         &mut self,
+        endpoint_id: ObjectId,
         caps: &mut CapTable,
         endpoint_cap: CapHandle,
     ) -> Result<ReceivedMessage, IpcError> {
-        caps.endpoint(endpoint_cap, Rights::RECEIVE)?;
+        let (capability_endpoint, _) = caps.endpoint(endpoint_cap, Rights::RECEIVE)?;
+        if capability_endpoint != endpoint_id {
+            return Err(IpcError::WrongEndpoint);
+        }
         if self.len == 0 {
             return Err(IpcError::Empty);
         }
         let slot = usize::from(self.head);
         let message = self.queue[slot];
-        self.head = ((slot + 1) % QUEUE_LEN) as u8;
-        self.len -= 1;
-
         let transferred = match message.transfer {
             Some(transfer) => Some(caps.insert_transfer(transfer.cap)?),
             None => None,
         };
+        self.head = ((slot + 1) % QUEUE_LEN) as u8;
+        self.len -= 1;
 
         Ok(ReceivedMessage {
             sender: message.sender,
@@ -184,7 +201,7 @@ pub type EndpointId = ObjectId;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::ObjectType;
+    use crate::capability::{MAX_CAPS, ObjectType};
 
     fn cap_for(endpoint: ObjectId, rights: Rights) -> (CapTable, CapHandle) {
         let mut table = CapTable::new();
@@ -208,16 +225,16 @@ mod tests {
         let (mut receiver_caps, recv_cap) = cap_for(id(0), Rights::RECEIVE);
 
         endpoint
-            .send(&sender_caps, send_cap, 2, b"hello", None)
+            .send(id(0), &sender_caps, send_cap, 2, b"hello", None)
             .expect("send");
         let message = endpoint
-            .receive(&mut receiver_caps, recv_cap)
+            .receive(id(0), &mut receiver_caps, recv_cap)
             .expect("receive");
         assert_eq!(message.sender, 2);
         assert_eq!(message.payload(), b"hello");
         assert!(message.transferred.is_none());
         assert_eq!(
-            endpoint.receive(&mut receiver_caps, recv_cap),
+            endpoint.receive(id(0), &mut receiver_caps, recv_cap),
             Err(IpcError::Empty)
         );
     }
@@ -227,14 +244,24 @@ mod tests {
         let mut endpoint = Endpoint::new();
         let (caps, receive_cap) = cap_for(id(0), Rights::RECEIVE);
         assert_eq!(
-            endpoint.send(&caps, receive_cap, 1, b"nope", None),
+            endpoint.send(id(0), &caps, receive_cap, 1, b"nope", None),
             Err(IpcError::Capability(CapError::InsufficientRights))
         );
 
         let (caps, send_cap) = cap_for(id(0), Rights::SEND);
         assert_eq!(
-            endpoint.send(&caps, send_cap, 1, &[0; MAX_MESSAGE_BYTES + 1], None),
+            endpoint.send(id(0), &caps, send_cap, 1, &[0; MAX_MESSAGE_BYTES + 1], None),
             Err(IpcError::MessageTooLong)
+        );
+    }
+
+    #[test]
+    fn rejects_capability_for_another_endpoint() {
+        let mut endpoint = Endpoint::new();
+        let (caps, send_cap) = cap_for(id(1), Rights::SEND);
+        assert_eq!(
+            endpoint.send(id(0), &caps, send_cap, 1, b"wrong endpoint", None),
+            Err(IpcError::WrongEndpoint)
         );
     }
 
@@ -247,7 +274,7 @@ mod tests {
             generation: 1,
         };
         assert_eq!(
-            endpoint.receive(&mut caps, forged),
+            endpoint.receive(id(0), &mut caps, forged),
             Err(IpcError::Capability(CapError::InvalidHandle))
         );
     }
@@ -257,10 +284,12 @@ mod tests {
         let mut endpoint = Endpoint::new();
         let (caps, send_cap) = cap_for(id(0), Rights::SEND);
         for _ in 0..QUEUE_LEN {
-            endpoint.send(&caps, send_cap, 1, b"x", None).expect("send");
+            endpoint
+                .send(id(0), &caps, send_cap, 1, b"x", None)
+                .expect("send");
         }
         assert_eq!(
-            endpoint.send(&caps, send_cap, 1, b"x", None),
+            endpoint.send(id(0), &caps, send_cap, 1, b"x", None),
             Err(IpcError::Full)
         );
     }
@@ -270,37 +299,90 @@ mod tests {
         let mut first = Endpoint::new();
         let mut second = Endpoint::new();
         let (mut receiver_caps, first_recv) = cap_for(id(0), Rights::RECEIVE);
-        let (sender_caps, first_send) = cap_for(id(0), Rights::SEND | Rights::TRANSFER);
-        let (_, second_send) = cap_for(id(1), Rights::SEND | Rights::TRANSFER);
+        let (mut sender_caps, first_send) = cap_for(id(0), Rights::SEND | Rights::TRANSFER);
+        let second_send = sender_caps
+            .grant(id(1), ObjectType::Endpoint, Rights::SEND | Rights::TRANSFER)
+            .expect("slot");
 
-        // A capability without TRANSFER cannot be passed through IPC. Handles
-        // are table-local, so use another capability from the sender's table.
-        let mut sender_caps = sender_caps;
+        // A capability without TRANSFER cannot be passed through IPC.
         let send_only = sender_caps
             .grant(id(2), ObjectType::Endpoint, Rights::SEND)
             .expect("slot");
         assert_eq!(
-            first.send(&sender_caps, first_send, 2, b"bad", Some(send_only)),
+            first.send(id(0), &sender_caps, first_send, 2, b"bad", Some(send_only)),
             Err(IpcError::Capability(CapError::InsufficientRights))
         );
 
         first
-            .send(&sender_caps, first_send, 2, b"cap", Some(second_send))
+            .send(
+                id(0),
+                &sender_caps,
+                first_send,
+                2,
+                b"cap",
+                Some(second_send),
+            )
             .expect("send capability");
         let message = first
-            .receive(&mut receiver_caps, first_recv)
+            .receive(id(0), &mut receiver_caps, first_recv)
             .expect("receive");
         let transferred = message.transferred.expect("transferred capability");
 
-        // The receiver can use the transferred send capability.
+        // A capability for endpoint B must not authorize an operation on
+        // endpoint A, even though the handle belongs to the receiver's table.
+        assert_eq!(
+            first.send(
+                id(0),
+                &receiver_caps,
+                transferred,
+                1,
+                b"wrong endpoint",
+                None
+            ),
+            Err(IpcError::WrongEndpoint)
+        );
+
+        // The receiver can use the transferred send capability on endpoint B.
         second
-            .send(&receiver_caps, transferred, 1, b"via transfer", None)
+            .send(id(1), &receiver_caps, transferred, 1, b"via transfer", None)
             .expect("send with transferred capability");
         let (mut second_receiver, second_recv) = cap_for(id(1), Rights::RECEIVE);
         let received = second
-            .receive(&mut second_receiver, second_recv)
+            .receive(id(1), &mut second_receiver, second_recv)
             .expect("receive");
         assert_eq!(received.payload(), b"via transfer");
         assert_eq!(received.sender, 1);
+    }
+
+    #[test]
+    fn table_full_does_not_consume_message_or_transfer() {
+        let mut endpoint = Endpoint::new();
+        let (mut sender_caps, send_cap) = cap_for(id(0), Rights::SEND | Rights::TRANSFER);
+        let transfer = sender_caps
+            .grant(id(1), ObjectType::Endpoint, Rights::SEND | Rights::TRANSFER)
+            .expect("slot");
+        let (mut receiver_caps, recv_cap) = cap_for(id(0), Rights::RECEIVE);
+        for _ in 1..MAX_CAPS {
+            receiver_caps
+                .grant(id(2), ObjectType::Endpoint, Rights::SEND)
+                .expect("slot");
+        }
+
+        endpoint
+            .send(id(0), &sender_caps, send_cap, 2, b"cap", Some(transfer))
+            .expect("send");
+        assert_eq!(
+            endpoint.receive(id(0), &mut receiver_caps, recv_cap),
+            Err(IpcError::Capability(CapError::TableFull))
+        );
+
+        // The failed receive left the message at the head of the queue. A
+        // receiver with capacity can still consume it and its capability.
+        let (mut fresh_caps, fresh_recv) = cap_for(id(0), Rights::RECEIVE);
+        let message = endpoint
+            .receive(id(0), &mut fresh_caps, fresh_recv)
+            .expect("queued message survives");
+        assert_eq!(message.payload(), b"cap");
+        assert!(message.transferred.is_some());
     }
 }
