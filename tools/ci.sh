@@ -1,8 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# Local equivalent of the pull-request CI gate. The GitHub Actions workflow
-# calls the same commands; keeping this script runnable makes failures
-# reproducible without CI.
+# Local equivalent of the pull-request CI gate. A GitHub Actions workflow can
+# call the same commands once it is enabled; keeping this script runnable makes
+# failures reproducible without CI.
 set -eu
 
 cd "$(dirname "$0")/.."

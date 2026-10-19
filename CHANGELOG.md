@@ -15,7 +15,7 @@ versioning scheme until the kernel ABI stabilises.
 - `no_std` x86-64 kernel skeleton with a dedicated stack, COM1 serial output,
   hand-off validation, and panic reporting.
 - Versioned `BootInfo` ABI shared by the loader, kernel, and host tests.
-- QEMU/OVMF boot harness (`make test`) and CI workflow.
+- QEMU/OVMF boot harness (`make test`) and local CI gate (`make ci`).
 - Architecture, threat-model, and ADR documentation.
 
 ### Known limitations

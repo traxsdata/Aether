@@ -27,7 +27,7 @@ grants, and the desktop is not a security authority.
 - Host unit tests for ABI layout, memory arithmetic, and a defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and fails unless
   the kernel prints `AETHER_BOOT_OK`.
-- A CI workflow that builds the kernel and loader and runs the same boot test.
+- A local CI gate (`make ci`) that builds the kernel and loader and runs the same boot test.
 
 The exact serial transcript from a successful boot is:
 
