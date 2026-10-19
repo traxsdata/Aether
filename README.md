@@ -10,37 +10,52 @@ grants, and the desktop is not a security authority.
 
 > **Status: early kernel prototype.** The current tree implements the first
 > sprint from the
-> [technical specification](Technical%20Specification%20and%20Initial%20Development%20Backlog.txt):
-> a reproducible UEFI boot path, a kernel hand-off with a validated physical
-> memory map, and serial diagnostics. There is no scheduler, user space,
-> filesystem, graphics stack, or Windows compatibility yet. Do not use this
-> tree for real data.
+> [technical specification](Technical%20Specification%20and%20Initial%20Development%20Backlog.txt)
+> plus the Phase 1 memory milestone: a reproducible UEFI boot path, a validated
+> physical memory map, a bitmap frame allocator, kernel-owned page tables with
+> W^X, structured exception reporting, and serial diagnostics. There is no
+> scheduler, user space, filesystem, graphics stack, or Windows compatibility
+> yet. Do not use this tree for real data.
 
 ## What works today
 
 - A `no_std` Rust UEFI loader that validates an embedded ELF64 kernel before
   copying it.
 - A `no_std` x86-64 kernel linked at a fixed physical address with its own
-  stack, serial console, and panic reporting.
+  stack, GDT, IDT, serial console, and panic reporting.
 - A bounded loader-to-kernel `BootInfo` ABI with magic, version, size, kernel
   range, and a merged physical memory map.
-- Host unit tests for ABI layout, memory arithmetic, and a defensive ELF parser.
-- `make test`, which boots the FAT image under QEMU with OVMF and fails unless
-  the kernel prints `AETHER_BOOT_OK`.
-- A local CI gate (`make ci`) that builds the kernel and loader and runs the same boot test.
+- A 16 GiB bitmap frame allocator that reserves the kernel and hand-off and
+  releases firmware boot-services memory only after the CR3 switch.
+- Kernel-owned four-level page tables: 4 KiB W^X mappings for the kernel image
+  and 2 MiB identity mappings for RAM.
+- Handlers for all 32 architectural exception vectors with vector, error code,
+  RIP, RFLAGS, and CR2 diagnostics.
+- Host unit tests for ABI layout, memory arithmetic, the frame allocator, page
+  table encoding, and a defensive ELF parser.
+- `make test`, which boots the FAT image under QEMU with OVMF and requires
+  `AETHER_MM_OK` and `AETHER_BOOT_OK`.
+- `make fault-test`, which executes `int3` after paging and requires the IDT
+  handler to report the breakpoint.
+- A local CI gate (`make ci`) that runs lint, unit tests, the boot test, and the
+  fault test.
 
 The exact serial transcript from a successful boot is:
 
 ```text
 AETHER_LOADER_OK stage=entry version=0.1.0
-loader: kernel elf start=0x4000000 end=0x4013000 entry=0x4000000 segments=4
+loader: kernel elf start=0x4000000 end=0x4097000 entry=0x4000000 segments=4
 loader: memory regions=39 usable=1016 MiB
 loader: boot services exited after 1 attempt(s)
 AETHER_LOADER_HANDOFF entry=0x4000000
 AETHER_KERNEL_OK stage=entry version=0.1.0 commit=...
-kernel: handoff magic=0x534f524548544541 version=1 regions=39 usable=1016 MiB
-kernel: image=0x4000000..0x4013000 entry=0x4000000
-kernel: long mode, ring 0, interrupts disabled
+boot: hand-off validated (version 1, 96 bytes)
+boot: memory map: 39 regions, 1016 MiB allocatable
+boot: kernel image [0x0000000004000000, 0x0000000004097000), entry 0x0000000004000000
+boot: paging: identity map to 1024 MiB, 5 page-table frames, CR3=0x0000000000100000
+boot: frame allocator: 1015 MiB free (260000 frames), bitmap capacity 16384 MiB
+AETHER_MM_OK
+boot: x86-64 execution environment ready
 AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
 
@@ -68,10 +83,11 @@ artifacts cannot drift apart.
 ### Tests
 
 ```sh
-make unittest   # host unit tests (ABI, ELF parser, memory arithmetic)
+make unittest   # host unit tests (ABI, ELF parser, memory arithmetic, allocator)
 make test       # QEMU/OVMF boot test; prints the serial transcript and PASS
+make fault-test # exception-path test: int3 after paging must reach the IDT
 make lint       # rustfmt, host clippy, kernel clippy, loader clippy
-make ci         # formatting, clippy, unit tests, boot test (the PR gate)
+make ci         # formatting, clippy, unit tests, boot test, fault test
 make clean
 ```
 
@@ -85,7 +101,8 @@ location.
 abi/                 loader/kernel hand-off ABI (no_std, host-testable)
 boot/common/         architecture-independent boot logic and ELF validation
 boot/loader/         UEFI application (no_std, target x86_64-unknown-uefi)
-kernel/              Aether kernel skeleton (no_std, target x86_64-unknown-none)
+kernel/memory/       host-testable frame allocator and page-table encoding
+kernel/              Aether kernel (no_std, target x86_64-unknown-none)
 tools/               boot test harness
 docs/                architecture, security, and decision records
 ```
@@ -104,8 +121,10 @@ by the specification.
 4. It converts the UEFI memory map into a fixed, bounded array and writes a
    `BootInfo` block.
 5. It exits boot services and jumps to the kernel with the `BootInfo` pointer.
-6. The kernel validates the hand-off, reports memory and image state, prints
-   `AETHER_BOOT_OK`, and halts.
+6. The kernel installs its own GDT and IDT, validates the hand-off, initializes
+   the frame allocator, builds page tables, switches CR3, and reports memory and
+   image state.
+7. It prints `AETHER_MM_OK` and `AETHER_BOOT_OK`, then halts.
 
 The loader and kernel are separate programs with a versioned ABI. Internal
 kernel structures are not exposed to the loader.
@@ -113,9 +132,10 @@ kernel structures are not exposed to the loader.
 ## Security posture
 
 This prototype is **not** a sandbox yet. It validates and bounds the boot
-hand-off and the kernel image parser, but it has no address-space isolation,
-capability system, or user space to isolate. Serial output is diagnostic and
-must not contain secrets.
+hand-off and the kernel image parser, owns its page tables, maps kernel text
+read-execute-only and data non-executable, and reports exceptions instead of
+resetting silently. It still has no user mode, capability system, or
+address-space isolation.
 
 See [`docs/security/threat-model.md`](docs/security/threat-model.md) for the
 current threat model, including what is deliberately out of scope for the
@@ -131,6 +151,11 @@ PR description. Security-relevant changes require explicit review.
 Architecture decisions are recorded in [`docs/decisions/`](docs/decisions/).
 The backlog and acceptance tests are in the
 [technical specification](Technical%20Specification%20and%20Initial%20Development%20Backlog.txt).
+
+Further reading: [memory and paging](docs/architecture/memory.md),
+[capabilities](docs/architecture/capabilities.md), [IPC](docs/architecture/ipc.md),
+[security boundaries](docs/security/security-boundaries.md), and the
+[development environment](docs/development.md).
 
 ## License
 

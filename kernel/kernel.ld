@@ -13,15 +13,20 @@ SECTIONS
     __kernel_start = .;
 
     .text : ALIGN(4096) {
+        __text_start = .;
         KEEP(*(.text.entry))
         *(.text .text.*)
+        __text_end = .;
     }
 
     .rodata : ALIGN(4096) {
+        __rodata_start = .;
         *(.rodata .rodata.*)
+        __rodata_end = .;
     }
 
     .data : ALIGN(4096) {
+        __data_start = .;
         *(.data .data.*)
     }
 

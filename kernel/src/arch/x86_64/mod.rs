@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! x86-64 architecture support.
 
+pub mod gdt;
+pub mod idt;
 pub mod serial;
+
+/// Installs the kernel's own descriptor and interrupt tables.
+pub fn init() {
+    gdt::init();
+    idt::init();
+}
 
 /// Stops the CPU until an interrupt arrives.
 #[inline]

@@ -16,13 +16,16 @@ LOADER_TARGET := x86_64-unknown-uefi
 AETHER_GIT_COMMIT := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 export AETHER_GIT_COMMIT
 
-.PHONY: all kernel loader image test unittest lint ci clean
+KERNEL_FEATURES ?=
+KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
+
+.PHONY: all kernel loader image test fault-test unittest lint ci clean
 
 all: image
 
 kernel:
 	@mkdir -p $(BUILD)
-	$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked
+	$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
 
 loader: kernel
@@ -40,6 +43,10 @@ image: loader
 test: image
 	$(PYTHON) tools/test-boot.py
 
+fault-test:
+	$(MAKE) KERNEL_FEATURES=fault-selftest image
+	AETHER_EXPECT_FAULT=1 $(PYTHON) tools/test-boot.py
+
 unittest:
 	$(CARGO) test --locked
 
@@ -48,6 +55,9 @@ lint: kernel
 	$(CARGO) clippy --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
+	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
+		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
+			--features fault-selftest --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		$(CARGO) clippy -p aether-bootloader --release --target $(LOADER_TARGET) --locked -- -D warnings
 
