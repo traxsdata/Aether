@@ -80,19 +80,54 @@ It is a planning model, not a delivery promise.
 - [ ] GPU acceleration, audio, networking, and multi-window application
   rendering.
 
-## Phase 5 and later
+## Phase 5 — Compatibility and developer alpha
 
-Windows compatibility research, packaging, update verification, recovery,
-external review, and release qualification. Full integration waits until the
-Aether interfaces it depends on exist.
+- [x] Signed application package format, verifier, installation, and runtime
+  profiles ([package format](specifications/package-format.md)).
+- [x] Initial compatibility test suite and database with named-test evidence
+  ([compatibility](specifications/compatibility.md)).
+- [x] Windows host-interface inventory and feasibility report
+  ([report](specifications/windows-host-interface-report.md)). The feasibility
+  gate is not met, so no runtime is promised.
+- [x] Developer documentation for packaging, updates, hardware, and recovery.
+- [ ] Windows compatibility prototype and per-application prefixes.
+- [ ] Better storage (persistent block device), networking, audio, and
+  accelerated graphics.
+- [ ] Interactive permission consent and grant revocation UI.
+- [ ] External security review.
+
+## Phase 6 — Public beta and release engineering
+
+- [x] Stable supported-hardware list for the QEMU platform
+  ([supported hardware](reference/supported-hardware.md)).
+- [x] Signed release bundles and verification (`make release`,
+  `make release-check`).
+- [x] Signed update manifests, digest verification, rollback counters, version
+  and channel policy ([signed updates](architecture/updates.md)).
+- [x] Recovery workflow documentation and current/previous image selection
+  ([installer and recovery](reference/installer-and-recovery.md)).
+- [x] Public compatibility database format and records.
+- [x] Security response process ([security response](security/security-response.md)).
+- [x] Community contribution program ([community](community.md)).
+- [x] Release qualification testing (`make qualify`).
+- [ ] UEFI installer, persistent boot slots, and activation of a staged image.
+- [ ] Secure Boot signing, measured boot, and an immutable rollback counter.
+- [ ] Accessibility and usability review.
+- [ ] External security review and a public beta.
 
 ## Current milestone
 
-The tree now reaches the Phase 4 prototype exit criterion on the QEMU platform:
-a clean checkout builds a FAT image and a UEFI ISO, boots through the loader,
-enforces a ring-3 user/kernel boundary, runs a native application in a private
-storage root, reports denied cross-application access, starts supervised
-services, paints a composited desktop, accepts keyboard input, grants one file
-through the portal, and verifies the current/previous image records without
-touching user data. Persistent storage, interactive consent, SMP, blocking IPC,
-and capability revocation remain follow-up work.
+The tree reaches the Phase 4 exit criterion and the implementable Phase 5/6
+slices on the QEMU platform: a clean checkout builds a FAT image and a UEFI ISO,
+boots through the loader, enforces a ring-3 user/kernel boundary, runs a native
+application in a private storage root, reports denied cross-application access,
+verifies and installs a signed package, derives an isolated runtime profile,
+verifies a signed update while rejecting replay, downgrade, and an unknown
+publisher, starts supervised services, paints a composited desktop, accepts
+keyboard input, grants one file through the portal, and verifies the
+current/previous image records without touching user data.
+
+The remaining Phase 5/6 work is blocked on user-space process creation, a
+persistent store, network/audio services, an installer, and external review.
+Persistent storage, interactive consent, SMP, blocking IPC, and capability
+revocation remain follow-up work.

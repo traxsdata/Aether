@@ -1,0 +1,9 @@
+[package]
+name = "aether-crypto"
+description = "Aether SHA-256, SHA-512, and Ed25519 primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true

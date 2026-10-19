@@ -20,3 +20,6 @@ __pycache__/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Intermediate fixture rendering (regenerate with tests/fixtures/build.sh)
+tests/fixtures/packages/manifests/*.signed.txt

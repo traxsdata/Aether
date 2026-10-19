@@ -18,12 +18,15 @@ mod graphics;
 mod input;
 mod ipc;
 mod memory;
+mod packaging;
 mod portal;
 mod recovery;
+mod runtime;
 mod scheduler;
 mod shell;
 mod supervisor;
 mod syscall;
+mod updates;
 
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
 use core::panic::PanicInfo;

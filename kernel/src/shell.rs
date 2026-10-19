@@ -98,6 +98,9 @@ fn execute_line() {
         "input" => serial_line!("input: dropped={}", crate::input::dropped()),
         "uptime" => serial_line!("uptime: {} ticks", scheduler::ticks()),
         "recovery" => recovery(),
+        "packages" => crate::packaging::print_status(),
+        "runtime" => crate::runtime::print_status(),
+        "updates" => crate::updates::print_status(),
         "desktop" => desktop(),
         "clear" => serial::write_str("\x1b[2J\x1b[H"),
         _ => serial_line!("shell: unknown command '{command}'"),
@@ -116,6 +119,9 @@ fn print_help() {
     serial_line!("  input            keyboard queue status");
     serial_line!("  uptime           timer ticks");
     serial_line!("  recovery         system image and rollback status");
+    serial_line!("  packages         installed package and verification status");
+    serial_line!("  runtime          per-application runtime profiles");
+    serial_line!("  updates          signed update and rollback status");
     serial_line!("  desktop          compositor and desktop status");
     serial_line!("  clear            clear the terminal");
 }

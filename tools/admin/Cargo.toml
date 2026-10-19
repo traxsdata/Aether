@@ -1,0 +1,18 @@
+[package]
+name = "aether-admin"
+description = "Aether package, update, and release signing tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "aether-admin"
+path = "src/main.rs"
+
+[dependencies]
+aether-crypto = { path = "../../crypto" }
+aether-packaging = { path = "../../packaging" }
+aether-update = { path = "../../updates" }

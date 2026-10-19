@@ -44,11 +44,14 @@ private storage.
   service APIs.
 - Sharing occurs only through explicit capabilities or mediated services.
 
-**Current status:** Each application has a kernel-owned root
-(`/apps/demo`, `/apps/other`). Path resolution rejects `..`, and file handles
-are per-task generation-checked capabilities. The native sandbox test attempts
-a sibling path and a root escape; both fail with `EPERM`. The filesystem is a
-volatile RAM disk, so this is not yet persistent private storage.
+**Current status:** Each application has a kernel-owned root (`/apps/demo`,
+`/apps/other`, and `/apps/<package id>` for installed packages). Path
+resolution rejects `..`, and file handles are per-task generation-checked
+capabilities. The native sandbox test attempts a sibling path and a root
+escape; both fail with `EPERM`. A packaged application's runtime prefix is
+derived from its identity, not from the manifest, and prefix sharing requires
+an explicit consent decision. The filesystem is a volatile RAM disk, so this is
+not yet persistent private storage.
 
 **Evidence:** AT-005 and the boot-time sandbox test (`AETHER_SANDBOX_OK`).
 
@@ -125,28 +128,62 @@ the hand-off.
 **Evidence:** Host unit tests for the ELF parser and region sink; boot smoke
 test; exception-path self-test.
 
-## 7. Update boundary
+## 7. Package boundary
 
-**Enforced by:** `updated` and an offline/independent verifier.
+**Enforced by:** `aether-packaging` verification in the kernel, the publisher
+trust store, and manifest policy.
+
+**Requirements:**
+
+- A package is installed only after framing, manifest policy, publisher trust,
+  signature, and payload digest checks.
+- An application cannot request network, device, or system-service authority in
+  a manifest.
+- Installation does not execute anything.
+- The storage root follows from the application identity.
+
+**Current status:** Implemented for `format=1`. The kernel installs a verified
+package at `/apps/<id>` and rejects an unknown publisher, a modified payload,
+and a zeroed signature at boot (`AETHER_PACKAGE_OK`). Requested permissions are
+an allowlist and limits are range-checked. Executing a packaged entry point and
+persisting packages are not implemented.
+
+**Evidence:** Host tests in `packaging/`, `updates/`, and the boot self-test.
+
+## 8. Update boundary
+
+**Enforced by:** `aether-update` verification and activation policy, run by the
+kernel and by release tooling.
 
 **Requirements:**
 
 - Artifacts are authenticated before activation.
 - Version downgrade and rollback attacks are rejected.
+- An unknown publisher cannot install an image.
 - Interrupted updates are recoverable.
 - User data is preserved across rollback.
 
-**Current status:** The recovery prototype verifies current/previous image
-markers, selects the previous marker when the current one is missing, records
-the selection, and checks that the user-data sentinel is readable. Artifact
-signatures, rollback counters, and interrupted-update recovery are not
-implemented.
+**Current status:** The update verifier checks framing, manifest fields,
+publisher trust, Ed25519 signature, and image digest. Policy requires a strictly
+increasing counter, a newer version unless a recovery override is explicit, and
+a matching channel. The boot test accepts a newer signed image and rejects
+replay, downgrade, and an untrusted key (`AETHER_UPDATE_OK`). The recovery
+prototype still verifies current/previous image markers and selects the previous
+one when the current marker is missing (`AETHER_RECOVERY_OK`).
 
-**Evidence:** AT-012 prototype (`AETHER_RECOVERY_OK`).
+**Remaining gap:** Activation, staging, and reboot into a pending image are not
+implemented, and the installed counter lives in the writable image. Secure Boot,
+measured boot, and TPM-backed counters are required before this is a meaningful
+boundary against an attacker who can rewrite storage.
+
+**Evidence:** Host tests in `updates/`, the boot self-test, and
+`make release-check`.
 
 ## Non-boundaries
 
 - A desktop confirmation dialog by itself.
 - A pathname check performed only by the application.
 - A process identifier or user-supplied object name.
+- A package signature without a pinned publisher key and a digest check.
+- A compatibility prefix presented as a sandbox.
 - Documentation claims without a corresponding test.

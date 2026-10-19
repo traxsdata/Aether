@@ -1,7 +1,8 @@
 # Windows Compatibility Feasibility Plan
 
 **Document ID:** AETHER-WIN-001  
-**Status:** Planning only; no Windows runtime exists  
+**Status:** Planning only; no Windows runtime exists. Gate 1 is reviewed and not
+met; see the [host-interface report](windows-host-interface-report.md).  
 **Related:** ADR-007, technical specification §7
 
 ## Purpose
@@ -74,6 +75,8 @@ device access.
 
 **Evidence:** report checked into `docs/`, source references to the pinned
 runtime version, and a gap list with no unresolved critical items.
+[Current report](windows-host-interface-report.md) — gap list has blocking
+items, so the gate is **not met**.
 
 ### Gate 2 — Interface mapping
 
@@ -103,7 +106,8 @@ Test a documented application set and assign each result one of:
 - **Unsupported:** known incompatibility or unmet security requirement.
 
 The database must record application version, runtime version, hardware or
-virtual platform, and test date.
+virtual platform, and test date. The format and classification rules are
+implemented in [`compatibility.md`](compatibility.md).
 
 ## Dependencies and sequencing
 

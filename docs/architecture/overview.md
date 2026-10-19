@@ -4,6 +4,8 @@ Aether is layered so that the privileged core stays small and security policy
 is enforced at explicit boundaries.
 
 ```text
+Packages and signed updates               verified and installed by the kernel
+        |
 Native application / SDK                  implemented (ring 3)
         |
 Desktop, file manager, Security Center   implemented (software compositor)
@@ -12,7 +14,8 @@ Services                                  implemented as supervised kernel modul
   storaged / fsd / appd / inputd / displayd / desktopd / portald / securityd
         |
 Capability-based microkernel              boot, memory, exceptions, scheduler,
-                                          syscalls, capabilities, IPC, timer
+                                          syscalls, capabilities, IPC, timer,
+                                          package/update verification
         |
 Hardware and UEFI firmware
 ```
@@ -42,6 +45,10 @@ supervision rules are already declared.
    grant; the desktop cannot mint authority.
 6. **Desktop to policy.** The compositor displays state and requests portal
    actions. The filesystem, supervisor, and portal services make the decisions.
+7. **Publisher to system.** A package is installed only after manifest policy,
+   publisher pin, Ed25519 signature, and payload digest verification. A signed
+   update is activated only when the manifest, image digest, rollback counter,
+   version, and channel policy agree. A valid signature is not a safety claim.
 
 ## Current implementation
 
@@ -54,12 +61,19 @@ supervision rules are already declared.
 - `kernel/memory/` contains the host-tested frame allocator and page-table
   encoding.
 - `kernel/ipc/` contains host-tested capability tables and endpoint queues.
-- `kernel/services/` contains the host-tested supervisor and application
-  lifecycle rules.
+- `kernel/services/` contains the host-tested supervisor, application
+  lifecycle rules, and runtime profiles.
+- `crypto/` contains dependency-free SHA-256, SHA-512, and Ed25519 used by
+  package and update verification.
+- `packaging/` and `updates/` contain the signed package format, runtime
+  manifest policy, update manifest, and activation policy.
+- `tests/compatibility/` contains the compatibility database and classification
+  rules; `tests/fixtures/` contains signed test artifacts.
 - `kernel/` contains the entry point, GDT/TSS/IDT, CPU NX/WP setup, serial,
   hand-off validation, physical memory, kernel and user page tables, timer,
-  scheduler, syscall gate, filesystem service, portal, shell, graphics,
-  compositor, input, and recovery logic.
+  scheduler, syscall gate, filesystem service, package installation, runtime
+  profiles, update verification, portal, shell, graphics, compositor, input,
+  and recovery logic.
 - `sdk/` and `user/` contain the native application SDK and the ring-3 init
   program.
 

@@ -15,6 +15,9 @@ aether-fs = { path = "fs" }
 aether-memory = { path = "memory" }
 aether-ipc = { path = "ipc" }
 aether-services = { path = "services" }
+aether-crypto = { path = "../crypto" }
+aether-packaging = { path = "../packaging" }
+aether-update = { path = "../updates" }
 
 [features]
 # Boot with a deliberate breakpoint to exercise the exception path.

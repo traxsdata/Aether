@@ -7,6 +7,15 @@ name = "aether-abi"
 version = "0.1.0"
 
 [[package]]
+name = "aether-admin"
+version = "0.1.0"
+dependencies = [
+ "aether-crypto",
+ "aether-packaging",
+ "aether-update",
+]
+
+[[package]]
 name = "aether-boot-common"
 version = "0.1.0"
 dependencies = [
@@ -20,6 +29,17 @@ dependencies = [
  "aether-abi",
  "aether-boot-common",
 ]
+
+[[package]]
+name = "aether-compat"
+version = "0.1.0"
+dependencies = [
+ "aether-packaging",
+]
+
+[[package]]
+name = "aether-crypto"
+version = "0.1.0"
 
 [[package]]
 name = "aether-fs"
@@ -43,10 +63,13 @@ version = "0.1.0"
 dependencies = [
  "aether-abi",
  "aether-boot-common",
+ "aether-crypto",
  "aether-fs",
  "aether-ipc",
  "aether-memory",
+ "aether-packaging",
  "aether-services",
+ "aether-update",
 ]
 
 [[package]]
@@ -54,6 +77,13 @@ name = "aether-memory"
 version = "0.1.0"
 dependencies = [
  "aether-abi",
+]
+
+[[package]]
+name = "aether-packaging"
+version = "0.1.0"
+dependencies = [
+ "aether-crypto",
 ]
 
 [[package]]
@@ -66,3 +96,14 @@ dependencies = [
 [[package]]
 name = "aether-services"
 version = "0.1.0"
+dependencies = [
+ "aether-packaging",
+]
+
+[[package]]
+name = "aether-update"
+version = "0.1.0"
+dependencies = [
+ "aether-crypto",
+ "aether-packaging",
+]

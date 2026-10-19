@@ -1,0 +1,19 @@
+# Aether compatibility database
+#
+# Format: nine pipe-separated fields, one record per line.
+#
+#   #
+# - `id` is a stable reverse-domain identity.
+# - `runtime` is `native` or a pinned compatibility runtime and version.
+# - `tested` is the date of the last completed run (YYYY-MM-DD).
+# - `tests` is a comma-separated list of test identifiers, or `none`.
+# - `limitations` is a short documented limitation, or `none`.
+# - `unsupported` records must state a reason and no security requirement may
+#   be waived by editing this file.
+#
+# Rules: `verified` and `compatible` records must name tests; identities are
+# unique; an empty suite cannot be classified.
+org.aether.demo | Aether Demo | 0.2.0 | native | qemu-q35-ovmf | 2026-10-19 | verified | security.file.sandbox,security.file.portal,functional.startup | none
+org.aether.other | Aether Other | 0.2.0 | native | qemu-q35-ovmf | 2026-10-19 | verified | security.file.sibling,functional.startup | none
+org.aether.package-verifier | Aether Package Verifier | 0.2.0 | native | qemu-q35-ovmf | 2026-10-19 | verified | security.package.signature,security.package.digest,security.package.publisher | none
+org.example.win32-notepad | Notepad (Win32) | 10.0.19045 | none | qemu-q35-ovmf | 2026-10-19 | unsupported | none | No Windows compatibility runtime exists; the package verifier rejects runtime=windows.

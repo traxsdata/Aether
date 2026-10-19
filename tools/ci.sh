@@ -11,6 +11,8 @@ make lint
 make docs-check
 make license-check
 make unittest
+make compat-test
+make update-test
 make test
 make shell-test
 make fault-test
