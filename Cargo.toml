@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    "abi",
+    "boot/common",
+    "boot/loader",
+    "kernel",
+]
+# The kernel and loader require bare-metal/UEFI targets, so only the
+# host-testable crates are part of a default `cargo test`.
+default-members = ["abi", "boot/common"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/traxsdata/Aether"
+authors = ["Aether contributors"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = 2
+strip = false

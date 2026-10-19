@@ -1,0 +1,13 @@
+[package]
+name = "aether-bootloader"
+description = "UEFI loader for the Aether kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aether-abi = { path = "../../abi" }
+aether-boot-common = { path = "../common" }
