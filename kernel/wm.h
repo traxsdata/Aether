@@ -17,6 +17,11 @@ int wm_win_resize(struct proc *p, int handle, struct win_info *out);
 void wm_display_info(struct display_info *out);
 void wm_proc_exited(struct proc *p);
 void wm_notify(const char *title, const char *msg);
+/* An app notification with identity and a per-app burst limit. Returns 0, or
+ * -E_LIMIT when the app is sending too many. */
+int wm_notify_from(const char *app, const char *title, const char *msg);
+void wm_notifications_clear(void);
+int wm_notifications_visible(void);
 
 /* System dialogs, drawn and answered entirely by the kernel. The calling
  * thread starts one, then blocks (WAIT_DIALOG) until its own dialog_done is

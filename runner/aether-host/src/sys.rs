@@ -410,6 +410,22 @@ pub fn app_remove(name: &str) -> Result<(), Error> {
 
 /// Changes the mounted volume's passphrase. The kernel verifies the old one
 /// and re-wraps the volume key; it never stores either passphrase.
+/// Post a notification. The kernel records this app's identity, rate-limits
+/// bursts, and draws the history (Super+N).
+pub fn notify(title: &str, msg: &str) -> Result<(), Error> {
+    check(unsafe {
+        syscall5(
+            SYS_NOTIFY,
+            title.as_ptr() as u64,
+            title.len() as u64,
+            msg.as_ptr() as u64,
+            msg.len() as u64,
+            0,
+        )
+    })
+    .map(|_| ())
+}
+
 pub fn change_passphrase(old: &str, new: &str) -> Result<(), Error> {
     if old.is_empty() || new.len() < 8 {
         return Err(Error(E_INVAL));

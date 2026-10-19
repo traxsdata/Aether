@@ -16,6 +16,14 @@ Workstation and real laptops today.
 - The Security page now combines auto-lock, Lock Now, passphrase change and
   the storage/protection status.
 
+## What's new in 1.6
+
+- **Notifications with a history.** Apps call `SYS_NOTIFY` to post a title
+  and message; the kernel records the app identity, rate-limits each app and
+  draws the toast. **Super+N** or the menu-bar bell opens the last 16
+  notifications, with a Clear action. The history is in memory only and is
+  cleared on lock. See [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md).
+
 ## What's new in 1.5
 
 - **USB storage.** A bulk-only transport driver speaks the SCSI transparent

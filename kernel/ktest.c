@@ -36,6 +36,7 @@
 #include "storage.h"
 #include "uaccess.h"
 #include "usb_hid.h"
+#include "wm.h"
 #include "i2c_hid.h"
 
 extern char __text_start[], __rodata_start[], __data_start[];
@@ -1211,6 +1212,16 @@ static void t_net_config(void) {
 
 /* ---- USB HID ----------------------------------------------------------- */
 
+static void t_notify_rate(void) {
+    wm_notifications_clear();
+    for (int i = 0; i < 4; i++)
+        KT_CHECK(wm_notify_from("ktest", "test", "one") == 0);
+    KT_CHECK(wm_notify_from("ktest", "test", "one") == -E_LIMIT); /* burst limit */
+    KT_CHECK(wm_notifications_visible() == 4);
+    wm_notifications_clear();
+    KT_CHECK(wm_notifications_visible() == 0);
+}
+
 static void t_usb_hid_keyboard(void) {
     struct usb_hid_kbd st;
     struct input_event ev[6];
@@ -1320,6 +1331,7 @@ static const struct ktest {
     {"usb", "HID boot mouse maps buttons and movement", t_usb_hid_mouse},
     {"usb", "I2C-HID report descriptor parser", t_i2c_hid_parser},
     {"settings", "settings persist and validate keys", t_settings},
+    {"wm", "notifications keep history and rate-limit bursts", t_notify_rate},
 };
 
 int ktest_run(const char *suite, char *out, size_t len, struct ktest_result *res) {

@@ -58,6 +58,7 @@ pub const SYS_LOCK: u64 = 58;
 pub const SYS_TRUNCATE: u64 = 59;
 pub const SYS_CHANGE_PASSPHRASE: u64 = 60;
 pub const SYS_SHUTDOWN: u64 = 61;
+pub const SYS_NOTIFY: u64 = 62;
 pub const SYS_WIN_RESIZE: u64 = 57;
 pub const SYS_NET_CONFIG: u64 = 45;
 pub const SYS_SETTINGS_GET: u64 = 46;

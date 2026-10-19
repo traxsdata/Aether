@@ -106,6 +106,20 @@ static int64_t sys_log(uint64_t msg, uint64_t len) {
     return 0;
 }
 
+static int64_t sys_notify(uint64_t utitle, uint64_t title_len, uint64_t umsg, uint64_t msg_len) {
+    REQUIRE(CAP_WINDOW);
+    char title[64], msg[128];
+    title_len = MIN(title_len, sizeof title - 1);
+    msg_len = MIN(msg_len, sizeof msg - 1);
+    if (copy_in(title, utitle, title_len) || copy_in(msg, umsg, msg_len)) return -E_FAULT;
+    title[title_len] = msg[msg_len] = 0;
+    for (uint64_t i = 0; i < title_len; i++)
+        if (title[i] < 32 || title[i] > 126) title[i] = '?';
+    for (uint64_t i = 0; i < msg_len; i++)
+        if (msg[i] < 32 || msg[i] > 126) msg[i] = '?';
+    return wm_notify_from(current->name, title, msg);
+}
+
 static int64_t sys_win_create(uint64_t ureq, uint64_t uinfo) {
     REQUIRE(CAP_WINDOW);
     struct win_req req;
@@ -602,6 +616,7 @@ void syscall_dispatch(struct isr_frame *f) {
     case SYS_TRUNCATE: r = sys_truncate(a, b); break;
     case SYS_CHANGE_PASSPHRASE: r = sys_change_passphrase(a, b, c, d); break;
     case SYS_SHUTDOWN: r = sys_shutdown(); break;
+    case SYS_NOTIFY: r = sys_notify(a, b, c, d); break;
     default: r = -E_INVAL; break;
     }
     f->rax = (uint64_t)r;

@@ -98,3 +98,6 @@ static inline const char *label_name(uint32_t l) {
     static const char *n[] = {"Public", "Personal", "Confidential", "Secret"};
     return l < 4 ? n[l] : "?";
 }
+static inline int64_t sys_notify(const char *title, const char *msg) {
+    return syscall4(SYS_NOTIFY, title, strlen(title), msg, strlen(msg));
+}

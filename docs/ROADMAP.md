@@ -7,6 +7,8 @@
 - **1.5** USB mass storage over bulk-only transport, registered as a normal
   block device. Wi-Fi, audio, battery/lid, cameras, Bluetooth and suspend
   remain open hardware work.
+- **1.6** `SYS_NOTIFY` with app identity, per-app burst limits, a kernel-drawn
+  history (Super+N) and clear-on-lock.
 
 - **1.0** Session lock and idle auto-lock; per-thread system dialogs; focus
   theft, window-slot and DLP metadata fixes; hostile-superblock and truncate

@@ -158,6 +158,11 @@ enum {
     SYS_CHANGE_PASSPHRASE = 60, /* (old, oldlen, new, newlen) [CAP_CONFIG] -> 0; rewrap the mounted volume key */
     SYS_SHUTDOWN = 61,       /* () [CAP_CONFIG] -> never returns; ACPI S5 power off */
 
+    /* Notifications (1.6). An app can post a short title/message; the kernel
+     * records the app identity and rate-limits bursts. The history panel is
+     * kernel-drawn (Super+N), so an app cannot spoof another app's entry. */
+    SYS_NOTIFY = 62,         /* (title, title_len, msg, msg_len) [CAP_WINDOW] -> 0 */
+
     SYS_COUNT
 };
 

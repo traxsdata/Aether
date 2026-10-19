@@ -61,6 +61,9 @@
 #define TOAST_H 66
 #define TOAST_MS 6000
 #define MAX_TOASTS 4
+#define MAX_NOTIFS 16
+#define NOTIF_RATE 4
+#define NOTIF_RATE_MS 10000
 #define LIGHT_R 6         /* title bar lights: radius, spacing, first centre */
 #define LIGHT_GAP 20
 #define LIGHT_X 20
@@ -151,6 +154,24 @@ static struct {
     uint64_t until;
 } toasts[MAX_TOASTS];
 static int ntoasts;
+
+/* Notification history (1.6). Toasts are transient; this ring keeps the
+ * last few with the app identity so Super+N can show what was missed. */
+struct notification {
+    char app[16], title[40], msg[112];
+    uint64_t at;
+};
+static struct notification notifications[MAX_NOTIFS];
+static int nnotifs;
+static int notif_open;
+
+/* Per-app burst limit: an app cannot fill the screen with toasts. Unknown
+ * callers share the kernel's own bucket. */
+static struct {
+    char app[16];
+    uint64_t first;
+    int count;
+} notif_rate[8];
 
 static void draw_chip(int x, int y, const char *text, uint32_t color);
 static int chip_width(const char *text);
@@ -596,17 +617,66 @@ void wm_proc_exited(struct proc *p) {
         if (windows[i].used && windows[i].owner == p) destroy_window(i);
 }
 
-void wm_notify(const char *title, const char *msg) {
+static int notif_allowed(const char *app) {
+    int slot = -1, free = -1;
+    for (int i = 0; i < (int)ARRAY_LEN(notif_rate); i++) {
+        if (!notif_rate[i].app[0]) { free = i; break; }
+        if (!strcmp(notif_rate[i].app, app)) { slot = i; break; }
+    }
+    if (slot < 0) {
+        slot = free;
+        if (slot < 0) slot = 0; /* all buckets in use: reuse the first */
+        memset(&notif_rate[slot], 0, sizeof notif_rate[slot]);
+        strlcpy(notif_rate[slot].app, app, sizeof notif_rate[slot].app);
+        notif_rate[slot].first = ticks;
+    }
+    if (ticks - notif_rate[slot].first >= NOTIF_RATE_MS) {
+        notif_rate[slot].first = ticks;
+        notif_rate[slot].count = 0;
+    }
+    if (++notif_rate[slot].count > NOTIF_RATE) return 0;
+    return 1;
+}
+
+int wm_notify_from(const char *app, const char *title, const char *msg) {
+    if (!app || !app[0]) app = "app";
+    if (!notif_allowed(app)) {
+        kprintf("[wm] %s: notification rate limit reached\n", app);
+        return -E_LIMIT;
+    }
+    if (nnotifs == MAX_NOTIFS) {
+        for (int i = 1; i < MAX_NOTIFS; i++) notifications[i - 1] = notifications[i];
+        nnotifs--;
+    }
+    memset(&notifications[nnotifs], 0, sizeof notifications[nnotifs]);
+    strlcpy(notifications[nnotifs].app, app, sizeof notifications[nnotifs].app);
+    strlcpy(notifications[nnotifs].title, title ? title : "", sizeof notifications[nnotifs].title);
+    strlcpy(notifications[nnotifs].msg, msg ? msg : "", sizeof notifications[nnotifs].msg);
+    notifications[nnotifs].at = ticks;
+    nnotifs++;
+
     if (ntoasts == MAX_TOASTS) {
         for (int i = 1; i < MAX_TOASTS; i++) toasts[i - 1] = toasts[i];
         ntoasts--;
     }
-    strlcpy(toasts[ntoasts].title, title, sizeof toasts[0].title);
-    strlcpy(toasts[ntoasts].msg, msg, sizeof toasts[0].msg);
+    strlcpy(toasts[ntoasts].title, title ? title : app, sizeof toasts[0].title);
+    strlcpy(toasts[ntoasts].msg, msg ? msg : "", sizeof toasts[0].msg);
     toasts[ntoasts].until = ticks + TOAST_MS;
     ntoasts++;
     damage((struct rect){screen.w - TOAST_W - 40, TOPBAR_H, TOAST_W + 40, (TOAST_H + 10) * MAX_TOASTS + 40});
+    damage_topbar();
+    if (notif_open) damage_all();
+    return 0;
 }
+
+void wm_notify(const char *title, const char *msg) { wm_notify_from("\xC3\xA6ther", title, msg); }
+
+void wm_notifications_clear(void) {
+    nnotifs = 0;
+    if (notif_open) damage_all();
+}
+
+int wm_notifications_visible(void) { return nnotifs; }
 
 /* ---- Layout helpers ------------------------------------------------------------ */
 
@@ -965,6 +1035,7 @@ static void draw_menu(void) {
 }
 
 static void draw_shield(int x, int y, uint32_t color);
+static void draw_bell(void);
 
 static void draw_topbar(void) {
     gfx_blend(&screen, 0, 0, screen.w, TOPBAR_H, 0x070B18, 200);
@@ -989,8 +1060,9 @@ static void draw_topbar(void) {
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     char clock[48];
     snprintf(clock, sizeof clock, "%s %u   %02u:%02u", months[(t.month + 11) % 12], t.day, t.hour, t.minute);
-    int cx = screen.w - 16 - gfx_text_width(clock, FONT_SMALL);
+    int cx = screen.w - 46 - gfx_text_width(clock, FONT_SMALL);
     gfx_text(&screen, cx, 7, clock, C_TEXT, FONT_SMALL);
+    draw_bell();
 
     /* Security status pill, left of the clock: which protections are active.
      * Shortened when the screen is too narrow for all of it. */
@@ -1168,6 +1240,69 @@ static void draw_anim(void) {
 
 static struct rect toast_rect(int i) {
     return (struct rect){screen.w - TOAST_W - 16, TOPBAR_H + 12 + i * (TOAST_H + 10), TOAST_W, TOAST_H};
+}
+
+/* The bell sits at the right end of the menu bar; the clock moves left to
+ * make room for it. Clicking it (or Super+N) opens the history. */
+static struct rect notif_button_rect(void) { return (struct rect){screen.w - 36, 4, 26, 22}; }
+static struct rect notif_panel_rect(void) {
+    int shown = MIN(nnotifs, 10);
+    int h = 56 + shown * 42 + (shown ? 10 : 4);
+    return (struct rect){screen.w - 396, TOPBAR_H + 8, 380, MIN(h, screen.h - TOPBAR_H - 16)};
+}
+static struct rect notif_clear_rect(void) {
+    struct rect r = notif_panel_rect();
+    return (struct rect){r.x + r.w - 74, r.y + 10, 62, 22};
+}
+
+static void toggle_notifications(void) {
+    notif_open = !notif_open;
+    damage_all();
+}
+
+static void draw_notifications(void) {
+    if (!notif_open) return;
+    struct rect r = notif_panel_rect();
+    gfx_shadow(&screen, r.x, r.y, r.w, r.h, 12, 14, 120);
+    gfx_round_rect(&screen, r.x, r.y, r.w, r.h, 12, 0x0C1226, 246);
+    gfx_round_outline(&screen, r.x, r.y, r.w, r.h, 12, 0xFFFFFF, 36);
+    gfx_text(&screen, r.x + 16, r.y + 12, "Notifications", 0xFFFFFF, FONT_SMALL);
+    struct rect c = notif_clear_rect();
+    if (nnotifs) {
+        gfx_round_rect(&screen, c.x, c.y, c.w, c.h, 7, 0xFFFFFF, 22);
+        gfx_text(&screen, c.x + 12, c.y + 5, "Clear", C_TEXT_DIM, FONT_SMALL);
+    }
+    if (!nnotifs) {
+        gfx_text(&screen, r.x + 16, r.y + 44, "Nothing here yet.", C_TEXT_DIM, FONT_SMALL);
+        return;
+    }
+    int y = r.y + 44;
+    for (int k = 0; k < 10 && k < nnotifs; k++) {
+        struct notification *n = &notifications[nnotifs - 1 - k];
+        if (k) gfx_blend(&screen, r.x + 14, y - 5, r.w - 28, 1, 0xFFFFFF, 22);
+        gfx_text(&screen, r.x + 16, y, n->app, C_ACCENT, FONT_SMALL);
+        char title[40];
+        strlcpy(title, n->title, sizeof title);
+        int room = (r.w - 32) / gfx_font_w(FONT_SMALL);
+        if (room > 3 && (int)strlen(title) > room) strlcpy(title + room - 3, "...", 4);
+        gfx_text(&screen, r.x + 80, y, title, 0xFFFFFF, FONT_SMALL);
+        char msg[112];
+        strlcpy(msg, n->msg, sizeof msg);
+        int mroom = (r.w - 32) / gfx_font_w(FONT_SMALL);
+        if (mroom > 3 && (int)strlen(msg) > mroom) strlcpy(msg + mroom - 3, "...", 4);
+        gfx_text(&screen, r.x + 16, y + 16, msg, C_TEXT_DIM, FONT_SMALL);
+        y += 42;
+    }
+}
+
+static void draw_bell(void) {
+    struct rect b = notif_button_rect();
+    gfx_round_rect(&screen, b.x, b.y, b.w, b.h, 7, 0xFFFFFF, notif_open ? 34 : 14);
+    int cx = b.x + b.w / 2, cy = b.y + 9;
+    gfx_circle(&screen, cx, cy, 5, notif_open ? C_ACCENT : C_TEXT_DIM, 90);
+    gfx_circle(&screen, cx, cy + 1, 3, 0x0B1020, 220);
+    gfx_blend(&screen, cx - 4, cy + 5, 8, 2, notif_open ? C_ACCENT : C_TEXT_DIM, 220);
+    if (nnotifs) gfx_circle(&screen, b.x + b.w - 3, b.y + 3, 4, C_DANGER, 255);
 }
 
 static void draw_toasts(void) {
@@ -1919,6 +2054,7 @@ static void compose(void) {
         draw_dock();
         draw_anim();
         draw_toasts();
+        draw_notifications();
         draw_menu();
         draw_switcher();
         draw_dialog();
@@ -2075,6 +2211,10 @@ static void handle_key(const struct input_event *e) {
         launch(program_find("terminal"));
         return;
     }
+    if ((e->mods & MOD_SUPER) && (e->key == 'n' || e->key == 'N')) {
+        toggle_notifications();
+        return;
+    }
     if (e->mods & MOD_SUPER) {
         super_key(e->key, e->mods);
         return;
@@ -2098,6 +2238,19 @@ static void client_event(int wi, uint32_t type) {
 
 /* The menu bar and an open menu. Returns 1 if it used the event. */
 static int menu_mouse(int pressed) {
+    if (pressed && rect_contains(notif_button_rect(), mx, my)) {
+        if (menu_open) close_menu();
+        toggle_notifications();
+        return 1;
+    }
+    if (notif_open) {
+        struct rect p = notif_panel_rect();
+        if (pressed) {
+            if (rect_contains(notif_clear_rect(), mx, my)) wm_notifications_clear();
+            else if (!rect_contains(p, mx, my)) toggle_notifications();
+        }
+        return 1; /* the history panel is modal for the pointer */
+    }
     int title = -1;
     if (my < TOPBAR_H)
         for (int m = MENU_SYSTEM; m < MENU_COUNT; m++)
