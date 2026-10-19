@@ -1,0 +1,1513 @@
+# Aether OS
+## Technical Specification and Initial Development Backlog
+
+**Document ID:** AETHER-TS-001  
+**Version:** 0.1.0-draft  
+**Status:** Proposed architecture baseline  
+**Date:** October 19, 2026  
+**Project type:** Independent, open-source desktop operating system  
+**Target architecture:** x86-64 desktop PCs  
+**Kernel strategy:** Original capability-based microkernel  
+**Governance:** Community-governed open source
+
+---
+
+# 1. Executive Summary
+
+Aether is a general-purpose desktop operating system designed to combine broad application compatibility, a polished user experience, customization, and strict security boundaries.
+
+Unlike a conventional Linux distribution, Aether will implement its own kernel, system interfaces, process model, security enforcement, and desktop experience.
+
+The defining security property is that applications do not automatically receive access to the user's filesystem, other applications' data, or privileged system services. Access is granted through explicit capabilities controlled by the operating system.
+
+Aether will support three application categories:
+
+1. **Native Aether applications:** Applications built against Aether's own APIs.
+2. **Windows-compatible applications:** Windows applications running through Wine or Proton inside Aether-managed isolation boundaries.
+3. **Windows virtual machines:** Optional isolated Windows environments for applications requiring greater Windows compatibility.
+
+The project will prioritize a small, auditable kernel and enforceable security boundaries over feature count. Desktop polish and application compatibility will expand as the underlying system becomes reliable.
+
+## 1.1 Mission statement
+
+Build an open, user-controlled desktop operating system where software compatibility does not require surrendering control of personal data.
+
+## 1.2 Product principles
+
+- Applications receive minimum necessary privileges.
+- Private application data is inaccessible to unrelated applications.
+- User files are accessed through explicit grants.
+- The system does not silently elevate application privileges.
+- Core system updates are authenticated and recoverable.
+- Network, device, clipboard, and interprocess access are controlled capabilities.
+- The user can inspect and revoke persistent permissions.
+- The system remains usable without a mandatory online account.
+- The kernel and core system components are independently developed.
+- Security claims are backed by tests and documented limitations.
+
+## 1.3 Non-goals for version 0.1
+
+The first release will not attempt to provide:
+
+- Complete Windows application compatibility.
+- Support for every PC, GPU, peripheral, or laptop.
+- A production-ready anti-cheat solution.
+- A complete POSIX implementation.
+- A fully independent graphics driver ecosystem.
+- A secure browser, office suite, and media suite developed from scratch.
+- Formal verification of the entire operating system.
+- A general-purpose hypervisor implemented from scratch.
+- Guaranteed protection against every hardware, firmware, or physical attack.
+
+These capabilities may be investigated later, but they must not block the first working system.
+
+# 2. Architecture Decision Records
+
+The following decisions establish the initial engineering baseline. Each remains subject to review through documented architecture decision records (ADRs).
+
+## ADR-001: Independent kernel
+
+**Decision:** Implement an original Aether kernel.
+
+The kernel will not use Linux, BSD, or an existing microkernel as its production kernel.
+
+Development tools and reference implementations may be used where licensing permits. Reuse of a reference implementation must not be misrepresented as original Aether code.
+
+**Rationale:** Kernel independence is a core project requirement and provides control over the system's process model, capabilities, scheduling, memory management, and security enforcement.
+
+**Consequences:** Driver availability, compatibility, debugging, and kernel maturity will be significant project risks.
+
+## ADR-002: Capability-based microkernel
+
+**Decision:** Use a microkernel architecture with capability-based resource access.
+
+The privileged kernel will implement only mechanisms that require kernel privilege or must be enforced at the lowest level.
+
+Initial kernel responsibilities:
+
+- CPU and thread scheduling.
+- Address-space and memory protection.
+- Interprocess communication primitives.
+- Capability management.
+- Interrupt and exception handling.
+- Timer support.
+- Controlled mapping of hardware resources.
+- Fundamental task lifecycle management.
+
+Filesystem implementations, networking, most device drivers, the application manager, the permission broker, and the desktop will run outside the kernel.
+
+**Rationale:** A small privileged core can reduce the amount of code that must be trusted and allows system services to be isolated independently.
+
+**Consequence:** The operating system will require carefully designed IPC, service supervision, and capability-distribution mechanisms.
+
+Reference material: the seL4 documentation describes capability-based access control and a small privileged kernel. It is a conceptual reference, not a dependency for Aether's kernel.  
+https://docs.sel4.systems/projects/sel4/index.html
+
+## ADR-003: Initial hardware platform
+
+**Decision:** Target x86-64 PCs with UEFI firmware.
+
+The initial development platform will be QEMU with a reproducible virtual hardware configuration. Physical hardware support will be added after the virtual platform is stable.
+
+Initial target assumptions:
+
+- x86-64 processor.
+- UEFI boot.
+- At least two CPU cores.
+- 8 GB RAM for early desktop experiments.
+- 16 GB RAM recommended for later development and Windows VM testing.
+- VirtIO devices for initial virtual storage, networking, and display where practical.
+
+These are development targets, not finalized consumer system requirements.
+
+Firmware interface reference: https://uefi.org/specifications
+
+## ADR-004: Kernel implementation language
+
+**Decision:** Use Rust for most new kernel code, with minimal architecture-specific assembly.
+
+The initial kernel will use a `no_std` environment and carefully selected dependencies.
+
+Unsafe Rust is permitted where required for hardware interaction, but every unsafe boundary must have documented invariants and dedicated tests where possible.
+
+The project will not assume that Rust automatically makes the kernel secure. Memory-management correctness, concurrency, capability validation, integer handling, and hardware interactions remain security-critical.
+
+Reference: https://doc.rust-lang.org/embedded-book/
+
+## ADR-005: Aether-native system interfaces
+
+**Decision:** Define Aether's own system ABI and native application SDK.
+
+The kernel ABI and user-space application ABI must be separate.
+
+Applications will use stable, versioned user-space interfaces rather than depend directly on internal kernel structures.
+
+The SDK will provide:
+
+- Process and task creation.
+- Capability handling.
+- File and directory access.
+- Window and graphics APIs.
+- Input and accessibility interfaces.
+- Networking.
+- Audio.
+- Notifications.
+- Interprocess communication.
+- Permission and portal requests.
+
+Native applications must not require unrestricted raw kernel access.
+
+## ADR-006: Strict application isolation
+
+**Decision:** Deny filesystem and device access by default.
+
+Every application runs inside a distinct security domain with its own private storage and explicitly granted capabilities.
+
+The security boundary must be enforced by kernel mechanisms and trusted system services. A desktop dialog alone is insufficient.
+
+## ADR-007: Windows compatibility
+
+**Decision:** Use Wine/Proton as compatibility technologies and optional virtual machines as a separate execution mode.
+
+Wine/Proton integration will be treated as a major compatibility project. Neither technology can simply be copied into Aether and expected to work: both depend on operating-system interfaces, graphics infrastructure, libraries, and other facilities that Aether must supply or adapt.
+
+Initial compatibility work will focus on architectural feasibility, not a promise of immediate Windows support.
+
+## ADR-008: Graphics architecture
+
+**Decision:** Begin with a simple framebuffer console and a minimal graphics service.
+
+The first milestone will use a framebuffer or virtual display device. A polished desktop and accelerated GPU support are later milestones.
+
+Aether will not initially attempt to create its own full GPU driver ecosystem.
+
+## ADR-009: System updates
+
+**Decision:** Use signed, versioned system images with a recoverable update process.
+
+Applications and user data must be stored separately from the system image.
+
+The update architecture must eventually support:
+
+- Authenticated manifests and artifacts.
+- Version and rollback protection.
+- Interrupted-update recovery.
+- Boot verification where supported.
+- Recovery from an unusable system image.
+- Preservation of user data during system rollback.
+
+## ADR-010: Open-source governance
+
+**Decision:** Publish the project under an open-source governance model.
+
+Proposed initial licensing strategy:
+
+- Kernel: permissive or copyleft open-source license selected after legal review.
+- User-space components: compatible open-source licenses chosen per component.
+- Documentation: a permissive documentation license.
+- Contributor agreements or a Developer Certificate of Origin: selected before accepting substantial external contributions.
+
+No license is finalized by this document.
+
+The project will publish contribution rules, security disclosure procedures, release criteria, and an architecture decision process.
+
+# 3. System Architecture
+
+## 3.1 Architectural layers
+
+### Layer 0 — Hardware and firmware
+
+Responsibilities:
+
+- CPU execution modes and architectural features.
+- Physical memory and interrupt hardware.
+- Timers.
+- UEFI firmware and boot services.
+- Storage and input devices.
+- Graphics hardware.
+
+Hardware-specific behavior must remain behind well-defined interfaces wherever possible.
+
+### Layer 1 — Aether kernel
+
+Subsystems:
+
+1. Boot and architecture initialization.
+2. Physical memory management.
+3. Virtual address-space management.
+4. Thread and scheduling management.
+5. IPC endpoints.
+6. Capability tables and object lifecycle.
+7. Interrupt delivery.
+8. Timer management.
+9. Basic device-resource mapping.
+10. Fault reporting and task termination.
+
+The kernel must not contain a general-purpose filesystem, TCP/IP stack, package manager, GUI toolkit, or application permission dialog.
+
+### Layer 2 — Essential user-space services
+
+Proposed services:
+
+- `initd`: service supervision and system startup.
+- `memd`: user-space memory management policy and allocation services.
+- `devd`: device discovery and driver supervision.
+- `storaged`: storage discovery and block-device access.
+- `fsd`: filesystem implementation and file-object management.
+- `netd`: networking stack and network policy.
+- `securityd`: policy evaluation and capability-grant orchestration.
+- `portald`: trusted user-mediated access requests.
+- `sessiond`: user sessions and application lifecycle.
+- `composerd`: display composition and window management.
+- `audiod`: audio routing and permissions.
+- `updated`: system image verification and update management.
+
+The names are provisional.
+
+Every service must have a documented capability profile. No service should receive all system capabilities merely because it starts early.
+
+### Layer 3 — Desktop environment
+
+Components:
+
+- Aether Shell.
+- Application launcher.
+- Window manager.
+- File manager.
+- Terminal.
+- Settings.
+- Security Center.
+- Notifications.
+- Application installer and store.
+- Recovery interface.
+
+The desktop must not be a security authority. Security decisions must be validated by trusted services and enforced by the kernel or appropriate resource-owning service.
+
+### Layer 4 — Application runtimes
+
+Runtime categories:
+
+- Native Aether runtime.
+- Windows compatibility runtime.
+- Windows virtual machine.
+- Development and diagnostic environments.
+
+Each runtime receives only the capabilities required for its operation.
+
+# 4. Kernel Specification
+
+## 4.1 Capability model
+
+A capability is an unforgeable reference to a kernel object or controlled resource, carrying specific rights.
+
+Proposed rights include:
+
+- `READ`
+- `WRITE`
+- `EXECUTE`
+- `MAP`
+- `TRANSFER`
+- `DERIVE`
+- `ADMINISTER`
+
+Rights must be limited to operations appropriate for each object type.
+
+A capability must not be equivalent to a guessable integer, pathname, process identifier, or user-supplied object name.
+
+### Capability rules
+
+1. Possessing no capability means no authority over the corresponding object.
+2. Capabilities cannot be forged by ordinary applications.
+3. A capability may be transferred only through an authorized IPC mechanism.
+4. Derived capabilities cannot have more authority than their source.
+5. Revocation must have defined semantics.
+6. Capability-table operations must validate bounds, rights, object lifetime, and concurrent access.
+7. Resource destruction must not leave usable references to recycled objects.
+
+Capability revocation is particularly important. If a user revokes a file grant, the system must specify what happens to open handles, mapped memory, child processes, and already-copied data.
+
+Revocation cannot undo information an application has already legitimately read.
+
+## 4.2 Process and thread model
+
+Aether will distinguish between:
+
+- **Task:** A kernel-managed execution container.
+- **Thread:** A scheduled execution context.
+- **Address space:** A protected virtual memory environment.
+- **Capability space:** A task's authorized object references.
+- **Security domain:** The policy boundary for an application or service.
+- **Application instance:** A managed application execution and lifecycle unit.
+
+The initial process model should be intentionally small.
+
+Required behavior:
+
+- Create and destroy tasks.
+- Create and terminate threads.
+- Isolate virtual address spaces.
+- Prevent unauthorized access to kernel memory.
+- Deliver faults to a trusted supervisor.
+- Terminate a faulting application without crashing unrelated applications.
+- Account for resource consumption.
+- Prevent ordinary applications from manipulating arbitrary tasks.
+
+## 4.3 Memory management
+
+Initial requirements:
+
+- Physical page allocation.
+- Virtual memory mapping and unmapping.
+- User/kernel page-table separation.
+- Address-space isolation.
+- Memory permission enforcement.
+- Guard pages where appropriate.
+- Safe handling of mapping failures.
+- Memory pressure reporting.
+- Defined shared-memory semantics.
+
+Shared memory must be created through explicit capabilities. Mapping the same memory into two tasks must not automatically grant either task authority over other memory belonging to the other task.
+
+## 4.4 Scheduling
+
+The first scheduler should prioritize correctness and predictable behavior over advanced optimization.
+
+Requirements:
+
+- Preemptive scheduling.
+- Timer-driven scheduling.
+- Multiple runnable tasks.
+- Thread blocking and wakeup.
+- Basic priority classes.
+- No unbounded busy-waiting in kernel paths.
+- Defined behavior for a task that fails repeatedly.
+
+Real-time guarantees are out of scope for the MVP.
+
+## 4.5 Interprocess communication
+
+IPC is the foundation of the user-space architecture.
+
+Required primitives:
+
+- Message passing.
+- Synchronous request/reply.
+- Notification or event delivery.
+- Capability transfer.
+- Bounded message sizes.
+- Cancellation or timeout semantics.
+- Sender identity where needed.
+- Protection against resource exhaustion.
+
+IPC must not allow a low-privilege application to impersonate a trusted service.
+
+The design must explicitly address deadlocks, denial of service, malformed messages, and cyclic service dependencies.
+
+## 4.6 Hardware security requirements
+
+The kernel should eventually support:
+
+- NX memory protection.
+- Supervisor/user access separation.
+- CPU privilege separation.
+- ASLR where applicable.
+- Stack protections.
+- Mitigations for relevant CPU vulnerabilities.
+- IOMMU isolation where available.
+- Secure boot integration where feasible.
+- Cryptographically secure random-number generation.
+
+The presence of a hardware feature is not proof that it is correctly enabled or sufficient to prevent attacks.
+
+# 5. Security Architecture
+
+## 5.1 Security objectives
+
+Aether's security model will prioritize:
+
+1. Confidentiality of private user data.
+2. Integrity of system files and security policies.
+3. Isolation between applications.
+4. Controlled access to devices and networks.
+5. Secure updates and recovery.
+6. Clear user consent for sensitive access.
+7. Containment of application crashes and compromise.
+
+## 5.2 Threat model
+
+### In-scope adversaries
+
+- Malicious downloaded applications.
+- Compromised or malicious installers.
+- Applications exploiting another application.
+- Compromised browser content.
+- Malformed files targeting parsers.
+- Untrusted application publishers.
+- Applications attempting unauthorized network access.
+- Applications attempting to escape their sandbox.
+- Compromised user-space services.
+- A malicious application attempting to persist across updates.
+
+### Out-of-scope or separately mitigated threats
+
+- An attacker with unrestricted physical access to an unlocked device.
+- Malicious firmware or a compromised hardware supply chain.
+- Hardware side-channel attacks not addressed by the platform.
+- A compromised kernel or boot trust chain.
+- A user deliberately granting an application access to sensitive data.
+- Malware already executing with full administrative authority.
+
+These exclusions do not mean the threats are harmless. They require separate controls and must be documented in the security model.
+
+## 5.3 Security boundaries
+
+Aether must separate at least the following domains:
+
+1. Kernel.
+2. Core system services.
+3. Device drivers.
+4. Application security broker.
+5. Desktop and portal processes.
+6. Native applications.
+7. Individual Windows compatibility environments.
+8. Individual virtual machines.
+9. Recovery environment.
+
+A compromised file manager must not automatically gain kernel authority. A compromised network service must not automatically read application files. A compromised application must not automatically access other applications' capabilities.
+
+## 5.4 File access policy
+
+Default policy:
+
+- Private application storage: read/write for the owning application.
+- Other application storage: denied.
+- User Documents, Downloads, Pictures, and similar folders: denied until granted.
+- Single-file access: preferred.
+- Folder access: explicit and scoped.
+- Network shares: separate grants.
+- Removable media: separate grants.
+- Raw storage devices: denied to normal applications.
+- System files: read-only or inaccessible according to policy.
+- System configuration: modification restricted to designated administration workflows.
+
+The user should be able to grant access for one operation or save a persistent grant.
+
+The policy engine must distinguish read, write, delete, rename, execute, and directory-listing permissions.
+
+## 5.5 File portal protocol
+
+The file portal must provide:
+
+1. Authenticated application identity.
+2. A trusted user interface.
+3. Resource selection.
+4. Scope selection.
+5. Read/write rights selection.
+6. Temporary or persistent grant selection.
+7. Grant storage and revocation.
+8. Audit events.
+9. Safe handling of symlinks, hard links, path traversal, and file replacement.
+10. Defined behavior for open handles after revocation.
+
+A portal must never trust an application to provide its own trusted permission dialog.
+
+## 5.6 Network access
+
+Network access will be denied by default for native applications.
+
+When granted, network permissions should initially support:
+
+- No network.
+- User-approved network access.
+- Optional per-application restrictions.
+- Visible network activity indicators.
+- Revocation of future network access.
+- Auditable connection requests where practical.
+
+Hostname filtering, DNS protection, and fine-grained destination controls may be added later.
+
+Network revocation must account for already-established connections. Closing existing sockets may require cooperation from the networking service.
+
+## 5.7 IPC and service access
+
+Applications may communicate only through documented interfaces and granted endpoints.
+
+The operating system must prevent applications from:
+
+- Enumerating arbitrary processes.
+- Reading another application's memory.
+- Sending arbitrary messages to privileged services.
+- Registering as trusted system services.
+- Impersonating system identities.
+- Acquiring capabilities by guessing identifiers.
+
+## 5.8 Administrative operations
+
+Aether will separate ordinary user authority from system administration.
+
+The terminal runs as the signed-in user by default. It must not automatically provide unrestricted system access.
+
+Administrative operations require an explicit elevation mechanism, a distinct authorization boundary, and clear disclosure of the requested operation.
+
+A malicious terminal command may still delete or expose files the user can already access. Aether cannot replace good authorization boundaries with a confirmation dialog on every command.
+
+## 5.9 Security acceptance policy
+
+No release may claim strong application isolation unless automated tests demonstrate that ungranted access is blocked.
+
+Security-critical failures must block releases regardless of desktop feature completeness.
+
+# 6. Filesystem and Storage Model
+
+## 6.1 Logical layout
+
+The following layout describes the intended user-visible organization:
+
+```text
+Aether/
+├── System/
+│   ├── Boot/
+│   ├── Core/
+│   └── Recovery/
+├── Applications/
+├── Vaults/
+│   └── <application-id>/
+├── Users/
+│   └── <user-id>/
+│       ├── Documents/
+│       ├── Downloads/
+│       ├── Pictures/
+│       ├── Music/
+│       └── Shared/
+├── Packages/
+└── Logs/
+```
+
+This is a logical layout. The physical disk format and partition structure remain implementation decisions.
+
+## 6.2 Storage requirements
+
+- The system image is immutable during normal operation.
+- Applications receive private storage allocations.
+- User data is stored independently of application executables.
+- Filesystem operations validate capabilities rather than trust paths alone.
+- File descriptors and handles are checked for access rights.
+- Untrusted filesystem images are treated as hostile input.
+- Storage failures are reported without silently corrupting unrelated data.
+- User data is not deleted during system rollback.
+
+The first implementation may use a simple custom filesystem or a narrowly selected existing format with an original Aether filesystem service. The project must not attempt a complex production filesystem before the kernel's basic memory and IPC systems are stable.
+
+## 6.3 Encryption
+
+The long-term design should include full-disk or volume encryption with a recovery model that does not silently expose encryption keys to ordinary applications.
+
+Encryption at rest does not protect files from an application that has legitimately received permission to read them.
+
+# 7. Windows Compatibility Specification
+
+## 7.1 Runtime architecture
+
+Windows compatibility is a user-space subsystem, not a kernel privilege.
+
+Aether must expose enough supported OS interfaces for the compatibility runtime to function without granting it unrestricted host access.
+
+The intended execution path is:
+
+```text
+Windows Application
+        |
+        v
+Aether Windows Runtime Manager
+        |
+        v
+Isolated Compatibility Environment
+   ├── Private Windows prefix
+   ├── Registry and configuration
+   ├── Private application files
+   ├── Restricted networking
+   ├── Restricted device interfaces
+   └── Selected-file portal
+        |
+        v
+Aether kernel and system services
+```
+
+## 7.2 Per-application isolation
+
+Each Windows application should receive a distinct compatibility environment by default.
+
+Sharing a prefix requires an explicit user decision and a warning that applications sharing that prefix may access common files and registry data.
+
+The runtime manager must not assume that Wine's own prefix structure constitutes a security sandbox. The Aether security domain must enforce isolation independently.
+
+## 7.3 Wine/Proton feasibility gate
+
+Before committing to full Windows support, the project must complete a technical feasibility study.
+
+This study must identify the minimum host facilities required by the selected Wine/Proton version, including:
+
+- Process creation and thread behavior.
+- Virtual memory and memory mapping.
+- Synchronization primitives.
+- Filesystem semantics.
+- Dynamic library loading.
+- Signals or equivalent exception delivery.
+- Networking.
+- Audio.
+- Windowing and graphics.
+- Input.
+- Timers.
+- Device access.
+- Required compiler, runtime, and build tooling.
+
+Aether must not claim Wine/Proton compatibility until these requirements have been mapped to actual Aether interfaces and tested.
+
+The initial kernel does not need to reproduce the entire Windows or POSIX interface. It does need a credible path to the compatibility requirements before the architecture becomes too rigid to support them.
+
+## 7.4 Virtual machine support
+
+Virtual machine support will be optional and implemented after the native kernel has stable memory management, scheduling, interrupts, and device-resource isolation.
+
+The first approach should evaluate an existing hypervisor or a dedicated virtualization environment rather than build a complete hypervisor from scratch.
+
+VM requirements:
+
+- Separate guest memory.
+- Virtual storage and network devices.
+- Restricted host file sharing.
+- Explicit clipboard and drag-and-drop sharing.
+- No unrestricted host-device passthrough.
+- Clear network policy.
+- VM snapshots and recovery.
+- Isolation tests for guest-to-host access.
+
+Aether must not describe a VM as perfectly isolated. Hypervisors and virtual device models also contain vulnerabilities.
+
+## 7.5 Compatibility classifications
+
+Every tested application will receive one classification:
+
+- **Verified:** Reproducibly passes the Aether test suite.
+- **Compatible:** Works with documented limitations.
+- **Limited:** Some functionality fails or requires workarounds.
+- **Unsupported:** Known incompatibility or security requirement cannot be met.
+
+The compatibility database must identify the application version, runtime version, hardware configuration, and test date.
+
+# 8. Native Application Platform
+
+## 8.1 Application identity
+
+Every application receives a stable reverse-domain identifier, such as:
+
+`org.aether.filemanager`
+
+Identity must not depend solely on the display name or installation path.
+
+## 8.2 Package format
+
+The future `.aether` package format should contain:
+
+- Signed metadata.
+- Package identity and version.
+- Target architecture.
+- Required runtime.
+- Dependencies.
+- Requested permissions.
+- Entry points.
+- Resource limits.
+- Update channel.
+- Publisher information.
+- Uninstall instructions.
+
+Package installation must not permit arbitrary execution with system authority.
+
+## 8.3 Package verification
+
+The package manager must verify:
+
+- Signature validity.
+- Publisher identity.
+- Artifact integrity.
+- Dependency integrity.
+- Version and update policy.
+- Requested capabilities.
+- Package structure.
+- Resource limits and installation paths.
+
+A valid signature is not proof that software is benign.
+
+## 8.4 SDK
+
+The Aether SDK will eventually include:
+
+- System interface definitions.
+- Compiler and linker configuration.
+- Application templates.
+- Capability and permission APIs.
+- File portal integration.
+- GUI framework.
+- Graphics and input APIs.
+- Networking APIs.
+- Testing tools.
+- Package generation.
+- Documentation.
+- A compatibility test harness.
+
+The SDK should evolve independently from the kernel's internal structures.
+
+# 9. Desktop and User Experience
+
+## 9.1 Desktop goals
+
+Aether should provide a consistent, discoverable interface inspired by the strengths of Windows and macOS, while preserving the customization and transparency associated with Linux.
+
+Core applications:
+
+- Aether Shell.
+- Aether Explorer.
+- Aether Settings.
+- Aether Terminal.
+- Aether Security Center.
+- Aether Application Manager.
+- Aether System Monitor.
+- Aether Recovery Manager.
+
+## 9.2 Explorer requirements
+
+The file manager must support:
+
+- User-owned folders.
+- Copy, move, rename, and delete.
+- File previews.
+- Search.
+- Tabs and split panes.
+- Removable storage.
+- Explicit application import/export.
+- Clear permission indicators.
+- Safe file operations.
+- Recovery from interrupted file operations.
+
+Applications may use file portals to import and export data. The file manager is the primary tool for manual organization, but safe application workflows must remain possible.
+
+## 9.3 Terminal requirements
+
+The terminal must:
+
+- Run commands as the ordinary user by default.
+- Display the effective security identity.
+- Make administrative operations explicit.
+- Avoid exposing unrestricted kernel interfaces.
+- Support scripts and development workflows.
+- Provide clear errors for denied capabilities.
+- Offer audit-friendly logging for administrative actions.
+
+## 9.4 Security Center requirements
+
+The Security Center will show:
+
+- Installed applications.
+- Publisher and package verification status.
+- Granted capabilities.
+- Recent access events where supported.
+- Network access status.
+- Device access status.
+- Storage usage.
+- Persistent grants.
+- Revocation controls.
+- Application isolation status.
+
+The interface must reflect enforced policy and actual service state rather than merely display declared permissions.
+
+# 10. Build, Test, and Development Environment
+
+## 10.1 Development platform
+
+Development will initially use a Linux or other suitable host environment for cross-compilation and emulation. This does not change Aether's independent-kernel requirement.
+
+QEMU is the initial virtual hardware target.
+
+Reference: https://www.qemu.org/docs/master/system/
+
+## 10.2 Build requirements
+
+- Reproducible toolchain configuration.
+- Pinned compiler and dependency versions.
+- Version-controlled build scripts.
+- Automated formatting and linting.
+- Unit tests for pure logic.
+- Kernel tests in emulation.
+- Integration tests across IPC boundaries.
+- Automated boot tests.
+- Artifact checksums.
+- Signed release artifacts.
+- Documented clean-build instructions.
+
+## 10.3 Continuous integration
+
+Every pull request should run:
+
+1. Formatting checks.
+2. Static analysis.
+3. Unit tests.
+4. Kernel build.
+5. Boot smoke test.
+6. Basic memory and IPC tests.
+7. Capability enforcement tests.
+8. Dependency and license checks.
+9. Documentation checks.
+
+Security-critical changes require explicit review from a designated maintainer.
+
+## 10.4 Debugging
+
+Early development should prioritize:
+
+- Serial console output.
+- Symbolized kernel logs.
+- Debug builds.
+- Panic reporting.
+- QEMU snapshots.
+- GDB-compatible debugging.
+- Fault-injection tests.
+- Deterministic test configurations where possible.
+
+Logging must not leak passwords, encryption keys, or sensitive file contents.
+
+# 11. Repository Structure
+
+The initial monorepo will use explicit component boundaries.
+
+```text
+aether/
+├── README.md
+├── LICENSE
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md
+├── GOVERNANCE.md
+├── CHANGELOG.md
+├── Cargo.toml
+├── rust-toolchain.toml
+│
+├── docs/
+│   ├── vision.md
+│   ├── roadmap.md
+│   ├── architecture/
+│   │   ├── overview.md
+│   │   ├── kernel.md
+│   │   ├── capabilities.md
+│   │   ├── ipc.md
+│   │   └── boot.md
+│   ├── security/
+│   │   ├── threat-model.md
+│   │   ├── security-boundaries.md
+│   │   └── release-policy.md
+│   ├── decisions/
+│   │   ├── ADR-001-kernel.md
+│   │   ├── ADR-002-microkernel.md
+│   │   └── ADR-003-platform.md
+│   └── specifications/
+│       ├── system-abi.md
+│       ├── package-format.md
+│       └── portal-protocol.md
+│
+├── boot/
+│   ├── loader/
+│   └── architecture/
+│       └── x86_64/
+│
+├── kernel/
+│   ├── arch/
+│   │   └── x86_64/
+│   ├── boot/
+│   ├── memory/
+│   ├── scheduler/
+│   ├── tasks/
+│   ├── capabilities/
+│   ├── ipc/
+│   ├── interrupts/
+│   └── tests/
+│
+├── abi/
+│   ├── definitions/
+│   ├── versioning/
+│   └── documentation/
+│
+├── services/
+│   ├── initd/
+│   ├── devd/
+│   ├── storaged/
+│   ├── fsd/
+│   ├── netd/
+│   ├── securityd/
+│   ├── portald/
+│   └── sessiond/
+│
+├── drivers/
+│   ├── virtual/
+│   └── hardware/
+│
+├── desktop/
+│   ├── shell/
+│   ├── explorer/
+│   ├── settings/
+│   ├── terminal/
+│   └── security-center/
+│
+├── runtimes/
+│   ├── native/
+│   ├── windows/
+│   └── virtual-machine/
+│
+├── sdk/
+│   ├── libraries/
+│   ├── templates/
+│   └── tools/
+│
+├── packaging/
+│   ├── format/
+│   ├── verifier/
+│   └── manager/
+│
+├── updates/
+│   ├── image-builder/
+│   ├── verifier/
+│   └── recovery/
+│
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   ├── security/
+│   ├── boot/
+│   └── compatibility/
+│
+├── tools/
+│   ├── build/
+│   ├── image/
+│   └── debugging/
+│
+└── .github/
+    ├── ISSUE_TEMPLATE/
+    └── workflows/
+```
+
+This structure is a proposed organization. Directories should be created when a component is ready to begin implementation rather than filled with empty placeholders.
+
+# 12. Initial Development Backlog
+
+Priority definitions:
+
+- **P0:** Blocks the first bootable prototype.
+- **P1:** Required for a credible kernel or security milestone.
+- **P2:** Required for a usable early system.
+- **P3:** Later functionality.
+
+Effort estimates are rough engineering person-weeks and should be recalibrated after the first working prototype.
+
+## Epic A — Project foundation
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-001 | P0 | Create repository and contribution rules | 1 |
+| AET-002 | P0 | Write architecture and threat-model documents | 2 |
+| AET-003 | P0 | Select initial license and governance framework | 1 |
+| AET-004 | P0 | Pin cross-compilation toolchain | 1 |
+| AET-005 | P0 | Create automated build pipeline | 2 |
+| AET-006 | P1 | Establish ADR review process | 1 |
+
+**Epic exit condition:** A new contributor can build the project from a clean checkout, run automated tests, and understand the security and contribution rules.
+
+## Epic B — Boot and kernel skeleton
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-010 | P0 | Create UEFI boot path | 2–4 |
+| AET-011 | P0 | Establish x86-64 execution environment | 2–4 |
+| AET-012 | P0 | Configure serial console | 1 |
+| AET-013 | P0 | Add panic and fault reporting | 1–2 |
+| AET-014 | P0 | Boot kernel under QEMU | 2–3 |
+| AET-015 | P1 | Parse memory map and reserve kernel regions | 2–3 |
+| AET-016 | P1 | Add architecture initialization tests | 2 |
+
+**Epic exit condition:** A reproducible build boots under the documented QEMU configuration and produces diagnosable output on success and failure.
+
+## Epic C — Memory and execution
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-020 | P0 | Implement physical page allocator | 3–5 |
+| AET-021 | P0 | Implement kernel page tables | 3–5 |
+| AET-022 | P1 | Establish user/kernel memory separation | 3–5 |
+| AET-023 | P1 | Implement task and thread objects | 3–5 |
+| AET-024 | P1 | Implement timer interrupts | 2–3 |
+| AET-025 | P1 | Implement basic preemptive scheduler | 3–5 |
+| AET-026 | P1 | Add fault containment and task termination | 2–4 |
+
+**Epic exit condition:** Multiple isolated tasks can execute, yield, block, and terminate without corrupting one another's address spaces.
+
+## Epic D — Capabilities and IPC
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-030 | P0 | Define capability object model | 2–3 |
+| AET-031 | P1 | Implement capability tables | 3–5 |
+| AET-032 | P1 | Enforce rights checks | 3–4 |
+| AET-033 | P1 | Implement IPC endpoints | 3–5 |
+| AET-034 | P1 | Implement capability transfer | 3–4 |
+| AET-035 | P1 | Define revocation and object-lifetime rules | 2–4 |
+| AET-036 | P1 | Add adversarial capability tests | 3–5 |
+
+**Epic exit condition:** A task cannot access an object without a valid capability and sufficient rights. Forged identifiers and malformed IPC requests are rejected.
+
+## Epic E — Minimal user space
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-040 | P1 | Implement first user-space loader | 3–5 |
+| AET-041 | P1 | Implement initial supervisor | 3–5 |
+| AET-042 | P1 | Define service startup and failure behavior | 2–3 |
+| AET-043 | P1 | Implement basic console shell | 2–3 |
+| AET-044 | P2 | Add virtual storage driver | 3–5 |
+| AET-045 | P2 | Add initial filesystem service | 4–8 |
+| AET-046 | P2 | Implement file handles and access checks | 3–5 |
+
+**Epic exit condition:** The kernel starts user-space services, accepts basic commands, and accesses a test filesystem through a defined service boundary.
+
+## Epic F — Application security
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-050 | P1 | Define application security-domain model | 2–3 |
+| AET-051 | P1 | Create private application storage | 3–5 |
+| AET-052 | P1 | Implement resource grant model | 3–5 |
+| AET-053 | P1 | Define file portal protocol | 2–4 |
+| AET-054 | P1 | Implement temporary and persistent grants | 4–6 |
+| AET-055 | P1 | Implement grant revocation behavior | 3–5 |
+| AET-056 | P1 | Add sandbox escape regression tests | 4–6 |
+| AET-057 | P2 | Add network and device permission models | 4–8 |
+
+**Epic exit condition:** A test application cannot read or modify an unrelated application's private data or ungranted user files.
+
+## Epic G — Desktop
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-060 | P2 | Define graphics service and window protocol | 3–5 |
+| AET-061 | P2 | Implement basic graphical compositor | 6–10 |
+| AET-062 | P2 | Implement launcher and session shell | 4–8 |
+| AET-063 | P2 | Implement file manager prototype | 5–8 |
+| AET-064 | P2 | Implement Security Center prototype | 4–6 |
+| AET-065 | P3 | Add themes and desktop customization | 4–8 |
+
+**Epic exit condition:** A user can launch a native application, interact with windows, select a file through the trusted portal, and inspect permissions.
+
+## Epic H — Windows compatibility research
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-070 | P1 | Produce Wine/Proton host-interface feasibility report | 3–6 |
+| AET-071 | P1 | Map compatibility requirements to Aether APIs | 3–5 |
+| AET-072 | P2 | Prototype compatibility runtime in isolation | 6–12 |
+| AET-073 | P2 | Implement per-application prefixes | 4–6 |
+| AET-074 | P2 | Test file import/export through portals | 3–5 |
+| AET-075 | P3 | Evaluate isolated Windows VM integration | 6–12 |
+
+**Epic exit condition:** A documented feasibility report identifies the required APIs, missing functionality, security boundaries, and realistic first compatibility target.
+
+## Epic I — Release engineering
+
+| ID | Priority | Task | Estimate |
+|---|---|---|---:|
+| AET-080 | P1 | Create reproducible system images | 3–5 |
+| AET-081 | P1 | Define signing and key-management architecture | 2–4 |
+| AET-082 | P2 | Implement update verification | 3–5 |
+| AET-083 | P2 | Implement recovery image and rollback prototype | 4–8 |
+| AET-084 | P2 | Publish developer and tester documentation | 2–4 |
+| AET-085 | P2 | Conduct external security review | Separate engagement |
+
+**Epic exit condition:** A release candidate can be built reproducibly, verified, booted, and recovered after a deliberately failed update.
+
+### Backlog execution rule
+
+Do not implement all epics concurrently.
+
+The initial critical path is:
+
+**Project foundation → boot → memory protection → task isolation → capabilities and IPC → user space → filesystem → application sandbox → graphical desktop.**
+
+Windows compatibility research can begin in parallel, but full integration must wait until the required Aether interfaces exist.
+
+# 13. MVP Acceptance Tests
+
+The MVP is a bootable, testable development system. It is not yet a daily-use desktop OS.
+
+## AT-001 — Reproducible boot
+
+**Given:** A clean build environment and documented toolchain.
+
+**When:** The kernel image is built and launched under the specified QEMU configuration.
+
+**Then:**
+- The kernel boots without manual debugger intervention.
+- Serial output identifies the build and boot stage.
+- Failures produce diagnosable error output.
+- Automated CI detects a failed boot.
+
+## AT-002 — Address-space isolation
+
+**Given:** Two independent user tasks.
+
+**When:** Task A attempts to read or modify memory belonging to Task B without an authorized shared mapping.
+
+**Then:** The access is blocked by hardware-enforced memory protection, and Task B's memory remains unchanged.
+
+## AT-003 — Capability enforcement
+
+**Given:** A resource owned by Task A.
+
+**When:** Task B attempts to access it without a capability, with a forged identifier, or with insufficient rights.
+
+**Then:** The request is denied without exposing the resource's contents.
+
+## AT-004 — IPC validation
+
+**Given:** A service accepting IPC requests.
+
+**When:** A client submits malformed messages, oversized messages, invalid capability references, or unauthorized operations.
+
+**Then:** Requests are rejected safely, the service remains functional where possible, and the kernel does not crash.
+
+## AT-005 — Application filesystem isolation
+
+**Given:** Applications A and B with separate private storage.
+
+**When:** Application A attempts to read, enumerate, overwrite, or delete Application B's private files.
+
+**Then:** All unauthorized operations fail.
+
+The test must include direct handles and service APIs, not merely pathname checks.
+
+## AT-006 — Selected-file portal
+
+**Given:** An application without general access to the user's Documents directory.
+
+**When:** The user grants access to one selected document.
+
+**Then:**
+- The application can access the selected document with the granted rights.
+- It cannot enumerate unrelated files.
+- It cannot access parent directories merely because the selected file is inside them.
+- A write grant does not imply permission to access unrelated documents.
+
+## AT-007 — Revocation
+
+**Given:** An application with a persistent file grant.
+
+**When:** The user revokes that grant.
+
+**Then:** Future unauthorized operations are denied according to the defined revocation semantics. Existing handles and mappings are handled consistently with the documented policy.
+
+The test must explicitly distinguish preventing future access from undoing information already read.
+
+## AT-008 — Service compromise containment
+
+**Given:** A simulated compromised user-space service.
+
+**When:** The service attempts to access capabilities outside its assigned authority.
+
+**Then:** The kernel denies the requests, and unrelated services continue operating where feasible.
+
+## AT-009 — Administrative boundary
+
+**Given:** An ordinary user terminal.
+
+**When:** A command attempts a privileged system operation without authorization.
+
+**Then:** The operation is denied. No implicit elevation occurs.
+
+## AT-010 — Application fault containment
+
+**Given:** Two unrelated applications.
+
+**When:** One application crashes or submits an invalid request.
+
+**Then:** The other application continues operating unless a documented shared dependency fails.
+
+## AT-011 — Update integrity
+
+**Given:** A valid system image and an intentionally corrupted update artifact.
+
+**When:** The update verifier processes the artifact.
+
+**Then:** The corrupted artifact is rejected and is not activated.
+
+## AT-012 — Recovery
+
+**Given:** A previously working system image and a deliberately failed update.
+
+**When:** The next boot or recovery workflow is invoked.
+
+**Then:** The previous valid image can be selected without silently destroying user data.
+
+## AT-013 — Build integrity
+
+**Given:** A release artifact.
+
+**When:** Its signature or checksum is modified.
+
+**Then:** Verification fails and the artifact is not accepted as authentic.
+
+## AT-014 — Resource exhaustion
+
+**Given:** An untrusted task.
+
+**When:** It repeatedly creates tasks, sends IPC messages, or requests memory beyond its permitted limits.
+
+**Then:** Resource quotas and failure handling prevent uncontrolled exhaustion of protected kernel resources.
+
+## AT-015 — Security regression suite
+
+**Given:** The complete MVP test environment.
+
+**When:** CI executes the security suite.
+
+**Then:** All required security tests pass. A failure in a mandatory isolation test blocks release.
+
+# 14. Phased Implementation Plan
+
+The schedule below is an engineering planning model, not a delivery promise. A new independent kernel introduces substantial uncertainty.
+
+## Phase 0 — Specification and proof of feasibility
+
+**Target:** Months 0–2.
+
+Deliverables:
+
+- Architecture decision records.
+- Threat model.
+- Initial system ABI specification.
+- Capability model.
+- Boot and memory architecture.
+- Toolchain and QEMU baseline.
+- Windows compatibility feasibility plan.
+- Open-source governance documents.
+
+Exit criteria: Architecture is sufficiently specified to implement the kernel skeleton without unresolved contradictions in the security model.
+
+## Phase 1 — Bootable kernel
+
+**Target:** Months 2–5.
+
+Deliverables:
+
+- UEFI boot path.
+- x86-64 initialization.
+- Serial console.
+- Memory map handling.
+- Panic reporting.
+- Physical memory allocator.
+- Initial virtual memory support.
+- Automated boot tests.
+
+Exit criteria: Reproducible kernel boot and basic memory-management tests.
+
+## Phase 2 — Isolated execution
+
+**Target:** Months 5–9.
+
+Deliverables:
+
+- Task and thread management.
+- Preemptive scheduler.
+- Address-space isolation.
+- Capability objects.
+- IPC primitives.
+- Capability transfer and validation.
+- User-space loader.
+- Service supervision.
+
+Exit criteria: Multiple independent user tasks run under enforced memory and object-access boundaries.
+
+## Phase 3 — Minimal operating system
+
+**Target:** Months 9–14.
+
+Deliverables:
+
+- Basic storage service.
+- Initial filesystem.
+- File handles.
+- User terminal.
+- Application lifecycle manager.
+- Security-domain implementation.
+- Private application storage.
+- Automated sandbox tests.
+
+Exit criteria: A small native application can run and is demonstrably unable to access ungranted resources.
+
+## Phase 4 — Native desktop prototype
+
+**Target:** Months 14–20.
+
+Deliverables:
+
+- Graphics and input service.
+- Basic compositor.
+- Desktop shell.
+- File manager.
+- Settings and Security Center.
+- File portal.
+- Initial native application SDK.
+- System image and recovery prototype.
+
+Exit criteria: A user can boot the graphical system, launch applications, choose files through the portal, and inspect permissions.
+
+## Phase 5 — Compatibility and developer alpha
+
+**Target:** Months 20–30+.
+
+Deliverables:
+
+- Windows compatibility prototype, if feasibility requirements have been met.
+- Application packaging.
+- Runtime isolation.
+- Initial compatibility test suite.
+- Optional VM research.
+- Better storage, networking, audio, and graphics.
+- Developer documentation.
+- External security review.
+
+Exit criteria: A credible developer alpha with documented compatibility limitations and repeatable security tests.
+
+## Phase 6 — Public beta and release engineering
+
+**Target:** After the developer alpha.
+
+Deliverables:
+
+- Stable supported-hardware list.
+- Installer and recovery workflow.
+- Signed updates.
+- Public compatibility database.
+- Accessibility and usability improvements.
+- Security response process.
+- Community contribution program.
+- Release qualification testing.
+
+Exit criteria: The project can publish, update, recover, and maintain a release without relying on undocumented manual procedures.
+
+# 15. Governance and Community Development
+
+## 15.1 Project roles
+
+Proposed roles:
+
+- **Project maintainers:** Manage releases and repository health.
+- **Kernel maintainers:** Review architecture and privileged code.
+- **Security team:** Handle vulnerabilities and security-critical review.
+- **Subsystem maintainers:** Own defined services and desktop components.
+- **Community contributors:** Submit issues, documentation, tests, and code.
+- **Release manager:** Coordinates release qualification.
+
+## 15.2 Contribution policy
+
+All contributions must include:
+
+- A clear purpose.
+- Relevant tests.
+- Documentation for public interfaces.
+- License compliance.
+- No undocumented privilege escalation.
+- Review by appropriate maintainers.
+- Security review when changing trust boundaries.
+
+## 15.3 Governance principles
+
+- Architecture decisions are recorded publicly.
+- Security issues have a private reporting path.
+- Public releases include known limitations.
+- Breaking API changes require a documented migration plan.
+- Maintainers cannot waive mandatory security tests without a documented exception process.
+- Community participation does not require agreement with a single commercial sponsor.
+
+# 16. Major Project Risks
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Kernel scope expands too quickly | Critical | Keep kernel small and defer advanced features |
+| Driver availability is poor | High | Start with QEMU and a tightly defined hardware target |
+| Windows compatibility is infeasible on the initial ABI | Critical | Conduct compatibility feasibility research early |
+| Security broker becomes overprivileged | Critical | Minimize its capabilities and isolate policy components |
+| IPC introduces vulnerabilities | High | Bound messages, validate capabilities, fuzz interfaces |
+| Storage implementation corrupts user data | Critical | Start with limited features, testing, and recovery |
+| Graphics work consumes the project | High | Begin with framebuffer output and incremental graphics |
+| Updates break bootability | High | Use verified images and a recovery path |
+| Community contributions fragment architecture | Medium | Require ADRs and interface review |
+| Project claims exceed actual assurance | High | Publish test results, limitations, and security review status |
+
+# 17. Initial Release Definition
+
+Aether 0.1 will be called a **kernel and security research prototype**, not a production desktop OS.
+
+It is complete when it can:
+
+1. Boot reproducibly on the supported virtual platform.
+2. Run isolated user-space tasks.
+3. Enforce capability-based access to kernel objects.
+4. Provide bounded IPC between services.
+5. Demonstrate memory and application isolation.
+6. Access a basic test filesystem through user-space services.
+7. Run a simple native application.
+8. Reject unauthorized filesystem operations.
+9. Execute its mandatory automated security tests.
+10. Publish reproducible build instructions and known limitations.
+
+Aether 0.1 does not need a polished desktop, a complete package store, or Windows compatibility.
+
+Those are later milestones.
+
+# 18. Immediate First Sprint
+
+The first sprint should be limited to project setup and a bootable proof of concept.
+
+**Sprint duration:** Two weeks.
+
+### Tasks
+
+- [ ] Create the Aether repository.
+- [ ] Publish the initial project README.
+- [ ] Create the threat-model document.
+- [ ] Create the kernel architecture ADR.
+- [ ] Select and pin the cross-compilation toolchain.
+- [ ] Configure QEMU for the initial x86-64 target.
+- [ ] Create a minimal UEFI boot path.
+- [ ] Print a kernel startup message to the serial console.
+- [ ] Add a CI workflow that builds and boots the image.
+- [ ] Document how another contributor can reproduce the result.
+
+### Sprint acceptance criteria
+
+The sprint is complete when a clean checkout produces a bootable kernel image, the image starts under the documented QEMU configuration, the startup message appears in the serial output, and CI detects a deliberately broken build or boot.
+
+Do not add a scheduler, filesystem, graphical desktop, or Windows runtime during this sprint.
+
+The purpose is to establish a reproducible engineering foundation before the project accumulates complexity.
+
+---
+
+# Final Architecture Position
+
+Aether's defining feature will not be its visual theme or the number of Windows applications it can launch. It will be its ability to provide useful desktop functionality while maintaining clear, enforceable boundaries between applications, user data, and the system.
+
+The project should measure progress in two dimensions:
+
+- **Capability:** What can the operating system do?
+- **Assurance:** What evidence demonstrates that it does not allow unauthorized actions?
+
+A feature that increases capability but compromises the security model must be redesigned or rejected.
+
+The long-term objective is a complete desktop operating system with an original kernel, a coherent user experience, a native application ecosystem, Windows compatibility, recoverable updates, and transparent open-source governance.
+
+The first milestone is much smaller: boot the kernel, establish memory isolation, and prove that capabilities are enforced. Everything else builds on that foundation.
