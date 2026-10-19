@@ -200,9 +200,11 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
     );
 
     let mut map_key = unsafe { current_map_key(services, map_page)? };
+    let mut last_status = SUCCESS;
     for attempt in 0..8 {
         // SAFETY: Firmware contract; boot services are still active.
         let status = unsafe { (services.exit_boot_services)(handle, map_key) };
+        last_status = status;
         if status == SUCCESS {
             serial_line!(
                 "loader: boot services exited after {} attempt(s)",
@@ -235,7 +237,7 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
         }
     }
 
-    Err(LoadError::ExitBootServices(1))
+    Err(LoadError::ExitBootServices(last_status))
 }
 
 unsafe fn current_map_key(services: &BootServices, map_page: u64) -> Result<usize, LoadError> {
