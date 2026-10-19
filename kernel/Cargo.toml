@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 aether-abi = { path = "../abi" }
 aether-memory = { path = "memory" }
+aether-ipc = { path = "ipc" }
 
 [features]
 # Boot with a deliberate breakpoint to exercise the exception path.
