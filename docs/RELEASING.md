@@ -39,6 +39,13 @@ Approve the waiting run under **Actions**. The tag's version (without the
 `v`) becomes the system image version; it must be higher than the
 `min_version` floor of installs that should accept it.
 
+The workflow materializes `AETHER_SIGNING_KEY` before the first `make`, so
+Settings, App Store and every other package built for the ISO are signed with
+the release key. It also exports `SOURCE_DATE_EPOCH` from the tag commit:
+two clean builds of the same commit must produce identical assets. Follow
+[RELEASE-CHECKLIST.md](RELEASE-CHECKLIST.md) for a key or update change, and
+[SECUREBOOT.md](SECUREBOOT.md) to sign the loader for Secure Boot.
+
 ## Checking a release
 
 - `SHA256SUMS` matches the downloaded assets.

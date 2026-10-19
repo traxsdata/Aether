@@ -382,7 +382,7 @@ impl Installer {
                 github::verify_digest(&bytes, asset.digest.as_deref())?;
                 let bytes = github::package_bytes(&asset, bytes)?;
                 check_package_name(&bytes, &expected)?;
-                sys::app_install(&bytes, replace).map_err(|e| e.to_string())
+                sys::app_install_signed(&bytes, replace).map_err(|e| e.to_string())
             })();
             let _ = tx.send(Msg::Installed(repo2, result));
         });
@@ -416,7 +416,7 @@ impl Installer {
                     github::verify_digest(&bytes, asset.digest.as_deref())?;
                     let bytes = github::package_bytes(&asset, bytes)?;
                     check_package_name(&bytes, &expected)?;
-                    sys::app_install(&bytes, replace).map_err(|e| e.to_string())
+                    sys::app_install_signed(&bytes, replace).map_err(|e| e.to_string())
                 })();
                 let _ = tx.send(Msg::Installed(repo, result));
             }

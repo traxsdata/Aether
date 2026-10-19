@@ -69,12 +69,29 @@ struct app_header {
     uint32_t icon_width, icon_height;
     uint32_t icon_offset, icon_size;
     uint8_t icon_sha256[32];
-    uint8_t reserved[188];
+    /*
+     * Optional publisher signature (1.4). The signature is a 256-byte
+     * RSASSA-PKCS1-v1_5/SHA-256 trailer after the icon. It covers every byte
+     * from the start of the package up to `sig_offset` (the header, ELF and
+     * icon), so changing any of them invalidates it. `sig_offset` must be the
+     * end of the package.
+     */
+    uint32_t sig_algorithm; /* APP_SIG_* */
+    uint32_t sig_size;
+    uint32_t sig_offset;
+    uint32_t sig_publisher; /* APP_PUBLISHER_* */
+    uint8_t reserved[172];
 };
 _Static_assert(sizeof(struct app_header) == 512, "app header");
 
 #define APP_ICON_NONE 0
 #define APP_ICON_RGBA 1
+
+#define APP_SIG_NONE 0
+#define APP_SIG_RSA2048_SHA256 1
+#define APP_SIG_SIZE 256
+#define APP_PUBLISHER_NONE 0
+#define APP_PUBLISHER_AETHER 1 /* the offline release key in common/release_key.h */
 
 /* 0 if the package header and image are valid, else why not. The image's hash
  * is only checked if `hash` is set. Neither checks for a name collision. */
@@ -84,6 +101,13 @@ const char *app_check_header(const struct app_header *h, uint64_t size, int hash
 const char *app_check_icon(const struct app_header *h, uint64_t size);
 /* As above, and refuses a name already in the program table. */
 const char *app_check(const struct app_header *h, uint64_t size, int hash);
+/* Shape of the optional signature trailer (bounds and algorithm). */
+const char *app_check_signature_shape(const struct app_header *h, uint64_t size);
+/* Verify the signature with the built-in publisher key. `digest` is the
+ * SHA-256 of header+ELF+icon; the caller computes it. Returns 0 or why not. */
+const char *app_verify_signature(const struct app_header *h, uint64_t size);
+/* 1 when the package carries a well-formed signature (not verified here). */
+int app_is_signed(const struct app_header *h, uint64_t size);
 /* An installed app's image matches its package hash (checked once, on first start). */
 int program_verify(const struct program *p);
 

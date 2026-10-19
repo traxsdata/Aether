@@ -16,6 +16,28 @@ Workstation and real laptops today.
 - The Security page now combines auto-lock, Lock Now, passphrase change and
   the storage/protection status.
 
+## What's new in 1.4
+
+- **Signed app packages.** A package can carry an RSA-2048 publisher
+  signature over its header, ELF and icon. App Store downloads must have a
+  valid signature from the release key, so a compromised release account or a
+  tampered download cannot publish an app. Local files stay installable, but
+  an invalid signature is always refused. Builds sign packages when
+  `AETHER_SIGNING_KEY` is set.
+
+- **A release chain you can audit.** `docs/SECUREBOOT.md` covers signing the
+  loader and enrolling the machine owner's key; `docs/RELEASE-CHECKLIST.md`
+  is the two-person review for key rotations and boot-control changes.
+  `SOURCE_DATE_EPOCH` makes image builds reproducible.
+
+- **Rollback stays tied to a higher floor.** Updates already refuse an image
+  below `bootcontrol.min_version`; 1.4 adds the release checklist and
+  documents how a key rotation keeps that floor honest.
+
+- **The 1.x plan is back in the tree** (`docs/PLAN-1.x.md` and
+  `docs/LINUX-APPS.md`), so 1.4 is based on the full roadmap rather than the
+  1.3 slice alone.
+
 ## What's new in 1.0
 
 - **A desktop you can leave alone.** **Super+L** or the æ menu locks the

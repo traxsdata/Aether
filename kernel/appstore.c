@@ -82,6 +82,7 @@ void appstore_init(void) {
         struct app_header *h = P2V(phys);
         const char *why = app_check_header(h, n.size, 0);
         if (!why) why = app_check_icon(h, n.size);
+        if (!why && app_is_signed(h, n.size)) why = app_verify_signature(h, n.size);
         if (why) {
             kprintf("[apps] skipping %s: %s\n", name, why);
             pmm_free_contig(phys, pages);
@@ -146,6 +147,20 @@ int appstore_install(uint64_t package_phys, uint64_t len, uint32_t flags) {
     const char *why = app_check_header(h, len, 1);
     if (why) {
         kprintf("[apps] refusing package: %s\n", why);
+        return -E_INVAL;
+    }
+    /* The App Store's network path asks for a publisher signature: HTTPS and
+     * a release digest protect the download, but only the signature says who
+     * built the package. Local files may still be unsigned (and are shown as
+     * such before install). */
+    if (flags & APP_INSTALL_SIGNED) {
+        why = app_verify_signature(h, len);
+        if (why) {
+            kprintf("[apps] refusing package: %s\n", why);
+            return -E_DENIED;
+        }
+    } else if (app_is_signed(h, len) && app_verify_signature(h, len)) {
+        kprintf("[apps] refusing package: bad signature\n");
         return -E_INVAL;
     }
     if (system_app_find(h->name)) return -E_PERM;

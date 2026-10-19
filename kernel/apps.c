@@ -12,6 +12,8 @@
  * a window, the picker, a private folder and the network.
  */
 #include "apps.h"
+#include "../common/release_key.h"
+#include "../common/rsa_verify.h"
 #include "../include/abi.h"
 #include "../include/bootinfo.h"
 #include "crypto.h"
@@ -134,6 +136,40 @@ const char *app_check_icon(const struct app_header *h, uint64_t size) {
     return icon_check(h, size, 1);
 }
 
+/* The signature trailer is optional before 1.4 and required for packages the
+ * App Store downloads (APP_INSTALL_SIGNED). Its shape is always checked, so
+ * a package cannot hide data past the part that is hashed. */
+const char *app_check_signature_shape(const struct app_header *h, uint64_t size) {
+    if (h->sig_algorithm == APP_SIG_NONE) {
+        if (h->sig_size || h->sig_offset || h->sig_publisher) return "bad app signature fields";
+        return 0;
+    }
+    if (h->sig_algorithm != APP_SIG_RSA2048_SHA256 || h->sig_size != APP_SIG_SIZE) return "unknown app signature";
+    if (h->sig_publisher != APP_PUBLISHER_AETHER) return "unknown app publisher";
+    /* The trailer is the last thing in the package, after the icon. */
+    uint64_t body = (uint64_t)sizeof *h + h->elf_size;
+    if (h->icon_format == APP_ICON_RGBA) body += h->icon_size;
+    if (h->sig_offset != body || h->sig_offset > size || h->sig_size > size - h->sig_offset)
+        return "bad app signature offset";
+    if (h->sig_offset + h->sig_size != size) return "data after app signature";
+    return 0;
+}
+
+int app_is_signed(const struct app_header *h, uint64_t size) {
+    return h->sig_algorithm != APP_SIG_NONE && !app_check_signature_shape(h, size);
+}
+
+const char *app_verify_signature(const struct app_header *h, uint64_t size) {
+    const char *why = app_check_signature_shape(h, size);
+    if (why) return why;
+    if (h->sig_algorithm == APP_SIG_NONE) return "app package is not signed";
+    uint8_t digest[32];
+    sha256((const uint8_t *)h, h->sig_offset, digest);
+    if (!rsa_verify_sha256(digest, (const uint8_t *)h + h->sig_offset, aether_release_modulus))
+        return "app signature is not from the release key";
+    return 0;
+}
+
 const char *app_check_header(const struct app_header *h, uint64_t size, int hash) {
     if (size < sizeof *h || memcmp(h->magic, APP_MAGIC, 8) || h->header_size != sizeof *h || h->format != 1)
         return "not an æther app package";
@@ -145,6 +181,8 @@ const char *app_check_header(const struct app_header *h, uint64_t size, int hash
     if (elf_check(image, h->elf_size, 1)) return "invalid or unsafe program image";
     const char *icon_why = icon_check(h, size, hash);
     if (icon_why) return icon_why;
+    const char *sig_why = app_check_signature_shape(h, size);
+    if (sig_why) return sig_why;
     /* Native (æther-ABI) programs are fixed-address executables; only the
      * Linux layer loads position-independent images. */
     if (h->abi == ABI_AETHER && *(const uint16_t *)(image + 16) != 2)

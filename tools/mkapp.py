@@ -15,10 +15,12 @@ outgoing connections, whatever the header asks for.
 The icon must be a non-interlaced 8-bit PNG (gray, RGB, palette, gray+alpha or
 RGBA), at most 256x256. It is stored as RGBA8888 at the end of the package.
 """
-import argparse, hashlib, re, struct, sys, zlib
+import argparse, hashlib, os, re, struct, subprocess, sys, tempfile, zlib
 
 CAP_WINDOW, CAP_PICK, CAP_STORAGE, CAP_NET = 0x01, 0x40, 0x80, 0x100
 ICON_MAX = 256
+SIG_RSA2048_SHA256 = 1
+SIG_SIZE = 256
 
 
 def field(s, n):
@@ -139,6 +141,38 @@ def read_png(path):
     return w, h, bytes(out)
 
 
+def sign_package(key, body):
+    """RSA-2048 PKCS#1 v1.5 SHA-256 over the header, ELF and icon."""
+    header_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common", "release_key.h")
+    try:
+        trusted_hex = re.findall(r"0x([0-9a-fA-F]{2})", open(header_path).read().split("aether_release_modulus", 1)[1])
+        trusted = bytes(int(x, 16) for x in trusted_hex)
+    except OSError:
+        raise SystemExit(f"mkapp: cannot read {header_path}")
+    modulus = subprocess.check_output(["openssl", "rsa", "-in", key, "-noout", "-modulus"],
+                                      stderr=subprocess.DEVNULL).decode().strip().split("=", 1)[1].lower()
+    if len(trusted) != 256 or trusted.hex() != modulus:
+        raise SystemExit("mkapp: this key doesn't match common/release_key.h; "
+                         "the kernel would reject every package it signs")
+    with tempfile.NamedTemporaryFile(prefix="aether-app-", delete=False) as tf:
+        tf.write(body)
+        body_path = tf.name
+    sig_path = body_path + ".sig"
+    try:
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", key, "-out", sig_path, body_path],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        signature = open(sig_path, "rb").read()
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"mkapp: signing failed: {e.stderr.decode(errors='replace').strip()}")
+    finally:
+        os.unlink(body_path)
+        if os.path.exists(sig_path):
+            os.unlink(sig_path)
+    if len(signature) != SIG_SIZE:
+        raise SystemExit(f"mkapp: expected a {SIG_SIZE}-byte RSA-2048 signature, got {len(signature)}")
+    return signature
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--name", required=True)
@@ -153,6 +187,8 @@ def main():
     ap.add_argument("--no-window", action="store_true", help="a console program: no window, not in the dock")
     ap.add_argument("--no-storage", action="store_true", help="no private folder")
     ap.add_argument("--net", action="store_true", help="ask for outgoing connections (CAP_NET, checked by the firewall)")
+    ap.add_argument("--key", default=os.environ.get("AETHER_APP_SIGNING_KEY"),
+                    help="RSA-2048 private key whose public half is the kernel's publisher key")
     ap.add_argument("elf")
     ap.add_argument("out")
     a = ap.parse_args()
@@ -175,12 +211,20 @@ def main():
         hdr += struct.pack("<5I", 1, iw, ih, offset, len(icon)) + hashlib.sha256(icon).digest()
     else:
         hdr += struct.pack("<5I", 0, 0, 0, 0, 0) + b"\0" * 32
+    body_len = 512 + len(elf) + (len(icon) if icon else 0)
+    if a.key:
+        hdr += struct.pack("<4I", SIG_RSA2048_SHA256, SIG_SIZE, body_len, 1)
+    else:
+        hdr += struct.pack("<4I", 0, 0, 0, 0)
     hdr = hdr.ljust(512, b"\0")
     assert len(hdr) == 512
+    body = hdr + elf + (icon or b"")
+    signature = sign_package(a.key, body) if a.key else b""
     with open(a.out, "wb") as f:
-        f.write(hdr + elf + (icon or b""))
+        f.write(body + signature)
     extra = f", icon {iw}x{ih}" if icon else ""
-    print(f"mkapp: {a.out} ({len(elf) // 1024} KiB, {a.abi}{extra})")
+    signed = ", signed" if signature else ", unsigned"
+    print(f"mkapp: {a.out} ({len(elf) // 1024} KiB, {a.abi}{extra}{signed})")
 
 
 if __name__ == "__main__":

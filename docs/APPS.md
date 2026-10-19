@@ -96,13 +96,27 @@ updates are handled by the OS tab instead.
 ## What is and is not verified
 
 The kernel verifies integrity: the package header, name, SHA-256 and the whole
-ELF image (and the optional icon). App Store additionally requires the
-release's SHA-256 digest for downloads. This is **not** a signature: a local
-file, or a release account that has been compromised, can still ship a
-package it built. OS system images are different: they are RSA-signed by the
-offline release key and the signed header pins the boot image's hash.
-Signed app packages are on the 1.x roadmap; until then, install packages only
-from sources you trust.
+ELF image (and the optional icon). Since **1.4** a package may also carry a
+publisher signature: a 256-byte RSA-2048 PKCS#1 v1.5 SHA-256 trailer after the
+icon. It covers the header, ELF and icon, so changing any of them invalidates
+the signature. The kernel's trust anchor is the same offline release key as
+the OS image (`common/release_key.h`).
+
+- **App Store downloads must be signed.** The installer passes
+  `APP_INSTALL_SIGNED`; the kernel refuses a download with a missing, changed
+  or non-release signature even if HTTPS and the release digest matched.
+- **Local package files may be unsigned.** A file you choose yourself is
+  accepted with the integrity checks only; the App Store shows its source
+  before installation. An invalid signature is always refused.
+- **Updates keep the old permissions.** A signed update cannot add `CAP_NET`
+  or `CAP_PICK`; remove and reinstall deliberately to widen them.
+
+A release account that has been compromised still cannot publish a package
+signed by the offline key. Build packages with
+`AETHER_APP_SIGNING_KEY=/secure/aether-release.pem make` (or pass `--key` to
+`tools/mkapp.py`). The key must match `common/release_key.h`; the build
+refuses one the kernel would not trust. OS system images are signed the same
+way, and the loader pins the boot image's hash.
 
 ## Craft apps from GitHub
 

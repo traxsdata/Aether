@@ -10,8 +10,16 @@
 
 BUILD := build
 CC    := clang
-VERSION ?= 1.3.0
-BUILD_DATE ?= $(shell date -u '+%Y-%m-%d %H:%M UTC')
+VERSION ?= 1.4.0
+# Set SOURCE_DATE_EPOCH to make the build date (and therefore the image)
+# reproducible. CI uses the tag's commit time.
+SOURCE_DATE_EPOCH ?=
+BUILD_DATE ?= $(if $(SOURCE_DATE_EPOCH),$(shell date -u -d '@$(SOURCE_DATE_EPOCH)' '+%Y-%m-%d %H:%M UTC'),$(shell date -u '+%Y-%m-%d %H:%M UTC'))
+# Optional publisher key for app packages. CI sets AETHER_SIGNING_KEY to the
+# offline release key; a local build without it produces unsigned packages
+# (accepted for local installs, refused by the App Store's network path).
+AETHER_APP_SIGNING_KEY ?= $(AETHER_SIGNING_KEY)
+export AETHER_APP_SIGNING_KEY
 
 COMMON_FLAGS := -ffreestanding -fno-builtin -std=c11 -O2 -g -Wall -Wextra -Wno-unused-parameter
 

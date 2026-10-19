@@ -17,6 +17,8 @@
  * freed, and the live file system is parked while `files` runs.
  */
 #include "ktest.h"
+#include "ktest_rsa.h"
+#include "../common/rsa_verify.h"
 #include "../include/abi.h"
 #include "afs.h"
 #include "apps.h"
@@ -835,6 +837,21 @@ static void t_runner_pie(void) {
     kfree(img);
 }
 
+static void t_runner_signature(void) {
+    /* The verifier is the same RSA-2048 PKCS#1 v1.5 code the loader and the
+     * App Store trust anchor use; this is a known-good test vector. */
+    uint8_t digest[32];
+    sha256((const uint8_t *)ktest_rsa_message, sizeof ktest_rsa_message - 1, digest);
+    KT_CHECK(rsa_verify_sha256(digest, ktest_rsa_sig, ktest_rsa_pub));
+    digest[0] ^= 1;
+    KT_CHECK(!rsa_verify_sha256(digest, ktest_rsa_sig, ktest_rsa_pub)); /* changed message */
+    digest[0] ^= 1;
+    uint8_t sig[256];
+    memcpy(sig, ktest_rsa_sig, sizeof sig);
+    sig[255] ^= 1;
+    KT_CHECK(!rsa_verify_sha256(digest, sig, ktest_rsa_pub)); /* changed signature */
+}
+
 static void t_runner_package(void) {
     uint64_t esize;
     uint8_t *elf = tiny_elf(3, 5, 0, &esize);
@@ -888,6 +905,19 @@ static void t_runner_package(void) {
     h->abi = ABI_AETHER;
     KT_CHECK(app_check(h, size, 1) != 0);
     h->abi = ABI_LINUX;
+    /* Signature fields: absent means all zero; a present signature must be a
+     * 256-byte trailer after the icon and nothing may follow it. */
+    KT_CHECK(app_check(h, size, 1) == 0);
+    h->sig_algorithm = APP_SIG_RSA2048_SHA256;
+    h->sig_size = APP_SIG_SIZE;
+    h->sig_offset = (uint32_t)size;
+    h->sig_publisher = APP_PUBLISHER_AETHER;
+    KT_CHECK(app_check_signature_shape(h, size) != 0); /* no room for a trailer */
+    h->sig_offset = (uint32_t)size - 8;
+    KT_CHECK(app_check_signature_shape(h, size) != 0);
+    h->sig_algorithm = APP_SIG_NONE;
+    h->sig_size = h->sig_offset = h->sig_publisher = 0;
+    KT_CHECK(app_check_signature_shape(h, size) == 0);
     kfree(elf);
     kfree(pkg);
 }
@@ -1274,6 +1304,7 @@ static const struct ktest {
     {"runner", "unsafe or incomplete programs refused", t_runner_elf},
     {"runner", "Linux programs load at a random base", t_runner_pie},
     {"runner", "app packages: checksum, name, size", t_runner_package},
+    {"runner", "publisher signatures verify and reject changes", t_runner_signature},
     {"runner", "the app store installs and removes a package", t_runner_appstore},
     {"runner", "memory made on first touch, W^X kept", t_runner_lazy},
     {"runner", "the memory limit holds on first touch", t_runner_quota},

@@ -391,6 +391,16 @@ pub fn app_install(package: &[u8], replace: bool) -> Result<(), Error> {
     .map(|_| ())
 }
 
+/// Install a package downloaded from a release. The kernel must verify its
+/// publisher signature; a local file uses `app_install` instead.
+pub fn app_install_signed(package: &[u8], replace: bool) -> Result<(), Error> {
+    let flags = APP_INSTALL_SIGNED | if replace { APP_INSTALL_REPLACE } else { 0 };
+    check(unsafe {
+        syscall5(SYS_APP_INSTALL, package.as_ptr() as u64, package.len() as u64, flags as u64, 0, 0)
+    })
+    .map(|_| ())
+}
+
 pub fn app_remove(name: &str) -> Result<(), Error> {
     if name.is_empty() || name.len() >= APP_NAME_MAX {
         return Err(Error(E_INVAL));

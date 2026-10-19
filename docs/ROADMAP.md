@@ -2,6 +2,9 @@
 
 ## Done
 
+- **1.4** Signed app packages and a publisher key; Secure Boot loader
+  signing; reproducible image builds; a release/key-rotation checklist.
+
 - **1.0** Session lock and idle auto-lock; per-thread system dialogs; focus
   theft, window-slot and DLP metadata fixes; hostile-superblock and truncate
   hardening; boot-image pinning in the signed system image; app updates that

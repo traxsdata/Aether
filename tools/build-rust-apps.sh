@@ -27,6 +27,11 @@ echo "build-rust-apps: building settings installer" >&2
 cargo build --release --target "$TARGET" --manifest-path runner/Cargo.toml \
     -p settings -p installer
 
+KEY_ARGS=""
+if [ -n "${AETHER_APP_SIGNING_KEY:-}" ]; then
+    KEY_ARGS="--key $AETHER_APP_SIGNING_KEY"
+fi
+
 package() {
     name=$1
     title=$2
@@ -36,8 +41,9 @@ package() {
     elf="runner/target/$TARGET/release/$name"
     [ -f "$elf" ] || { echo "build-rust-apps: $elf is missing" >&2; exit 1; }
     strip -o "$OUT/$name.elf" "$elf"
-    tools/mkapp.py --name "$name" --title "$title" --version 0.8.0 \
-        --source "aether/runner/apps/$name" --quota "$quota" --color "$color" "$@" \
+    # shellcheck disable=SC2086
+    tools/mkapp.py --name "$name" --title "$title" --version 1.4.0 \
+        --source "aether/runner/apps/$name" --quota "$quota" --color "$color" $KEY_ARGS "$@" \
         "$OUT/$name.elf" "build/apps/$name.app"
 }
 

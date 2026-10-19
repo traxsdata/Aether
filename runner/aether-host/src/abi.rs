@@ -432,6 +432,7 @@ impl Default for app_info {
 }
 
 pub const APP_INSTALL_REPLACE: u32 = 1;
+pub const APP_INSTALL_SIGNED: u32 = 2;
 
 pub const SETTINGS_KEY_MAX: usize = 32;
 pub const SETTINGS_VALUE_MAX: usize = 128;

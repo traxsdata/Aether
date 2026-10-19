@@ -238,6 +238,7 @@ struct app_info {
 };
 
 #define APP_INSTALL_REPLACE 1 /* allow replacing an existing, non-system app */
+#define APP_INSTALL_SIGNED  2 /* require a valid publisher signature (network downloads) */
 
 /* ---- Settings ---------------------------------------------------------- */
 #define SETTINGS_KEY_MAX 32
