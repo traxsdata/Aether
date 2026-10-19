@@ -10,10 +10,10 @@
 
 ## Current scope
 
-Aether is a bootable research prototype. The only implemented security
-boundaries are firmware → loader and loader → kernel. There is no user mode,
-capability enforcement, IPC, or filesystem, so those threats are recorded as
-planned work rather than mitigated today.
+Aether is a bootable research prototype. The implemented boundaries are
+firmware → loader, loader → kernel, and kernel-task → kernel-task address-space
+isolation. There is no user mode, capability enforcement, IPC, or filesystem,
+so those threats are recorded as planned work rather than mitigated today.
 
 ### In-scope adversaries
 
@@ -47,6 +47,8 @@ planned work rather than mitigated today.
 | Boot path | Allocator reuses firmware page tables or kernel memory | Reserve kernel/hand-off; release boot services only after CR3 switch; double-free checks | Implemented, host-tested |
 | Boot path | A fault during memory setup resets silently | IDT installed before paging; structured vector/RIP/CR2 report; fault self-test | Implemented, QEMU-tested |
 | Kernel memory | Kernel text writable or data executable | 4 KiB W^X page permissions for the kernel image | Implemented; not yet adversarially tested |
+| Kernel task → task | One task reads or writes another task's memory | Per-task PML4 and private frame at the same virtual address; CR3 switch on context switch; boot-time isolation test | Implemented, QEMU-tested |
+| Kernel task → kernel | Task corrupts kernel state | Kernel and tasks share the kernel mapping; all tasks run at CPL0 | **Not isolated yet** (planned user mode) |
 | Diagnostics | Secret leakage | Boot code prints only version, addresses, and memory sizes | Policy; no secrets exist yet |
 | Build | Malformed image reaches CI as “passing” | `make test` requires a kernel marker after a real boot | Implemented |
 | Kernel → user | User reads another task's memory | Not implemented | Planned (Epic C) |
@@ -69,10 +71,11 @@ planned work rather than mitigated today.
 ## Known gaps
 
 - The loader is trusted and its own image is not verified by the kernel.
-- The kernel identity-maps physical memory; there is no higher-half mapping or
-  user/kernel address-space separation.
-- Page-table construction is covered by host unit tests and a real boot, but
-  not by an adversarial page-table test suite.
+- Tasks are kernel tasks at CPL0 and share the kernel mapping; there is no
+  user/kernel isolation.
+- Per-task address spaces are tested by a positive boot-time check, not by an
+  adversarial suite or a deliberately broken configuration.
+- The kernel identity-maps physical memory; there is no higher-half mapping.
 - The boot image is unsigned. Secure Boot, signed updates, and rollback
   protection are later epics.
 - Serial output is not rate-limited or access-controlled; it is a development

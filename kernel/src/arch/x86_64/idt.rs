@@ -58,6 +58,9 @@ struct DescriptorTablePointer {
 
 static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
 
+/// Emergency stack for exception reporting when the interrupted stack is bad.
+static mut EMERGENCY_STACK: [u8; 8192] = [0; 8192];
+
 core::arch::global_asm!(
     r#"
     .section .text
@@ -67,6 +70,8 @@ core::arch::global_asm!(
 isr_common:
     /* [rbp+0]=vector, [rbp+8]=error, [rbp+16]=RIP, [rbp+24]=CS, [rbp+32]=RFLAGS */
     mov rbp, rsp
+    lea rsp, [rip + {emergency_stack}]
+    add rsp, {emergency_size}
     and rsp, -16
     mov rdi, [rbp]
     mov rsi, [rbp + 8]
@@ -102,8 +107,65 @@ isr_\num:
 .irp n, 8,10,11,12,13,14,17,21,29,30
     isr_err \n
 .endr
+
+/* IRQ0 (timer) from the remapped PIC. */
+.global irq_0
+.type irq_0, @function
+irq_0:
+    push 0
+    push 32
+    jmp irq_common
+
+/* Save the full interrupted context, call Rust, restore the selected frame. */
+.p2align 4
+.global irq_common
+.type irq_common, @function
+irq_common:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rbp, rsp
+    and rsp, -16
+    mov rdi, rbp
+    call {irq_handler}
+    mov rsp, rax
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    add rsp, 16
+    iretq
     "#,
     handler = sym exception_handler,
+    irq_handler = sym irq_handler,
+    emergency_stack = sym EMERGENCY_STACK,
+    emergency_size = const 8192,
 );
 
 unsafe extern "C" {
@@ -139,6 +201,55 @@ unsafe extern "C" {
     fn isr_29();
     fn isr_30();
     fn isr_31();
+    fn irq_0();
+}
+
+/// Saved general-purpose and interrupt-return context.
+///
+/// Field order matches the push order in `irq_common`, lowest address first.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InterruptFrame {
+    /// Saved r15.
+    pub r15: u64,
+    /// Saved r14.
+    pub r14: u64,
+    /// Saved r13.
+    pub r13: u64,
+    /// Saved r12.
+    pub r12: u64,
+    /// Saved r11.
+    pub r11: u64,
+    /// Saved r10.
+    pub r10: u64,
+    /// Saved r9.
+    pub r9: u64,
+    /// Saved r8.
+    pub r8: u64,
+    /// Saved rbp.
+    pub rbp: u64,
+    /// Saved rdi.
+    pub rdi: u64,
+    /// Saved rsi.
+    pub rsi: u64,
+    /// Saved rdx.
+    pub rdx: u64,
+    /// Saved rcx.
+    pub rcx: u64,
+    /// Saved rbx.
+    pub rbx: u64,
+    /// Saved rax.
+    pub rax: u64,
+    /// Interrupt vector (synthetic for IRQs).
+    pub vector: u64,
+    /// Error code (zero for IRQs).
+    pub error: u64,
+    /// Instruction pointer to resume.
+    pub rip: u64,
+    /// Code segment to resume.
+    pub cs: u64,
+    /// RFLAGS to resume.
+    pub rflags: u64,
 }
 
 const HANDLERS: [unsafe extern "C" fn(); 32] = [
@@ -157,6 +268,10 @@ pub fn init() {
         // static IDT has 256 entries.
         unsafe { (*idt.add(index)).set_handler(*handler as usize as u64) };
     }
+
+    // IRQ0 (timer) is vector 32 after the PIC remap.
+    // SAFETY: Index 32 is inside the IDT.
+    unsafe { (*idt.add(32)).set_handler(irq_0 as *const () as usize as u64) };
 
     let pointer = DescriptorTablePointer {
         limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -203,6 +318,12 @@ extern "C" fn exception_handler(
     );
     serial_line!("AETHER_BOOT_FAILED reason=exception vector={vector}");
     crate::arch::x86_64::halt()
+}
+
+/// Timer interrupt entry, called from `irq_common`.
+extern "C" fn irq_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    crate::arch::x86_64::timer::acknowledge();
+    crate::scheduler::on_tick(frame)
 }
 
 fn exception_name(vector: u64) -> &'static str {

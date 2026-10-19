@@ -31,10 +31,10 @@ make            # build build/aether.img
 make clean
 ```
 
-`make test` requires `AETHER_MM_OK` and `AETHER_BOOT_OK` and fails on any
-failure marker. `make fault-test` requires the exception handler to report
-`breakpoint (3)` and `AETHER_BOOT_FAILED`. Both use TCG and need no KVM or root
-access.
+`make test` requires `AETHER_MM_OK`, `AETHER_SCHED_OK`,
+`AETHER_ISOLATION_OK`, and `AETHER_BOOT_OK` and fails on any failure marker.
+`make fault-test` requires the exception handler to report `breakpoint (3)` and
+`AETHER_BOOT_FAILED`. Both use TCG and need no KVM or root access.
 
 ## Toolchain pinning
 
@@ -111,8 +111,8 @@ remain release-engineering work.
 1. `make lint` — formatting and clippy for host, kernel, loader, and the fault
    self-test configuration.
 2. `cargo test --locked` — host unit tests.
-3. `make test` — real QEMU boot with required `AETHER_MM_OK` and
-   `AETHER_BOOT_OK` markers.
+3. `make test` — real QEMU boot with required `AETHER_MM_OK`,
+   `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, and `AETHER_BOOT_OK` markers.
 4. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
    and failure marker.
 
