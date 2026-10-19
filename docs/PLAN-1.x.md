@@ -169,3 +169,22 @@ prototype.
 - A negative test: try to escape the root, exec outside the bundle, write the
   image, read the host, or connect to an unapproved host.
 - A short review note in `docs/REVIEW-*.md` with what was not tested.
+
+## Delivered after 1.5
+
+These were split out of the 1.3 list and the roadmap's "More apps" line so
+each could land with its own review note and tests:
+
+- **1.6 Notifications.** `SYS_NOTIFY`, app identity, per-app rate limits, a
+  kernel-drawn history (Super+N) and clear-on-lock.
+- **1.7 Clipboard.** `SYS_CLIPBOARD` with a DLP label, `CAP_CLIPBOARD`,
+  taint-raising reads, clear-on-lock, and Notes/Files integration.
+- **1.8 Trash and undo.** Files moves deletes to `/home/.trash`, Ctrl+Z
+  restores, permanent deletion only in Trash with confirmation, and trusted
+  reads now raise DLP taint.
+- **1.9 System Monitor.** A read-only process/memory/storage/network view with
+  only `CAP_WINDOW | CAP_SYSINFO`.
+
+Still open from the 1.x plan: the 1.1 bundle runtime, 1.2 Claude Code, Secure
+Boot enrolment on hardware, the remaining 1.5 hardware, and the 2.0
+Steam-class decision.

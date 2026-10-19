@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include "../include/bootinfo.h"
 
-#define AETHER_VERSION "0.9.0"
+#define AETHER_VERSION "1.9.0"
 #define AETHER_BUILD __DATE__ " " __TIME__
 
 #define PAGE_SIZE 4096ull

@@ -789,6 +789,7 @@ static void run_command(char *cmd) {
     else if (!strcmp(cmd, "test")) cmd_test(arg);
     else if (!strcmp(cmd, "notes")) cmd_run("notes");
     else if (!strcmp(cmd, "files") || !strcmp(cmd, "explorer")) cmd_run("explorer");
+    else if (!strcmp(cmd, "monitor")) cmd_run("monitor");
     else if (!strcmp(cmd, "settings")) cmd_run("settings");
     else if (!strcmp(cmd, "store") || !strcmp(cmd, "installer")) cmd_run("installer");
     else if (!strcmp(cmd, "ls")) cmd_ls(arg);

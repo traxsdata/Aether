@@ -16,6 +16,14 @@ Workstation and real laptops today.
 - The Security page now combines auto-lock, Lock Now, passphrase change and
   the storage/protection status.
 
+## What's new in 1.9
+
+- **System Monitor.** A trusted native app with only `CAP_WINDOW | CAP_SYSINFO`
+  shows memory, uptime, CPU features, storage, network and a live process
+  table (pid, trust, DLP taint, capabilities and memory). It refreshes once a
+  second, resizes with the window, and starts from the dock or `monitor` in
+  the Terminal. See [docs/SYSTEM-MONITOR.md](docs/SYSTEM-MONITOR.md).
+
 ## What's new in 1.8
 
 - **Trash and undo in Files.** Delete moves an item to `/home/.trash` instead

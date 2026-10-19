@@ -10,7 +10,7 @@
 
 BUILD := build
 CC    := clang
-VERSION ?= 1.4.0
+VERSION ?= 1.9.0
 # Set SOURCE_DATE_EPOCH to make the build date (and therefore the image)
 # reproducible. CI uses the tag's commit time.
 SOURCE_DATE_EPOCH ?=
@@ -49,7 +49,7 @@ KERNEL_SRCS := kernel/entry.S kernel/main.c kernel/lib.c kernel/log.c kernel/ser
 ULIB_SRCS := user/lib/crt0.S user/lib/ui.c user/lib/runtime.c
 # Native C apps, built into the kernel image. Settings and App Store are
 # Rust packages built by tools/build-rust-apps.sh into build/apps.
-APPS := terminal calculator notes probe explorer
+APPS := terminal calculator notes probe explorer monitor
 
 KERNEL_OBJS := $(patsubst %,$(BUILD)/k/%.o,$(KERNEL_SRCS) $(COMMON_SRCS))
 ULIB_OBJS := $(patsubst %,$(BUILD)/u/%.o,$(ULIB_SRCS) $(COMMON_SRCS))
@@ -209,6 +209,9 @@ test-lock: $(BUILD)/aether.iso
 
 test-usb-storage: $(BUILD)/aether.iso
 	tools/test-usb-storage.sh
+
+test-monitor: $(BUILD)/aether.iso
+	AETHER_DISK=none tools/qemu-drive.py tests/monitor.txt
 
 test-power: $(BUILD)/aether.iso
 	tools/test-power.sh

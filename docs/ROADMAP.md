@@ -14,6 +14,8 @@
 - **1.8** Trash and undo in Files, with a Trash place, unique names,
   label-preserving renames, and confirmation only for permanent deletion.
   Trusted file reads now raise DLP taint like every other read.
+- **1.9** System Monitor: memory, uptime, CPU features, storage, network and a
+  live process table, with only `CAP_WINDOW | CAP_SYSINFO`.
 
 - **1.0** Session lock and idle auto-lock; per-thread system dialogs; focus
   theft, window-slot and DLP metadata fixes; hostile-superblock and truncate

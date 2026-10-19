@@ -14,3 +14,4 @@ app_\name\()_end:
     APP notes, "build/user/notes.elf"
     APP probe, "build/user/probe.elf"
     APP explorer, "build/user/explorer.elf"
+    APP monitor, "build/user/monitor.elf"

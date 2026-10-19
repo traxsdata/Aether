@@ -723,6 +723,16 @@ static void t_sandbox_explorer(void) {
     stop(p);
 }
 
+static void t_sandbox_monitor(void) {
+    const struct program *prog = program_find("monitor");
+    KT_REQUIRE(prog);
+    KT_CHECK(prog->caps == (CAP_WINDOW | CAP_SYSINFO) && prog->trust == TRUST_TRUSTED && !strcmp(prog->title, "System Monitor"));
+    struct proc *p = spawn_quiet("monitor", current->pid);
+    KT_REQUIRE(p);
+    KT_CHECK(p->trust == TRUST_TRUSTED && p->caps == (CAP_WINDOW | CAP_SYSINFO));
+    stop(p);
+}
+
 static void t_sandbox_system(void) {
     struct proc *k = proc_find(0);
     KT_REQUIRE(k);
@@ -1331,6 +1341,7 @@ static const struct ktest {
     {"sandbox", "children inherit distrust and taint", t_sandbox_inherit},
     {"sandbox", "private, W^X, randomized memory", t_sandbox_layout},
     {"sandbox", "Files gets a window and paths only", t_sandbox_explorer},
+    {"sandbox", "System Monitor gets a window and system info", t_sandbox_monitor},
     {"sandbox", "process table is consistent", t_sandbox_system},
     {"syscall", "kernel and wild pointers rejected", t_syscall_pointers},
     {"syscall", "checked against the caller's pages", t_syscall_caller},

@@ -28,6 +28,7 @@ BLOB(app_calculator);
 BLOB(app_notes);
 BLOB(app_probe);
 BLOB(app_explorer);
+BLOB(app_monitor);
 
 static struct program programs[] = {
     {.name = "terminal", .title = "Terminal", .image = app_terminal_start,
@@ -43,6 +44,8 @@ static struct program programs[] = {
      .caps = CAP_STORAGE, .trust = TRUST_UNTRUSTED, .mem_quota_mib = 8, .abi = ABI_AETHER},
     {.name = "explorer", .title = "Files", .image = app_explorer_start,
      .caps = CAP_WINDOW | CAP_FILES | CAP_CLIPBOARD, .trust = TRUST_TRUSTED, .mem_quota_mib = 32, .abi = ABI_AETHER},
+    {.name = "monitor", .title = "System Monitor", .image = app_monitor_start,
+     .caps = CAP_WINDOW | CAP_SYSINFO, .trust = TRUST_TRUSTED, .mem_quota_mib = 32, .abi = ABI_AETHER},
 };
 
 /*
@@ -76,6 +79,7 @@ static void fill_sizes(void) {
     programs[2].size = (uint64_t)(app_notes_end - app_notes_start);
     programs[3].size = (uint64_t)(app_probe_end - app_probe_start);
     programs[4].size = (uint64_t)(app_explorer_end - app_explorer_start);
+    programs[5].size = (uint64_t)(app_monitor_end - app_monitor_start);
 }
 
 const struct program *program_at(int i) {

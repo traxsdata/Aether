@@ -1,0 +1,9 @@
+# System Monitor on temporary storage: open it from the Terminal, let it sample
+# twice, then close it.
+wait 12
+type monitor\n
+wait 2
+expect started monitor
+shot 01-monitor
+type x
+wait 1
