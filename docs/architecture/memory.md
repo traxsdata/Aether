@@ -13,7 +13,9 @@ that map it. The implementation lives in:
 Memory is represented as 4 KiB frames, one bit per frame. The bitmap is a
 512 KiB static array in the kernel image, covering 16 GiB. Memory above that
 limit is a documented Phase 1 limitation; a dynamically sized allocator will
-replace it when larger systems are supported.
+replace it when larger systems are supported. The identity map is capped at the
+same 16 GiB, so a machine with more RAM still boots using the low 16 GiB; the
+loader keeps all boot metadata below 4 GiB so it always remains mapped.
 
 Initialization starts with every frame marked in use, then releases
 `MemoryKind::Usable` regions. The first 1 MiB and the kernel image range are
@@ -41,14 +43,21 @@ concurrency.
 
 ## Page tables
 
+Before loading those tables, the kernel enables `IA32_EFER.NXE` and `CR0.WP`.
+NX makes the `NO_EXECUTE` bits effective; WP makes supervisor writes to
+read-only kernel text fault. The kernel refuses to boot if the CPU does not
+report NX support instead of silently weakening the mapping.
+
 The kernel builds a new four-level identity map and installs it in CR3:
 
 - `0..2 MiB`: 4 KiB pages, writable and non-executable, covering firmware
   remnants and page-table frames.
 - The 2 MiB windows containing the kernel image: 4 KiB pages split by section
   permissions.
-- `2 MiB..end`: 2 MiB pages, writable and non-executable, except for the kernel
-  windows above.
+- `2 MiB..end`: 2 MiB pages where the window is fully covered by mappable RAM,
+  loader, ACPI, or runtime-service regions; 4 KiB pages at region boundaries so
+  reserved holes and device MMIO stay unmapped. All mappings are writable and
+  non-executable except the kernel text/rodata rules above.
 
 Kernel section boundaries come from linker symbols:
 
@@ -60,8 +69,10 @@ Kernel section boundaries come from linker symbols:
 | other low/kernel-window memory | present, writable, NX |
 
 The identity map covers only RAM, loader, ACPI, and runtime-service regions.
-The PCI address hole and reserved firmware holes are not mapped. The map ends
-at the highest needed region, rounded up to 2 MiB.
+The PCI address hole, reserved firmware holes, MMIO, and unusable memory are
+not mapped. The map ends at the highest needed region, rounded up to 2 MiB, and
+is capped at 16 GiB. The hand-off block and region array are reserved and
+validated for ordering and overlap before use.
 
 Page-table frames are allocated from the frame allocator and zeroed before
 use. They are reachable both before and after the switch because the new map
@@ -92,7 +103,8 @@ rather than triple-faulting.
 ## Verified behavior
 
 `make test` requires `AETHER_MM_OK` and `AETHER_BOOT_OK`. The boot log reports
-the identity-map size, page-table frame count, CR3, and free frames.
+`boot: cpu: NX and write-protect enabled`, the identity-map size, page-table
+frame count, CR3, and free frames.
 
 `make fault-test` builds a kernel that executes `int3` after enabling paging;
 the test requires the IDT handler to report the breakpoint and emit
@@ -103,6 +115,8 @@ the test requires the IDT handler to report the breakpoint and emit
 1. Higher-half kernel mapping and a per-address-space user region.
 2. User/supervisor page permissions and user-mode entry.
 3. Guard pages and stack overflow detection with an IST.
-4. Dynamic bitmap sizing for memory above 16 GiB.
+4. Dynamic bitmap sizing and identity mapping for memory above 16 GiB.
 5. Locking/per-CPU allocator state.
 6. Per-task kernel stacks allocated from frames.
+7. A fault-injection test proving writes to kernel text and instruction fetches
+   from data are rejected with NX and WP enabled.

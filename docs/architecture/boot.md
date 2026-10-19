@@ -18,10 +18,11 @@
 4. **Loading.** The loader allocates the image's aligned physical range with
    `AllocateAddress`, copies file bytes, and zeroes the remainder of each
    segment.
-5. **Hand-off construction.** It allocates pages for `BootInfo`, a 64 KiB
-   firmware-map buffer, and a fixed region array (`MAX_MEMORY_REGIONS = 256`).
-   UEFI descriptors are converted to `MemoryRegion` entries and adjacent
-   regions of the same kind are merged.
+5. **Hand-off construction.** It allocates pages below 4 GiB for `BootInfo`, a
+   64 KiB firmware-map buffer, and a fixed region array
+   (`MAX_MEMORY_REGIONS = 256`). UEFI descriptors are converted to
+   `MemoryRegion` entries, adjacent regions of the same kind are merged, and
+   the result is checked for ordering and overlap.
 6. **Boot-services exit.** `ExitBootServices` is retried a bounded number of
    times if firmware reports a stale map key. The final successful call is
    followed immediately by the kernel jump.
@@ -29,11 +30,12 @@
    calls `kernel_main` with the `BootInfo` pointer in `RDI`.
 8. **Validation.** The kernel checks magic, version, structure size, region
    count, kernel range, entry point, and every region.
-9. **Kernel ownership.** It installs a flat GDT and an exception IDT, builds a
-   bitmap frame allocator, creates kernel page tables, switches CR3, and only
-   then releases boot-services memory.
-10. **Report.** It prints the memory and paging summary, `AETHER_MM_OK`, and
-    `AETHER_BOOT_OK`, then halts.
+9. **Kernel ownership.** It installs a flat GDT and an exception IDT, enables
+   NX and supervisor write protection, builds a bitmap frame allocator, creates
+   kernel page tables, switches CR3, and only then releases boot-services
+   memory.
+10. **Execution.** It starts the timer and scheduler, runs the isolation and
+    capability/IPC checks, prints the `AETHER_*_OK` markers, and halts.
 
 See [memory.md](memory.md) for allocator and paging details.
 
@@ -48,8 +50,12 @@ Rules:
 - Pointers are **physical addresses**; the kernel starts on the identity map
   left by firmware.
 - The kernel does not call UEFI boot services.
-- Unused fields are zero.
-- The region array is bounded; the loader fails closed rather than truncating.
+- Unused and reserved fields are zero; the kernel rejects non-zero reserved
+  header fields.
+- The region array is bounded and aligned; the loader fails closed rather than
+  truncating.
+- Regions are sorted by ascending physical start and must not overlap. Both the
+  loader and kernel validate this.
 - Memory kinds are stored as raw `u32` values and decoded with
   `MemoryKind::from_raw`, so an invalid discriminant becomes an error instead
   of undefined behaviour.
@@ -59,8 +65,8 @@ Rules:
 The kernel links at `0x04000000` and is built as a static `ET_EXEC` image with
 a 64 KiB BSS stack. The loader does not process relocations. The kernel image
 is mapped with 4 KiB pages so text is read-execute, rodata is read-only NX, and
-data/BSS are writable NX. This keeps the first boot path small, but it also
-means:
+data/BSS are writable NX. NX and `CR0.WP` are enabled explicitly before the new
+tables are loaded. This keeps the first boot path small, but it also means:
 
 - the load address is fixed and must remain free in firmware's map;
 - the image must not require dynamic linking or position-independent
@@ -93,6 +99,8 @@ and prints the serial transcript. It uses TCG so it works without KVM or root.
 - Allocation failure, address mismatch, or a memory map that exceeds the
   bounded array stops in the loader with an `AETHER_LOADER_FAILED` line.
 - Kernel validation failure prints `AETHER_BOOT_FAILED reason=...` and halts.
+- A CPU without NX support fails with `AETHER_BOOT_FAILED reason=cpu: ...`
+  rather than booting with executable data.
 - A page fault, general-protection fault, or other CPU exception prints
   `KERNEL EXCEPTION` with vector, error code, RIP, RFLAGS, and CR2, then emits
-  `AETHER_BOOT_FAILED` and halts. There is no task to terminate yet.
+  `AETHER_BOOT_FAILED` and halts. There is no user task to terminate yet.

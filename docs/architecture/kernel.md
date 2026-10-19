@@ -20,21 +20,24 @@ services.
 
 ## Current state
 
-The kernel implements the Phase 1 boot/memory slice and the first Phase 2
-scheduling slice:
+The kernel implements the Phase 1 boot/memory slice and the Phase 2
+scheduling, isolation, capability, and IPC slices:
 
 - x86-64 long mode, ring 0, interrupts enabled after scheduler setup;
+- explicit `IA32_EFER.NXE` and `CR0.WP` setup, with boot failure if NX is
+  unsupported;
 - a dedicated 64 KiB boot stack and 16 KiB per-task stacks;
 - a flat kernel GDT and a 32-entry architectural exception IDT;
 - COM1 serial output and panic reporting;
 - `BootInfo` header, kernel-range, and memory-region validation;
 - a 16 GiB bitmap frame allocator over validated RAM;
-- kernel-owned four-level page tables with a 4 KiB W^X kernel mapping and 2 MiB
-  identity mappings for the rest of RAM;
+- kernel-owned four-level page tables with a 4 KiB W^X kernel mapping and
+  2 MiB/4 KiB identity mappings for kernel-accessible regions only;
 - structured exception reports with vector, error code, RIP, RFLAGS, and CR2;
 - a 100 Hz PIT/PIC timer and preemptive round-robin scheduler;
 - per-task PML4 address spaces and CR3 switching;
-- per-task capability tables, bounded IPC endpoints, and capability transfer;
+- per-task capability tables, endpoint identity checks, bounded IPC endpoints,
+  atomic receives, and capability transfer;
 - a boot-time isolation and capability/IPC test across three kernel tasks;
 - explicit `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`,
   `AETHER_CAP_OK`, `AETHER_IPC_OK`, and `AETHER_BOOT_OK` markers.
@@ -59,7 +62,7 @@ These gaps are tracked in the technical specification backlog (Epics C–D).
    in `.bss`);
 3. clears `rbp`;
 4. calls `kernel_main(boot_info)` with the pointer already in `RDI`;
-5. executes `ud2` if the entry function ever returns.
+5. halts in a `cli; hlt` loop if the entry function ever returns.
 
 `kernel_main` is `unsafe extern "sysv64"` because it trusts only the calling
 convention, not the pointer. It validates the `BootInfo` header before reading
@@ -72,9 +75,10 @@ The critical path from the specification is:
 1. User-mode entry: TSS/RSP0, user page permissions, syscall gate.
 2. Per-task kernel stacks and guard pages.
 3. Higher-half kernel mapping and per-address-space user regions.
-4. Capability objects, tables, rights checks, IPC endpoints, and transfer.
+4. Capability revocation, object destruction, and stale-reference behavior.
 5. User-space loader, `initd` supervision, and the first native task.
-6. Adversarial isolation, capability, and IPC tests.
+6. User-visible syscalls for capability and IPC operations.
+7. Blocking IPC, timeouts, cancellation, and broader adversarial tests.
 
 Each step needs tests that fail closed and an ADR if it changes a trust
 boundary.

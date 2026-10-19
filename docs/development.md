@@ -22,12 +22,15 @@ The first Cargo invocation downloads Rust 1.99.1 and the
 ## Common commands
 
 ```sh
-make unittest   # host tests for abi/, boot/common/, kernel/memory/, kernel/ipc/
-make test       # build the image and boot it under QEMU/OVMF
-make fault-test # boot a kernel that executes int3 after paging is enabled
-make lint       # rustfmt + clippy (host, kernel, loader)
-make ci         # lint + unit tests + boot test + fault test
-make            # build build/aether.img
+make unittest      # host tests for abi/, boot/common/, kernel/memory/, kernel/ipc/
+make test          # build the image and boot it under QEMU/OVMF
+make fault-test    # boot a kernel that executes int3 after paging is enabled
+make negative-test # prove the boot harness rejects a deliberately failing kernel
+make docs-check    # check relative links in Markdown files
+make license-check # check workspace and dependency licence metadata
+make lint          # rustfmt + clippy (host, kernel, loader)
+make ci            # full pull-request gate
+make               # build build/aether.img
 make clean
 ```
 
@@ -107,17 +110,23 @@ remain release-engineering work.
 
 ## CI
 
-`tools/ci.sh` is the local equivalent of the pull-request gate:
+`tools/ci.sh` is the pull-request gate, and
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same script
+on GitHub Actions for every pull request and every push to `main`:
 
 1. `make lint` — formatting and clippy for host, kernel, loader, and the fault
    self-test configuration.
-2. `cargo test --locked` — host unit tests.
-3. `make test` — real QEMU boot with required `AETHER_MM_OK`,
+2. `make docs-check` — relative Markdown links.
+3. `make license-check` — workspace and dependency licence metadata.
+4. `make unittest` — host unit tests.
+5. `make test` — real QEMU boot with required `AETHER_MM_OK`,
    `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`, `AETHER_IPC_OK`,
    and `AETHER_BOOT_OK` markers.
-4. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
+6. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
    and failure marker.
+7. `make negative-test` — a deliberately failing kernel must be rejected by the
+   same harness used for the normal boot test.
 
-A GitHub Actions workflow can call `make ci` once it is enabled with the
-required token scope. Keeping the script runnable makes failures reproducible
-without CI.
+The workflow installs `qemu-system-x86`, `ovmf`, and `mtools` on the runner.
+The gate does not require KVM, root access, secrets, or network access beyond
+package installation.
