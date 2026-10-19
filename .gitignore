@@ -1,4 +1,18 @@
-/build/
+# Build output
 /target/
+/build/
 *.iso
 *.img
+
+# Local editor / agent configuration (may contain credentials)
+opencode.json
+.env
+.env.*
+
+# Logs and serial captures
+*.log
+*.serial
+
+# OS noise
+.DS_Store
+Thumbs.db

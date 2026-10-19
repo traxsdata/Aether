@@ -26,4 +26,12 @@ name = "aether-kernel"
 version = "0.1.0"
 dependencies = [
  "aether-abi",
+ "aether-memory",
+]
+
+[[package]]
+name = "aether-memory"
+version = "0.1.0"
+dependencies = [
+ "aether-abi",
 ]

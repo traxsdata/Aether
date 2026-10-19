@@ -22,8 +22,10 @@ IMAGE = BUILD / "aether.img"
 SERIAL = BUILD / "serial.log"
 VARS = BUILD / "OVMF_VARS.fd"
 
-SUCCESS = "AETHER_BOOT_OK"
+SUCCESS_MARKERS = ("AETHER_MM_OK", "AETHER_BOOT_OK")
+FAULT_MARKERS = ("KERNEL EXCEPTION: breakpoint (3)", "AETHER_BOOT_FAILED")
 FAILURES = ("AETHER_LOADER_FAILED", "AETHER_LOADER_PANIC", "AETHER_KERNEL_PANIC", "AETHER_BOOT_FAILED")
+EXPECT_FAULT = os.environ.get("AETHER_EXPECT_FAULT") == "1"
 TIMEOUT = int(os.environ.get("AETHER_BOOT_TIMEOUT", "90"))
 
 CODE_CANDIDATES = (
@@ -114,17 +116,28 @@ def main() -> int:
             if process.poll() is not None:
                 break
             log = read_serial()
-            if SUCCESS in log:
-                print(log)
-                print(f"PASS: {SUCCESS}")
-                return 0
-            if any(marker in log for marker in FAILURES):
-                print(log)
-                print("FAIL: boot reported an error", file=sys.stderr)
-                return 1
+            if EXPECT_FAULT:
+                if all(marker in log for marker in FAULT_MARKERS):
+                    print(log)
+                    print("PASS: fault path reported breakpoint and halted")
+                    return 0
+                if any(marker in log for marker in FAILURES[:3]):
+                    print(log)
+                    print("FAIL: fault self-test hit an unexpected failure", file=sys.stderr)
+                    return 1
+            else:
+                if all(marker in log for marker in SUCCESS_MARKERS):
+                    print(log)
+                    print(f"PASS: {' '.join(SUCCESS_MARKERS)}")
+                    return 0
+                if any(marker in log for marker in FAILURES):
+                    print(log)
+                    print("FAIL: boot reported an error", file=sys.stderr)
+                    return 1
             time.sleep(0.25)
         print(read_serial())
-        print(f"FAIL: timed out after {TIMEOUT}s waiting for {SUCCESS}", file=sys.stderr)
+        expected = FAULT_MARKERS if EXPECT_FAULT else SUCCESS_MARKERS
+        print(f"FAIL: timed out after {TIMEOUT}s waiting for {expected}", file=sys.stderr)
         return 1
     finally:
         process.terminate()

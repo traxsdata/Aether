@@ -10,3 +10,4 @@ cd "$(dirname "$0")/.."
 make lint
 cargo test --locked
 make test
+make fault-test
