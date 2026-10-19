@@ -1,0 +1,13 @@
+[package]
+name = "aether-update"
+description = "Aether signed system update manifests and rollback policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aether-crypto = { path = "../crypto" }
+aether-packaging = { path = "../packaging" }

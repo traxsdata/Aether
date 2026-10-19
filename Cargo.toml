@@ -3,13 +3,18 @@ resolver = "3"
 members = [
     "abi",
     "boot/common",
+    "crypto",
     "boot/loader",
     "kernel",
     "kernel/fs",
     "kernel/memory",
     "kernel/ipc",
     "kernel/services",
+    "packaging",
     "sdk",
+    "tests/compatibility",
+    "tools/admin",
+    "updates",
     "user",
 ]
 # The kernel, loader, SDK, and user program require bare-metal/UEFI targets, so
@@ -17,10 +22,14 @@ members = [
 default-members = [
     "abi",
     "boot/common",
+    "crypto",
     "kernel/fs",
     "kernel/memory",
     "kernel/ipc",
     "kernel/services",
+    "packaging",
+    "tests/compatibility",
+    "updates",
 ]
 
 [workspace.package]

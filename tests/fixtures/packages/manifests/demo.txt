@@ -1,0 +1,12 @@
+format=1
+id=org.aether.demo
+version=0.2.0
+arch=x86_64
+runtime=native
+entry=demo.bin
+publisher=Aether Test Publisher
+channel=developer
+permissions=file.read,file.write
+limits.memory_kib=256
+limits.open_files=4
+limits.tasks=1
