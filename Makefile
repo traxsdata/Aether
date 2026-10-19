@@ -26,7 +26,8 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
 .PHONY: all kernel user loader image iso test shell-test fault-test negative-test \
-	unittest lint docs-check license-check ci clean
+	unittest lint docs-check license-check compat-test update-test release release-demo \
+	release-check qualify ci clean
 
 all: image
 
@@ -77,6 +78,14 @@ negative-test:
 unittest:
 	$(CARGO) test --locked
 
+compat-test:
+	$(CARGO) test --locked -p aether-compat
+
+# Package and update policy tests share the signed test fixtures under
+# tests/fixtures; run both crates together.
+update-test:
+	$(CARGO) test --locked -p aether-packaging -p aether-update
+
 docs-check:
 	$(PYTHON) tools/check-docs.py
 
@@ -97,6 +106,30 @@ lint: kernel
 		$(CARGO) clippy -p aether-sdk -p aether-init --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		$(CARGO) clippy -p aether-bootloader --release --target $(LOADER_TARGET) --locked -- -D warnings
+
+# Signed release bundle. Requires AETHER_SIGNING_KEY and AETHER_PUBLISHER;
+# unsigned releases are refused.
+release:
+	sh tools/release.sh
+
+# Build and verify a release bundle with the checked-in test key. This proves
+# the mechanism, not a release trust root.
+release-demo:
+	rm -rf $(BUILD)/release-demo
+	AETHER_SIGNING_KEY=tests/fixtures/keys/test.seed \
+	AETHER_PUBLISHER="Aether Test Publisher" \
+	AETHER_VERSION=0.2.0 \
+	AETHER_RELEASE_DIR=$(abspath $(BUILD)/release-demo) \
+		sh tools/release.sh
+	AETHER_TRUST="Aether Test Publisher:$$(cat tests/fixtures/keys/test.pub)" \
+	AETHER_RELEASE_DIR=$(abspath $(BUILD)/release-demo) \
+		sh tools/release-check.sh
+
+release-check:
+	sh tools/release-check.sh
+
+qualify:
+	$(PYTHON) tools/qualify.py
 
 ci:
 	sh tools/ci.sh
