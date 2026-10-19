@@ -10,7 +10,9 @@
 #![no_main]
 
 mod arch;
+mod ipc;
 mod memory;
+mod scheduler;
 
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
 use core::panic::PanicInfo;
@@ -161,11 +163,7 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
 
     serial_line!("boot: x86-64 execution environment ready");
-    serial_line!(
-        "AETHER_BOOT_OK stage=kernel version={}",
-        env!("CARGO_PKG_VERSION")
-    );
-    arch::x86_64::halt()
+    scheduler::run(&mut frames)
 }
 
 fn boot_failure(reason: &str) -> ! {

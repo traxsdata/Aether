@@ -67,6 +67,18 @@ Page-table frames are allocated from the frame allocator and zeroed before
 use. They are reachable both before and after the switch because the new map
 is identity-based.
 
+## Per-task address spaces
+
+Phase 2 adds `create_address_space`, which allocates a new PML4, copies the
+kernel identity-map entry, and maps a private physical frame at
+`PRIVATE_BASE = 0x0000_0080_0000_0000` (PML4 slot 1). Every task sees the same
+virtual address backed by a different frame. The scheduler switches CR3 on
+context switches, so a write by one task is invisible to another.
+
+The kernel remains identity-mapped in every address space. This is enough for
+kernel-task isolation but is not yet a user/kernel split; see
+[scheduler.md](scheduler.md).
+
 ## Failure handling
 
 If a page-table frame cannot be allocated, or an address cannot be encoded,
@@ -88,9 +100,9 @@ the test requires the IDT handler to report the breakpoint and emit
 
 ## Next steps
 
-1. Higher-half kernel mapping and a per-address-space abstraction.
-2. User/supervisor page permissions.
+1. Higher-half kernel mapping and a per-address-space user region.
+2. User/supervisor page permissions and user-mode entry.
 3. Guard pages and stack overflow detection with an IST.
 4. Dynamic bitmap sizing for memory above 16 GiB.
 5. Locking/per-CPU allocator state.
-6. Timer and interrupt-controller initialization.
+6. Per-task kernel stacks allocated from frames.

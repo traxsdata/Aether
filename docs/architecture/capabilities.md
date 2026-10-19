@@ -63,4 +63,18 @@ read.
 
 ## Status
 
-Not implemented. The boot skeleton does not contain capability tables yet.
+Implemented in `kernel/ipc` (`aether-ipc`) and exercised by the boot-time
+scheduler test:
+
+- Per-task table with 16 slots.
+- Generation-checked handles: a forged index or stale generation fails.
+- Endpoint object IDs carry their own generation.
+- Rights: `SEND`, `RECEIVE`, `TRANSFER`.
+- Kernel-mediated transfer that removes `TRANSFER` from the new capability.
+- Tests for insufficient rights, forged/stale handles, table exhaustion,
+  queue capacity, and capability transfer.
+
+This is still a kernel-internal interface. A user-mode syscall boundary will
+expose these operations to applications in a later Phase 2 slice; until then,
+the tests demonstrate mechanism correctness, not a user-visible security
+boundary.

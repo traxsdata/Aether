@@ -29,13 +29,17 @@ It is a planning model, not a delivery promise.
 
 ## Phase 2 — Isolated execution
 
-- [ ] Task/thread objects and address-space ownership.
-- [ ] Preemptive timer-driven scheduler.
+- [x] Static task/thread objects and preemptive timer-driven scheduling.
+- [x] Per-task address spaces with CR3 switching and a hardware isolation test.
+- [x] Timer interrupt and legacy PIC/PIT setup.
+- [x] Capability table, rights checks, and generation-checked handles.
+- [x] Bounded IPC endpoints and kernel-mediated capability transfer.
+- [x] Host tests for capability and IPC validation plus boot-time adversarial
+  rights/forged-handle checks.
 - [ ] User/kernel separation and user-space loader.
-- [ ] Capability object model, tables, and rights checks.
-- [ ] IPC endpoints, bounded messages, capability transfer.
+- [ ] Expose capability and IPC operations through validated syscalls.
 - [ ] Revocation and object-lifetime rules.
-- [ ] Adversarial capability and IPC tests.
+- [ ] Blocking IPC, wakeup queues, timeouts, and broader adversarial IPC tests.
 
 ## Phase 3 — Minimal operating system
 
@@ -60,7 +64,9 @@ Aether interfaces it depends on exist.
 
 ## Current milestone
 
-The Phase 1 boot and memory milestones are met: a clean checkout builds an
-image, boots under the documented QEMU configuration, owns its page tables,
-reports exceptions, and runs automated boot and fault tests. The next milestone
-is a higher-half mapping, timer interrupts, and the task/address-space model.
+Phase 1 is complete and Phase 2 is underway: a clean checkout builds an image,
+boots under QEMU, owns its page tables, reports exceptions, preemptively runs
+tasks in separate address spaces, and enforces capability rights on bounded IPC
+with a boot-time transfer test. The next milestone is user-mode entry: TSS/RSP0,
+user page permissions, a syscall gate for capability/IPC operations, and
+per-task kernel stacks.
