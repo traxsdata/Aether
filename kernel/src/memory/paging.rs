@@ -40,6 +40,12 @@ pub enum PagingError {
     UnrepresentableAddress(u64),
     /// The boot memory map contains no mappable RAM.
     EmptyMap,
+    /// The memory-map pointer or size cannot be represented.
+    InvalidMemoryMap,
+    /// Boot metadata lies above the identity-map limit.
+    MetadataOutsideMap,
+    /// A page-table walk found a huge-page entry where a table was expected.
+    UnexpectedHugePage,
     /// The active kernel PML4 entry 0 is missing.
     MissingKernelMapping,
 }
@@ -159,12 +165,12 @@ pub fn init(
     info: &BootInfo,
     regions: &[MemoryRegion],
 ) -> Result<PagingStats, PagingError> {
-    let end = identity_end(info, regions).ok_or(PagingError::EmptyMap)?;
+    let end = identity_end(info, regions)?;
     let mut tables = Tables::new(allocator)?;
 
     tables.map_low_memory()?;
     tables.map_kernel()?;
-    tables.map_large_pages(end)?;
+    tables.map_large_pages(end, regions)?;
 
     let pml4_address = tables.pml4.start_address();
     let stats = PagingStats {
@@ -176,28 +182,37 @@ pub fn init(
     Ok(stats)
 }
 
+/// Returns `true` if a memory region may be identity-mapped by the kernel.
+///
+/// The kernel only accesses conventional RAM, loader-owned data, ACPI tables,
+/// and runtime services. Device MMIO is mapped explicitly when a driver needs
+/// it; reserved firmware holes and unusable memory are never mapped.
+fn is_identity_mappable(region: &MemoryRegion) -> bool {
+    matches!(
+        region.kind(),
+        Some(
+            MemoryKind::Usable
+                | MemoryKind::BootServices
+                | MemoryKind::Loader
+                | MemoryKind::AcpiReclaimable
+                | MemoryKind::AcpiNvs
+                | MemoryKind::RuntimeServices
+        )
+    )
+}
+
 /// Computes the exclusive end of the identity map.
 ///
 /// Only RAM, loader, ACPI, and runtime-service regions are considered. MMIO,
 /// reserved firmware holes, and unusable memory are not mapped; the kernel does
 /// not access them yet. This keeps the identity map proportional to actual RAM
-/// rather than to the PCI address hole. The result is capped by the frame
-/// bitmap capacity.
-fn identity_end(info: &BootInfo, regions: &[MemoryRegion]) -> Option<u64> {
+/// rather than to the PCI address hole. The map is capped at the frame bitmap
+/// capacity (16 GiB); the loader keeps boot metadata in the low 4 GiB so it is
+/// always inside the map.
+fn identity_end(info: &BootInfo, regions: &[MemoryRegion]) -> Result<u64, PagingError> {
     let mut end = 0u64;
     for region in regions {
-        let kinds = matches!(
-            region.kind(),
-            Some(
-                MemoryKind::Usable
-                    | MemoryKind::BootServices
-                    | MemoryKind::Loader
-                    | MemoryKind::AcpiReclaimable
-                    | MemoryKind::AcpiNvs
-                    | MemoryKind::RuntimeServices
-            )
-        );
-        if !kinds {
+        if !is_identity_mappable(region) {
             continue;
         }
         let Some(region_end) = region.end() else {
@@ -206,26 +221,33 @@ fn identity_end(info: &BootInfo, regions: &[MemoryRegion]) -> Option<u64> {
         if region.start >= crate::memory::MAX_PHYSICAL_BYTES {
             continue;
         }
-        end = end.max(region_end);
+        // A region may extend past the allocator's bitmap. Truncate it instead
+        // of refusing to boot on machines with more than 16 GiB of RAM.
+        end = end.max(region_end.min(crate::memory::MAX_PHYSICAL_BYTES));
     }
 
     end = end.max(info.kernel_end);
     let map_bytes = info
         .memory_region_count
-        .checked_mul(core::mem::size_of::<MemoryRegion>() as u64)?;
-    let map_end = info.memory_regions.checked_add(map_bytes)?;
-    let info_end =
-        (info as *const BootInfo as u64).checked_add(core::mem::size_of::<BootInfo>() as u64)?;
+        .checked_mul(core::mem::size_of::<MemoryRegion>() as u64)
+        .ok_or(PagingError::InvalidMemoryMap)?;
+    let map_end = info
+        .memory_regions
+        .checked_add(map_bytes)
+        .ok_or(PagingError::InvalidMemoryMap)?;
+    let info_end = (info as *const BootInfo as u64)
+        .checked_add(core::mem::size_of::<BootInfo>() as u64)
+        .ok_or(PagingError::InvalidMemoryMap)?;
     end = end.max(map_end).max(info_end);
 
     // The hand-off and kernel must remain mapped after the CR3 switch.
     if end > crate::memory::MAX_PHYSICAL_BYTES {
-        return None;
+        return Err(PagingError::MetadataOutsideMap);
     }
     if end == 0 {
-        return None;
+        return Err(PagingError::EmptyMap);
     }
-    Some(align_up_large(end))
+    Ok(align_up_large(end))
 }
 
 fn align_up_large(value: u64) -> u64 {
@@ -291,7 +313,7 @@ impl<'a, 'b> Tables<'a, 'b> {
                     // Data, BSS, and gaps in the kernel window.
                     PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE
                 };
-                // `data_start` is checked for documentation and future use;
+                // `_data_start` is reserved for future per-section handling;
                 // every non-text, non-rodata page in the window is writable.
                 let entry = PageTableEntry::new(address, flags)
                     .ok_or(PagingError::UnrepresentableAddress(address))?;
@@ -302,33 +324,75 @@ impl<'a, 'b> Tables<'a, 'b> {
         Ok(())
     }
 
-    fn map_large_pages(&mut self, end: u64) -> Result<(), PagingError> {
+    fn map_large_pages(&mut self, end: u64, regions: &[MemoryRegion]) -> Result<(), PagingError> {
         let (text_start, _text_end, _rodata_start, _rodata_end, _data_start, kernel_end) =
             kernel_ranges();
         let kernel_window_start = text_start & !(LARGE_PAGE_SIZE - 1);
         let kernel_window_end = align_up_large(kernel_end);
+        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
 
         let mut base = LOW_REGION_BYTES;
         while base < end {
+            let next = base.saturating_add(LARGE_PAGE_SIZE);
             // The low region and the kernel windows are already mapped with
             // 4 KiB page tables.
             if base >= kernel_window_start && base < kernel_window_end {
-                base = base.saturating_add(LARGE_PAGE_SIZE);
+                base = next;
+                continue;
+            }
+
+            // Build a bitmap of the 4 KiB pages covered by mappable regions in
+            // this 2 MiB window. A fully covered window can use a huge page; a
+            // partial window uses 4 KiB pages so reserved holes stay unmapped.
+            let mut covered = [0u64; PAGE_TABLE_ENTRIES / 64];
+            let mut any = false;
+            for region in regions {
+                if !is_identity_mappable(region) {
+                    continue;
+                }
+                let Some(region_end) = region.end() else {
+                    continue;
+                };
+                let start = region.start.max(base);
+                let region_end = region_end.min(next);
+                if start >= region_end {
+                    continue;
+                }
+                any = true;
+                let first = ((start - base) / PAGE_SIZE) as usize;
+                let last = ((region_end - 1 - base) / PAGE_SIZE) as usize;
+                for page in first..=last {
+                    covered[page / 64] |= 1u64 << (page % 64);
+                }
+            }
+            if !any {
+                base = next;
                 continue;
             }
 
             let pml4_index = ((base >> 39) & 0x1ff) as usize;
             let pdpt_index = ((base >> 30) & 0x1ff) as usize;
             let pd_index = ((base >> 21) & 0x1ff) as usize;
-
             let pdpt = self.ensure(self.pml4, pml4_index)?;
             let pd = self.ensure(pdpt, pdpt_index)?;
 
-            let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
-            let entry = PageTableEntry::new_large(base, flags)
-                .ok_or(PagingError::UnrepresentableAddress(base))?;
-            unsafe { (*table_ptr(pd)).set_entry(pd_index, entry) };
-            base = base.saturating_add(LARGE_PAGE_SIZE);
+            if covered.iter().all(|bits| *bits == u64::MAX) {
+                let entry = PageTableEntry::new_large(base, flags)
+                    .ok_or(PagingError::UnrepresentableAddress(base))?;
+                unsafe { (*table_ptr(pd)).set_entry(pd_index, entry) };
+            } else {
+                let pt = self.ensure(pd, pd_index)?;
+                for page in 0..PAGE_TABLE_ENTRIES {
+                    if covered[page / 64] & (1u64 << (page % 64)) == 0 {
+                        continue;
+                    }
+                    let address = base + page as u64 * PAGE_SIZE;
+                    let entry = PageTableEntry::new(address, flags)
+                        .ok_or(PagingError::UnrepresentableAddress(address))?;
+                    unsafe { (*table_ptr(pt)).set_entry(page, entry) };
+                }
+            }
+            base = next;
         }
         Ok(())
     }
@@ -337,6 +401,9 @@ impl<'a, 'b> Tables<'a, 'b> {
     fn ensure(&mut self, parent: PhysFrame, index: usize) -> Result<PhysFrame, PagingError> {
         let entry = unsafe { (*table_ptr(parent)).entry(index) };
         if entry.is_present() {
+            if entry.is_huge() {
+                return Err(PagingError::UnexpectedHugePage);
+            }
             return PhysFrame::from_address(entry.address())
                 .ok_or(PagingError::UnrepresentableAddress(entry.address()));
         }

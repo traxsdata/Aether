@@ -68,13 +68,16 @@ scheduler test:
 
 - Per-task table with 16 slots.
 - Generation-checked handles: a forged index or stale generation fails.
-- Endpoint object IDs carry their own generation.
+- Endpoint object IDs carry their own generation, and an operation rejects a
+  capability whose object identity does not match the endpoint.
 - Rights: `SEND`, `RECEIVE`, `TRANSFER`.
-- Kernel-mediated transfer that removes `TRANSFER` from the new capability.
-- Tests for insufficient rights, forged/stale handles, table exhaustion,
-  queue capacity, and capability transfer.
+- Kernel-mediated transfer that removes `TRANSFER` from the new capability and
+  commits the receiver slot before consuming the queued message.
+- Tests for insufficient rights, forged/stale handles, wrong endpoints, table
+  exhaustion, queue capacity, and capability transfer.
 
 This is still a kernel-internal interface. A user-mode syscall boundary will
 expose these operations to applications in a later Phase 2 slice; until then,
 the tests demonstrate mechanism correctness, not a user-visible security
-boundary.
+boundary. Revocation and object destruction are not implemented yet; the
+generation counters prepare the table for them.

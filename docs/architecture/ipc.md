@@ -19,7 +19,7 @@ global names.
 A message contains a small, fixed header and a bounded payload. The header
 identifies the operation and payload length; the kernel validates the length
 before copying. Capabilities travel in a separate, explicitly sized list and
-are installed in the receiver's table only if the send operation succeeds.
+are installed in the receiver's table only when the receive commits.
 
 The initial implementation should copy small messages and use shared-memory
 capabilities for bulk data. Shared memory is created explicitly; mapping the
@@ -47,7 +47,8 @@ For every message the kernel verifies:
 - Payload bounds and alignment.
 - Every transferred capability's validity, type, and `TRANSFER` right.
 - Receiver table capacity before committing the receive.
-- Sender identity matches what the protocol is allowed to observe.
+- Sender identity is supplied by the kernel from the current task, not copied
+  from a message field. A user-mode syscall wrapper must preserve this rule.
 
 ## Status
 
@@ -56,15 +57,18 @@ Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
 - Two endpoint objects in the boot test, each with a four-message queue.
 - 32-byte payload limit; messages carry sender identity and an optional
   capability transfer.
-- Send/receive require the corresponding endpoint capability right.
+- Send/receive require the corresponding endpoint capability right, and the
+  capability's object identity must match the endpoint being operated on.
 - Capability transfer requires `TRANSFER`; the receiver gets a new table slot
   and the transferred capability drops `TRANSFER`.
+- The receiver's capability slot is installed before the queue head advances.
+  If the table is full, the message stays queued and no capability is lost.
 - Queue operations run with interrupts masked, so preemption cannot observe a
   half-updated queue.
 - Polled semantics: send returns `Full` and receive returns `Empty`; test tasks
   wait with `HLT` until the timer preempts them. Blocking/wakeup queues are next.
-- Host tests cover bounded messages, rights, forged handles, queue capacity,
-  and transfer.
+- Host tests cover bounded messages, rights, forged handles, endpoint
+  confusion, queue capacity, table exhaustion, and transfer.
 
 The kernel-internal API is not yet exposed through a user-mode syscall
 boundary.

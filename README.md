@@ -10,11 +10,12 @@ grants, and the desktop is not a security authority.
 
 > **Status: kernel prototype, Phase 2 in progress.** The tree now has a
 > reproducible UEFI boot path, a validated physical memory map, a bitmap frame
-> allocator, kernel-owned page tables with W^X, structured exception reporting,
-> a 100 Hz preemptive scheduler, hardware-enforced address-space isolation
-> between kernel tasks, per-task capability tables, and bounded IPC with
-> capability transfer. There is no user mode, filesystem, graphics stack, or
-> Windows compatibility yet. Do not use this tree for real data.
+> allocator, kernel-owned page tables with NX and write-protect enforcement,
+> structured exception reporting, a 100 Hz preemptive scheduler,
+> hardware-enforced address-space isolation between kernel tasks, per-task
+> capability tables, and bounded IPC with capability transfer. There is no user
+> mode, filesystem, graphics stack, or Windows compatibility yet. Do not use
+> this tree for real data.
 
 ## What works today
 
@@ -27,7 +28,8 @@ grants, and the desktop is not a security authority.
 - A 16 GiB bitmap frame allocator that reserves the kernel and hand-off and
   releases firmware boot-services memory only after the CR3 switch.
 - Kernel-owned four-level page tables: 4 KiB W^X mappings for the kernel image
-  and 2 MiB identity mappings for RAM.
+  and 2 MiB or 4 KiB identity mappings for kernel-accessible RAM. NX and
+  write-protect are enabled explicitly rather than inherited from firmware.
 - Handlers for all 32 architectural exception vectors with vector, error code,
   RIP, RFLAGS, and CR2 diagnostics.
 - A 100 Hz PIT/PIC timer interrupt, preemptive round-robin scheduler, and static
@@ -36,40 +38,49 @@ grants, and the desktop is not a security authority.
   virtual address, switched in CR3 by the scheduler.
 - A boot-time isolation test that verifies each task's private mapping survives
   preemption by another task.
-- Per-task capability tables with generation-checked handles, endpoint rights,
-  bounded IPC queues, and kernel-mediated capability transfer.
+- Per-task capability tables with generation-checked handles, endpoint identity
+  checks, endpoint rights, bounded IPC queues, and kernel-mediated capability
+  transfer.
 - A boot-time capability/IPC test covering successful transfer, insufficient
-  rights, and forged handles.
-- Host unit tests for ABI layout, memory arithmetic, the frame allocator, page
-  table encoding, capability tables, IPC endpoints, and a defensive ELF parser.
+  rights, forged handles, and endpoint confusion.
+- Host unit tests for ABI layout and region validation, memory arithmetic, the
+  frame allocator, page-table encoding, capability tables, IPC endpoints, and a
+  defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
   `AETHER_IPC_OK`, and `AETHER_BOOT_OK`.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
-- A local CI gate (`make ci`) that runs lint, unit tests, the boot test, and the
-  fault test.
+- `make negative-test`, which proves the boot harness rejects a deliberately
+  failing kernel.
+- A local CI gate (`make ci`) that runs formatting, clippy, documentation and
+  licence checks, unit tests, the boot test, the fault test, and the negative
+  boot test. A GitHub Actions workflow will publish the same gate in a
+  follow-up; until then, run the gate locally before opening a pull request.
 
-The exact serial transcript from a successful boot is:
+A representative serial transcript from a successful boot (region counts and
+frame addresses vary with firmware, build, and feature set):
 
 ```text
 AETHER_LOADER_OK stage=entry version=0.1.0
-loader: kernel elf start=0x4000000 end=0x4097000 entry=0x4000000 segments=4
+loader: kernel elf start=0x4000000 end=0x40a9000 entry=0x4000000 segments=4
 loader: memory regions=39 usable=1016 MiB
 loader: boot services exited after 1 attempt(s)
 AETHER_LOADER_HANDOFF entry=0x4000000
 AETHER_KERNEL_OK stage=entry version=0.1.0 commit=...
 boot: hand-off validated (version 1, 96 bytes)
 boot: memory map: 39 regions, 1016 MiB allocatable
-boot: kernel image [0x0000000004000000, 0x0000000004097000), entry 0x0000000004000000
-boot: paging: identity map to 1024 MiB, 5 page-table frames, CR3=0x0000000000100000
-boot: frame allocator: 1015 MiB free (260000 frames), bitmap capacity 16384 MiB
+boot: kernel image [0x0000000004000000, 0x00000000040a9000), entry 0x0000000004000000
+boot: cpu: NX and write-protect enabled
+boot: paging: identity map to 1024 MiB, 6 page-table frames, CR3=0x0000000000100000
+boot: frame allocator: 1015 MiB free (259944 frames), bitmap capacity 16384 MiB
 AETHER_MM_OK
-sched: task 1 ready pml4=0x0000000000106000 private=0x0000000000105000
-sched: task 2 ready pml4=0x000000000010b000 private=0x000000000010a000
-sched: task 3 ready pml4=0x0000000000110000 private=0x000000000010f000
+boot: x86-64 execution environment ready
+sched: task 1 ready pml4=0x0000000000107000 private=0x0000000000106000
+sched: task 2 ready pml4=0x000000000010c000 private=0x000000000010b000
+sched: task 3 ready pml4=0x0000000000111000 private=0x0000000000110000
 sched: timer started at 100 Hz
-AETHER_SCHED_OK workers=3 ticks=20
+AETHER_SCHED_OK workers=3 ticks=23
 AETHER_ISOLATION_OK tasks=3
 AETHER_CAP_OK denials=2
 AETHER_IPC_OK messages=3
@@ -100,11 +111,14 @@ artifacts cannot drift apart.
 ### Tests
 
 ```sh
-make unittest   # host unit tests (ABI, ELF parser, memory arithmetic, allocator)
-make test       # QEMU/OVMF boot test; prints the serial transcript and PASS
-make fault-test # exception-path test: int3 after paging must reach the IDT
-make lint       # rustfmt, host clippy, kernel clippy, loader clippy
-make ci         # formatting, clippy, unit tests, boot test, fault test
+make unittest      # host unit tests (ABI, ELF parser, memory arithmetic, allocator)
+make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
+make fault-test    # exception-path test: int3 after paging must reach the IDT
+make negative-test # boot harness must detect a deliberately failing kernel
+make docs-check    # relative Markdown links
+make license-check # workspace and dependency licence metadata
+make lint          # rustfmt, host clippy, kernel clippy, loader clippy
+make ci            # full pull-request gate
 make clean
 ```
 
@@ -137,12 +151,13 @@ by the specification.
    before writing to memory.
 3. It allocates the kernel at the image's linked physical address (`0x4000000`
    today), copies `PT_LOAD` segments, and zeroes BSS.
-4. It converts the UEFI memory map into a fixed, bounded array and writes a
-   `BootInfo` block.
+4. It allocates the hand-off block, map buffer, and region array below 4 GiB,
+   converts the UEFI memory map into a fixed, bounded array, validates it, and
+   writes a `BootInfo` block.
 5. It exits boot services and jumps to the kernel with the `BootInfo` pointer.
-6. The kernel installs its own GDT and IDT, validates the hand-off, initializes
-   the frame allocator, builds page tables, switches CR3, and reports memory and
-   image state.
+6. The kernel installs its own GDT and IDT, validates the hand-off and region
+   ordering, enables NX and write-protect, initializes the frame allocator,
+   builds page tables, switches CR3, and reports memory and image state.
 7. It starts a 100 Hz timer, preemptively runs three tasks in separate address
    spaces, verifies that private mappings survive preemption, exercises
    capability rights and bounded IPC including a transfer, prints
@@ -155,12 +170,13 @@ kernel structures are not exposed to the loader.
 ## Security posture
 
 This prototype is **not** a sandbox yet. It validates and bounds the boot
-hand-off and the kernel image parser, owns its page tables, maps kernel text
-read-execute-only and data non-executable, reports exceptions instead of
-resetting silently, isolates kernel tasks in separate address spaces, and
-enforces generation-checked capability rights on bounded IPC. It still has no
-user mode or user/kernel memory split, so kernel tasks share the kernel
-mapping and all run at CPL0.
+hand-off and the kernel image parser, owns its page tables, explicitly enables
+NX and write-protect so kernel text is read-execute-only and data is
+non-executable, reports exceptions instead of resetting silently, isolates
+kernel tasks in separate address spaces, and enforces generation-checked
+capability rights and endpoint identity on bounded IPC. It still has no user
+mode or user/kernel memory split, so kernel tasks share the kernel mapping and
+all run at CPL0.
 
 See [`docs/security/threat-model.md`](docs/security/threat-model.md) for the
 current threat model, including what is deliberately out of scope for the
@@ -169,13 +185,15 @@ prototype.
 ## Contributing
 
 Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request. In
-short: branch from `main`, keep commits focused, run `make unittest`,
-`make test`, and `make lint`, and include the exact commands and results in the
-PR description. Security-relevant changes require explicit review.
+short: branch from `main`, keep commits focused, run `make ci`, and include the
+exact commands and results in the PR description. Security-relevant changes
+require explicit review.
 
 Architecture decisions are recorded in [`docs/decisions/`](docs/decisions/).
 The backlog and acceptance tests are in the
 [technical specification](Technical%20Specification%20and%20Initial%20Development%20Backlog.txt).
+The Windows compatibility feasibility plan is in
+[`docs/specifications/windows-compatibility.md`](docs/specifications/windows-compatibility.md).
 
 Further reading: [memory and paging](docs/architecture/memory.md),
 [scheduler and address spaces](docs/architecture/scheduler.md),

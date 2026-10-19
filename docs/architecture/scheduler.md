@@ -11,7 +11,9 @@ isolation. User mode, capabilities, and IPC build on this slice.
 - Round-robin preemptive scheduling on every timer tick.
 - A per-task PML4 and private physical frame mapped at the same virtual address.
 - A CR3 switch on every task switch.
-- Per-task capability tables and two endpoints.
+- NX and supervisor write-protect enabled before the first address space is
+  activated.
+- Per-task capability tables, endpoint identity checks, and two endpoints.
 - An isolation self-test plus a capability/IPC self-test in the normal boot path.
 
 There is no kernel heap. Task control blocks and stacks are static, and the
@@ -91,9 +93,10 @@ After the isolation rounds the workers exercise the capability and IPC path:
 - The idle task checks that exactly two operations were denied and three
   messages were received before printing `AETHER_CAP_OK` and `AETHER_IPC_OK`.
 
-Capabilities are per task, handles are generation-checked, and transfer
-requires `TRANSFER`. This is still a kernel-internal API; user mode and a
-syscall boundary are the next step.
+Capabilities are per task, handles are generation-checked, endpoint identity is
+checked against the target object, and transfer requires `TRANSFER`. A failed
+transfer install does not consume the queued message. This is still a
+kernel-internal API; user mode and a syscall boundary are the next step.
 
 This demonstrates hardware address-space isolation between kernel tasks. It is
 not yet user/kernel isolation: all tasks run at CPL0 and share the kernel

@@ -19,7 +19,8 @@ export AETHER_GIT_COMMIT
 KERNEL_FEATURES ?=
 KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 
-.PHONY: all kernel loader image test fault-test unittest lint ci clean
+.PHONY: all kernel loader image test fault-test negative-test unittest lint \
+	docs-check license-check ci clean
 
 all: image
 
@@ -47,8 +48,21 @@ fault-test:
 	$(MAKE) KERNEL_FEATURES=fault-selftest image
 	AETHER_EXPECT_FAULT=1 $(PYTHON) tools/test-boot.py
 
+# Build a kernel that deliberately fails after paging and require the normal
+# harness to detect the failure marker. This checks the CI gate itself, not
+# just the boot path.
+negative-test:
+	$(MAKE) KERNEL_FEATURES=fault-selftest image
+	AETHER_EXPECT_BOOT_FAILURE=1 $(PYTHON) tools/test-boot.py
+
 unittest:
 	$(CARGO) test --locked
+
+docs-check:
+	$(PYTHON) tools/check-docs.py
+
+license-check:
+	$(PYTHON) tools/check-licenses.py
 
 lint: kernel
 	$(CARGO) fmt --all --check

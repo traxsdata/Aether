@@ -7,14 +7,18 @@ prototype. Release notes must say so plainly.
 
 ## Mandatory gates
 
-Every pull request runs:
+Every pull request runs the local gate (`make ci`); the same gate is intended
+to run in GitHub Actions once the workflow is published:
 
 1. Formatting check.
 2. Clippy with warnings denied for host, kernel, and loader targets.
-3. Host unit tests.
-4. Kernel and loader cross-builds.
-5. Automated QEMU boot smoke test.
-6. A negative boot-test self-check, proving CI detects a missing marker.
+3. Documentation link and licence/dependency metadata checks.
+4. Host unit tests.
+5. Kernel and loader cross-builds.
+6. Automated QEMU boot smoke test with required success markers.
+7. Fault-path test requiring a structured exception report.
+8. Negative boot test proving the harness rejects a deliberately failing
+   kernel.
 
 Security-critical changes additionally require review from a designated
 kernel/security maintainer.

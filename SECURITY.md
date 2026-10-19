@@ -26,14 +26,17 @@ The prototype's in-scope trust boundaries are currently:
 
 - the UEFI loader's parsing of the embedded kernel image and firmware memory
   map,
-- the loader-to-kernel `BootInfo` hand-off, and
-- the kernel's validation of that hand-off.
+- the loader-to-kernel `BootInfo` hand-off,
+- the kernel's validation of that hand-off and memory region ordering,
+- kernel-task address-space isolation, and
+- kernel-internal capability and IPC validation.
 
-There is no user/kernel isolation, capability enforcement, IPC, or filesystem
-yet, so reports about missing sandboxing are expected and tracked as planned
-work rather than vulnerabilities. Reports about a *claim* of isolation that
-does not hold, or about memory unsafety in the implemented boot path, are in
-scope.
+There is no user/kernel isolation or user-mode syscall boundary, and capability
+enforcement is not yet a user-visible security boundary, so reports about
+missing application sandboxing are expected and tracked as planned work rather
+than vulnerabilities. Reports about a *claim* of isolation that does not hold,
+or about memory unsafety in the implemented boot, memory, scheduler,
+capability, or IPC paths, are in scope.
 
 ## Response
 

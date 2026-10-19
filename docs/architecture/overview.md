@@ -27,8 +27,10 @@ Hardware and UEFI firmware
    A mismatch fails closed.
 3. **Kernel to user space.** Not implemented. When it exists, the kernel will
    enforce address-space separation and capability rights in hardware.
-4. **Service to service.** Not implemented. Future IPC must bound messages,
-   validate transferred capabilities, and prevent impersonation.
+4. **Service to service.** Not implemented as a user-space boundary. The
+   kernel-internal IPC mechanism is bounded, checks endpoint identity and
+   rights, and validates transferred capabilities; a syscall boundary is still
+   required before services can rely on it.
 5. **Application to user data.** Not implemented. Files will be reached through
    capability-bearing handles and a user-mediated portal, not global paths.
 
@@ -43,9 +45,10 @@ The tree implements the lowest layer needed to prove the boot and memory model:
 - `kernel/memory/` contains the host-tested frame allocator and page-table
   encoding.
 - `kernel/ipc/` contains host-tested capability tables and endpoint queues.
-- `kernel/` contains the entry point, GDT/IDT, serial output, hand-off
-  validation, physical-memory initialization, kernel page tables, timer,
-  preemptive scheduler with per-task address spaces, and IPC object glue.
+- `kernel/` contains the entry point, GDT/IDT, CPU NX/WP setup, serial output,
+  hand-off validation, physical-memory initialization, kernel page tables,
+  timer, preemptive scheduler with per-task address spaces, and IPC object
+  glue.
 
 There is no general-purpose filesystem, network stack, package manager, GUI
 toolkit, or permission dialog in the kernel. That remains a design rule, not

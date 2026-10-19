@@ -6,13 +6,19 @@ It is a planning model, not a delivery promise.
 
 ## Phase 0 — Specification and proof of feasibility
 
-- [x] Architecture decision records for kernel, microkernel, platform, and
-  language.
-- [x] Threat model and security boundaries for the implemented boot path.
+- [x] Architecture decision records for kernel, microkernel, platform,
+  language, system interfaces, application isolation, Windows compatibility,
+  graphics, updates, and governance.
+- [x] Threat model and security boundaries for the implemented boot, memory,
+  scheduler, capability, and IPC paths.
 - [x] Pinned toolchain and QEMU target.
 - [x] Boot ABI and defensive image parser.
 - [x] Broader system ABI, capability, and IPC specifications.
-- [ ] Windows compatibility feasibility report (can run in parallel).
+- [x] Windows compatibility feasibility plan
+  ([`specifications/windows-compatibility.md`](specifications/windows-compatibility.md)).
+  The host-interface report remains an Epic H deliverable.
+- [x] Local CI gate and repository checks for pull requests.
+- [ ] GitHub Actions workflow publication.
 
 ## Phase 1 — Bootable kernel
 
@@ -22,10 +28,11 @@ It is a planning model, not a delivery promise.
 - [x] Automated boot test and CI.
 - [x] GDT and IDT with structured exception reporting.
 - [x] Physical page allocator and kernel-owned page tables.
+- [x] NX and supervisor write-protect enabled explicitly.
 - [x] Architecture/memory initialization tests (host unit tests and QEMU
   exception-path test).
-- [ ] Higher-half kernel and per-address-space page tables.
-- [ ] Interrupt controller and timer.
+- [x] Per-address-space page tables (first Phase 2 slice).
+- [ ] Higher-half kernel mapping.
 
 ## Phase 2 — Isolated execution
 
@@ -33,9 +40,10 @@ It is a planning model, not a delivery promise.
 - [x] Per-task address spaces with CR3 switching and a hardware isolation test.
 - [x] Timer interrupt and legacy PIC/PIT setup.
 - [x] Capability table, rights checks, and generation-checked handles.
+- [x] Endpoint identity checks and atomic capability receive.
 - [x] Bounded IPC endpoints and kernel-mediated capability transfer.
 - [x] Host tests for capability and IPC validation plus boot-time adversarial
-  rights/forged-handle checks.
+  rights/forged-handle/endpoint-confusion checks.
 - [ ] User/kernel separation and user-space loader.
 - [ ] Expose capability and IPC operations through validated syscalls.
 - [ ] Revocation and object-lifetime rules.
@@ -65,8 +73,9 @@ Aether interfaces it depends on exist.
 ## Current milestone
 
 Phase 1 is complete and Phase 2 is underway: a clean checkout builds an image,
-boots under QEMU, owns its page tables, reports exceptions, preemptively runs
-tasks in separate address spaces, and enforces capability rights on bounded IPC
-with a boot-time transfer test. The next milestone is user-mode entry: TSS/RSP0,
-user page permissions, a syscall gate for capability/IPC operations, and
-per-task kernel stacks.
+boots under QEMU, owns its page tables with NX and write-protect enabled,
+reports exceptions, preemptively runs tasks in separate address spaces, and
+enforces capability rights, endpoint identity, and bounded IPC with a boot-time
+transfer test. The next milestone is user-mode entry: TSS/RSP0, user page
+permissions, a syscall gate for capability/IPC operations, and per-task kernel
+stacks.

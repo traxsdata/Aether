@@ -20,7 +20,7 @@ use core::fmt;
 use core::panic::PanicInfo;
 use core::ptr;
 use uefi::{
-    ALLOCATE_ADDRESS, ALLOCATE_ANY_PAGES, BUFFER_TOO_SMALL, BootServices, Handle,
+    ALLOCATE_ADDRESS, ALLOCATE_MAX_ADDRESS, BUFFER_TOO_SMALL, BootServices, Handle,
     MEMORY_TYPE_LOADER_DATA, MemoryDescriptor, SUCCESS, Status, SystemTable,
 };
 
@@ -31,6 +31,13 @@ static KERNEL_ELF: &[u8] = include_bytes!(env!("AETHER_KERNEL_ELF"));
 /// Fixed buffer for the firmware memory map. OVMF's map is a few kilobytes;
 /// 64 KiB leaves ample room for unusual firmware.
 const MEMORY_MAP_BYTES: usize = 64 * 1024;
+
+/// Highest address for loader-owned boot metadata.
+///
+/// The kernel identity-maps at most the first 16 GiB, so the hand-off block
+/// and its memory map must be allocated in the low 4 GiB where they are
+/// guaranteed to remain mapped after the CR3 switch.
+const MAX_BOOT_METADATA_ADDRESS: u64 = 0xffff_ffff;
 
 #[derive(Clone, Copy, Debug)]
 enum LoadError {
@@ -147,10 +154,11 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
         }
     }
 
-    let boot_info_page = unsafe { allocate_any(services, 1)? };
-    let map_page = unsafe { allocate_any(services, pages_for(MEMORY_MAP_BYTES as u64).unwrap())? };
+    let boot_info_page = unsafe { allocate_below_4g(services, 1)? };
+    let map_page =
+        unsafe { allocate_below_4g(services, pages_for(MEMORY_MAP_BYTES as u64).unwrap())? };
     let region_bytes = (MAX_MEMORY_REGIONS * core::mem::size_of::<MemoryRegion>()) as u64;
-    let region_page = unsafe { allocate_any(services, pages_for(region_bytes).unwrap())? };
+    let region_page = unsafe { allocate_below_4g(services, pages_for(region_bytes).unwrap())? };
 
     let boot_info = boot_info_page as *mut BootInfo;
     let regions = region_page as *mut MemoryRegion;
@@ -175,20 +183,28 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
         );
     }
 
-    let info = unsafe { &*boot_info };
-    info.validate().map_err(LoadError::BootInfo)?;
-    // SAFETY: `read_memory_map` filled `count` regions inside the allocation.
-    let usable = unsafe { info.usable_bytes() };
+    // SAFETY: `boot_info` points to the initialized hand-off block and
+    // `read_memory_map` filled `count` regions inside the bounded allocation.
+    unsafe {
+        (*boot_info).validate().map_err(LoadError::BootInfo)?;
+        (*boot_info)
+            .validate_regions()
+            .map_err(LoadError::BootInfo)?;
+    }
+    // SAFETY: Validation succeeded and the region array is readable.
+    let usable = unsafe { (*boot_info).usable_bytes() };
     serial_line!(
         "loader: memory regions={} usable={} MiB",
-        info.memory_region_count,
+        unsafe { (*boot_info).memory_region_count },
         usable / (1024 * 1024)
     );
 
     let mut map_key = unsafe { current_map_key(services, map_page)? };
+    let mut last_status = SUCCESS;
     for attempt in 0..8 {
         // SAFETY: Firmware contract; boot services are still active.
         let status = unsafe { (services.exit_boot_services)(handle, map_key) };
+        last_status = status;
         if status == SUCCESS {
             serial_line!(
                 "loader: boot services exited after {} attempt(s)",
@@ -210,13 +226,18 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
         serial_line!("loader: ExitBootServices retry {attempt}: status={status:#x}");
         map_key = unsafe { current_map_key(services, map_page)? };
         let new_count = unsafe { read_memory_map(services, map_page, regions)? };
-        // SAFETY: The boot information page is still owned by the loader.
+        // SAFETY: The boot information page is still owned by the loader and
+        // `read_memory_map` bounded the new count by MAX_MEMORY_REGIONS.
         unsafe {
             (*boot_info).memory_region_count = new_count as u64;
+            (*boot_info).validate().map_err(LoadError::BootInfo)?;
+            (*boot_info)
+                .validate_regions()
+                .map_err(LoadError::BootInfo)?;
         }
     }
 
-    Err(LoadError::ExitBootServices(1))
+    Err(LoadError::ExitBootServices(last_status))
 }
 
 unsafe fn current_map_key(services: &BootServices, map_page: u64) -> Result<usize, LoadError> {
@@ -358,12 +379,13 @@ unsafe fn allocate_at(services: &BootServices, address: u64, pages: u64) -> Resu
     Ok(())
 }
 
-unsafe fn allocate_any(services: &BootServices, pages: u64) -> Result<u64, LoadError> {
-    let mut address = 0u64;
-    // SAFETY: Firmware contract.
+unsafe fn allocate_below_4g(services: &BootServices, pages: u64) -> Result<u64, LoadError> {
+    let mut address = MAX_BOOT_METADATA_ADDRESS;
+    // SAFETY: Firmware contract. AllocateMaxAddress may return any page range
+    // that ends at or below the supplied maximum.
     let status = unsafe {
         (services.allocate_pages)(
-            ALLOCATE_ANY_PAGES,
+            ALLOCATE_MAX_ADDRESS,
             MEMORY_TYPE_LOADER_DATA,
             pages as usize,
             &mut address,

@@ -291,15 +291,17 @@ extern "C" fn worker_entry(task_id: u64) -> ! {
     }
 }
 
-/// Runs `f` with the current task's capability table and assigned handles.
+/// Runs `f` with the current task identity, capability table, and handles.
 ///
 /// Interrupts are masked so a preemption cannot observe a half-updated table.
-fn with_current<R>(f: impl FnOnce(&mut CapTable, &TaskHandles) -> R) -> R {
+/// The task index passed to `f` is the kernel's authoritative sender identity;
+/// callers must not accept a sender identity from a message payload.
+fn with_current<R>(f: impl FnOnce(usize, &mut CapTable, &TaskHandles) -> R) -> R {
     let _guard = timer::InterruptGuard::enter();
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     let task = &mut tasks[current];
-    f(&mut task.caps, &task.handles)
+    f(current, &mut task.caps, &task.handles)
 }
 
 fn ipc_fail(operation: &str, error: IpcError) -> ! {
@@ -315,7 +317,7 @@ fn ipc_receiver() {
     let mut transferred = None;
 
     while !(got_normal && got_from3 && transferred.is_some()) {
-        let result = with_current(|caps, handles| {
+        let result = with_current(|_current, caps, handles| {
             crate::ipc::receive(caps, handles.ep_a_recv.expect("receiver capability"))
         });
         match result {
@@ -344,8 +346,8 @@ fn ipc_receiver() {
 
     let transferred = transferred.expect("transfer capability");
     loop {
-        let result = with_current(|caps, _handles| {
-            crate::ipc::send(caps, transferred, 1, b"transferred", None)
+        let result = with_current(|current, caps, _handles| {
+            crate::ipc::send(caps, transferred, current as u16, b"transferred", None)
         });
         match result {
             Ok(()) => break,
@@ -359,11 +361,11 @@ fn ipc_receiver() {
 /// receives the message that worker 1 sends using the transferred capability.
 fn ipc_sender() {
     loop {
-        let result = with_current(|caps, handles| {
+        let result = with_current(|current, caps, handles| {
             crate::ipc::send(
                 caps,
                 handles.ep_a_send.expect("send capability"),
-                2,
+                current as u16,
                 b"normal",
                 None,
             )
@@ -376,11 +378,11 @@ fn ipc_sender() {
     }
 
     loop {
-        let result = with_current(|caps, handles| {
+        let result = with_current(|current, caps, handles| {
             crate::ipc::send(
                 caps,
                 handles.ep_a_send.expect("send capability"),
-                2,
+                current as u16,
                 b"transfer",
                 handles.ep_b_send,
             )
@@ -393,7 +395,7 @@ fn ipc_sender() {
     }
 
     loop {
-        let result = with_current(|caps, handles| {
+        let result = with_current(|_current, caps, handles| {
             crate::ipc::receive(caps, handles.ep_b_recv.expect("receive capability"))
         });
         match result {
@@ -415,11 +417,11 @@ fn ipc_sender() {
 /// Worker 3 verifies that insufficient rights and forged handles are rejected,
 /// then sends one valid message.
 fn ipc_denied() {
-    let result = with_current(|caps, handles| {
+    let result = with_current(|current, caps, handles| {
         crate::ipc::send(
             caps,
             handles.ep_a_recv.expect("receive-only capability"),
-            3,
+            current as u16,
             b"bad",
             None,
         )
@@ -438,7 +440,9 @@ fn ipc_denied() {
         index: 15,
         generation: 1,
     };
-    let result = with_current(|caps, _handles| crate::ipc::send(caps, forged, 3, b"forged", None));
+    let result = with_current(|current, caps, _handles| {
+        crate::ipc::send(caps, forged, current as u16, b"forged", None)
+    });
     match result {
         Err(IpcError::Capability(CapError::InvalidHandle)) => {
             DENIED.fetch_add(1, Ordering::Release);
@@ -450,11 +454,11 @@ fn ipc_denied() {
     }
 
     loop {
-        let result = with_current(|caps, handles| {
+        let result = with_current(|current, caps, handles| {
             crate::ipc::send(
                 caps,
                 handles.ep_a_send.expect("send capability"),
-                3,
+                current as u16,
                 b"from3",
                 None,
             )

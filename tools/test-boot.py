@@ -33,6 +33,7 @@ SUCCESS_MARKERS = (
 FAULT_MARKERS = ("KERNEL EXCEPTION: breakpoint (3)", "AETHER_BOOT_FAILED")
 FAILURES = ("AETHER_LOADER_FAILED", "AETHER_LOADER_PANIC", "AETHER_KERNEL_PANIC", "AETHER_BOOT_FAILED")
 EXPECT_FAULT = os.environ.get("AETHER_EXPECT_FAULT") == "1"
+EXPECT_BOOT_FAILURE = os.environ.get("AETHER_EXPECT_BOOT_FAILURE") == "1"
 TIMEOUT = int(os.environ.get("AETHER_BOOT_TIMEOUT", "90"))
 
 CODE_CANDIDATES = (
@@ -132,6 +133,15 @@ def main() -> int:
                     print(log)
                     print("FAIL: fault self-test hit an unexpected failure", file=sys.stderr)
                     return 1
+            elif EXPECT_BOOT_FAILURE:
+                if any(marker in log for marker in FAILURES):
+                    print(log)
+                    print("PASS: harness detected the expected boot failure")
+                    return 0
+                if all(marker in log for marker in SUCCESS_MARKERS):
+                    print(log)
+                    print("FAIL: expected a boot failure, but the boot succeeded", file=sys.stderr)
+                    return 1
             else:
                 if all(marker in log for marker in SUCCESS_MARKERS):
                     print(log)
@@ -143,7 +153,12 @@ def main() -> int:
                     return 1
             time.sleep(0.25)
         print(read_serial())
-        expected = FAULT_MARKERS if EXPECT_FAULT else SUCCESS_MARKERS
+        if EXPECT_FAULT:
+            expected = FAULT_MARKERS
+        elif EXPECT_BOOT_FAILURE:
+            expected = "a boot failure marker"
+        else:
+            expected = SUCCESS_MARKERS
         print(f"FAIL: timed out after {TIMEOUT}s waiting for {expected}", file=sys.stderr)
         return 1
     finally:

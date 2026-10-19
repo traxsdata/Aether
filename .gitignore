@@ -13,6 +13,10 @@ opencode.json
 *.log
 *.serial
 
+# Python caches
+__pycache__/
+*.pyc
+
 # OS noise
 .DS_Store
 Thumbs.db

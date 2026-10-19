@@ -8,6 +8,9 @@ set -eu
 cd "$(dirname "$0")/.."
 
 make lint
-cargo test --locked
+make docs-check
+make license-check
+make unittest
 make test
 make fault-test
+make negative-test

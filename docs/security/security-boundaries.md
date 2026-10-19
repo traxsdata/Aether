@@ -22,8 +22,10 @@ validation, capability checks.
 
 **Current status:** Kernel tasks have separate PML4s and a private mapping, and
 the boot test verifies that one task's write is invisible to another after
-timer-driven preemption. User-mode isolation and syscall validation do not
-exist yet.
+timer-driven preemption. Kernel-internal capability tables and IPC enforce
+rights, handle generations, endpoint identity, and bounded queues. User-mode
+isolation, user/kernel memory separation, and syscall pointer validation do not
+exist yet, so the capability checks are not a user-visible security boundary.
 
 ## 2. Application / application boundary
 

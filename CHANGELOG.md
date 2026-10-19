@@ -35,12 +35,26 @@ versioning scheme until the kernel ABI stabilises.
   transfer, and a boot-time capability/IPC test with insufficient-rights and
   forged-handle checks.
 - `AETHER_CAP_OK` and `AETHER_IPC_OK` boot markers.
+- Explicit `IA32_EFER.NXE` and `CR0.WP` setup, with a boot failure when NX is
+  unavailable.
+- Hand-off validation for reserved fields, memory-map alignment, region
+  ordering, and overlapping regions.
+- Endpoint identity checks and atomic capability receive on table exhaustion.
+- Expanded local CI gate with `make docs-check`, `make license-check`, and
+  `make negative-test`; a GitHub Actions workflow publication remains a
+  follow-up.
+- ADR-005 through ADR-010 and a Windows compatibility feasibility plan.
 
 ### Changed
 
+- The loader keeps `BootInfo` and memory-map metadata below 4 GiB.
+- The identity map is built from mappable regions only; reserved holes and
+  device MMIO stay unmapped, and a machine with more than 16 GiB still boots
+  using the low 16 GiB.
 - Boot tests require `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`,
   `AETHER_CAP_OK`, `AETHER_IPC_OK`, and `AETHER_BOOT_OK`.
-- `make ci` runs the exception-path test in addition to the boot test.
+- `make ci` runs documentation and licence checks, the exception-path test, and
+  the negative boot test in addition to the normal boot test.
 
 ### Known limitations
 
@@ -56,6 +70,10 @@ versioning scheme until the kernel ABI stabilises.
 - Single-core only; no SMP startup.
 - The scheduler has no priorities, sleeping/wakeup queues, or dynamic task
   creation; IPC is polled rather than blocking.
+- Capability revocation, endpoint destruction, and object-lifetime behavior are
+  not implemented.
+- NX and WP are enabled, but there is no fault-injection test that attempts to
+  write kernel text or execute data.
 - No Secure Boot signing, measured boot, or update/recovery path yet.
 
 ## [0.1.0] - 2026-10-19

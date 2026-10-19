@@ -18,17 +18,23 @@ when they preserve the project's security model and can be reviewed.
 git fetch origin
 git switch -c feat/<short-topic> origin/main
 # edit
-make unittest
-make test
-make lint
+make ci
 git add <files>
 git commit -m 'feat: <short description>'
 git push -u origin feat/<short-topic>
 ```
 
+`make ci` runs formatting, clippy, documentation link checks, licence checks,
+host unit tests, the QEMU boot test, the fault-path test, and a negative boot
+test that proves the harness rejects a deliberately failing kernel. The gate is
+intended to run in GitHub Actions; until the workflow is published, run it
+locally before opening the pull request.
+
 Open a pull request against `main`. Keep the branch rebased on current `main`;
 do not force-push a branch that someone else is reviewing unless you have
-amended your own unpublished commit and use a lease.
+amended your own unpublished commit and use a lease. Do not commit `target/`,
+`build/`, serial logs, editor configuration, or credentials; they are ignored
+by `.gitignore`.
 
 ### Commit messages
 
@@ -51,8 +57,8 @@ Every PR should state:
 
 1. What changed and why.
 2. The exact commit tested.
-3. Commands run and their pass/fail counts (`make unittest`, `make test`,
-   `make lint`, and any manual QEMU checks).
+3. Commands run and their pass/fail counts (`make ci`, plus any manual QEMU
+   checks). If you run the individual targets instead, list each one.
 4. Anything that was **not** run, and why.
 5. Known limitations, timing caveats, or follow-up work.
 
