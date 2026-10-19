@@ -11,7 +11,7 @@ It is a planning model, not a delivery promise.
 - [x] Threat model and security boundaries for the implemented boot path.
 - [x] Pinned toolchain and QEMU target.
 - [x] Boot ABI and defensive image parser.
-- [ ] Broader system ABI, capability, and IPC specifications.
+- [x] Broader system ABI, capability, and IPC specifications.
 - [ ] Windows compatibility feasibility report (can run in parallel).
 
 ## Phase 1 — Bootable kernel
@@ -20,9 +20,12 @@ It is a planning model, not a delivery promise.
 - [x] Serial console and panic reporting.
 - [x] Memory-map parsing and kernel hand-off.
 - [x] Automated boot test and CI.
-- [ ] IDT and structured exception reporting.
-- [ ] Physical page allocator and kernel-owned page tables.
-- [ ] Architecture initialization tests.
+- [x] GDT and IDT with structured exception reporting.
+- [x] Physical page allocator and kernel-owned page tables.
+- [x] Architecture/memory initialization tests (host unit tests and QEMU
+  exception-path test).
+- [ ] Higher-half kernel and per-address-space page tables.
+- [ ] Interrupt controller and timer.
 
 ## Phase 2 — Isolated execution
 
@@ -57,8 +60,7 @@ Aether interfaces it depends on exist.
 
 ## Current milestone
 
-The first-sprint acceptance criteria are met when a clean checkout builds an
-image, boots under the documented QEMU configuration, prints the startup
-message on serial, and CI detects a deliberately broken build or boot. The next
-milestone is a kernel that owns its page tables and reports faults without
-resetting.
+The Phase 1 boot and memory milestones are met: a clean checkout builds an
+image, boots under the documented QEMU configuration, owns its page tables,
+reports exceptions, and runs automated boot and fault tests. The next milestone
+is a higher-half mapping, timer interrupts, and the task/address-space model.

@@ -20,27 +20,32 @@ services.
 
 ## Current state
 
-The kernel is a first-sprint skeleton:
+The kernel implements the Phase 1 boot and memory slice:
 
 - x86-64 long mode, ring 0, interrupts disabled at entry;
 - a dedicated 64 KiB stack in `.bss`;
-- COM1 serial output;
-- panic reporting;
+- a flat kernel GDT and a 32-entry architectural exception IDT;
+- COM1 serial output and panic reporting;
 - `BootInfo` header, kernel-range, and memory-region validation;
-- a memory summary (region count and usable bytes);
-- an explicit `AETHER_BOOT_OK` marker for the boot test.
+- a 16 GiB bitmap frame allocator over validated RAM;
+- kernel-owned four-level page tables with a 4 KiB W^X kernel mapping and 2 MiB
+  identity mappings for the rest of RAM;
+- structured exception reports with vector, error code, RIP, RFLAGS, and CR2;
+- explicit `AETHER_MM_OK` and `AETHER_BOOT_OK` markers for the boot test;
+- a `fault-selftest` feature that executes `int3` after paging for the
+  exception-path test.
 
 What is deliberately absent:
 
-- IDT, exception handlers, and a structured fault report;
-- physical page allocator and page tables owned by the kernel;
-- GDT/TSS ownership and user-mode entry;
+- a higher-half mapping and per-address-space page tables;
+- IST/TSS setup for double-fault and stack-overflow recovery;
+- user-mode entry and user/kernel page permissions;
 - task/thread objects, context switching, and scheduling;
 - timer and interrupt controllers;
 - capability objects, tables, rights checks, and IPC;
 - SMP startup.
 
-These gaps are tracked in the technical specification backlog (Epics B–D).
+These gaps are tracked in the technical specification backlog (Epics C–D).
 
 ## Entry contract
 
@@ -61,11 +66,11 @@ any pointed-to memory.
 
 The critical path from the specification is:
 
-1. IDT, exception reporting, and a deliberate panic/abort path.
-2. Physical page allocator over the validated memory map.
-3. Kernel-owned page tables and a higher-half mapping policy.
+1. Higher-half kernel mapping and per-address-space page tables.
+2. IST/TSS for double-fault and stack-overflow diagnostics.
+3. Interrupt controller and timer initialization.
 4. Task/address-space objects and user/kernel separation.
-5. Timer interrupts, preemptive scheduling, and fault containment.
+5. Preemptive scheduling and fault containment.
 6. Capability objects, tables, rights checks, IPC endpoints, and transfer.
 7. User-space loader and supervisor.
 

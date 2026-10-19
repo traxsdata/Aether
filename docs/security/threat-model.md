@@ -44,6 +44,9 @@ planned work rather than mitigated today.
 | Loader → kernel | Stale/wrong hand-off | Magic, version, structure size, count, kernel range, entry, region validation | Implemented |
 | Loader → kernel | Invalid enum discriminant | Memory kinds stored as `u32` and decoded fallibly | Implemented |
 | Boot path | Firmware page tables or NX deny execution | Boot test under OVMF; failure is visible on serial | Verified on QEMU/OVMF only |
+| Boot path | Allocator reuses firmware page tables or kernel memory | Reserve kernel/hand-off; release boot services only after CR3 switch; double-free checks | Implemented, host-tested |
+| Boot path | A fault during memory setup resets silently | IDT installed before paging; structured vector/RIP/CR2 report; fault self-test | Implemented, QEMU-tested |
+| Kernel memory | Kernel text writable or data executable | 4 KiB W^X page permissions for the kernel image | Implemented; not yet adversarially tested |
 | Diagnostics | Secret leakage | Boot code prints only version, addresses, and memory sizes | Policy; no secrets exist yet |
 | Build | Malformed image reaches CI as “passing” | `make test` requires a kernel marker after a real boot | Implemented |
 | Kernel → user | User reads another task's memory | Not implemented | Planned (Epic C) |
@@ -66,10 +69,10 @@ planned work rather than mitigated today.
 ## Known gaps
 
 - The loader is trusted and its own image is not verified by the kernel.
-- There is no IDT; an exception currently resets instead of producing a
-  structured report.
-- The kernel uses firmware's identity map; it does not yet own page tables or
-  enforce W^X/NX policy.
+- The kernel identity-maps physical memory; there is no higher-half mapping or
+  user/kernel address-space separation.
+- Page-table construction is covered by host unit tests and a real boot, but
+  not by an adversarial page-table test suite.
 - The boot image is unsigned. Secure Boot, signed updates, and rollback
   protection are later epics.
 - Serial output is not rate-limited or access-controlled; it is a development

@@ -11,7 +11,7 @@ Desktop and native SDK               (not implemented)
 Essential user-space services        (not implemented)
   initd / devd / storaged / fsd / netd / securityd / portald / sessiond
         |
-Capability-based microkernel         (boot skeleton only)
+Capability-based microkernel         (boot, memory, exceptions)
   memory / tasks / IPC / capabilities / interrupts / timer
         |
 Hardware and UEFI firmware
@@ -34,14 +34,16 @@ Hardware and UEFI firmware
 
 ## Current implementation
 
-The tree implements only the lowest layer needed to prove the toolchain and
-boot path:
+The tree implements the lowest layer needed to prove the boot and memory model:
 
 - `abi/` defines the loader/kernel contract.
 - `boot/common/` parses and validates the kernel ELF and contains host-tested
   memory arithmetic.
 - `boot/loader/` is a UEFI application.
-- `kernel/` contains the entry point, serial output, and hand-off validation.
+- `kernel/memory/` contains the host-tested frame allocator and page-table
+  encoding.
+- `kernel/` contains the entry point, GDT/IDT, serial output, hand-off
+  validation, physical-memory initialization, and kernel page tables.
 
 There is no general-purpose filesystem, network stack, package manager, GUI
 toolkit, or permission dialog in the kernel. That remains a design rule, not
