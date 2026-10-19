@@ -1,0 +1,32 @@
+# Session lock test. Run with a blank disk: the first-boot setup creates an
+# encrypted volume, then the lock screen is opened from the æ menu.
+#   AETHER_DISK=<blank 64 MiB image> tools/qemu-drive.py tests/lock.txt
+wait 25
+type testpass1\n
+wait 1
+type testpass1\n
+wait 6
+shot 01-desktop
+expect [storage] unlocked
+expect-count 1 started terminal
+# Open the æ menu and choose Lock Screen.
+move -610 -385
+click
+wait 0.5
+shot 02-menu
+move 30 210
+click
+wait 1
+shot 03-locked
+expect [wm] desktop locked
+# A wrong passphrase stays locked; the correct one returns to the desktop.
+type wrongpass\n
+wait 2
+shot 04-wrong
+expect unlock failed
+expect [wm] desktop locked
+type testpass1\n
+wait 2
+shot 05-unlocked
+expect-count 2 [storage] unlocked
+expect-count 1 started terminal

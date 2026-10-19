@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["nvme"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+debug = false

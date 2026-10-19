@@ -1,0 +1,7 @@
+# Run with AETHER_DISK=none. Runs the Linux-ABI Rust test program (build/apps/linuxtest.app).
+wait 12
+expect started terminal
+type run linuxtest\n
+wait 8
+shot 01-linuxtest
+expect linuxtest: all checks passed

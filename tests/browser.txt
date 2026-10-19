@@ -1,0 +1,26 @@
+# Run with AETHER_DISK=none after tools/build-browser.sh built
+# build/apps/browser.app: start the browser, show about:home, open
+# example.com (no firewall question: the browser's web policy allows it),
+# then about:security and the http warning.
+# Without internet access on the host the page is an error page that shows
+# webnet's message.
+wait 12
+expect started terminal
+type run browser\n
+wait 12
+expect started browser
+shot 01-browser-home
+type example.com\n
+wait 15
+shot 03-browser-example
+key ctrl-l
+type about:security\n
+wait 4
+shot 04-browser-security
+key pgdn
+wait 2
+shot 05-browser-security-scrolled
+key ctrl-l
+type http://example.com\n
+wait 4
+shot 06-browser-http-warning

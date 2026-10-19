@@ -1,0 +1,72 @@
+# Headless screenshots of the browser (see tools/build-browser.sh --shots):
+#   BROWSER_TEST_ROOT=runner/browser/testpages AETHER_SCRIPT=this \
+#   AETHER_SHOT_DIR=out browser
+# Dump paths are relative to the current directory.
+frame
+dump shots/01-home.png
+move 260 140
+frame
+click 120 62
+frame
+type https://test.aether/article.html
+key enter
+frame
+dump shots/02-article.png
+move 285 389
+frame
+dump shots/03-article-hover.png
+scroll 0 -6
+frame
+dump shots/04-article-scrolled.png
+key ctrl+l
+type test.aether/listings.html
+key enter
+frame
+dump shots/05-listings.png
+key tab
+key tab
+key tab
+frame
+dump shots/06-listings-focus.png
+key ctrl+l
+type test.aether/styled.html
+key enter
+frame
+dump shots/07-styled.png
+key ctrl+l
+type test.aether/images.html
+key enter
+frame
+dump shots/08-images.png
+key ctrl+l
+type http://test.aether/article.html
+key enter
+frame
+dump shots/09-http-warning.png
+key ctrl+l
+type https://nowhere.example/
+key enter
+frame
+dump shots/10-error.png
+click 1078 62
+frame
+dump shots/11-security.png
+key pgdn
+frame
+dump shots/12-security-scrolled.png
+key ctrl+t
+frame
+dump shots/13-new-tab.png
+key ctrl+w
+key ctrl+l
+type test.aether/article.html
+key enter
+frame
+key ctrl+t
+type test.aether/listings.html
+key enter
+frame
+dump shots/14-two-tabs.png
+key ctrl+1
+frame
+dump shots/15-first-tab.png

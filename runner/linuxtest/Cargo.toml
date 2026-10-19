@@ -1,0 +1,8 @@
+[package]
+name = "linuxtest"
+version = "0.1.0"
+edition = "2021"
+description = "Checks æther's Linux system call layer with ordinary Rust std code"
+
+[profile.release]
+opt-level = 2

@@ -1,0 +1,13 @@
+[package]
+name = "aether-host"
+version = "0.1.0"
+edition = "2021"
+description = "Raw æther system calls, and a Backend for windows and files: real (æther) or headless (Linux host tests)"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std"]
+# The Backend trait objects, the headless backend and the PNG writer need std.
+std = []
+
+[dependencies]

@@ -1,0 +1,12 @@
+# First boot on a blank disk: set a passphrase, which formats the encrypted volume.
+wait 6
+shot 01-setup
+type short\n
+wait 1
+shot 02-tooshort
+type correct horse\n
+type correct horse\n
+wait 4
+expect [afs] formatted sata0
+expect started terminal
+shot 03-desktop

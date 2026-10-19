@@ -1,0 +1,14 @@
+[package]
+name = "webnet"
+version = "0.1.0"
+edition = "2021"
+description = "æther's browser network layer: URLs, HTTP/1.1 and a TLS 1.3 client with its own crypto (std only, no external crates)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+aether-host = { path = "../aether-host" }
+
+[[bin]]
+name = "webget"
+path = "src/bin/webget.rs"

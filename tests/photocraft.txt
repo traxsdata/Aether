@@ -1,0 +1,26 @@
+# Run with AETHER_DISK=none, after tools/craft-build.sh built PhotoCraft and
+# tools/mkapp.py packaged it as build/apps/photocraft.app.
+# Start PhotoCraft, make a new document (Ctrl+N, Enter), paint a stroke.
+wait 12
+expect started terminal
+type run photocraft\n
+wait 40
+expect started photocraft
+shot 01-photocraft
+key ctrl-n
+wait 4
+shot 02-photocraft-new
+type \n
+wait 8
+shot 03-photocraft-doc
+# The pointer starts near (640, 408): drag across the canvas.
+down
+move 60 30
+wait 1
+move 60 30
+wait 1
+move 60 10
+wait 1
+up
+wait 4
+shot 04-photocraft-stroke

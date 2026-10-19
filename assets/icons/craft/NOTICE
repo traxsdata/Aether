@@ -1,0 +1,20 @@
+The PNG icons in this directory are the Craft apps' own application icons,
+downloaded from their source repositories under the Apache License 2.0:
+
+  https://github.com/storytold/photocraft  (assets/app-icon/hicolor/256x256/apps/ai.storyteller.photocraft.png)
+  https://github.com/storytold/vectorcraft (assets/app-icon/hicolor/256x256/apps/ai.storyteller.vectorcraft.png)
+  https://github.com/storytold/filmcraft   (assets/app-icon/hicolor/256x256/apps/ai.storyteller.filmcraft.png)
+  https://github.com/storytold/lightcraft  (assets/app-icon/hicolor/256x256/apps/ai.storyteller.lightcraft.png)
+  https://github.com/storytold/pdfcraft    (assets/app-icon/hicolor/256x256/apps/ai.storyteller.pdfcraft.png)
+  https://github.com/storytold/effectcraft (assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png)
+  https://github.com/storytold/designcraft (assets/app-icon/hicolor/256x256/apps/ai.storyteller.designcraft.png)
+  https://github.com/storytold/figcraft    (assets/app-icon/figcraft-256.png)
+  https://github.com/storytold/wordcraft   (assets/app-icon/hicolor/256x256/apps/ai.storyteller.wordcraft.png)
+  https://github.com/storytold/soundcraft  (assets/app-icon/hicolor/256x256/apps/ai.storyteller.soundcraft.png)
+  https://github.com/storytold/deckcraft   (assets/app-icon/hicolor/256x256/apps/ai.storyteller.deckcraft.png)
+  https://github.com/storytold/cadcraft    (assets/app-icon/cadcraft-256.png)
+  https://github.com/storytold/gridcraft   (assets/app-icon/hicolor/256x256/apps/ai.storyteller.gridcraft.png)
+
+They are resized to 128x128 for the æther package icon. Each icon travels
+inside that app's own untrusted .app package, never inside a trusted system
+app. The app repositories' Apache-2.0 license and NOTICE files apply.

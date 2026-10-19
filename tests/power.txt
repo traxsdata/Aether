@@ -1,0 +1,10 @@
+# ACPI shutdown from the æ menu. The guest writes PM1a_CNT (or QEMU's
+# fallback port) and QEMU exits; the serial log must show the power line.
+wait 25
+move -610 -385
+click
+wait 0.5
+move 30 262
+click
+wait 2
+expect [power] shutting down

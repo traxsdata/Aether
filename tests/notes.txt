@@ -1,0 +1,44 @@
+# Notes is untrusted: it opens and saves only through the system file picker.
+wait 6
+type correct horse\n
+wait 4
+type notes\n
+wait 2
+type Meeting notes from the launch review
+key ret
+type Ship on Friday.
+wait 1
+shot 01-notes
+key ctrl-s
+wait 1
+shot 02-save-picker
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+type launch.txt
+key ret
+wait 2
+shot 03-saved
+key ctrl-o
+wait 2
+key up
+wait 0.5
+key up
+shot 04-open-picker
+key ret
+wait 1
+shot 05-in-work
+key ret
+wait 2
+shot 06-opened-confidential
+expect notes was given launch.txt to save
+expect notes was given salary.txt to read

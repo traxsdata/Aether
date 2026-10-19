@@ -1,0 +1,10 @@
+[package]
+name = "settings"
+version = "0.8.0"
+edition = "2021"
+publish = false
+description = "Settings: network, Wi-Fi status, firewall, privacy and about"
+
+[dependencies]
+aether-host = { path = "../../aether-host" }
+system-ui = { path = "../../system-ui" }

@@ -1,0 +1,173 @@
+# Files, the explorer: browse, preview, new folder, rename, copy, move, delete, labels, the viewer, mouse.
+# Needs an æther disk (tests/storage.txt first). Works whether or not tests/files.txt has run:
+# everything happens in /home/zone, which it makes (run it on a freshly set-up disk to repeat it).
+wait 25
+type correct horse\n
+wait 4
+expect started terminal
+type mkdir zone\n
+type write zone/alpha.txt Launch plan: ship on Friday, budget 1200.\n
+type mkdir zone/beta\n
+type write zone/beta/inner.txt inside beta\n
+type write zone/secret.txt the vault code is 4711\n
+type label zone/secret.txt secret\n
+type mkdir zone/docs\n
+type write zone/docs/readme.txt Opened with a double-click.\n
+type mkdir zone/many\n
+type write zone/many/f01.txt 1\n
+type write zone/many/f02.txt 2\n
+type write zone/many/f03.txt 3\n
+type write zone/many/f04.txt 4\n
+type write zone/many/f05.txt 5\n
+type write zone/many/f06.txt 6\n
+type write zone/many/f07.txt 7\n
+type write zone/many/f08.txt 8\n
+type write zone/many/f09.txt 9\n
+type write zone/many/f10.txt 10\n
+type write zone/many/f11.txt 11\n
+type write zone/many/f12.txt 12\n
+type write zone/many/f13.txt 13\n
+type write zone/many/f14.txt 14\n
+type write zone/many/f15.txt 15\n
+type write zone/many/f16.txt 16\n
+type write zone/many/f17.txt 17\n
+type write zone/many/f18.txt 18\n
+type write zone/many/f19.txt 19\n
+type write zone/many/f20.txt 20\n
+type files\n
+wait 2
+expect started explorer
+shot 01-home
+# Type-ahead to zone, Enter opens it; Down selects alpha.txt and previews it (Personal: no question asked)
+type z
+key ret
+wait 0.5
+type a
+wait 0.5
+shot 02-zone-preview
+# New folder "reports"
+key ctrl-n
+wait 0.3
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+type reports
+wait 0.5
+shot 03-newfolder-dialog
+key ret
+wait 0.5
+# Rename alpha.txt to plan-a.txt
+type a
+key ctrl-r
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+type plan-a.txt
+key ret
+wait 0.5
+shot 04-renamed
+# Copy plan-a.txt into reports
+type p
+key ctrl-c
+type r
+key ret
+wait 0.3
+key ctrl-v
+wait 0.5
+shot 05-copied
+key backspace
+# Cut beta and paste it into reports
+type b
+key ctrl-x
+type r
+key ret
+wait 0.3
+key ctrl-v
+wait 0.5
+shot 06-moved
+key backspace
+wait 0.3
+# Delete reports: it isn't empty, and the dialog says so
+type r
+key delete
+wait 0.3
+shot 07-delete-confirm
+key ret
+wait 0.5
+shot 08-deleted
+# Raise plan-a.txt to Confidential (free), then try to lower it to Public (the kernel asks; keep)
+type p
+key ctrl-l
+key right
+wait 0.5
+shot 09-label-dialog
+key ret
+wait 0.5
+key ctrl-l
+key left
+key left
+key ret
+wait 1
+shot 10-lower-dialog
+key ret
+wait 0.5
+shot 11-kept
+# System folders can't be renamed: a friendly refusal in the status line
+key backspace
+key backspace
+wait 0.3
+type h
+key ctrl-r
+type x
+key ret
+wait 0.5
+shot 12-refused
+# Back to zone; secret.txt is Secret, so the preview asks first. Space reads it: Files now holds Secret data
+type h
+key ret
+type z
+key ret
+type s
+wait 0.5
+shot 13-preview-asks
+key spc
+wait 0.5
+shot 14-secret-preview
+# Enter opens the read-only viewer
+key ret
+wait 0.5
+shot 15-viewer
+key esc
+wait 0.3
+# Mouse: double-click "many" (second row), wheel down, the Up button, then Home in the sidebar
+move -240 -196
+click
+click
+wait 0.8
+shot 16-many
+scroll -3
+wait 0.5
+shot 17-scrolled
+move -262 -104
+click
+wait 0.5
+move 29 76
+click
+wait 0.8
+shot 18-home
+expect explorer raised plan-a.txt from Personal to Confidential
+expect you kept plan-a.txt as Confidential (asked by explorer)
+expect now holds Secret data (read a file)

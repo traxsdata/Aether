@@ -1,0 +1,35 @@
+# Mouse: open the calculator from the dock, click 7 x 6 =, drag it, close it with its red light
+# The 0.6 dock has six icons: terminal, calculator, notes, files, settings, store.
+wait 25
+move -96 347
+wait 0.5
+shot 10-dock-hover
+click
+wait 1.5
+expect started calculator
+shot 11-calc-open
+# Click 7 x 6 = on the calculator (window opens centred; keys measured from the screenshot)
+move -63 -387
+click
+move 222 0
+click
+move -73 61
+click
+move 73 122
+click
+wait 0.5
+shot 12-calc-42
+# Drag the calculator by its title bar, then close it
+move -111 -437
+down
+move 150 50
+move 150 50
+up
+wait 0.5
+shot 13-dragged
+# The red light is the first of the three on the left of the title bar.
+move -3000 -3000
+move 756 219
+click
+wait 1
+shot 14-closed

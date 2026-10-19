@@ -1,0 +1,17 @@
+# The browser loading a real page over TLS 1.3 inside æther. Run through
+# tools/test-https.sh, which sets up the server, the DNS name and a test build
+# of the browser that trusts a throwaway CA.
+wait 12
+expect started terminal
+expect [net] address 203.0.113.15
+type run browser\n
+wait 12
+expect started browser
+type aether.test/index.html\n
+wait 15
+expect [net] browser connected to aether.test:443
+shot 02-page
+key tab
+key ret
+wait 10
+shot 03-second-page

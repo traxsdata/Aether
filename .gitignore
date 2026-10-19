@@ -1,0 +1,9 @@
+build/
+prebuilt/
+.claude/
+runner/*/target/
+/target/
+
+# Headless browser screenshots (docs/ has the ones worth keeping).
+runner/browser/shots/
+drivers/target/

@@ -1,0 +1,19 @@
+# Run with AETHER_DISK=none, after tools/craft-build.sh built GridCraft and
+# tools/mkapp.py packaged it as build/apps/gridcraft.app (tools/build-craft.sh).
+# QEMU wheel notches: negative scrolls down.
+wait 12
+expect started terminal
+type run gridcraft\n
+wait 25
+expect started gridcraft
+shot 01-gridcraft
+# Pointer from about (640, 408) onto a cell, then type a number into it.
+move -200 -60
+click
+wait 2
+type 42\n
+wait 4
+shot 02-gridcraft-typed
+scroll -3
+wait 4
+shot 03-gridcraft-scrolled

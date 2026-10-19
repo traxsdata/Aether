@@ -1,0 +1,49 @@
+<!doctype html>
+<html><head><title>Scripted</title>
+<script src="scripted.js"></script>
+<script src="https://cdn.example/lib.js"></script>
+</head>
+<body>
+<h1 id="heading">Waiting for scripts</h1>
+<p><button id="count" type="button">Clicked 0 times</button></p>
+<ul id="list"></ul>
+<form id="search" action="/search">
+  <input id="q" name="q" placeholder="Search">
+  <button id="go">Search</button>
+</form>
+<p id="result"></p>
+<p id="data"></p>
+<a id="spa" href="/elsewhere.html">A link the page handles itself</a>
+<noscript><p>Scripts are off.</p></noscript>
+<script>
+  document.getElementById('heading').textContent = 'Scripts ' + (window.fromFile ? 'and files ' : '') + 'are running';
+  var n = 0;
+  document.getElementById('count').addEventListener('click', function () {
+    n++;
+    this.textContent = 'Clicked ' + n + (n === 1 ? ' time' : ' times');
+  });
+  ['one', 'two', 'three'].forEach(function (x) {
+    var li = document.createElement('li');
+    li.textContent = 'Item ' + x;
+    document.getElementById('list').appendChild(li);
+  });
+  document.getElementById('search').addEventListener('submit', function (e) {
+    e.preventDefault();
+    document.getElementById('result').textContent = 'You searched for ' + document.getElementById('q').value;
+  });
+  document.getElementById('q').addEventListener('input', function (e) {
+    document.getElementById('result').textContent = 'Typing: ' + e.target.value;
+  });
+  document.getElementById('spa').addEventListener('click', function (e) {
+    e.preventDefault();
+    history.pushState({}, '', '/handled');
+    document.getElementById('result').textContent = 'Handled by the page';
+  });
+  fetch('data.json').then(function (r) { return r.json(); }).then(function (d) {
+    document.getElementById('data').textContent = 'Fetched: ' + d.message;
+  });
+  fetch('https://cdn.example/track').catch(function (e) {
+    document.title = 'Scripted (blocked: ' + e.message.split(':')[0] + ')';
+  });
+</script>
+</body></html>

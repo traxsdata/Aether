@@ -1,0 +1,12 @@
+[package]
+name = "browser"
+version = "0.7.0"
+edition = "2021"
+publish = false
+description = "æther's web browser: a from-scratch HTML/CSS engine, picture decoders, script engine and tabbed shell"
+
+[dependencies]
+aether-host = { path = "../aether-host" }
+# The network layer (URLs, HTTP/1.1, TLS 1.3). The browser only uses it
+# through src/net.rs.
+webnet = { path = "../webnet" }

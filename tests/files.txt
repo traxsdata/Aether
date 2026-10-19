@@ -1,0 +1,37 @@
+# Unlock an existing volume, use files and labels, run the security test, then Notes.
+wait 6
+type wrong passphrase\n
+wait 3
+shot 01-wrong
+type correct horse\n
+wait 4
+expect started terminal
+type write plan.txt launch on friday\n
+type append plan.txt budget 1200\n
+type mkdir work\n
+type write work/salary.txt alice 95000\n
+type label work/salary.txt confidential\n
+type ls\n
+type cat plan.txt\n
+wait 1
+shot 02-files
+type clear\n
+type sectest\n
+wait 9
+shot 03-sectest
+type clear\n
+type cat work/salary.txt\n
+type write public.txt copied\n
+type label public.txt\n
+type log\n
+wait 1
+shot 04-taint
+type label public.txt public\n
+wait 2
+shot 05-lower-dialog
+key ret
+wait 1
+type dlp\n
+wait 1
+shot 06-dlp
+expect you kept public.txt as Confidential

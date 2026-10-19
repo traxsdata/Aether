@@ -1,0 +1,9 @@
+[package]
+name = "aether-nvme"
+version = "0.8.0"
+edition = "2021"
+publish = false
+description = "Memory-safe Rust NVMe driver for æther"
+
+[lib]
+crate-type = ["staticlib"]

@@ -1,0 +1,26 @@
+# Run with AETHER_DISK=none. The eframe example (build/apps/hello.app,
+# built by tools/build-hello.sh) drawn by the Rust runner: start it, type
+# into the text field, click the button, scroll.
+wait 12
+expect started terminal
+type run hello\n
+wait 10
+expect started hello
+shot 01-hello
+# The pointer starts near (640, 408); the name field is near (490, 182).
+move -150 -226
+click
+wait 1
+key ctrl-a
+type Aether
+wait 2
+# The button, near (308, 204).
+move -182 22
+click
+wait 1
+click
+wait 2
+shot 02-hello-typed
+scroll 2
+wait 2
+shot 03-hello-scrolled

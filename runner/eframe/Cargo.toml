@@ -1,0 +1,40 @@
+[package]
+name = "eframe"
+# 0.36.99 so `[patch.crates-io] eframe = { path = ... }` satisfies `eframe = "0.36"`.
+version = "0.36.99"
+edition = "2021"
+description = "eframe's public API on æther: egui drawn in software into an æther window"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["accesskit", "default_fonts", "links", "wayland", "web_screen_reader", "wgpu", "x11"]
+# egui 0.36 always builds its AccessKit tree support; nothing to switch on.
+accesskit = []
+default_fonts = ["egui/default_fonts"]
+# Real wgpu and egui-wgpu are re-exported so app code naming their types
+# compiles; rendering always goes through the software rasterizer.
+wgpu = ["wgpu_no_default_features", "egui-wgpu/default"]
+wgpu_no_default_features = ["dep:wgpu", "dep:egui-wgpu"]
+glow = ["dep:glow"]
+persistence = ["egui/persistence", "dep:ron", "dep:serde"]
+# Accepted for compatibility; nothing to do on æther.
+links = []
+wayland = []
+x11 = []
+web_screen_reader = []
+android-game-activity = []
+android-native-activity = []
+inspection = []
+__screenshot = []
+
+[dependencies]
+aether-host = { path = "../aether-host" }
+egui = { version = "0.36.2", default-features = false, features = ["bytemuck"] }
+log = { version = "0.4", features = ["std"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+egui-wgpu = { version = "0.36.2", default-features = false, optional = true }
+wgpu = { version = "30.0", default-features = false, features = ["std", "wgsl"], optional = true }
+glow = { version = "0.17", optional = true }
+ron = { version = "0.12", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }

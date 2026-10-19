@@ -1,0 +1,14 @@
+# Firewall rules persist in the encrypted volume, where no app can reach them.
+# Run twice after tests/storage.txt (needs build/disk.img): the second run shows the rule kept.
+wait 12
+type correct horse\n
+wait 5
+expect started terminal
+type fw allow terminal *.example.com 443\n
+type fw\n
+type ls /\n
+type cat /system/firewall\n
+type ls /system\n
+wait 2
+shot 01-rules
+expect [fw] 1 firewall rule loaded

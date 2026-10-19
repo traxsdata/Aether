@@ -1,0 +1,29 @@
+# Settings smoke test: open it and check the Network page renders the address
+# DHCP gave us. Run with AETHER_DISK=none.
+wait 25
+type run settings\n
+wait 2
+shot 01-network
+expect started settings
+# Wi-Fi says there is no adapter instead of pretending. Tab positions are
+# measured from the 1280x800 default screen.
+move -322 -300
+click
+wait 0.5
+shot 02-wifi
+move 102 0
+click
+wait 0.5
+shot 03-firewall
+move 80 0
+click
+wait 0.5
+shot 04-security
+move 92 0
+click
+wait 0.5
+shot 05-privacy
+move 92 0
+click
+wait 0.5
+shot 06-about

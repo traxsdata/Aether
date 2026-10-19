@@ -1,0 +1,9 @@
+# Run the unit tests from the terminal (the `test` command); tools/test-unit.sh
+# checks the results in the serial log. Needs AETHER_DISK=none (temporary
+# storage), so the terminal starts without an unlock screen.
+wait 30
+expect started terminal
+type test\n
+wait 60
+shot unit
+expect [terminal] test:

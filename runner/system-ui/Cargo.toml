@@ -1,0 +1,9 @@
+[package]
+name = "system-ui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The OS's own clean-room drawing surface and Facet text, for Rust system apps"
+
+[dependencies]
+aether-host = { path = "../aether-host" }

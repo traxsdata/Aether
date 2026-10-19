@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Northwind — Plans and pricing</title>
+<link rel="stylesheet" href="styled.css">
+</head>
+<body>
+<nav class="top">
+  <a class="brand" href="/">Northwind</a>
+  <ul>
+    <li><a href="/product">Product</a></li>
+    <li><a href="/pricing" class="active">Pricing</a></li>
+    <li><a href="/docs">Docs</a></li>
+    <li><a href="/blog">Blog</a></li>
+  </ul>
+  <a class="btn small" href="/signin">Sign in</a>
+</nav>
+
+<section class="hero">
+  <span class="pill">New: yearly billing saves 20%</span>
+  <h1>Simple pricing for teams of every size</h1>
+  <p class="lead">Start free, upgrade when you need to. No credit card required, cancel any time.</p>
+  <p><a class="btn" href="/signup">Start for free</a> <a class="btn ghost" href="/sales">Talk to sales</a></p>
+</section>
+
+<main class="wrap">
+  <div class="plans">
+    <div class="card">
+      <h3>Starter</h3>
+      <p class="price">$0<span>/month</span></p>
+      <ul class="features">
+        <li>Up to 3 projects</li>
+        <li>1 GB storage</li>
+        <li>Community support</li>
+      </ul>
+      <a class="btn ghost block" href="/signup?plan=starter">Choose Starter</a>
+    </div>
+    <div class="card featured">
+      <div class="ribbon">Most popular</div>
+      <h3>Team</h3>
+      <p class="price">$12<span>/user/month</span></p>
+      <ul class="features">
+        <li>Unlimited projects</li>
+        <li>100 GB storage</li>
+        <li>Priority email support</li>
+        <li>Audit log</li>
+      </ul>
+      <a class="btn block" href="/signup?plan=team">Choose Team</a>
+    </div>
+    <div class="card">
+      <h3>Enterprise</h3>
+      <p class="price">Custom</p>
+      <ul class="features">
+        <li>SSO and SCIM</li>
+        <li>Dedicated region</li>
+        <li>99.99% uptime SLA</li>
+      </ul>
+      <a class="btn ghost block" href="/sales">Contact us</a>
+    </div>
+  </div>
+
+  <h2 id="faq">Frequently asked questions</h2>
+  <div class="faq">
+    <details open><summary>Can I change plans later?</summary>
+      <p>Yes. Upgrades take effect immediately; downgrades at the end of the billing period.</p></details>
+    <details><summary>Do you offer discounts for non-profits?</summary>
+      <p>We do: 50% off the Team plan.</p></details>
+  </div>
+
+  <table class="compare">
+    <thead><tr><th>Feature</th><th>Starter</th><th>Team</th><th>Enterprise</th></tr></thead>
+    <tbody>
+      <tr><td>Projects</td><td>3</td><td>Unlimited</td><td>Unlimited</td></tr>
+      <tr><td>Storage</td><td>1 GB</td><td>100 GB</td><td>Custom</td></tr>
+      <tr><td>Support</td><td>Community</td><td>Email</td><td>24/7 phone</td></tr>
+    </tbody>
+  </table>
+</main>
+
+<footer class="site">
+  <div class="cols">
+    <div><h4>Product</h4><a href="/features">Features</a><a href="/changelog">Changelog</a></div>
+    <div><h4>Company</h4><a href="/about">About</a><a href="/jobs">Jobs</a></div>
+    <div><h4>Legal</h4><a href="/terms">Terms</a><a href="/privacy">Privacy</a></div>
+  </div>
+  <p class="fine">&copy; 2025 Northwind Inc.</p>
+</footer>
+</body>
+</html>

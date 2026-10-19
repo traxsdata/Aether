@@ -1,0 +1,55 @@
+# The network and firewall, end to end. Needs, on the host:
+#   - QEMU's user network moved to a public range (below), so the host, 203.0.113.2, can be
+#     reached by name without tripping the LAN-address rule
+#   - a web server on port 80:  cd some/folder && python3 -m http.server 80   (with an index.html)
+#   - tools/test-dns.py running, and /etc/resolv.conf pointing at 127.0.0.1 (QEMU forwards the
+#     guest's DNS to the host's resolver)
+# Run:  AETHER_DISK=none AETHER_NIC_OPTS=net=203.0.113.0/24 \
+#       tools/qemu-drive.py tests/net.txt       (also with AETHER_NIC=e1000)
+wait 12
+expect started terminal
+expect [net] address 203.0.113.15
+type net\n
+wait 1
+# An address typed as such: the firewall asks. Block is focused; Tab to "Allow once".
+type get 203.0.113.2 /index.html\n
+wait 2
+shot 01-firewall-dialog
+key tab
+key ret
+wait 4
+shot 02-get
+expect [net] terminal connected to 203.0.113.2:80
+# "Allow once" lasts for this app's run: no second question.
+type get 203.0.113.2 /index.html\n
+wait 3
+# A name, resolved by DNS; "Always allow" adds a rule.
+type get aether.test /index.html\n
+wait 2
+key tab
+key tab
+key ret
+wait 4
+expect [fw] rule added: allow terminal aether.test:80
+expect [net] terminal connected to aether.test:80
+shot 03-dns
+# A name that resolves into the LAN is refused (DNS rebinding), and so is an unknown name.
+type fw allow terminal rebind.test\n
+type get rebind.test\n
+wait 3
+expect [fw] blocked terminal -> rebind.test (192.168.1.1): not a public address
+# The firewall asks before any DNS lookup, so a blocked name never leaks to the network.
+type get nosuch.test\n
+wait 2
+key tab
+key ret
+wait 3
+# A deny rule wins without asking.
+type fw deny terminal blocked.test\n
+type get blocked.test\n
+wait 2
+expect [fw] blocked terminal -> blocked.test:80
+type fw\n
+type net\n
+wait 1
+shot 04-rules

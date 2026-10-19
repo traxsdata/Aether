@@ -1,0 +1,70 @@
+# Window management. Run with AETHER_DISK=none on the default ISO (dock: six apps).
+# Zoom with Super+Up, unzoom by double-clicking the title bar, resize by the
+# corner, minimize with the yellow light, restore from the Window menu, switch
+# with Super+Tab, quit with Super+Q. "move -3000 -3000" parks the pointer at
+# the top-left corner so the moves after it are absolute (1280x800 screen).
+wait 25
+type files\n
+wait 3
+expect started explorer
+shot 01-files
+# Zoom: fills the space between the menu bar and the dock.
+key meta_l-up
+wait 2
+expect explorer: window 2 is now 1280x638 (zoomed)
+shot 02-zoomed
+# Double-click the title bar: back to where it was.
+move -3000 -3000
+move 640 47
+click
+click
+wait 2
+expect explorer: window 2 is now 980x560
+# Drag the bottom-right corner 200 left and 100 up.
+move -3000 -3000
+move 1084 645
+down
+move -100 -50
+move -100 -50
+wait 0.5
+shot 03-resizing
+up
+wait 2
+expect explorer: window 2 is now 780x460
+shot 04-resized
+# Minimize with the yellow light: Files goes to the dock.
+move -3000 -3000
+move 142 65
+wait 0.5
+shot 05-lights-hover
+click
+wait 1.5
+expect explorer: window 2 minimized
+shot 06-minimized
+# Calculator from the dock (fixed size: its zoom light is hollow).
+move -3000 -3000
+move 505 750
+click
+wait 2
+expect started calculator
+# The Window menu, then Show All Windows brings Files back.
+move -3000 -3000
+move 160 15
+click
+wait 0.5
+shot 07-window-menu
+move 20 123
+click
+wait 2.5
+expect explorer: window 2 restored
+shot 08-shown
+# Super+Tab, held: the switcher; letting go picks the second window (Calculator).
+# (QEMU delivers a held key late: give the switcher time to open and close.)
+key meta_l-tab 1500
+wait 2.5
+shot 09-switcher
+wait 4
+key meta_l-q
+wait 2
+expect calculator: closed by the user
+shot 10-final

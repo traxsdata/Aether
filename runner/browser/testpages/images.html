@@ -1,0 +1,17 @@
+<!doctype html><html><head><title>Pictures</title><style>
+body { margin: 24px; font-family: sans-serif; background: #0b1022; color: #e6ecff; }
+img { margin: 8px; vertical-align: middle; }
+.narrow { max-width: 64px; height: auto; }
+.missing { width: 160px; height: 80px; }
+</style></head><body>
+<h1>Pictures</h1>
+<p>A page with real pictures, a data URL and one that is missing.</p>
+<table><tr><td><img src="images/quad.png" alt="Table picture"></td><td>Inside a table.</td></tr></table>
+<img src="images/landscape.png" alt="A quiet lake" width="192" height="120">
+<img class="narrow" src="images/landscape.png" alt="Narrow lake">
+<img src="images/quad.png" alt="Four colours">
+<img src="images/gradient-420.jpg" alt="Gradient" width="64" height="64">
+<img src="images/quad.gif" alt="GIF" width="64" height="64">
+<img width="64" height="64" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAI0lEQVR4nG3KsQ0AIAwDMAfxOJeHoRvCs1MKKbA8diaonO+4ATsFiR9Jq+QAAAAASUVORK5CYII=" alt="Inline">
+<img class="missing" src="images/missing.png" alt="Missing picture">
+</body></html>

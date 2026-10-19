@@ -1,0 +1,11 @@
+[package]
+name = "installer"
+version = "0.8.0"
+edition = "2021"
+publish = false
+description = "App Store: install and update Craft apps and the OS from GitHub"
+
+[dependencies]
+aether-host = { path = "../../aether-host" }
+webnet = { path = "../../webnet" }
+system-ui = { path = "../../system-ui" }

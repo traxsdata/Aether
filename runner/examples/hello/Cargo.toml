@@ -1,0 +1,10 @@
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A small eframe app for the æther runner"
+
+[dependencies]
+# Exactly like a Craft app: the workspace's [patch.crates-io] swaps in our eframe.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "persistence"] }

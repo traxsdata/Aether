@@ -1,0 +1,30 @@
+# The æther Rust runner: runs unmodified eframe apps in a software-rendered
+# æther window. Build a Craft app with tools/craft-build.sh.
+[workspace]
+resolver = "2"
+members = [
+    "aether-host",
+    "eframe",
+    "examples/hello",
+    "webnet",
+    "browser",
+    "system-ui",
+    "apps/settings",
+    "apps/installer",
+]
+# Built on its own by tools/build-linuxtest.sh.
+exclude = ["linuxtest"]
+
+# Apps ask for `eframe = "0.36"`; this hands them ours (version 0.36.99).
+[patch.crates-io]
+eframe = { path = "eframe" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = 0
+
+# Debug builds of the rasterizer and egui are unusably slow.
+[profile.dev.package."*"]
+opt-level = 2
