@@ -40,6 +40,8 @@ pub enum PagingError {
     UnrepresentableAddress(u64),
     /// The boot memory map contains no mappable RAM.
     EmptyMap,
+    /// The active kernel PML4 entry 0 is missing.
+    MissingKernelMapping,
 }
 
 unsafe extern "C" {
@@ -61,6 +63,94 @@ fn kernel_ranges() -> (u64, u64, u64, u64, u64, u64) {
         core::ptr::addr_of!(__data_start) as u64,
         core::ptr::addr_of!(__kernel_end) as u64,
     )
+}
+
+/// Virtual base of the per-address-space private window.
+///
+/// This is PML4 slot 1 (512 GiB), which the kernel identity map does not use.
+/// Every task maps the same virtual address to a different physical frame,
+/// which makes address-space isolation observable from the scheduler test.
+pub const PRIVATE_BASE: u64 = 0x0000_0080_0000_0000;
+
+/// Reads the active PML4 physical address from CR3.
+#[must_use]
+pub fn current_pml4() -> Option<PhysFrame> {
+    let value: u64;
+    // SAFETY: Reading CR3 is valid at CPL 0 and has no side effects.
+    unsafe {
+        asm!(
+            "mov {value}, cr3",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    PhysFrame::from_address(value & aether_memory::paging::ADDRESS_MASK)
+}
+
+/// Switches to `pml4`.
+pub fn activate(pml4: PhysFrame) {
+    // SAFETY: The address space shares the kernel identity mapping, so the
+    // running code, stack, and data remain mapped. Interrupts are disabled by
+    // the caller while switching scheduler state.
+    unsafe {
+        asm!(
+            "mov cr3, {pml4}",
+            pml4 = in(reg) pml4.start_address(),
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Creates a new address space that shares the kernel identity map and maps
+/// `private_frame` at [`PRIVATE_BASE`].
+///
+/// The private mapping is kernel-only for now. User-accessible mappings and
+/// per-task kernel stacks arrive with user mode.
+pub fn create_address_space(
+    allocator: &mut FrameAllocator<'_>,
+    private_frame: PhysFrame,
+) -> Result<PhysFrame, PagingError> {
+    let kernel_pml4 = current_pml4().ok_or(PagingError::MissingKernelMapping)?;
+    let kernel_entry = unsafe { (*table_ptr(kernel_pml4)).entry(0) };
+    if !kernel_entry.is_present() {
+        return Err(PagingError::MissingKernelMapping);
+    }
+
+    let pml4 = allocate_table(allocator)?;
+    let pdpt = allocate_table(allocator)?;
+    let pd = allocate_table(allocator)?;
+    let pt = allocate_table(allocator)?;
+
+    let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(PRIVATE_BASE);
+
+    // SAFETY: All tables were just allocated and zeroed, so every entry is
+    // absent. The kernel PML4 entry is copied so kernel text, data, stacks, and
+    // the identity map remain reachable in the new address space.
+    unsafe {
+        let pml4_table = table_ptr(pml4);
+        (*pml4_table).set_entry(0, kernel_entry);
+        (*pml4_table).set_entry(pml4_index, link_entry(pdpt)?);
+        (*table_ptr(pdpt)).set_entry(pdpt_index, link_entry(pd)?);
+        (*table_ptr(pd)).set_entry(pd_index, link_entry(pt)?);
+        let private = PageTableEntry::new(
+            private_frame.start_address(),
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
+        )
+        .ok_or(PagingError::UnrepresentableAddress(
+            private_frame.start_address(),
+        ))?;
+        (*table_ptr(pt)).set_entry(pt_index, private);
+    }
+
+    Ok(pml4)
+}
+
+fn link_entry(child: PhysFrame) -> Result<PageTableEntry, PagingError> {
+    PageTableEntry::new(
+        child.start_address(),
+        PageFlags::PRESENT | PageFlags::WRITABLE,
+    )
+    .ok_or(PagingError::UnrepresentableAddress(child.start_address()))
 }
 
 /// Installs kernel page tables and switches CR3.

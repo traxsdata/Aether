@@ -4,6 +4,7 @@
 pub mod gdt;
 pub mod idt;
 pub mod serial;
+pub mod timer;
 
 /// Installs the kernel's own descriptor and interrupt tables.
 pub fn init() {
