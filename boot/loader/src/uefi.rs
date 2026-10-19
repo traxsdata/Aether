@@ -21,8 +21,8 @@ pub const BUFFER_TOO_SMALL: Status = 0x8000_0000_0000_0005;
 
 /// Allocate at the address supplied in the final argument.
 pub const ALLOCATE_ADDRESS: u32 = 2;
-/// Allocate anywhere below `4 GiB`.
-pub const ALLOCATE_ANY_PAGES: u32 = 0;
+/// Allocate at or below the maximum address supplied in the final argument.
+pub const ALLOCATE_MAX_ADDRESS: u32 = 1;
 
 /// `EfiLoaderData`.
 pub const MEMORY_TYPE_LOADER_DATA: u32 = 2;

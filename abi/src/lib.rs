@@ -7,12 +7,13 @@
 //!
 //! The loader is trusted, but the kernel still validates the hand-off. A
 //! firmware bug, a corrupted image, or a future loader mismatch must fail
-//! closed instead of causing undefined behaviour.
+//! closed instead of causing undefined behaviour. The kernel also checks the
+//! hand-off pointer's alignment before forming a reference.
 
 #![no_std]
 
 use core::fmt;
-use core::mem::size_of;
+use core::mem::{align_of, size_of};
 
 /// Magic value identifying an [`BootInfo`] block. ASCII `AETHEROS`.
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"AETHEROS");
@@ -135,8 +136,12 @@ pub enum BootInfoError {
     UnsupportedVersion(u32),
     /// Structure is smaller than this kernel expects.
     Truncated { reported: u32, required: u32 },
+    /// Reserved header fields must be zero.
+    ReservedNotZero,
     /// Memory map pointer is null.
     NullMemoryMap,
+    /// Memory map pointer does not satisfy `MemoryRegion` alignment.
+    MemoryMapMisaligned,
     /// Memory map has no regions.
     EmptyMemoryMap,
     /// Region count exceeds [`MAX_MEMORY_REGIONS`].
@@ -149,6 +154,10 @@ pub enum BootInfoError {
     EntryOutsideKernel,
     /// A region is empty, overflows, or has an unknown kind.
     InvalidRegion { index: u64 },
+    /// Regions are not sorted by ascending physical start address.
+    RegionsNotSorted { index: u64 },
+    /// Two regions overlap.
+    OverlappingRegions { index: u64 },
 }
 
 impl fmt::Display for BootInfoError {
@@ -161,7 +170,9 @@ impl fmt::Display for BootInfoError {
             Self::Truncated { reported, required } => {
                 write!(f, "boot information is {reported} bytes, need {required}")
             }
+            Self::ReservedNotZero => write!(f, "reserved boot information fields are not zero"),
             Self::NullMemoryMap => write!(f, "null memory map pointer"),
+            Self::MemoryMapMisaligned => write!(f, "misaligned memory map pointer"),
             Self::EmptyMemoryMap => write!(f, "empty memory map"),
             Self::TooManyRegions(n) => {
                 write!(
@@ -173,6 +184,12 @@ impl fmt::Display for BootInfoError {
             Self::InvalidKernelRange => write!(f, "invalid kernel address range"),
             Self::EntryOutsideKernel => write!(f, "kernel entry point outside kernel image"),
             Self::InvalidRegion { index } => write!(f, "invalid memory region at index {index}"),
+            Self::RegionsNotSorted { index } => {
+                write!(f, "memory regions are not sorted at index {index}")
+            }
+            Self::OverlappingRegions { index } => {
+                write!(f, "memory region at index {index} overlaps its predecessor")
+            }
         }
     }
 }
@@ -244,8 +261,17 @@ impl BootInfo {
                 required,
             });
         }
+        if self.reserved.iter().any(|value| *value != 0) {
+            return Err(BootInfoError::ReservedNotZero);
+        }
         if self.memory_regions == 0 {
             return Err(BootInfoError::NullMemoryMap);
+        }
+        if !self
+            .memory_regions
+            .is_multiple_of(align_of::<MemoryRegion>() as u64)
+        {
+            return Err(BootInfoError::MemoryMapMisaligned);
         }
         if self.memory_region_count == 0 {
             return Err(BootInfoError::EmptyMemoryMap);
@@ -289,6 +315,7 @@ impl BootInfo {
     ///
     /// Same requirements as [`Self::regions`].
     pub unsafe fn validate_regions(&self) -> Result<(), BootInfoError> {
+        let mut previous: Option<(u64, u64)> = None;
         // SAFETY: Guaranteed by the caller.
         for (index, region) in unsafe { self.regions() }.iter().enumerate() {
             let index = index as u64;
@@ -302,6 +329,15 @@ impl BootInfo {
             {
                 return Err(BootInfoError::InvalidRegion { index });
             }
+            if let Some((previous_start, previous_end)) = previous {
+                if region.start < previous_start {
+                    return Err(BootInfoError::RegionsNotSorted { index });
+                }
+                if region.start < previous_end {
+                    return Err(BootInfoError::OverlappingRegions { index });
+                }
+            }
+            previous = Some((region.start, end));
         }
         Ok(())
     }
@@ -363,6 +399,20 @@ mod tests {
             info.validate(),
             Err(BootInfoError::UnsupportedVersion(BOOT_INFO_VERSION + 1))
         );
+    }
+
+    #[test]
+    fn rejects_nonzero_reserved_fields() {
+        let mut info = header();
+        info.reserved[2] = 1;
+        assert_eq!(info.validate(), Err(BootInfoError::ReservedNotZero));
+    }
+
+    #[test]
+    fn rejects_misaligned_memory_map_pointer() {
+        let mut info = header();
+        info.memory_regions = 0x1001;
+        assert_eq!(info.validate(), Err(BootInfoError::MemoryMapMisaligned));
     }
 
     #[test]
@@ -439,5 +489,64 @@ mod tests {
         assert_eq!(size_of::<MemoryKind>(), 4);
         assert_eq!(size_of::<MemoryRegion>(), 24);
         assert_eq!(size_of::<BootInfo>(), 96);
+    }
+
+    #[test]
+    fn accepts_sorted_adjacent_regions() {
+        let regions = [
+            MemoryRegion::new(0x1000, 0x1000, MemoryKind::Usable),
+            MemoryRegion::new(0x2000, 0x1000, MemoryKind::BootServices),
+        ];
+        let mut info = header();
+        info.memory_regions = regions.as_ptr() as u64;
+        info.memory_region_count = regions.len() as u64;
+        assert_eq!(unsafe { info.validate_regions() }, Ok(()));
+    }
+
+    #[test]
+    fn rejects_unsorted_regions() {
+        let regions = [
+            MemoryRegion::new(0x2000, 0x1000, MemoryKind::Usable),
+            MemoryRegion::new(0x1000, 0x1000, MemoryKind::Usable),
+        ];
+        let mut info = header();
+        info.memory_regions = regions.as_ptr() as u64;
+        info.memory_region_count = regions.len() as u64;
+        assert_eq!(
+            unsafe { info.validate_regions() },
+            Err(BootInfoError::RegionsNotSorted { index: 1 })
+        );
+    }
+
+    #[test]
+    fn rejects_overlapping_regions() {
+        let regions = [
+            MemoryRegion::new(0x1000, 0x2000, MemoryKind::Usable),
+            MemoryRegion::new(0x2000, 0x1000, MemoryKind::Reserved),
+        ];
+        let mut info = header();
+        info.memory_regions = regions.as_ptr() as u64;
+        info.memory_region_count = regions.len() as u64;
+        assert_eq!(
+            unsafe { info.validate_regions() },
+            Err(BootInfoError::OverlappingRegions { index: 1 })
+        );
+    }
+
+    #[test]
+    fn rejects_region_with_unknown_kind() {
+        let regions = [MemoryRegion {
+            start: 0x1000,
+            len: 0x1000,
+            kind: 42,
+            reserved: 0,
+        }];
+        let mut info = header();
+        info.memory_regions = regions.as_ptr() as u64;
+        info.memory_region_count = 1;
+        assert_eq!(
+            unsafe { info.validate_regions() },
+            Err(BootInfoError::InvalidRegion { index: 0 })
+        );
     }
 }
