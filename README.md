@@ -16,6 +16,15 @@ Workstation and real laptops today.
 - The Security page now combines auto-lock, Lock Now, passphrase change and
   the storage/protection status.
 
+## What's new in 1.7
+
+- **A label-aware clipboard.** `SYS_CLIPBOARD` is kernel memory with a DLP
+  label, reachable only with `CAP_CLIPBOARD`. Writing never lowers a label
+  below the writer's taint; reading raises the reader's taint. Notes copies
+  and pastes text, Files copies paths and can paste text as a new file, and
+  the clipboard is wiped whenever the desktop locks. See
+  [docs/CLIPBOARD.md](docs/CLIPBOARD.md).
+
 ## What's new in 1.6
 
 - **Notifications with a history.** Apps call `SYS_NOTIFY` to post a title

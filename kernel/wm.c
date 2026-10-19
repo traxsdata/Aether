@@ -34,6 +34,7 @@
 #include "../common/gfx.h"
 #include "afs.h"
 #include "apps.h"
+#include "clipboard.h"
 #include "crypto.h"
 #include "dlp.h"
 #include "cpu.h"
@@ -1964,6 +1965,8 @@ static void wm_lock_now(void) {
     lock.confirming = 0;
     crypto_wipe(lock.pw, sizeof lock.pw);
     crypto_wipe(lock.first, sizeof lock.first);
+    clipboard_clear();
+    wm_notifications_clear();
     last_input = ticks;
     damage_all();
     kprintf("[wm] desktop locked\n");

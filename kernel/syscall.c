@@ -11,6 +11,7 @@
 #include "afs.h"
 #include "apps.h"
 #include "appstore.h"
+#include "clipboard.h"
 #include "cpu.h"
 #include "crypto.h"
 #include "dlp.h"
@@ -104,6 +105,53 @@ static int64_t sys_log(uint64_t msg, uint64_t len) {
         if ((buf[i] < 32 || buf[i] > 126) && buf[i] != '\n') buf[i] = '?'; /* no control characters */
     kprintf("[%s] %s\n", current->name, buf);
     return 0;
+}
+
+static int64_t sys_clipboard(uint64_t op, uint64_t a, uint64_t b, uint64_t c) {
+    REQUIRE(CAP_CLIPBOARD);
+    if (op == CLIP_SET) {
+        uint64_t len = b;
+        if (len > CLIP_MAX || c >= LABEL_COUNT) return -E_INVAL;
+        void *tmp = len ? kmalloc(len) : 0;
+        if (len && !tmp) return -E_NOMEM;
+        if (copy_in(tmp, a, len)) {
+            kfree(tmp);
+            return -E_FAULT;
+        }
+        int r = clipboard_store(current, tmp, len, (int)c);
+        kfree(tmp);
+        return r;
+    }
+    if (op == CLIP_GET) {
+        uint64_t max = b;
+        if (max > CLIP_MAX) max = CLIP_MAX;
+        struct clip_result res;
+        if (!user_range_ok(c, sizeof res, 1)) return -E_FAULT;
+        if (!user_range_ok(a, max, 1)) return -E_FAULT;
+        void *tmp = max ? kmalloc(max) : 0;
+        if (max && !tmp) return -E_NOMEM;
+        size_t n = 0;
+        int label = LABEL_PUBLIC;
+        clipboard_read(current, tmp, max, &n, &label);
+        int err = copy_out(a, tmp, n);
+        kfree(tmp);
+        if (err) return err;
+        res.len = n;
+        res.label = (uint32_t)label;
+        res.pad = 0;
+        return copy_out(c, &res, sizeof res);
+    }
+    if (op == CLIP_INFO) {
+        struct clip_result res;
+        size_t n = 0;
+        int label = LABEL_PUBLIC;
+        clipboard_info(&n, &label);
+        res.len = n;
+        res.label = (uint32_t)label;
+        res.pad = 0;
+        return copy_out(a, &res, sizeof res);
+    }
+    return -E_INVAL;
 }
 
 static int64_t sys_notify(uint64_t utitle, uint64_t title_len, uint64_t umsg, uint64_t msg_len) {
@@ -617,6 +665,7 @@ void syscall_dispatch(struct isr_frame *f) {
     case SYS_CHANGE_PASSPHRASE: r = sys_change_passphrase(a, b, c, d); break;
     case SYS_SHUTDOWN: r = sys_shutdown(); break;
     case SYS_NOTIFY: r = sys_notify(a, b, c, d); break;
+    case SYS_CLIPBOARD: r = sys_clipboard(a, b, c, d); break;
     default: r = -E_INVAL; break;
     }
     f->rax = (uint64_t)r;

@@ -7,7 +7,10 @@
  * private folder (/apps/notes), and the kernel's DLP labels follow the text:
  * open a Confidential file and the draft becomes Confidential too.
  *
- * Keys: Ctrl+O open, Ctrl+S save, Ctrl+N new, arrows/Home/End to move.
+ * Keys: Ctrl+O open, Ctrl+S save, Ctrl+N new, Ctrl+C/X/V clipboard,
+ * arrows/Home/End to move. The clipboard is the kernel's label-aware one;
+ * copying the whole document raises this app's taint to the file's label and
+ * pasting raises it to the clipboard's label.
  */
 #include "lib/ui.h"
 
@@ -75,6 +78,53 @@ static void load_draft(void) {
     load_from(h);
     sys_close(h);
     if (len) set_status(C_DIM, "Restored your unsaved draft");
+}
+
+static char pastebuf[MAX_TEXT + 1];
+
+static void do_copy(int cut) {
+    int label = file_label >= 0 ? file_label : 0;
+    int64_t r = sys_clip_set(text, (uint64_t)len, label);
+    if (r < 0) {
+        set_status(C_ERR, r == -E_PERM ? "This Notes build has no clipboard access" : "Couldn't copy");
+        return;
+    }
+    if (cut) {
+        len = cur = top = 0;
+        text[0] = 0;
+        dirty = draft_dirty = 1;
+        set_status(C_DIM, "Cut the whole document");
+    } else {
+        set_status(C_DIM, "Copied the whole document");
+    }
+}
+
+static void do_paste(void) {
+    struct clip_result ci;
+    if (sys_clip_info(&ci) || !ci.len) {
+        set_status(C_DIM, "The clipboard is empty");
+        return;
+    }
+    if (ci.len > (uint64_t)(MAX_TEXT - len)) {
+        set_status(C_ERR, "That clipboard text doesn't fit");
+        return;
+    }
+    struct clip_result got;
+    int64_t n = sys_clip_get(pastebuf, MAX_TEXT, &got);
+    if (n < 0) {
+        set_status(C_ERR, "Couldn't read the clipboard");
+        return;
+    }
+    n = got.len;
+    memmove(text + cur + n, text + cur, (size_t)(len - cur));
+    memcpy(text + cur, pastebuf, (size_t)n);
+    len += (int)n;
+    cur += (int)n;
+    text[len] = 0;
+    dirty = draft_dirty = 1;
+    char pasted[64];
+    snprintf(pasted, sizeof pasted, "Pasted %ld bytes (%s)", (long)n, label_name((int)got.label));
+    set_status(C_DIM, pasted);
 }
 
 static void do_open(void) {
@@ -192,6 +242,9 @@ static void key(uint32_t k, uint32_t mods) {
         if (k == 'o' || k == 'O') do_open();
         else if (k == 's' || k == 'S') do_save(0);
         else if (k == 'n' || k == 'N') do_new();
+        else if (k == 'c' || k == 'C') do_copy(0);
+        else if (k == 'x' || k == 'X') do_copy(1);
+        else if (k == 'v' || k == 'V') do_paste();
         return;
     }
     switch (k) {

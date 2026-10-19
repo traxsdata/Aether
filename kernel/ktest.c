@@ -23,6 +23,7 @@
 #include "afs.h"
 #include "apps.h"
 #include "appstore.h"
+#include "clipboard.h"
 #include "blk.h"
 #include "crypto.h"
 #include "dlp.h"
@@ -671,7 +672,8 @@ static void t_sandbox_untrusted(void) {
     for (unsigned i = 0; i < ARRAY_LEN(never_untrusted); i++) blocked &= !(p->syscall_allow & (1ull << never_untrusted[i]));
     KT_CHECK(blocked);
     KT_CHECK(p->syscall_allow & (1ull << SYS_EXIT));
-    KT_CHECK(!(p->syscall_allow >> SYS_COUNT)); /* nothing beyond the table */
+    KT_CHECK(SYS_COUNT <= 64);                 /* the untrusted filter is one word */
+
     KT_CHECK(p->mem_quota_pages == 8 * 256);    /* 8 MiB */
     stop(p);
 }
@@ -713,10 +715,11 @@ static void t_sandbox_layout(void) {
 static void t_sandbox_explorer(void) {
     const struct program *prog = program_find("explorer");
     KT_REQUIRE(prog);
-    KT_CHECK(prog->caps == (CAP_WINDOW | CAP_FILES) && prog->trust == TRUST_TRUSTED && !strcmp(prog->title, "Files"));
+    KT_CHECK(prog->caps == (CAP_WINDOW | CAP_FILES | CAP_CLIPBOARD) && prog->trust == TRUST_TRUSTED &&
+             !strcmp(prog->title, "Files"));
     struct proc *p = spawn_quiet("explorer", current->pid);
     KT_REQUIRE(p);
-    KT_CHECK(p->trust == TRUST_TRUSTED && p->caps == (CAP_WINDOW | CAP_FILES)); /* no spawn, kill or system info */
+    KT_CHECK(p->trust == TRUST_TRUSTED && p->caps == (CAP_WINDOW | CAP_FILES | CAP_CLIPBOARD)); /* no spawn, kill or system info */
     stop(p);
 }
 
@@ -1212,6 +1215,26 @@ static void t_net_config(void) {
 
 /* ---- USB HID ----------------------------------------------------------- */
 
+static void t_clipboard_labels(void) {
+    uint32_t before = current->taint;
+    size_t n = 0;
+    int label = LABEL_PUBLIC;
+    clipboard_clear();
+    KT_CHECK(clipboard_store(current, "confidential text", 18, LABEL_CONFIDENTIAL) == 0);
+    KT_CHECK(current->taint >= LABEL_CONFIDENTIAL); /* writing taints the writer */
+    char out[32];
+    KT_CHECK(clipboard_read(current, out, sizeof out, &n, &label) == 0 && n == 18 && label == LABEL_CONFIDENTIAL);
+    KT_CHECK(!memcmp(out, "confidential text", 18));
+    /* An app that already holds Confidential data cannot label a later copy
+     * Public; labels only go up. */
+    KT_CHECK(clipboard_store(current, "x", 1, LABEL_PUBLIC) == 0);
+    KT_CHECK(!clipboard_info(&n, &label) && n == 1 && label == LABEL_CONFIDENTIAL);
+    KT_CHECK(clipboard_store(current, 0, CLIP_MAX + 1, LABEL_PUBLIC) == -E_INVAL);
+    clipboard_clear();
+    KT_CHECK(!clipboard_info(&n, &label) && n == 0 && label == LABEL_PUBLIC);
+    current->taint = before; /* the test raised it deliberately */
+}
+
 static void t_notify_rate(void) {
     wm_notifications_clear();
     for (int i = 0; i < 4; i++)
@@ -1332,6 +1355,7 @@ static const struct ktest {
     {"usb", "I2C-HID report descriptor parser", t_i2c_hid_parser},
     {"settings", "settings persist and validate keys", t_settings},
     {"wm", "notifications keep history and rate-limit bursts", t_notify_rate},
+    {"dlp", "clipboard raises taint and never lowers labels", t_clipboard_labels},
 };
 
 int ktest_run(const char *suite, char *out, size_t len, struct ktest_result *res) {

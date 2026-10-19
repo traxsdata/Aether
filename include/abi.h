@@ -26,6 +26,7 @@
 #define CAP_APPS     (1u << 10) /* install, update and remove app packages */
 #define CAP_CONFIG   (1u << 11) /* change system settings: network, Wi-Fi, ... */
 #define CAP_UPDATE   (1u << 12) /* install the OS, write A/B slots and reboot */
+#define CAP_CLIPBOARD (1u << 13) /* read and write the label-aware system clipboard */
 
 /* Which system call interface a program speaks. */
 #define ABI_AETHER 0
@@ -163,6 +164,11 @@ enum {
      * kernel-drawn (Super+N), so an app cannot spoof another app's entry. */
     SYS_NOTIFY = 62,         /* (title, title_len, msg, msg_len) [CAP_WINDOW] -> 0 */
 
+    /* Clipboard (1.7). Kernel-owned memory with a DLP label. An app needs
+     * CAP_CLIPBOARD to read or write it; reading raises the reader's taint.
+     * The kernel clears it when the session locks. */
+    SYS_CLIPBOARD = 63,      /* (op CLIP_*, arg, len, out) [CAP_CLIPBOARD]: see CLIP_* below */
+
     SYS_COUNT
 };
 
@@ -241,6 +247,18 @@ struct app_info {
     uint32_t mem_quota_mib;
     uint64_t size;           /* program image bytes */
 };
+
+#define CLIP_MAX 65536
+
+struct clip_result {
+    uint64_t len;   /* bytes stored / copied */
+    uint32_t label; /* DLP label */
+    uint32_t pad;
+};
+
+#define CLIP_SET  1 /* (data, len, label) -> 0 */
+#define CLIP_GET  2 /* (buf, max, struct clip_result *out) -> bytes */
+#define CLIP_INFO 3 /* (struct clip_result *out) -> 0 */
 
 #define APP_INSTALL_REPLACE 1 /* allow replacing an existing, non-system app */
 #define APP_INSTALL_SIGNED  2 /* require a valid publisher signature (network downloads) */

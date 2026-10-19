@@ -88,6 +88,7 @@ static char view_name[NAME_MAX + 2];
 /* Clipboard: one path, copied or cut. */
 static char clip[PATH_MAX];
 static int clip_cut;
+static char pastebuf[CLIP_MAX + 1];
 
 /* In-window dialogs. */
 enum { M_NONE, M_NEWDIR, M_RENAME, M_DELETE, M_LABEL };
@@ -528,11 +529,38 @@ static void do_copy(int cut) {
     struct entry *e = selected();
     if (!e || !join(clip, cwd, e->name)) return;
     clip_cut = cut;
+    /* Also put the path on the system clipboard. Notes (or another app) can
+     * paste it, and the kernel raises the clipboard to this file's label so
+     * the path carries the same DLP label as the data it names. */
+    sys_clip_set(clip, strlen(clip), (int)e->label);
     say(C_DIM, "%s %s: open a folder and paste (Ctrl+V)", cut ? "Cut" : "Copied", e->name);
 }
 
+/* Paste text from another app as a new file. The path clipboard above takes
+ * priority, so copying a file inside Files still moves/copies the file. */
+static void paste_text_file(void) {
+    struct clip_result ci;
+    if (sys_clip_info(&ci) || !ci.len) {
+        say(C_DIM, "Nothing to paste: copy or cut something first");
+        return;
+    }
+    if (ci.len > CLIP_MAX) return say(C_ERR, "That clipboard text is too large");
+    struct clip_result got;
+    if (sys_clip_get(pastebuf, CLIP_MAX, &got) < 0) return say(C_ERR, "Couldn't read the clipboard");
+    char dst[PATH_MAX];
+    if (!unique_path(dst, cwd, "Pasted.txt")) return say(C_ERR, "Can't find a free name for the paste");
+    int h = (int)sys_open(dst, O_WRITE | O_CREATE | O_TRUNC);
+    if (h < 0) return say(C_ERR, "Can't create %s: %s", base_name(dst), why(h));
+    int64_t n = sys_write(h, pastebuf, got.len);
+    sys_close(h);
+    if (n != (int64_t)got.len) return say(C_ERR, "The paste was only partly written");
+    say(C_OK, "Pasted %ld bytes as %s (%s)", (long)got.len, base_name(dst), label_name((int)got.label));
+    refresh_fs_info();
+    go(cwd, base_name(dst));
+}
+
 static void do_paste(void) {
-    if (!clip[0]) return say(C_DIM, "Nothing to paste: copy or cut something first");
+    if (!clip[0]) return paste_text_file();
     char dst[PATH_MAX], from_dir[PATH_MAX];
     const char *name = base_name(clip);
     if (path_within(cwd, clip)) return say(C_ERR, "Can't put a folder inside itself");

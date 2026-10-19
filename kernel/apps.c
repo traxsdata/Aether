@@ -32,16 +32,17 @@ BLOB(app_explorer);
 static struct program programs[] = {
     {.name = "terminal", .title = "Terminal", .image = app_terminal_start,
      .caps = CAP_WINDOW | CAP_LOG | CAP_SYSINFO | CAP_SPAWN | CAP_KILL | CAP_FILES | CAP_PICK | CAP_STORAGE |
-             CAP_NET | CAP_FIREWALL | CAP_APPS | CAP_CONFIG,
+             CAP_NET | CAP_FIREWALL | CAP_APPS | CAP_CONFIG | CAP_CLIPBOARD,
      .trust = TRUST_SYSTEM, .mem_quota_mib = 64, .abi = ABI_AETHER},
     {.name = "calculator", .title = "Calculator", .image = app_calculator_start,
      .caps = CAP_WINDOW, .trust = TRUST_TRUSTED, .mem_quota_mib = 16, .abi = ABI_AETHER},
     {.name = "notes", .title = "Notes", .image = app_notes_start,
-     .caps = CAP_WINDOW | CAP_PICK | CAP_STORAGE, .trust = TRUST_UNTRUSTED, .mem_quota_mib = 32, .abi = ABI_AETHER},
+     .caps = CAP_WINDOW | CAP_PICK | CAP_STORAGE | CAP_CLIPBOARD, .trust = TRUST_UNTRUSTED, .mem_quota_mib = 32,
+     .abi = ABI_AETHER},
     {.name = "probe", .image = app_probe_start,
      .caps = CAP_STORAGE, .trust = TRUST_UNTRUSTED, .mem_quota_mib = 8, .abi = ABI_AETHER},
     {.name = "explorer", .title = "Files", .image = app_explorer_start,
-     .caps = CAP_WINDOW | CAP_FILES, .trust = TRUST_TRUSTED, .mem_quota_mib = 32, .abi = ABI_AETHER},
+     .caps = CAP_WINDOW | CAP_FILES | CAP_CLIPBOARD, .trust = TRUST_TRUSTED, .mem_quota_mib = 32, .abi = ABI_AETHER},
 };
 
 /*

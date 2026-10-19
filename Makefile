@@ -41,6 +41,7 @@ COMMON_SRCS := common/gfx.c common/string.c common/fmt.c
 KERNEL_SRCS := kernel/entry.S kernel/main.c kernel/lib.c kernel/log.c kernel/serial.c kernel/gdt.c \
                kernel/idt.c kernel/isr.S kernel/pic.c kernel/input.c kernel/ps2.c kernel/rtc.c kernel/pmm.c kernel/vmm.c \
                kernel/heap.c kernel/proc.c kernel/switch.S kernel/syscall.c kernel/wm.c kernel/apps.c \
+               kernel/clipboard.c \
                kernel/apps.S kernel/rng.c kernel/crypto.c kernel/afs.c kernel/vfs.c kernel/dlp.c kernel/umem.c kernel/storage.c kernel/pci.c kernel/blk.c kernel/ahci.c \
                kernel/elf.c kernel/linux.c kernel/ktest.c kernel/e1000.c kernel/net.c kernel/firewall.c \
                kernel/usb.c kernel/usb_hid.c kernel/usb_net.c kernel/usb_storage.c kernel/i2c_hid.c \

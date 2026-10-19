@@ -101,3 +101,12 @@ static inline const char *label_name(uint32_t l) {
 static inline int64_t sys_notify(const char *title, const char *msg) {
     return syscall4(SYS_NOTIFY, title, strlen(title), msg, strlen(msg));
 }
+static inline int64_t sys_clip_set(const void *data, uint64_t len, int label) {
+    return syscall4(SYS_CLIPBOARD, CLIP_SET, data, len, label);
+}
+static inline int64_t sys_clip_get(void *buf, uint64_t max, struct clip_result *out) {
+    return syscall4(SYS_CLIPBOARD, CLIP_GET, buf, max, out);
+}
+static inline int64_t sys_clip_info(struct clip_result *out) {
+    return syscall4(SYS_CLIPBOARD, CLIP_INFO, out, 0, 0);
+}

@@ -143,7 +143,7 @@ static const uint64_t untrusted_syscalls =
     BIT(SYS_RENAME) | BIT(SYS_SET_LABEL) | BIT(SYS_PICK_FILE) | BIT(SYS_FS_INFO) | BIT(SYS_MEM_MAP) |
     BIT(SYS_MEM_UNMAP) | BIT(SYS_MEM_PROTECT) | BIT(SYS_DISPLAY_INFO) | BIT(SYS_EVENT_WAKE) | BIT(SYS_NET_CONNECT) |
     BIT(SYS_NET_SEND) | BIT(SYS_NET_RECV) | BIT(SYS_NET_CLOSE) | BIT(SYS_NET_INFO) | /* the network still needs CAP_NET */
-    BIT(SYS_WIN_FLAGS) | BIT(SYS_WIN_RESIZE) | BIT(SYS_TRUNCATE) | BIT(SYS_NOTIFY);
+    BIT(SYS_WIN_FLAGS) | BIT(SYS_WIN_RESIZE) | BIT(SYS_TRUNCATE) | BIT(SYS_NOTIFY) | BIT(SYS_CLIPBOARD);
 
 int proc_spawn(const char *name, uint32_t caps, uint64_t arg, int parent) {
     const struct program *prog = program_find(name);

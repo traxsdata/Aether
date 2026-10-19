@@ -46,6 +46,7 @@ Each process carries a capability mask, fixed at spawn time:
 | `CAP_APPS` | install, update and remove app packages | ✓ | | | | | | ✓ |
 | `CAP_CONFIG` | network and system settings | ✓ | | | | | ✓ | |
 | `CAP_UPDATE` | install the OS, write A/B slots, reboot | ✓ | | | | | | ✓ |
+| `CAP_CLIPBOARD` | read/write the label-aware system clipboard | ✓ | | ✓ | | ✓ | | |
 
 A child gets the intersection of what its program's manifest allows
 (`kernel/apps.c`), what the parent asked for, and what the parent itself
