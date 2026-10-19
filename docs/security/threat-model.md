@@ -48,6 +48,8 @@ so those threats are recorded as planned work rather than mitigated today.
 | Boot path | A fault during memory setup resets silently | IDT installed before paging; structured vector/RIP/CR2 report; fault self-test | Implemented, QEMU-tested |
 | Kernel memory | Kernel text writable or data executable | 4 KiB W^X page permissions for the kernel image | Implemented; not yet adversarially tested |
 | Kernel task → task | One task reads or writes another task's memory | Per-task PML4 and private frame at the same virtual address; CR3 switch on context switch; boot-time isolation test | Implemented, QEMU-tested |
+| Kernel task → object | Forged handle, stale slot, or insufficient rights | Generation-checked capability handles; per-task tables; rights checks | Implemented, host- and QEMU-tested |
+| Kernel task → IPC | Oversized message, queue exhaustion, capability forgery | 32-byte bound, four-message queues, critical sections, `TRANSFER` check | Implemented, host- and QEMU-tested |
 | Kernel task → kernel | Task corrupts kernel state | Kernel and tasks share the kernel mapping; all tasks run at CPL0 | **Not isolated yet** (planned user mode) |
 | Diagnostics | Secret leakage | Boot code prints only version, addresses, and memory sizes | Policy; no secrets exist yet |
 | Build | Malformed image reaches CI as “passing” | `make test` requires a kernel marker after a real boot | Implemented |
@@ -73,8 +75,12 @@ so those threats are recorded as planned work rather than mitigated today.
 - The loader is trusted and its own image is not verified by the kernel.
 - Tasks are kernel tasks at CPL0 and share the kernel mapping; there is no
   user/kernel isolation.
+- Capability and IPC enforcement is a kernel-internal API, not yet a user-mode
+  syscall boundary.
 - Per-task address spaces are tested by a positive boot-time check, not by an
   adversarial suite or a deliberately broken configuration.
+- IPC is polled, not blocking; there is no wakeup queue, timeout, revocation, or
+  object-lifetime test for endpoints.
 - The kernel identity-maps physical memory; there is no higher-half mapping.
 - The boot image is unsigned. Secure Boot, signed updates, and rollback
   protection are later epics.

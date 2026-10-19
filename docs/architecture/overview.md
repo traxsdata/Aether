@@ -42,9 +42,10 @@ The tree implements the lowest layer needed to prove the boot and memory model:
 - `boot/loader/` is a UEFI application.
 - `kernel/memory/` contains the host-tested frame allocator and page-table
   encoding.
+- `kernel/ipc/` contains host-tested capability tables and endpoint queues.
 - `kernel/` contains the entry point, GDT/IDT, serial output, hand-off
-  validation, physical-memory initialization, kernel page tables, timer, and
-  preemptive scheduler with per-task address spaces.
+  validation, physical-memory initialization, kernel page tables, timer,
+  preemptive scheduler with per-task address spaces, and IPC object glue.
 
 There is no general-purpose filesystem, network stack, package manager, GUI
 toolkit, or permission dialog in the kernel. That remains a design rule, not

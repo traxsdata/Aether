@@ -51,5 +51,20 @@ For every message the kernel verifies:
 
 ## Status
 
-Not implemented. The first IPC implementation should land with the capability
-table and adversarial tests, not before.
+Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
+
+- Two endpoint objects in the boot test, each with a four-message queue.
+- 32-byte payload limit; messages carry sender identity and an optional
+  capability transfer.
+- Send/receive require the corresponding endpoint capability right.
+- Capability transfer requires `TRANSFER`; the receiver gets a new table slot
+  and the transferred capability drops `TRANSFER`.
+- Queue operations run with interrupts masked, so preemption cannot observe a
+  half-updated queue.
+- Polled semantics: send returns `Full` and receive returns `Empty`; test tasks
+  wait with `HLT` until the timer preempts them. Blocking/wakeup queues are next.
+- Host tests cover bounded messages, rights, forged handles, queue capacity,
+  and transfer.
+
+The kernel-internal API is not yet exposed through a user-mode syscall
+boundary.

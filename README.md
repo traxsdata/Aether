@@ -11,10 +11,10 @@ grants, and the desktop is not a security authority.
 > **Status: kernel prototype, Phase 2 in progress.** The tree now has a
 > reproducible UEFI boot path, a validated physical memory map, a bitmap frame
 > allocator, kernel-owned page tables with W^X, structured exception reporting,
-> a 100 Hz preemptive scheduler, and hardware-enforced address-space isolation
-> between kernel tasks. There is no user mode, capability system, filesystem,
-> graphics stack, or Windows compatibility yet. Do not use this tree for real
-> data.
+> a 100 Hz preemptive scheduler, hardware-enforced address-space isolation
+> between kernel tasks, per-task capability tables, and bounded IPC with
+> capability transfer. There is no user mode, filesystem, graphics stack, or
+> Windows compatibility yet. Do not use this tree for real data.
 
 ## What works today
 
@@ -36,11 +36,15 @@ grants, and the desktop is not a security authority.
   virtual address, switched in CR3 by the scheduler.
 - A boot-time isolation test that verifies each task's private mapping survives
   preemption by another task.
+- Per-task capability tables with generation-checked handles, endpoint rights,
+  bounded IPC queues, and kernel-mediated capability transfer.
+- A boot-time capability/IPC test covering successful transfer, insufficient
+  rights, and forged handles.
 - Host unit tests for ABI layout, memory arithmetic, the frame allocator, page
-  table encoding, and a defensive ELF parser.
+  table encoding, capability tables, IPC endpoints, and a defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
-  `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, and
-  `AETHER_BOOT_OK`.
+  `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
+  `AETHER_IPC_OK`, and `AETHER_BOOT_OK`.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
 - A local CI gate (`make ci`) that runs lint, unit tests, the boot test, and the
@@ -67,6 +71,8 @@ sched: task 3 ready pml4=0x0000000000110000 private=0x000000000010f000
 sched: timer started at 100 Hz
 AETHER_SCHED_OK workers=3 ticks=20
 AETHER_ISOLATION_OK tasks=3
+AETHER_CAP_OK denials=2
+AETHER_IPC_OK messages=3
 AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
 
@@ -113,8 +119,9 @@ abi/                 loader/kernel hand-off ABI (no_std, host-testable)
 boot/common/         architecture-independent boot logic and ELF validation
 boot/loader/         UEFI application (no_std, target x86_64-unknown-uefi)
 kernel/memory/       host-testable frame allocator and page-table encoding
+kernel/ipc/          host-testable capability tables and IPC endpoints
 kernel/              Aether kernel (no_std, target x86_64-unknown-none)
-  src/scheduler.rs   preemptive kernel scheduler and isolation test
+  src/scheduler.rs   preemptive kernel scheduler, isolation and IPC tests
 tools/               boot test harness
 docs/                architecture, security, and decision records
 ```
@@ -137,9 +144,10 @@ by the specification.
    the frame allocator, builds page tables, switches CR3, and reports memory and
    image state.
 7. It starts a 100 Hz timer, preemptively runs three tasks in separate address
-   spaces, verifies that private mappings survive preemption, prints
-   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, and
-   `AETHER_BOOT_OK`, then halts.
+   spaces, verifies that private mappings survive preemption, exercises
+   capability rights and bounded IPC including a transfer, prints
+   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
+   `AETHER_IPC_OK`, and `AETHER_BOOT_OK`, then halts.
 
 The loader and kernel are separate programs with a versioned ABI. Internal
 kernel structures are not exposed to the loader.
@@ -149,8 +157,10 @@ kernel structures are not exposed to the loader.
 This prototype is **not** a sandbox yet. It validates and bounds the boot
 hand-off and the kernel image parser, owns its page tables, maps kernel text
 read-execute-only and data non-executable, reports exceptions instead of
-resetting silently, and isolates kernel tasks in separate address spaces. It
-still has no user mode, capability system, or user/kernel memory split.
+resetting silently, isolates kernel tasks in separate address spaces, and
+enforces generation-checked capability rights on bounded IPC. It still has no
+user mode or user/kernel memory split, so kernel tasks share the kernel
+mapping and all run at CPL0.
 
 See [`docs/security/threat-model.md`](docs/security/threat-model.md) for the
 current threat model, including what is deliberately out of scope for the
