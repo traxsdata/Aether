@@ -7,6 +7,7 @@ PYTHON ?= python3
 
 BUILD := build
 KERNEL_ELF := $(BUILD)/aether-kernel.elf
+USER_ELF := $(BUILD)/aether-init.elf
 LOADER_EFI := $(BUILD)/BOOTX64.EFI
 IMAGE := $(BUILD)/aether.img
 
@@ -19,14 +20,26 @@ export AETHER_GIT_COMMIT
 KERNEL_FEATURES ?=
 KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 
-.PHONY: all kernel loader image test fault-test negative-test unittest lint \
+# The native user program is linked at 2 TiB, outside the small code model.
+# PIC keeps its internal references PC-relative; -no-pie keeps the image an
+# ET_EXEC file with all relocations resolved at link time.
+USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
+
+.PHONY: all kernel user loader image test fault-test negative-test unittest lint \
 	docs-check license-check ci clean
 
 all: image
 
-kernel:
+user:
 	@mkdir -p $(BUILD)
-	$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
+	RUSTFLAGS="$(USER_RUSTFLAGS)" \
+		$(CARGO) build -p aether-init --release --target $(KERNEL_TARGET) --locked
+	cp target/$(KERNEL_TARGET)/release/aether-init $(USER_ELF)
+
+kernel: user
+	@mkdir -p $(BUILD)
+	AETHER_USER_ELF=$(abspath $(USER_ELF)) \
+		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
 
 loader: kernel
@@ -68,10 +81,14 @@ lint: kernel
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
+		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
+		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
 			--features fault-selftest --locked -- -D warnings
+	RUSTFLAGS="$(USER_RUSTFLAGS)" \
+		$(CARGO) clippy -p aether-sdk -p aether-init --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		$(CARGO) clippy -p aether-bootloader --release --target $(LOADER_TARGET) --locked -- -D warnings
 

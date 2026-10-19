@@ -4,15 +4,18 @@
 //! Validate the loader hand-off, take ownership of the CPU descriptor/interrupt
 //! tables, configure the protections required by the page tables, initialize
 //! physical memory, install kernel page tables, and hand control to the
-//! scheduler. There is no user space yet.
+//! scheduler. The scheduler starts ring-0 service tests and the first ring-3
+//! process created from an embedded native ELF image.
 
 #![no_std]
 #![no_main]
 
 mod arch;
+mod fs;
 mod ipc;
 mod memory;
 mod scheduler;
+mod syscall;
 
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
 use core::panic::PanicInfo;

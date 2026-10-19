@@ -10,7 +10,9 @@
 //! This is not yet a user/kernel split and there is no higher-half direct map.
 //! Address-space isolation arrives with the task model in Phase 2.
 
+use aether_abi::user::{USER_BASE, USER_LIMIT, USER_STACK_PAGES, USER_STACK_TOP};
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
+use aether_boot_common::elf::{Image, PF_W, PF_X};
 use aether_memory::frame::{FrameAllocator, PhysFrame};
 use aether_memory::paging::{PAGE_TABLE_ENTRIES, PageFlags, PageTable, PageTableEntry};
 use aether_memory::{LARGE_PAGE_SIZE, PAGE_SIZE};
@@ -48,6 +50,12 @@ pub enum PagingError {
     UnexpectedHugePage,
     /// The active kernel PML4 entry 0 is missing.
     MissingKernelMapping,
+    /// A user image segment lies outside the user address window.
+    UserImageOutsideWindow,
+    /// A user image segment is empty or has inconsistent bounds.
+    InvalidUserSegment,
+    /// A user page table contains an unexpected huge-page entry.
+    UnexpectedUserHugePage,
 }
 
 unsafe extern "C" {
@@ -157,6 +165,240 @@ fn link_entry(child: PhysFrame) -> Result<PageTableEntry, PagingError> {
         PageFlags::PRESENT | PageFlags::WRITABLE,
     )
     .ok_or(PagingError::UnrepresentableAddress(child.start_address()))
+}
+
+fn link_user_entry(child: PhysFrame) -> Result<PageTableEntry, PagingError> {
+    PageTableEntry::new(
+        child.start_address(),
+        PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER,
+    )
+    .ok_or(PagingError::UnrepresentableAddress(child.start_address()))
+}
+
+/// Creates an address space for a ring-3 process.
+///
+/// The new PML4 shares the supervisor-only kernel identity map but adds user
+/// mappings only in [`USER_BASE`]..[`USER_LIMIT`]. Each `PT_LOAD` page gets its
+/// own frame; the final permissions follow the ELF segment flags. A private
+/// stack is mapped below [`USER_STACK_TOP`].
+///
+/// The kernel copies the file bytes through the physical frame before the page
+/// is made read-only, so W^X does not prevent loading.
+pub fn create_user_address_space(
+    allocator: &mut FrameAllocator<'_>,
+    image: &Image,
+    bytes: &[u8],
+) -> Result<PhysFrame, PagingError> {
+    let kernel_pml4 = current_pml4().ok_or(PagingError::MissingKernelMapping)?;
+    let kernel_entry = unsafe { (*table_ptr(kernel_pml4)).entry(0) };
+    if !kernel_entry.is_present() {
+        return Err(PagingError::MissingKernelMapping);
+    }
+
+    let pml4 = allocate_table(allocator)?;
+    // SAFETY: The table was just allocated and zeroed. The kernel entry is
+    // copied unchanged so kernel text, data, stacks, and the identity map stay
+    // supervisor-only in the new address space.
+    unsafe { (*table_ptr(pml4)).set_entry(0, kernel_entry) };
+
+    for segment in image.segments() {
+        let physical_end = segment
+            .physical_address
+            .checked_add(segment.memory_size)
+            .ok_or(PagingError::InvalidUserSegment)?;
+        if segment.memory_size == 0
+            || physical_end <= segment.physical_address
+            || segment.physical_address < USER_BASE
+            || physical_end > USER_LIMIT
+        {
+            return Err(PagingError::UserImageOutsideWindow);
+        }
+
+        let first_page = segment.physical_address & !(PAGE_SIZE - 1);
+        let last_page = align_up_page(physical_end)?;
+        let mut virtual_address = first_page;
+        while virtual_address < last_page {
+            let frame = allocate_table(allocator)?;
+            // SAFETY: The frame is exclusively owned and identity-mapped.
+            unsafe { ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize) };
+
+            // Copy the intersection of this page and the segment's file data.
+            let page_end = virtual_address.saturating_add(PAGE_SIZE);
+            let copy_start = segment.physical_address.max(virtual_address);
+            let copy_end = physical_end.min(page_end).min(
+                segment
+                    .physical_address
+                    .saturating_add(segment.file_size),
+            );
+            if copy_start < copy_end {
+                let source_offset = segment
+                    .file_offset
+                    .checked_add(copy_start - segment.physical_address)
+                    .ok_or(PagingError::InvalidUserSegment)? as usize;
+                let length = (copy_end - copy_start) as usize;
+                let source = bytes
+                    .get(source_offset..source_offset.saturating_add(length))
+                    .ok_or(PagingError::InvalidUserSegment)?;
+                // SAFETY: The destination is inside the freshly zeroed frame,
+                // which is identity-mapped and exclusively owned.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        source.as_ptr(),
+                        (frame.start_address() + (copy_start - virtual_address)) as *mut u8,
+                        length,
+                    );
+                }
+            }
+
+            map_user_page(
+                pml4,
+                allocator,
+                virtual_address,
+                frame,
+                user_segment_flags(segment.flags),
+            )?;
+            virtual_address = page_end;
+        }
+    }
+
+    for page in 0..USER_STACK_PAGES {
+        let address = USER_STACK_TOP - (page + 1) * PAGE_SIZE;
+        let frame = allocate_table(allocator)?;
+        // SAFETY: The frame is exclusively owned and identity-mapped.
+        unsafe { ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize) };
+        map_user_page(
+            pml4,
+            allocator,
+            address,
+            frame,
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE,
+        )?;
+    }
+
+    Ok(pml4)
+}
+
+fn user_segment_flags(flags: u32) -> PageFlags {
+    let mut page = PageFlags::PRESENT | PageFlags::USER;
+    if flags & PF_W != 0 {
+        page = page | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+    }
+    if flags & PF_X == 0 {
+        page = page | PageFlags::NO_EXECUTE;
+    }
+    page
+}
+
+fn align_up_page(value: u64) -> Result<u64, PagingError> {
+    value
+        .checked_add(PAGE_SIZE - 1)
+        .map(|value| value & !(PAGE_SIZE - 1))
+        .ok_or(PagingError::InvalidUserSegment)
+}
+
+/// Maps one 4 KiB page into a user address space, allocating intermediate
+/// tables and marking every level user-accessible.
+pub fn map_user_page(
+    pml4: PhysFrame,
+    allocator: &mut FrameAllocator<'_>,
+    virtual_address: u64,
+    physical: PhysFrame,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    if virtual_address < USER_BASE || virtual_address >= USER_LIMIT {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    let [pml4_index, pdpt_index, pd_index, pt_index] =
+        aether_memory::paging::indices(virtual_address);
+
+    let pdpt = ensure_user_table(pml4, pml4_index, allocator)?;
+    let pd = ensure_user_table(pdpt, pdpt_index, allocator)?;
+    let pt = ensure_user_table(pd, pd_index, allocator)?;
+    let entry = PageTableEntry::new(physical.start_address(), flags | PageFlags::USER)
+        .ok_or(PagingError::UnrepresentableAddress(physical.start_address()))?;
+    // SAFETY: `pt` was validated or allocated above and is identity-mapped.
+    unsafe { (*table_ptr(pt)).set_entry(pt_index, entry) };
+    Ok(())
+}
+
+fn ensure_user_table(
+    parent: PhysFrame,
+    index: usize,
+    allocator: &mut FrameAllocator<'_>,
+) -> Result<PhysFrame, PagingError> {
+    let entry = unsafe { (*table_ptr(parent)).entry(index) };
+    if entry.is_present() {
+        if entry.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        return PhysFrame::from_address(entry.address())
+            .ok_or(PagingError::UnrepresentableAddress(entry.address()));
+    }
+
+    let child = allocate_table(allocator)?;
+    let link = link_user_entry(child)?;
+    // SAFETY: The parent table is identity-mapped and exclusively owned by
+    // this address space.
+    unsafe { (*table_ptr(parent)).set_entry(index, link) };
+    Ok(child)
+}
+
+/// Validates that `address..address+len` lies in the user window and is mapped
+/// with user permissions.
+///
+/// System calls use this before dereferencing a user pointer. A write requires
+/// every page to be writable; a read only requires presence. The range may be
+/// empty, which is valid and copies nothing.
+#[must_use]
+pub fn user_range_valid(pml4: PhysFrame, address: u64, len: u64, write: bool) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let Some(end) = address.checked_add(len) else {
+        return false;
+    };
+    if address < USER_BASE || end > USER_LIMIT {
+        return false;
+    }
+
+    let mut page = address & !(PAGE_SIZE - 1);
+    while page < end {
+        let Some(entry) = user_leaf_entry(pml4, page) else {
+            return false;
+        };
+        if !entry.is_present() || !entry.flags().contains(PageFlags::USER) {
+            return false;
+        }
+        if write && !entry.flags().contains(PageFlags::WRITABLE) {
+            return false;
+        }
+        page = page.saturating_add(PAGE_SIZE);
+    }
+    true
+}
+
+fn user_leaf_entry(pml4: PhysFrame, address: u64) -> Option<PageTableEntry> {
+    let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+    // SAFETY: The PML4 is the active or a task-owned table and the kernel
+    // identity map covers every allocated page-table frame.
+    unsafe {
+        let pml4_entry = (*table_ptr(pml4)).entry(pml4_index);
+        if !pml4_entry.is_present() || pml4_entry.is_huge() {
+            return None;
+        }
+        let pdpt = PhysFrame::from_address(pml4_entry.address())?;
+        let pdpt_entry = (*table_ptr(pdpt)).entry(pdpt_index);
+        if !pdpt_entry.is_present() || pdpt_entry.is_huge() {
+            return None;
+        }
+        let pd = PhysFrame::from_address(pdpt_entry.address())?;
+        let pd_entry = (*table_ptr(pd)).entry(pd_index);
+        if !pd_entry.is_present() || pd_entry.is_huge() {
+            return None;
+        }
+        let pt = PhysFrame::from_address(pd_entry.address())?;
+        Some((*table_ptr(pt)).entry(pt_index))
+    }
 }
 
 /// Installs kernel page tables and switches CR3.

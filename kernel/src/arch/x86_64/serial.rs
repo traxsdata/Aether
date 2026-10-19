@@ -55,11 +55,20 @@ pub fn write_byte(byte: u8) {
 
 /// Writes a string with LF converted to CRLF.
 pub fn write_str(value: &str) {
-    for byte in value.bytes() {
-        if byte == b'\n' {
+    write_bytes(value.as_bytes());
+}
+
+/// Writes bytes with LF converted to CRLF.
+///
+/// This is the only console write path used by user output, so a native
+/// application cannot smuggle terminal control sequences through a different
+/// newline convention.
+pub fn write_bytes(value: &[u8]) {
+    for byte in value {
+        if *byte == b'\n' {
             write_byte(b'\r');
         }
-        write_byte(byte);
+        write_byte(*byte);
     }
 }
 

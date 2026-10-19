@@ -12,6 +12,8 @@
 
 #![no_std]
 
+pub mod user;
+
 use core::fmt;
 use core::mem::{align_of, size_of};
 
