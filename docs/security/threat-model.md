@@ -13,8 +13,9 @@
 Aether is a bootable research prototype. The implemented boundaries are
 firmware → loader, loader → kernel, kernel → ring-3 application,
 application → application (private roots), application → user data (file
-capabilities and the portal), and service-policy supervision. Service bodies
-still run as kernel modules; moving them to ring 3 is follow-up work.
+capabilities and the portal), package publisher → installed application,
+update publisher → activated image, and service-policy supervision. Service
+bodies still run as kernel modules; moving them to ring 3 is follow-up work.
 
 ### In-scope adversaries
 
@@ -33,6 +34,10 @@ still run as kernel modules; moving them to ring 3 is follow-up work.
   ungranted portal path.
 - A malformed framebuffer descriptor or a service that exhausts its restart
   budget.
+- A package with a forged signature, an untrusted publisher, a modified payload,
+  a path-traversal file name, a denied permission, or oversized limits.
+- A replayed or downgraded signed update, a manifest for a different image, or
+  an update from another channel.
 - Accidental disclosure of secrets through serial diagnostics.
 - A build or CI change that silently removes validation or the boot test.
 
@@ -71,7 +76,10 @@ still run as kernel modules; moving them to ring 3 is follow-up work.
 | Service → service | Impersonation or capability forgery | Declared profiles, dependency order, restart/quarantine | Policy prototype; bodies still in kernel |
 | Diagnostics | Secret leakage | Boot code prints only version, addresses, and memory sizes | Policy; no secrets exist yet |
 | Build | Malformed image reaches CI as “passing” | Local `make ci` gate; boot, shell, fault, and negative tests require markers on a real boot; GitHub Actions publication pending | Implemented locally |
-| Update | Corrupted image is activated | Current/previous marker selection and user-data sentinel | Prototype; no signatures or rollback counter |
+| Package publisher → system | Forged, modified, or over-privileged package | Ed25519 over the manifest, pinned publisher key, payload SHA-256, permission allowlist, bounded archive, derived root | Implemented, host- and QEMU-tested |
+| Update publisher → system | Replayed, downgraded, or forged image | Signed manifest, image digest, publisher pin, monotonic counter, version and channel policy | Implemented verifier and policy; activation pending |
+| Update → user data | Rollback destroys user files | User data is outside the image set; recovery selector records its choice | Prototype; volatile storage |
+| Diagnostics | Secret leakage | Boot code prints only version, addresses, sizes, publisher name, and digests | Policy; keys are never loaded by the kernel |
 
 ## Abuse cases and expected responses
 
@@ -113,8 +121,15 @@ still run as kernel modules; moving them to ring 3 is follow-up work.
   grant store, or revocation UI.
 - The kernel identity-maps physical memory and caps the map bitmap at 16 GiB;
   there is no higher-half mapping, kernel heap, or guard page.
-- The boot image is unsigned. Secure Boot, signed updates, artifact
-  verification, and rollback protection are later epics.
+- The boot image is unsigned. Secure Boot, measured boot, and bootloader
+  verification are not implemented; signed update manifests are verified by the
+  kernel and host tooling, but activation of a staged image is not.
+- The installed update counter lives in the writable RAM image; it is not
+  protected against an attacker who can rewrite storage.
+- Package and update test keys are checked into `tests/fixtures` and provide no
+  security. A release requires an offline key.
+- Packaged entry points are not executed; only verification, installation, and
+  runtime policy are implemented.
 - Serial output is not rate-limited or access-controlled; it is a development
   channel, not a production logging interface.
 - The test suite is not a security proof. A passing boot test only demonstrates
@@ -124,4 +139,5 @@ still run as kernel modules; moving them to ring 3 is follow-up work.
 
 Re-review this document when adding: user mode, page tables, capability
 objects, IPC, a filesystem, device drivers, networking, package verification,
-updates, or any code that parses data from an untrusted source.
+updates, a compatibility runtime, an installer, or any code that parses data
+from an untrusted source.

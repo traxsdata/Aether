@@ -14,11 +14,14 @@ to run in GitHub Actions once the workflow is published:
 2. Clippy with warnings denied for host, kernel, and loader targets.
 3. Documentation link and licence/dependency metadata checks.
 4. Host unit tests.
-5. Kernel and loader cross-builds.
-6. Automated QEMU boot smoke test with required success markers.
-7. Fault-path test requiring a structured exception report.
-8. Negative boot test proving the harness rejects a deliberately failing
-   kernel.
+5. Compatibility database and classification rules.
+6. Package and update verification policy tests.
+7. Kernel and loader cross-builds.
+8. Automated QEMU boot smoke test with required success markers, including
+   package, runtime, and update verification.
+9. Fault-path test requiring a structured exception report.
+10. Negative boot test proving the harness rejects a deliberately failing
+    kernel.
 
 Security-critical changes additionally require review from a designated
 kernel/security maintainer.
@@ -45,9 +48,14 @@ block release on failure.
 
 - Reproducible build from a clean checkout with pinned tools.
 - Checksums published for every artifact.
-- Signed artifacts and a documented key-management process.
-- Known limitations and unsupported hardware listed.
-- Recovery path tested after a deliberately failed update.
+- Signed artifacts and a documented key-management process: `make release`
+  refuses to produce an unsigned bundle, and `make release-check` verifies it.
+- Known limitations and unsupported hardware listed
+  ([supported hardware](../reference/supported-hardware.md)).
+- Recovery path tested after a deliberately failed update; update replay,
+  downgrade, and unknown publishers are rejected by the boot test.
+- A completed `make qualify` report with commit, toolchain, emulator, step
+  results, boot markers, and artifact digests.
 - No unresolved critical or high-severity security findings without a
   documented exception and mitigation.
 
@@ -57,7 +65,15 @@ A mandatory test may be waived only by a documented exception that states the
 reason, the compensating control, the owner, and the expiry. Waivers are public
 unless they would disclose an unfixed vulnerability.
 
+## Qualification
+
+`make qualify` runs the full gate plus a signed test-key release build and
+verification, then writes `build/qualification/report.md`. A release candidate
+is not published from a failing report. Qualification is automated evidence; it
+does not replace the external security review, which remains outstanding.
+
 ## Vulnerability handling
 
-Follow [SECURITY.md](../../SECURITY.md). Fixes for embargoed issues may be
-developed privately and merged with a coordinated disclosure date.
+Follow [SECURITY.md](../../SECURITY.md) and the
+[security response process](security-response.md). Fixes for embargoed issues
+may be developed privately and merged with a coordinated disclosure date.

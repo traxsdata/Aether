@@ -8,15 +8,21 @@ The project's security goal is simple to state and hard to build: applications
 receive only the capabilities they need, user files are opened through explicit
 grants, and the desktop is not a security authority.
 
-> **Status: native desktop prototype, Phase 3 complete and the Phase 4
-> prototype in place.** The tree has a reproducible UEFI boot path and ISO, a validated
-> physical memory map, kernel-owned page tables with NX and write-protect
-> enforcement, a 100 Hz preemptive scheduler, a ring-3 user/kernel boundary,
-> validated syscalls, a bounded filesystem with per-process roots and
-> generation-checked file capabilities, supervised services, a console shell, a
-> linear framebuffer compositor, keyboard input, a file portal, and a recovery
-> prototype. Windows compatibility, networking, persistent storage, audio, and
-> GPU acceleration are not implemented. Do not use this tree for real data.
+> **Status: native desktop prototype, Phase 4 complete, and the Phase 5/6
+> packaging, compatibility, update, and release-engineering slices in place.**
+> The tree has a reproducible UEFI boot path and ISO, a validated physical
+> memory map, kernel-owned page tables with NX and write-protect enforcement, a
+> 100 Hz preemptive scheduler, a ring-3 user/kernel boundary, validated
+> syscalls, a bounded filesystem with per-process roots and generation-checked
+> file capabilities, supervised services, a console shell, a linear framebuffer
+> compositor, keyboard input, a file portal, a recovery prototype, signed
+> package installation, per-application runtime profiles, a compatibility
+> database, Ed25519 update verification with rollback protection, and a signed
+> release bundle plus qualification report.
+>
+> Windows compatibility, networking, persistent storage, audio, GPU
+> acceleration, a general installer, Secure Boot, and an external security
+> review are not implemented. Do not use this tree for real data.
 
 ## What works today
 
@@ -59,18 +65,44 @@ grants, and the desktop is not a security authority.
   PS/2 keyboard input, Security Center, file manager, settings, portal view,
   and current/previous image recovery view.
 - A native application SDK (`sdk/`) for the initial syscall surface.
+- A dependency-free `aether-crypto` crate with SHA-256, SHA-512, and Ed25519
+  verification and signing, tested against RFC 8032 and an independent
+  implementation.
+- A signed `.aether` package format (`aether-packaging`): canonical manifest,
+  bounded payload archive, permission and limit allowlists, publisher trust
+  store, and one verifier shared by the kernel and release tooling.
+- Kernel installation of a verified package into a root derived from its
+  identity, with boot-time rejection of an unknown publisher, a modified
+  payload, and a zeroed signature (`AETHER_PACKAGE_OK`).
+- Per-application runtime profiles (`aether-services::runtime`) with derived
+  prefixes, declared permissions and limits, path containment, and explicit
+  consent for prefix sharing (`AETHER_RUNTIME_OK`).
+- A compatibility database and classification harness (`aether-compat`) with
+  verified/compatible/limited/unsupported records and named-test evidence.
+- A signed update manifest format (`aether-update`) with image digests,
+  publisher pins, a monotonic rollback counter, channel policy, and deliberate
+  recovery overrides; the boot test accepts one update and rejects replay,
+  downgrade, and an untrusted key (`AETHER_UPDATE_OK`).
+- `aether-admin`, a host tool that builds and signs packages and updates and
+  assembles a release bundle. Signing keys are read from a file outside the
+  repository; unsigned releases are refused.
+- `make release` / `make release-check` for a signed ISO bundle with checksums
+  and a signed manifest, and `make qualify` for a release report with commit,
+  toolchain, emulator, step results, boot markers, and artifact digests.
 - Host unit tests for ABI layout and region validation, memory arithmetic, the
   frame allocator, page-table encoding, capability tables, IPC endpoints, the
-  filesystem, service supervision, application lifecycle, and the defensive
-  ELF parser.
+  filesystem, service supervision, application lifecycle, hashes, signatures,
+  package policy, update policy, runtime policy, and the defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
   `AETHER_IPC_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`, `AETHER_SANDBOX_OK`,
-  `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`, `AETHER_GRAPHICS_OK`,
+  `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`, `AETHER_PACKAGE_OK`,
+  `AETHER_RUNTIME_OK`, `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`,
   `AETHER_DESKTOP_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
   `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
 - `make shell-test`, which drives the console over a QEMU serial socket and
-  checks filesystem, service, recovery, desktop, and input commands.
+  checks filesystem, service, package, runtime, update, recovery, desktop, and
+  input commands.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
 - `make negative-test`, which proves the boot harness rejects a deliberately
@@ -101,6 +133,10 @@ boot: paging: identity map to 1024 MiB, CR3=0x0000000000100000
 boot: framebuffer mapped 1280x800 stride=1280 format=1
 AETHER_MM_OK
 sched: user task ready pid=4 entry=0x0000020000000230 stack=0x0000020004000000
+package: installed org.aether.demo 0.2.0 at /apps/org.aether.demo
+AETHER_PACKAGE_OK installed=1 rejected=3 files=2
+AETHER_RUNTIME_OK apps=1 isolated=1 prefix_checks=4 shared=0
+AETHER_UPDATE_OK accepted=1 rejected=3 rollback_protected=true counter=2 selected=0.2.0
 AETHER_SUPERVISOR_OK starts=11 running=9 quarantined=1
 AETHER_RECOVERY_OK current=aether-0.1.0 previous=aether-0.0.9 selected=aether-0.1.0 rollback=false user_data=true
 AETHER_GRAPHICS_OK mode=1280x800 format=linear
@@ -150,7 +186,10 @@ a small EFI system image and writes it to `build/ISOs/aether-<UTC>.iso`.
 ### Tests
 
 ```sh
-make unittest      # host unit tests (ABI, ELF, filesystem, services, IPC, memory)
+make unittest      # host unit tests (ABI, ELF, filesystem, services, IPC,
+                   # memory, crypto, packages, updates, compatibility)
+make compat-test   # compatibility database and classification rules
+make update-test   # package and update policy crates
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # exception-path test: int3 after paging must reach the IDT
@@ -159,9 +198,19 @@ make docs-check    # relative Markdown links
 make license-check # workspace and dependency licence metadata
 make lint          # rustfmt, host/kernel/user/loader clippy
 make iso           # timestamped UEFI El Torito ISO under build/ISOs
-make ci            # full pull-request gate
+make release       # signed release bundle (requires a signing key)
+make release-check # verify a release bundle against a trusted publisher key
+make release-demo  # same flow with the checked-in test key, then verify
+make qualify       # full release gate and build/qualification/report.md
+make ci            # pull-request gate
 make clean
 ```
+
+`make release` requires `AETHER_SIGNING_KEY` (a 32-byte hex seed file outside the
+repository) and `AETHER_PUBLISHER`; it refuses to produce an unsigned bundle.
+`make release-demo` uses the checked-in test key and proves the mechanism, not a
+release trust root. `make qualify` runs every gate and records the commit,
+toolchain, emulator, step results, boot markers, and artifact digests.
 
 `make test` uses QEMU TCG and needs no KVM or root access. The graphics test
 needs a display device for OVMF to expose GOP; the harness starts a headless
@@ -174,20 +223,29 @@ VNC server and an emulated VGA adapter. Override the firmware paths with
 abi/                 boot ABI and user syscall ABI (no_std, host-testable)
 boot/common/         architecture-independent boot logic and ELF validation
 boot/loader/         UEFI application (no_std, target x86_64-unknown-uefi)
+crypto/              SHA-256, SHA-512, and Ed25519 (no_std, host-tested)
+packaging/           .aether container, manifest, and verifier (no_std)
+updates/             signed update manifests and rollback policy (no_std)
 kernel/fs/           host-testable virtual block device and filesystem
 kernel/memory/       host-testable frame allocator and page-table encoding
 kernel/ipc/          host-testable capability tables and IPC endpoints
-kernel/services/     host-testable supervisor and application lifecycle rules
+kernel/services/     host-testable supervisor, lifecycle, and runtime profiles
 kernel/              Aether kernel (no_std, target x86_64-unknown-none)
   src/scheduler.rs   scheduler, ring-3 process, isolation and IPC tests
   src/syscall.rs     validated user syscall gate
+  src/packaging.rs   package verification, installation, and self-test
+  src/runtime.rs     runtime profile registration and isolation self-test
+  src/updates.rs     signed update verification and policy self-test
   src/desktop.rs     software compositor and desktop shell
   src/input.rs       PS/2 keyboard service
   src/portal.rs      scoped file portal grants
   src/recovery.rs    current/previous image selection
 sdk/                 native application SDK
+tests/fixtures/      test keys and signed package/update fixtures
+tests/compatibility/ compatibility database and classification harness
+tools/               boot, shell, ISO, release, and qualification harnesses
+tools/admin/         package/update/release signing tool (host only)
 user/                ring-3 native init and sandbox test
-tools/               boot, shell, ISO, and repository test harnesses
 docs/                architecture, security, and decision records
 ```
 
@@ -216,11 +274,15 @@ by the specification.
    native application into its own PML4.
 8. The application exercises its private root, denied sibling access, denied
    root escape, kernel-pointer rejection, and a portal-granted read.
-9. The supervisor starts the filesystem, application, input, display, desktop,
-   portal, and security services; the compositor paints the desktop; the input
-   self-test drives focus; and recovery verifies the current/previous image
-   records without touching user data. The console shell stays available after
-   the boot markers.
+9. The kernel verifies and installs an embedded signed package, checks that an
+   unknown publisher, a modified payload, and a zeroed signature are rejected,
+   derives the application's runtime profile, and verifies a signed update
+   while rejecting replay, downgrade, and an untrusted publisher key.
+10. The supervisor starts the filesystem, application, input, display, desktop,
+    portal, and security services; the compositor paints the desktop; the input
+    self-test drives focus; and recovery verifies the current/previous image
+    records without touching user data. The console shell stays available after
+    the boot markers.
 
 The loader and kernel are separate programs with a versioned ABI. Internal
 kernel structures are not exposed to the loader.
@@ -240,10 +302,21 @@ capabilities, but the filesystem and portal services make the decision. Service
 profiles are declared and the supervisor quarantines a service that exhausts
 its restart budget.
 
-This is still a prototype. Storage is a volatile RAM disk, there is one native
-application, portal grants are seeded rather than interactively consented, and
-there is no capability revocation UI, blocking IPC, SMP, networking, audio,
-persistent storage, or GPU acceleration. Do not store real data on it.
+Packages and updates are authenticated before use: the kernel verifies an
+Ed25519 signature over the manifest, the publisher is pinned in a trust store,
+and the payload or image digest must match. A package cannot request network,
+device, or system-service authority, and its storage root is derived from its
+identity rather than declared by the manifest. Updates require a newer rollback
+counter and version; a replay or downgrade is rejected unless a recovery action
+explicitly allows an older version. A valid signature says who produced an
+artifact, not that it is safe.
+
+This is still a prototype. Storage is a volatile RAM disk, packages are not
+persisted or executed from their entry points, update activation and the UEFI
+installer are not implemented, the signing keys in `tests/fixtures` are test
+keys, and there is no Secure Boot, measured boot, TPM counter, capability
+revocation UI, blocking IPC, SMP, networking, audio, or GPU acceleration. Do
+not store real data on it.
 
 See [`docs/security/threat-model.md`](docs/security/threat-model.md) and
 [`docs/security/security-boundaries.md`](docs/security/security-boundaries.md)
@@ -260,14 +333,23 @@ Architecture decisions are recorded in [`docs/decisions/`](docs/decisions/).
 The backlog and acceptance tests are in the
 [technical specification](Technical%20Specification%20and%20Initial%20Development%20Backlog.txt).
 The Windows compatibility feasibility plan is in
-[`docs/specifications/windows-compatibility.md`](docs/specifications/windows-compatibility.md).
+[`docs/specifications/windows-compatibility.md`](docs/specifications/windows-compatibility.md)
+and the host-interface review in
+[`docs/specifications/windows-host-interface-report.md`](docs/specifications/windows-host-interface-report.md).
 
 Further reading: [memory and paging](docs/architecture/memory.md),
 [scheduler and address spaces](docs/architecture/scheduler.md),
 [capabilities](docs/architecture/capabilities.md), [IPC](docs/architecture/ipc.md),
 [filesystem and file handles](docs/architecture/filesystem.md),
 [compositor and desktop](docs/architecture/desktop.md),
-[security boundaries](docs/security/security-boundaries.md), and the
+[package format](docs/specifications/package-format.md),
+[signed updates](docs/architecture/updates.md),
+[compatibility database](docs/specifications/compatibility.md),
+[supported hardware](docs/reference/supported-hardware.md),
+[installer and recovery](docs/reference/installer-and-recovery.md),
+[security boundaries](docs/security/security-boundaries.md),
+[security response](docs/security/security-response.md),
+[community](docs/community.md), and the
 [development environment](docs/development.md).
 
 ## License

@@ -28,19 +28,32 @@ The prototype's in-scope trust boundaries are currently:
   map,
 - the loader-to-kernel `BootInfo` hand-off,
 - the kernel's validation of that hand-off and memory region ordering,
-- kernel-task address-space isolation, and
-- kernel-internal capability and IPC validation.
+- kernel-task and user/kernel address-space isolation,
+- kernel capability and IPC validation,
+- the syscall gate's pointer, length, handle, and generation checks,
+- per-process roots and portal grants,
+- package verification (framing, manifest policy, publisher pin, signature,
+  payload digest, archive structure) and installation, and
+- update verification (signature, publisher pin, image digest, rollback
+  counter, version, and channel policy).
 
-There is no user/kernel isolation or user-mode syscall boundary, and capability
-enforcement is not yet a user-visible security boundary, so reports about
-missing application sandboxing are expected and tracked as planned work rather
-than vulnerabilities. Reports about a *claim* of isolation that does not hold,
-or about memory unsafety in the implemented boot, memory, scheduler,
-capability, or IPC paths, are in scope.
+Missing features are not vulnerabilities by themselves, but a report that a
+*claimed* boundary does not hold is in scope: for example an application reading
+a sibling root, a package bypassing a verification step, a replayed update being
+accepted, or a package installing a file outside its derived root. Memory
+unsafety in the implemented boot, memory, scheduler, capability, IPC,
+filesystem, or verification paths is in scope.
+
+Windows compatibility, networking, audio, persistent storage, Secure Boot, and
+the UEFI installer are not implemented; reports about their absence are tracked
+as planned work in the [roadmap](docs/roadmap.md).
 
 ## Response
 
 Maintainers will acknowledge a report, reproduce it, and agree on a disclosure
-timeline. Fixes for mandatory isolation or boot-integrity failures block a
-release. Release notes must state known limitations; a passing test suite is not
-proof of security.
+timeline. The detailed process, severity targets, embargo, key-compromise
+handling, and advisory requirements are in the
+[security response process](docs/security/security-response.md). Fixes for
+mandatory isolation, boot-integrity, package-verification, or
+update-verification failures block a release. Release notes must state known
+limitations; a passing test suite is not proof of security.

@@ -78,6 +78,36 @@ versioning scheme until the kernel ABI stabilises.
 - Architecture notes for the filesystem and desktop.
 - Boot markers for graphics, desktop, input, portal, recovery, supervisor, and
   shell.
+- `aether-crypto`: dependency-free SHA-256, SHA-512, and Ed25519 verification
+  and signing, tested against RFC 8032 vectors and an independent
+  implementation.
+- `aether-packaging`: signed `.aether` container, canonical manifest with
+  reverse-domain identity, architecture/runtime policy, permission allowlist,
+  resource limits, publisher trust store, bounded payload archive, and a single
+  verifier shared by the kernel and tooling.
+- Kernel package installation into `/apps/<id>` with boot-time rejection of an
+  unknown publisher, a modified payload, and a zeroed signature
+  (`AETHER_PACKAGE_OK`), plus the `packages` shell command.
+- Per-application runtime profiles with derived prefixes, declared permissions
+  and limits, path containment, and consent-based prefix sharing
+  (`AETHER_RUNTIME_OK`), plus the `runtime` shell command.
+- `aether-compat`: compatibility database format, classification rules, named
+  test evidence, and the shipped records under `tests/compatibility/`.
+- `aether-update`: signed update manifests, publisher pins, image digests,
+  monotonic rollback counters, version and channel policy, and an explicit
+  recovery override.
+- Kernel update verification self-test accepting a newer image and rejecting
+  replay, downgrade, and an untrusted publisher (`AETHER_UPDATE_OK`), plus the
+  `updates` shell command.
+- `aether-admin` host tool for package, update, and release signing; release
+  bundles with `SHA256SUMS`, `release-info.txt`, and a signed manifest.
+- `make release`, `make release-check`, `make release-demo`, `make compat-test`,
+  `make update-test`, and `make qualify`.
+- `make qualify` writes `build/qualification/report.md` with commit, toolchain,
+  emulator, step results, boot markers, and artifact digests.
+- Documentation: package format, signed updates, compatibility database,
+  Windows host-interface report, supported hardware, installer and recovery,
+  security response process, community program, and ADR-013/ADR-014.
 
 ### Changed
 
@@ -94,6 +124,13 @@ versioning scheme until the kernel ABI stabilises.
 - The loader now queries GOP and writes BootInfo version 2 (136 bytes).
 - QEMU test harnesses start a headless VNC display and emulated VGA adapter so
   OVMF exposes a linear framebuffer.
+- `make ci` also runs the compatibility suite and the package/update policy
+  crates, and `make test` requires `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`, and
+  `AETHER_UPDATE_OK`.
+- The shell exposes `packages`, `runtime`, and `updates`; the shell test checks
+  them.
+- Package and update verification use one `no_std` implementation in both the
+  kernel and host tooling.
 
 ### Known limitations
 
@@ -118,8 +155,20 @@ versioning scheme until the kernel ABI stabilises.
 - Single-core only; no SMP startup.
 - NX and WP are enabled, but there is no fault-injection test that attempts to
   write kernel text or execute data.
-- No Secure Boot signing, measured boot, artifact signature verification, or
-  rollback counter yet.
+- No Secure Boot signing, measured boot, or TPM-backed rollback counter yet.
+  Installed update state lives in the writable RAM image.
+- Packaged applications are verified and installed but their entry points are
+  not executed; the kernel still embeds one native program.
+- Packages do not persist across reboot, and update activation/staging and a
+  general UEFI installer are not implemented.
+- Release signing uses a key file outside the repository; the checked-in keys
+  are test keys and provide no security. The ISO embeds build timestamps, so
+  the signed artifact digest is recorded per release rather than claimed
+  bit-for-bit reproducible.
+- No Windows or other compatibility runtime exists; the compatibility database
+  records Windows applications as unsupported and the package verifier rejects
+  `runtime=windows`.
+- No external security review has been completed.
 - The ISO is generated but automated CD/ISO boot is not part of `make ci`.
 
 ## [0.1.0] - 2026-10-19

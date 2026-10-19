@@ -32,8 +32,11 @@ sustained contribution record.
 ## Contribution and conduct
 
 All participants must follow [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
-Contribution requirements are in [`CONTRIBUTING.md`](CONTRIBUTING.md). Security
-reports follow [`SECURITY.md`](SECURITY.md).
+Contribution requirements are in [`CONTRIBUTING.md`](CONTRIBUTING.md). The
+contribution ladder and review expectations are in
+[`docs/community.md`](docs/community.md). Security reports follow
+[`SECURITY.md`](SECURITY.md) and the
+[response process](docs/security/security-response.md).
 
 ## Licensing and project assets
 
@@ -41,3 +44,14 @@ The current repository licence is Apache-2.0. The specification calls for a
 final licence and contributor-agreement review before a public release.
 Signing keys, release credentials, and private vulnerability reports are never
 committed to the repository.
+
+Release signing keys are held offline and read from a file by
+[`tools/admin`](tools/admin/src/main.rs); unsigned releases are refused. The keys
+under `tests/fixtures/keys` are documented test keys, are not
+secrets, and provide no security. Key rotation and compromise handling follow
+the [security response process](docs/security/security-response.md).
+
+Compatibility claims are recorded in
+[`tests/compatibility/database.txt`](tests/compatibility/database.txt) with named
+test evidence. A maintainer may not upgrade a record beyond what the suite
+supports.
