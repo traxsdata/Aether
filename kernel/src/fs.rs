@@ -18,7 +18,6 @@ use aether_abi::user::{FileRights, errno};
 use aether_fs::{Access, AetherFs, FsError, OpenId, RamDisk};
 use aether_ipc::{CapError, CapHandle, CapTable, ObjectId, ObjectType, Rights};
 use aether_memory::frame::PhysFrame;
-use aether_packaging::manifest::Permissions;
 use aether_services::runtime::RuntimeProfile;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -204,6 +203,13 @@ fn encode_handle(handle: CapHandle) -> u64 {
 }
 
 fn decode_handle(value: u64) -> Option<CapHandle> {
+    // Handle 0 is reserved (slot generations start at 1), and bytes above the
+    // 24-bit encoding are rejected so a caller cannot smuggle extra bits and
+    // rely on truncation to name a valid slot. This matches the endpoint
+    // decoder and the system ABI contract.
+    if value == 0 || value > 0x00ff_ffff {
+        return None;
+    }
     let index = (value & 0xff) as u8;
     let generation = (value >> 8) as u16;
     Some(CapHandle { index, generation })
@@ -228,12 +234,12 @@ fn portal_permission(root: &str, rights: u64) -> Result<(), i64> {
     let Some(profile) = profile_for_root(root) else {
         return Ok(());
     };
-    let bit = if rights & FileRights::WRITE != 0 {
-        Permissions::PORTAL_WRITE
-    } else {
-        Permissions::PORTAL_READ
-    };
-    if profile.allows(bit) {
+    // Every requested right needs its own declaration. A combined READ|WRITE
+    // request must not pass on PORTAL_WRITE alone, or an application that
+    // declared write-only access would receive a readable capability.
+    let needs_read = rights & FileRights::READ != 0;
+    let needs_write = rights & FileRights::WRITE != 0;
+    if profile.allows_portal(needs_read, needs_write) {
         Ok(())
     } else {
         ACCESS_DENIALS.fetch_add(1, Ordering::Release);
@@ -300,12 +306,14 @@ pub fn sys_portal_open(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) 
     let path = user_str(pml4, pointer, length)?;
     let access = access_from_rights(rights)?;
     let result = scheduler::with_current_caps(|root, caps| {
+        // The verified manifest decides whether the application may use the
+        // portal at all; only then is the exact-path grant consulted. Checking
+        // permission first keeps the denial independent of whether a grant
+        // happens to exist and avoids counting a grant use that never opens.
+        portal_permission(root, rights)?;
         if crate::portal::check(root, path, rights).is_err() {
             return Err(errno::ENOGRANT);
         }
-        // A portal grant authorizes this file; the verified manifest decides
-        // whether the application may use the portal at all.
-        portal_permission(root, rights)?;
         let open = match with_fs(|filesystem| filesystem.open("/", path, access)) {
             Ok(open) => open,
             Err(error) => return Err(map_error(error)),

@@ -151,6 +151,7 @@ def main() -> int:
             ("cat /system/policy.txt", "aether policy v1"),
             ("apps", "app org.aether.demo pid=4"),
             ("security", "security: open_files="),
+            ("mem", "mem: free="),
             ("services", "service storaged"),
             ("portal", "portal: grants=1"),
             ("portal revoke 0", "portal: revoked grant 0"),

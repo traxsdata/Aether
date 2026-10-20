@@ -278,19 +278,6 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     let stacks = unsafe { &mut *STACKS.0.get() };
     let kernel_stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
 
-    // Record the frame allocator's pressure for the `mem` diagnostic. The
-    // allocator is not reachable after bootstrap, so the counters are the
-    // runtime view of the same numbers the boot line prints.
-    let stats = allocator.stats();
-    MEM_FREE_MIB.store(
-        (stats.free_bytes() / (1024 * 1024)) as usize,
-        Ordering::Release,
-    );
-    MEM_TOTAL_MIB.store(
-        (stats.total_bytes() / (1024 * 1024)) as usize,
-        Ordering::Release,
-    );
-
     // Task 0 is the idle task: it is the boot context and keeps the kernel
     // address space. Its kernel stack is the stack used during boot.
     let mut idle = Task::new();
@@ -395,6 +382,20 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         user_pml4.start_address(),
         image.entry(),
         USER_STACK_TOP
+    );
+
+    // Record the allocator's pressure after every boot allocation for the
+    // `mem` diagnostic. The allocator is not reachable after bootstrap and no
+    // frames are allocated later, so this is the free/total view the shell
+    // reports for the running system.
+    let stats = allocator.stats();
+    MEM_FREE_MIB.store(
+        (stats.free_bytes() / (1024 * 1024)) as usize,
+        Ordering::Release,
+    );
+    MEM_TOTAL_MIB.store(
+        (stats.total_bytes() / (1024 * 1024)) as usize,
+        Ordering::Release,
     );
 
     Ok(())

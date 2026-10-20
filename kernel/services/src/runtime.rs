@@ -115,6 +115,17 @@ impl<'a> RuntimeProfile<'a> {
         self.permissions.contains(permission)
     }
 
+    /// Returns `true` if every requested portal right is declared.
+    ///
+    /// Read and write are separate declarations. A combined request requires
+    /// both, so declaring `portal.write` alone never authorizes reading a
+    /// portal file.
+    #[must_use]
+    pub const fn allows_portal(&self, read: bool, write: bool) -> bool {
+        (!read || self.permissions.contains(Permissions::PORTAL_READ))
+            && (!write || self.permissions.contains(Permissions::PORTAL_WRITE))
+    }
+
     /// Returns `true` if the application may open `open` files.
     #[must_use]
     pub const fn allows_open_files(&self, open: u8) -> bool {

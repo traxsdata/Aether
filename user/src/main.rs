@@ -201,7 +201,7 @@ fn ipc_section() {
             0,
         )
     };
-    require_denial("init: ipc-too-long EINVAL", raw, "EINVAL");
+    require_denial("init: ipc-too-long", raw, "EINVAL");
 
     // A well-formed handle that this task does not own must be rejected as
     // an invalid handle, never treated as a fresh grant.

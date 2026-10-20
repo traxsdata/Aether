@@ -115,7 +115,7 @@ Implemented calls:
 | 14 | `task_count` | — | debug value |
 | 15 | `endpoint_create` | — | endpoint capability handle (or `ENOSPC` when the pool is exhausted) |
 | 16 | `endpoint_send` | endpoint handle, payload, payload length, transfer handle (0 = none) | 0 (`EAGAIN` when the queue is full) |
-| 17 | `endpoint_receive` | endpoint handle, buffer, buffer length (at least 32), transferred-handle out-field | bytes received; the out-field receives the transferred handle, or 0 |
+| 17 | `endpoint_receive` | endpoint handle, buffer, buffer length (at least 32), required transferred-handle out-field | bytes received; the out-field receives the transferred handle, or 0 |
 
 Rules for this implementation:
 
@@ -144,11 +144,13 @@ Endpoint syscalls (15–17) add these rules:
   the receiver's installed copy never carries `TRANSFER`, so transfer chains
   cannot be extended by receivers.
 - `endpoint_receive` requires a buffer able to hold a maximum-size message
-  (at least 32 bytes) so a receive is never partial, plus a four-byte
-  writable out-field for the transferred handle that does not overlap the
-  payload buffer. The transferred handle is stored byte-wise; the call
-  returns the received byte count in `RAX` and installs the transferred
-  capability in the caller's table before success is reported.
+  (at least 32 bytes) so a receive is never partial, plus a required
+  four-byte writable out-field for the transferred handle that does not
+  overlap the payload buffer. Passing `0` for the out-field is an `EINVAL`
+  usage error; it is not silently treated as "discard the transferred
+  handle", because the kernel installs a transferred capability before it
+  reports success. The transferred handle is stored byte-wise; the call
+  returns the received byte count in `RAX`.
 
 Error numbers (two's-complement `i64` in `RAX`):
 

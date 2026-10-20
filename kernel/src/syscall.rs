@@ -183,9 +183,11 @@ fn endpoint_send(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, transf
             }
         }
     };
-    let sender = scheduler::current_task() as u16;
-    let result = scheduler::with_current_ipc(|_current, caps| {
-        crate::ipc::send(caps, cap, sender, payload, transfer)
+    // Derive the sender identity inside the same guard that borrows the
+    // caller's table, so the two can never describe different tasks even if
+    // the gate is ever made preemptible.
+    let result = scheduler::with_current_ipc(|current, caps| {
+        crate::ipc::send(caps, cap, current as u16, payload, transfer)
     });
     match result {
         Ok(()) => {
@@ -204,14 +206,21 @@ fn endpoint_send(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, transf
 fn endpoint_create() -> i64 {
     let full =
         aether_ipc::Rights::SEND | aether_ipc::Rights::RECEIVE | aether_ipc::Rights::TRANSFER;
-    let result =
-        scheduler::with_current_ipc(|_current, caps| match crate::ipc::create_endpoint() {
+    let result = scheduler::with_current_ipc(|_current, caps| {
+        // Refuse before allocating the endpoint when the caller cannot name
+        // it. Otherwise a full table would consume a pool slot with no
+        // capability to use or revoke it.
+        if !caps.has_free_slot() {
+            return Err(errno::ENOSPC);
+        }
+        match crate::ipc::create_endpoint() {
             None => Err(errno::ENOSPC),
             Some(object) => caps
                 .grant(object, aether_ipc::ObjectType::Endpoint, full)
                 .map(|handle| (u64::from(handle.generation) << 8) | u64::from(handle.index))
                 .map_err(|_| errno::ENOSPC),
-        });
+        }
+    });
     match result {
         Ok(handle) => handle as i64,
         Err(code) => {

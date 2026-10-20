@@ -8,10 +8,11 @@ The project's security goal is simple to state and hard to build: applications
 receive only the capabilities they need, user files are opened through explicit
 grants, and the desktop is not a security authority.
 
-> **Status: native desktop prototype. Phase 4's deliverables are complete;
-> its exit criterion (launching a packaged application from the desktop with
-> an explicit consent grant) is still pending. The Phase 5/6 packaging,
-> compatibility, update, and release-engineering slices are in place.**
+> **Status: native desktop prototype. Phase 4's core deliverables are in
+> place; interactive portal consent and its exit criterion (launching a
+> packaged application from the desktop with an explicit consent grant) are
+> still pending. The Phase 5/6 packaging, compatibility, update, and
+> release-engineering slices are in place.**
 > The tree has a reproducible UEFI boot path and ISO, a validated physical
 > memory map, kernel-owned page tables with NX and write-protect enforcement, a
 > 100 Hz preemptive scheduler, a ring-3 user/kernel boundary, validated
@@ -115,8 +116,8 @@ grants, and the desktop is not a security authority.
   `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`, `AETHER_SHELL_OK`, and
   `AETHER_BOOT_OK`.
 - `make shell-test`, which drives the console over a QEMU serial socket and
-  checks filesystem, service, portal grant/revocation, package, runtime, update,
-  recovery, desktop, and input commands.
+  checks filesystem, service, memory, portal grant/revocation, package,
+  runtime, update, recovery, desktop, and input commands.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
 - `make rollback-test`, which boots a kernel with the

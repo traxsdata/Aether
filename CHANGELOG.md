@@ -207,6 +207,20 @@ versioning scheme until the kernel ABI stabilises.
 - Capability lookup reports a wrong object type as `WrongObjectType` before
   any rights check, so using a file handle as an endpoint fails with `EBADF`
   rather than a misleading permission error.
+- Portal permission enforcement checks every requested right: a manifest that
+  declares `portal.write` but not `portal.read` can no longer obtain a
+  readable capability through a combined `READ|WRITE` request. Permission is
+  also checked before the exact-path grant, so an undeclared application gets
+  a consistent `EACCES` instead of learning whether a grant exists.
+- File-handle decoding rejects reserved zero and values above the 24-bit
+  encoding before lookup, matching the endpoint decoder and the system ABI
+  contract instead of silently truncating high bits.
+- The release tamper test removes both temporary bundle copies (the second
+  assignment previously replaced the only `EXIT` trap).
+- The ring-3 diagnostics no longer duplicate the expected errno in the
+  too-long IPC payload line; the serial transcript, Phase 4 status, escape
+  count, boot-gate wording, and memory-view documentation now match the tested
+  output.
 
 ### Known limitations
 

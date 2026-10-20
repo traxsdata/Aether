@@ -558,7 +558,7 @@ fn format_security(buffer: &mut [u8]) -> usize {
 /// uses; the log only reports what already happened.
 fn format_log(buffer: &mut [u8]) -> usize {
     let mut writer = LineWriter::new(buffer);
-    writer.push(b"CAPABILITIES DENIED=");
+    writer.push(b"IPC DENIED=");
     writer.value(syscall::ipc_denials());
     writer.end_line();
     writer.push(b"USERS EXITS=");

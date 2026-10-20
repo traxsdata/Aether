@@ -23,6 +23,48 @@ fn profile(id: &'static str) -> RuntimeProfile<'static> {
 }
 
 #[test]
+fn portal_permissions_are_checked_per_requested_right() {
+    let limits = profile("org.aether.demo").limits;
+    let read_only = isolated(
+        "org.aether.read",
+        "/apps/org.aether.read",
+        Permissions::parse_list("portal.read").unwrap(),
+        limits,
+    )
+    .unwrap();
+    assert!(read_only.allows_portal(true, false));
+    assert!(!read_only.allows_portal(false, true));
+    // A combined READ|WRITE request must not pass on one declaration alone.
+    assert!(!read_only.allows_portal(true, true));
+
+    let write_only = isolated(
+        "org.aether.write",
+        "/apps/org.aether.write",
+        Permissions::parse_list("portal.write").unwrap(),
+        limits,
+    )
+    .unwrap();
+    assert!(!write_only.allows_portal(true, false));
+    assert!(write_only.allows_portal(false, true));
+    assert!(!write_only.allows_portal(true, true));
+
+    let both = isolated(
+        "org.aether.both",
+        "/apps/org.aether.both",
+        Permissions::parse_list("portal.read,portal.write").unwrap(),
+        limits,
+    )
+    .unwrap();
+    assert!(both.allows_portal(true, true));
+    assert!(both.allows_portal(true, false));
+    assert!(both.allows_portal(false, true));
+
+    let neither = profile("org.aether.demo");
+    assert!(!neither.allows_portal(true, false));
+    assert!(!neither.allows_portal(false, true));
+}
+
+#[test]
 fn prefixes_are_derived_from_identity() {
     let mut buffer = [0u8; 64];
     let prefix = derive_prefix("org.aether.demo", &mut buffer).unwrap();

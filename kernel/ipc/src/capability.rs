@@ -170,7 +170,9 @@ impl CapTable {
     ///
     /// The rights must be valid for the object type; see
     /// [`Rights::for_object`]. Granting a self-authorizing right set is
-    /// rejected rather than silently attenuated.
+    /// rejected rather than silently attenuated. A `File` capability may
+    /// carry the empty set for a create-only open, which still needs a
+    /// closeable handle; other object kinds require at least one right.
     pub fn grant(
         &mut self,
         object: ObjectId,
@@ -180,7 +182,10 @@ impl CapTable {
         if rights.bits() & !Rights::for_object(kind).bits() != 0 {
             return Err(CapError::InvalidRights);
         }
-        if rights.bits() == 0 {
+        // A create-only file open has no read or write right yet still needs a
+        // closeable handle, so File accepts the empty set. Other object types
+        // must name at least one operation they can perform.
+        if rights.bits() == 0 && !matches!(kind, ObjectType::File) {
             return Err(CapError::InvalidRights);
         }
         let index = self
@@ -259,6 +264,23 @@ impl CapTable {
             index: cap.object_index,
             generation: cap.object_generation,
         })
+    }
+
+    /// Returns `true` if at least one capability slot is free.
+    ///
+    /// Callers that must create an object before they can mint its capability
+    /// use this to fail before allocating the object, so a full table cannot
+    /// leak a kernel object that no handle can name.
+    #[must_use]
+    pub const fn has_free_slot(&self) -> bool {
+        let mut index = 0usize;
+        while index < MAX_CAPS {
+            if self.slots[index].is_empty() {
+                return true;
+            }
+            index += 1;
+        }
+        false
     }
 
     /// Returns the number of capabilities that name a `File` object.
@@ -561,19 +583,15 @@ mod tests {
     #[test]
     fn rights_are_limited_to_the_object_type() {
         let mut table = CapTable::new();
-        // Endpoint rights on a file, file rights on an endpoint, zero rights,
-        // and meaningless rights on a Frame object are all refused at mint
-        // time instead of silently attenuated.
+        // Endpoint rights on a file, file rights on an endpoint, and
+        // meaningless rights on a Frame object are all refused at mint time
+        // instead of silently attenuated.
         assert_eq!(
             table.grant(object(0), ObjectType::File, Rights::SEND),
             Err(CapError::InvalidRights)
         );
         assert_eq!(
             table.grant(object(0), ObjectType::Endpoint, Rights::READ),
-            Err(CapError::InvalidRights)
-        );
-        assert_eq!(
-            table.grant(object(0), ObjectType::File, Rights::empty()),
             Err(CapError::InvalidRights)
         );
         assert_eq!(
@@ -584,6 +602,13 @@ mod tests {
             table.grant(object(0), ObjectType::Frame, Rights::empty()),
             Err(CapError::InvalidRights)
         );
+
+        // Create-only opens return an object with no read/write right; the
+        // handle must still be mintable so it can be closed.
+        let create_only = table
+            .grant(object(0), ObjectType::File, Rights::empty())
+            .expect("create-only slot");
+        assert_eq!(table.file(create_only, Rights::empty()), Ok(object(0)));
 
         let file = table
             .grant(object(1), ObjectType::File, Rights::READ | Rights::WRITE)
@@ -637,6 +662,28 @@ mod tests {
             other.insert_transfer(smuggled),
             Err(CapError::InvalidRights)
         );
+    }
+
+    #[test]
+    fn free_slot_check_matches_table_capacity() {
+        let mut table = CapTable::new();
+        assert!(table.has_free_slot());
+        let mut first = None;
+        for index in 0..MAX_CAPS {
+            let handle = table
+                .grant(object(index as u16), ObjectType::Endpoint, Rights::SEND)
+                .expect("slot");
+            if index == 0 {
+                first = Some(handle);
+            }
+        }
+        assert!(!table.has_free_slot());
+        assert_eq!(
+            table.grant(object(0), ObjectType::Endpoint, Rights::SEND),
+            Err(CapError::TableFull)
+        );
+        assert!(table.remove(first.expect("first handle")).is_ok());
+        assert!(table.has_free_slot());
     }
 
     #[test]

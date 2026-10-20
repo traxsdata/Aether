@@ -89,10 +89,11 @@ pub enum Syscall {
     /// Receive a bounded IPC message. `arg1` is the endpoint capability
     /// handle, `arg2` the buffer pointer, `arg3` the buffer length (the
     /// kernel requires room for a maximum-size message), and `arg4` the
-    /// pointer of a writable 4-byte field that receives the transferred
-    /// capability handle (0 = none). The sender identity comes from the
-    /// kernel; a message field never names the sender. Returns the payload
-    /// length, or `EAGAIN` when the queue is empty.
+    /// pointer of a required writable 4-byte field that receives the
+    /// transferred capability handle (0 is rejected, so a transferred handle
+    /// is never installed without a place to report it). The sender identity
+    /// comes from the kernel; a message field never names the sender. Returns
+    /// the payload length, or `EAGAIN` when the queue is empty.
     EndpointReceive = 17,
 }
 

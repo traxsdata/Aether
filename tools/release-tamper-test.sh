@@ -39,10 +39,15 @@ verify() {
     AETHER_RELEASE_DIR="$1" sh tools/release-check.sh 2>&1
 }
 
+# Both mutations run under one work directory so the EXIT trap removes every
+# copy; replacing TAMPERED for the second step previously leaked the first.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/aether-tamper.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
 # Step 1: a poisoned SHA256SUMS entry must be refused before the image even
 # reaches the signature verifier, and the refusal must name the disagreement.
-TAMPERED=$(mktemp -d "${TMPDIR:-/tmp}/aether-tamper-sums.XXXXXX")
-trap 'rm -rf "$TAMPERED"' EXIT
+TAMPERED="$WORK/sums"
+mkdir "$TAMPERED"
 cp "$BUNDLE"/* "$TAMPERED"/
 # Flip the first digest character to a hex digit that is guaranteed to be
 # different from the original, otherwise a digest that already starts with
@@ -71,8 +76,8 @@ echo "tamper: SHA256SUMS entry rejected"
 
 # Step 2: one flipped byte inside the image must break the signature that is
 # verified against the (still consistent) checksums and manifest files.
-TAMPERED=$(mktemp -d "${TMPDIR:-/tmp}/aether-tamper-image.XXXXXX")
-trap 'rm -rf "$TAMPERED"' EXIT
+TAMPERED="$WORK/image"
+mkdir "$TAMPERED"
 cp "$BUNDLE"/* "$TAMPERED"/
 IMAGE="$TAMPERED/$IMAGE_NAME"
 IMAGE_SIZE=$(wc -c <"$IMAGE")

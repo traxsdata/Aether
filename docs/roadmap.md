@@ -118,15 +118,17 @@ It is a planning model, not a delivery promise.
 
 ## Current milestone
 
-The tree reaches the Phase 4 exit criterion and the implementable Phase 5/6
-slices on the QEMU platform: a clean checkout builds a FAT image and a UEFI ISO,
-boots through the loader, enforces a ring-3 user/kernel boundary, runs a native
-application in a private storage root, reports denied cross-application access,
-verifies and installs a signed package, derives an isolated runtime profile,
-verifies a signed update while rejecting replay, downgrade, and an unknown
-publisher, starts supervised services, paints a composited desktop, accepts
-keyboard input, grants one file through the portal, and verifies the
-current/previous image records without touching user data.
+The tree implements the Phase 4 deliverables except interactive portal consent
+and launching a packaged application from the desktop, so its exit criterion is
+still pending. The implementable Phase 5/6 slices are in place on the QEMU
+platform: a clean checkout builds a FAT image and a UEFI ISO, boots through the
+loader, enforces a ring-3 user/kernel boundary, runs a native application in a
+private storage root, reports denied cross-application access, verifies and
+installs a signed package, derives an isolated runtime profile, verifies a
+signed update while rejecting replay, downgrade, and an unknown publisher,
+starts supervised services, paints a composited desktop, accepts keyboard
+input, grants one file through the portal, and verifies the current/previous
+image records without touching user data.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
 persistent store, network/audio services, an installer, and external review.

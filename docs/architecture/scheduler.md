@@ -149,7 +149,7 @@ AETHER_CAP_OK denials=2
 AETHER_IPC_OK messages=3
 AETHER_APP_OK
 AETHER_USER_OK tasks=4 exits=1 faults=0
-AETHER_SANDBOX_OK escapes=2 access_denials=0 quota_denials=1
+AETHER_SANDBOX_OK escapes=4 access_denials=0 quota_denials=1
 AETHER_IPC_USER_OK sends=7 receives=7 denials=7
 AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
@@ -160,8 +160,9 @@ A user task's exit line records `user: exit pid=N status=S closed=C`, where
 `closed` is the number of file capability handles the kernel closed on the
 task's behalf (`fs::close_task_files`). The kernel closes them on normal exit
 and on every user fault, so a retired task can never keep open-file slots that
-shrink the pool shared by later tasks. Open capabilities themselves are removed
-with the task; a ghost handle to an exited process fails the generation check.
+shrink the pool shared by later tasks. The retired task never runs again, so
+its remaining capability table is unreachable; endpoint objects owned by an
+exited task are not reclaimed yet because the pool has no destroy path.
 
 Every user failure is accounted: `user_exits()`/`user_faults()` end up in
 `AETHER_USER_OK`, denial counters in `AETHER_SANDBOX_OK`/`AETHER_CAP_OK`, and
@@ -174,7 +175,7 @@ decorative:
   `AETHER_BOOT_FAILED reason=user-test ...`.
 - A task that claims a zero exit without exercising the contract fails the
   gate: `AETHER_BOOT_FAILED reason=user-ipc sends=... receives=... denials=...`
-  unless the IPC counters reached at least 7 handlers-end, 7 receives, 7
+  unless the IPC counters reached at least 7 sends, 7 receives, 7
   denials, and the filesystem quota counter reported at least one denied
   fifth open. Only then is `AETHER_IPC_USER_OK` printed — by the kernel, not
   by the user program.
@@ -187,6 +188,8 @@ branch with its own `AETHER_RECOVERY_ROLLBACK_OK` marker.
 
 - Static task set; no process creation, wait, or per-process resource
   accounting beyond the counters above.
+- Endpoint objects created by a task are not destroyed when the task exits;
+  the fixed four-object pool is not reclaimed.
 - Single CPU; no SMP startup or per-CPU scheduler state.
 - No priorities, sleeping/wakeup queues, or blocking IPC.
 - Per-task kernel stacks are static, not capability-managed.

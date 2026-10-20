@@ -39,8 +39,10 @@ counts, sandbox escape/access/quota denials, portal grants/uses/denials, user
 task exits and faults, IPC denials, the update status, and the input queue's
 drop counter. A closing "denied events" roll-up is drawn in the warning
 colour. Because the data is recomputed on every repaint, a counter that stops
-being driven by the boot self-test shows up as a wrong number (and as a boot
-failure, since the scheduler gate cross-checks the same counters).
+being driven by the boot self-test shows up as a wrong number. The boot gate
+separately cross-checks the IPC send/receive/denial counters and the quota
+counter, and a nonzero exit or user fault fails the boot before
+`AETHER_USER_OK`; the remaining counters are descriptive.
 
 ## Input
 
