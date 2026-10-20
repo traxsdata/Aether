@@ -14,7 +14,7 @@
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::serial_line;
 use aether_abi::user::FileRights;
-use aether_services::portal_store::{self, PortalGrant};
+use aether_services::portal_store::{self, PortalEntry, PortalGrant};
 use core::cell::UnsafeCell;
 use core::fmt::{self, Write as _};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -69,6 +69,8 @@ static PENDING: Global<[Request; MAX_PENDING]> =
 pub enum PortalError {
     /// No grant matches the caller, path, and requested rights.
     NotGranted,
+    /// The matching grant was revoked.
+    Revoked,
     /// The consent queue is full or the request index is stale.
     NoRequest,
     /// A grant record could not be represented or stored.
@@ -114,6 +116,9 @@ pub fn init() {
         }
     }
 
+    #[cfg(feature = "gate4-portal-test")]
+    let seeded_gate4 = seed_gate4_grant();
+
     if corrupt {
         serial_line!("portal: grant store corrupt; no grants loaded");
     } else if loaded == 0 {
@@ -122,6 +127,49 @@ pub fn init() {
     } else {
         serial_line!("portal: restored {} grant record(s)", loaded);
     }
+    #[cfg(feature = "gate4-portal-test")]
+    if seeded_gate4 {
+        persist();
+        serial_line!(
+            "portal: seeded Gate 4 workbook grant root={} path={}",
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_WORKBOOK
+        );
+    }
+}
+
+/// Seeds the test-only Gate 4 workbook grant.
+///
+/// The grant is exact-file and read+write. It exists only in the
+/// `gate4-portal-test` build; a normal boot keeps the Gate 3 grant table and
+/// behavior unchanged.
+#[cfg(feature = "gate4-portal-test")]
+fn seed_gate4_grant() -> bool {
+    let Some(grant) = PortalGrant::new(
+        crate::fs::DEMO_ROOT,
+        crate::fs::GATE4_WORKBOOK,
+        portal_store::READ | portal_store::WRITE,
+    ) else {
+        return false;
+    };
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and this runs once during boot.
+    let grants = unsafe { &mut *GRANTS.0.get() };
+    if grants.iter().any(|slot| {
+        !slot.grant.is_empty()
+            && slot.grant.root() == crate::fs::DEMO_ROOT
+            && slot.grant.path() == crate::fs::GATE4_WORKBOOK
+    }) {
+        return false;
+    }
+    let Some(free) = grants.iter().position(|slot| slot.grant.is_empty()) else {
+        return false;
+    };
+    grants[free] = Slot {
+        grant,
+        revoked: false,
+    };
+    true
 }
 
 /// Checks whether `root` may open `path` with `rights` through the portal.
@@ -152,6 +200,40 @@ fn check_grant(root: &str, path: &str, rights: u64) -> Result<(), PortalError> {
         }
     }
     Err(PortalError::NotGranted)
+}
+
+/// Resolves a Linux `/run/aether/portal/<grant-id>/<file>` path.
+///
+/// The grant id, caller root, exact final file component, and requested rights
+/// are all matched by the host-tested policy in `aether-services`. A revoked
+/// matching record fails closed even if another record could otherwise match.
+/// The returned grant names the backing path the caller may open.
+pub fn check_namespace(
+    root: &str,
+    namespace: &str,
+    rights: u64,
+) -> Result<PortalGrant, PortalError> {
+    let outcome = resolve_namespace(root, namespace, rights);
+    if outcome.is_ok() {
+        GRANTED.fetch_add(1, Ordering::Release);
+    } else {
+        DENIED.fetch_add(1, Ordering::Release);
+    }
+    outcome
+}
+
+fn resolve_namespace(root: &str, namespace: &str, rights: u64) -> Result<PortalGrant, PortalError> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the snapshot.
+    let grants = unsafe { &*GRANTS.0.get() };
+    let entries: [PortalEntry; MAX_GRANTS] = core::array::from_fn(|index| PortalEntry {
+        grant: grants[index].grant,
+        revoked: grants[index].revoked,
+    });
+    portal_store::resolve(&entries, root, namespace, rights).map_err(|error| match error {
+        portal_store::PortalPathError::Revoked => PortalError::Revoked,
+        _ => PortalError::NotGranted,
+    })
 }
 
 /// Queues an interactive consent request from an application.

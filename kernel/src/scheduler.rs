@@ -99,16 +99,36 @@ pub enum TaskAbi {
 enum LinuxFileSource {
     Root(usize),
     Overlay(usize),
-    Directory { path: [u8; 64], len: usize },
-    Pipe { index: usize, write: bool },
-    EventFd { index: usize },
-    Epoll { index: usize },
-    TimerFd { index: usize },
+    /// An exact-file portal grant resolved to a kernel filesystem backing path.
+    Portal {
+        path: [u8; PORTAL_PATH_BYTES],
+        len: u8,
+        rights: u8,
+    },
+    Directory {
+        path: [u8; 64],
+        len: usize,
+    },
+    Pipe {
+        index: usize,
+        write: bool,
+    },
+    EventFd {
+        index: usize,
+    },
+    Epoll {
+        index: usize,
+    },
+    TimerFd {
+        index: usize,
+    },
     Inotify,
     Pseudo(PseudoFile),
     PseudoDir(PseudoDir),
 }
 
+/// Maximum backing-path bytes carried by a portal descriptor.
+const PORTAL_PATH_BYTES: usize = aether_fs::MAX_PATH;
 const PIPE_BYTES: usize = 512;
 /// Global pipe slots. Forked processes share the same slot, so a write on one
 /// side is visible to the other.
@@ -649,6 +669,17 @@ static LINUXD_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as 
 static LINUXD_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static MEM_FREE_MIB: AtomicUsize = AtomicUsize::new(0);
 static MEM_TOTAL_MIB: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "gate4-portal-test")]
+static GATE4_PORTAL_READ_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "gate4-portal-test")]
+static GATE4_PORTAL_WRITE_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "gate4-portal-test")]
+static GATE4_DENIED_READS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "gate4-portal-test")]
+static GATE4_DENIED_WRITES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "gate4-portal-test")]
+static GATE4_REVOKED: AtomicUsize = AtomicUsize::new(0);
 
 /// Scheduler initialization failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1211,6 +1242,14 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             program_path,
             if count > 0 { configured[0] } else { "" }
         );
+        #[cfg(feature = "gate4-portal-test")]
+        let environment = [
+            "LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64",
+            "HOME=/tmp",
+            "TMPDIR=/tmp",
+            crate::fs::GATE4_ENVIRONMENT,
+        ];
+        #[cfg(not(feature = "gate4-portal-test"))]
         let environment = [
             "LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64",
             "HOME=/tmp",
@@ -3254,6 +3293,160 @@ const LINUX_ENAMETOOLONG: i64 = -36;
 const LINUX_ESPIPE: i64 = -29;
 const LINUX_ENOSPC: i64 = -28;
 
+/// Opens a Linux portal namespace path for the calling task.
+///
+/// The caller root is the kernel-owned task root. The namespace path is only a
+/// name: the returned descriptor carries the exact backing path from the
+/// matched grant, so a later read or write never resolves the guest string
+/// again.
+pub fn linux_portal_open(namespace: &str, flags: u64) -> Result<u64, i64> {
+    use aether_abi::user::FileRights;
+    let rights = match flags & 0x3 {
+        0 => FileRights::READ,
+        1 => FileRights::WRITE,
+        2 => FileRights::READ | FileRights::WRITE,
+        _ => return Err(LINUX_EINVAL),
+    };
+    // Directory and create grants do not exist: the namespace names one
+    // existing file. O_TRUNC is allowed only with a write right.
+    if flags & 0x40 != 0 {
+        return Err(LINUX_EACCES);
+    }
+    let truncate = flags & 0x200 != 0;
+    if truncate && rights & FileRights::WRITE == 0 {
+        return Err(LINUX_EACCES);
+    }
+    let root = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        tasks[CURRENT.load(Ordering::Relaxed)].root
+    };
+    crate::fs::portal_permission(root, rights)?;
+    let grant = match crate::portal::check_namespace(root, namespace, rights) {
+        Ok(grant) => grant,
+        Err(error) => {
+            #[cfg(feature = "gate4-portal-test")]
+            if GATE4_REVOKED.load(Ordering::Acquire) != 0
+                && error == crate::portal::PortalError::Revoked
+            {
+                if rights & FileRights::READ != 0 {
+                    GATE4_DENIED_READS.fetch_add(1, Ordering::Release);
+                }
+                if rights & FileRights::WRITE != 0 {
+                    GATE4_DENIED_WRITES.fetch_add(1, Ordering::Release);
+                }
+            }
+            let _ = error;
+            return Err(LINUX_EACCES);
+        }
+    };
+    let backing = grant.path();
+    let length = backing.len();
+    if length > PORTAL_PATH_BYTES {
+        return Err(LINUX_ENAMETOOLONG);
+    }
+    crate::fs::portal_size(backing).map_err(portal_fs_error)?;
+    if truncate {
+        crate::fs::portal_truncate(backing).map_err(portal_fs_error)?;
+    }
+    let mut path = [0u8; PORTAL_PATH_BYTES];
+    path[..length].copy_from_slice(backing.as_bytes());
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(LINUX_EBADF);
+    }
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::Portal {
+                    path,
+                    len: length as u8,
+                    rights: rights as u8,
+                },
+                offset: 0,
+                writable: rights & FileRights::WRITE != 0,
+            });
+            return Ok(descriptor as u64);
+        }
+    }
+    Err(LINUX_EMFILE)
+}
+
+/// Maps a filesystem failure on a portal backing file to a Linux errno.
+fn portal_fs_error(error: FsError) -> i64 {
+    match error {
+        FsError::Access | FsError::Escape => LINUX_EACCES,
+        FsError::NotFound => LINUX_ENOENT,
+        FsError::NameTooLong | FsError::PathTooLong => LINUX_ENAMETOOLONG,
+        FsError::FileTooLarge | FsError::NoSpace => LINUX_ENOSPC,
+        _ => -5, // EIO
+    }
+}
+
+/// Revokes the Gate 4 workbook grant through the test-only control path.
+///
+/// This exists only in the `gate4-portal-test` build and only for the demo
+/// application root. Revocation remains a kernel operation; the guest supplies
+/// no grant state or marker text.
+#[cfg(feature = "gate4-portal-test")]
+pub fn gate4_revoke_portal() -> Result<(), i64> {
+    let root = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        tasks[CURRENT.load(Ordering::Relaxed)].root
+    };
+    if root != crate::fs::DEMO_ROOT {
+        return Err(LINUX_EACCES);
+    }
+    crate::portal::revoke(root, crate::fs::GATE4_WORKBOOK).map_err(|_| LINUX_EACCES)?;
+    GATE4_REVOKED.store(1, Ordering::Release);
+    Ok(())
+}
+
+/// Emits kernel-owned Gate 4 portal evidence after the application exits.
+#[cfg(feature = "gate4-portal-test")]
+pub fn gate4_portal_post_exit() {
+    let read_bytes = GATE4_PORTAL_READ_BYTES.load(Ordering::Acquire);
+    if read_bytes == 0 {
+        serial_line!("AETHER_BOOT_FAILED reason=gate4 portal read not observed");
+        return;
+    }
+    serial_line!(
+        "AETHER_GATE4_PORTAL_OK path={} read_bytes={read_bytes} source=kernel",
+        crate::fs::GATE4_NAMESPACE
+    );
+
+    let mut saved = [0u8; aether_fs::MAX_FILE_BYTES];
+    match crate::fs::read_path(crate::fs::GATE4_WORKBOOK, &mut saved) {
+        Ok(length)
+            if length == crate::fs::GATE4_SAVED_FIXTURE.len()
+                && saved[..length] == *crate::fs::GATE4_SAVED_FIXTURE =>
+        {
+            serial_line!(
+                "AETHER_GATE4_SAVE_OK file={} bytes={} source=kernel",
+                crate::fs::GATE4_WORKBOOK,
+                length
+            );
+        }
+        _ => {
+            serial_line!("AETHER_BOOT_FAILED reason=gate4 saved bytes not observed");
+            return;
+        }
+    }
+
+    let denied_reads = GATE4_DENIED_READS.load(Ordering::Acquire);
+    let denied_writes = GATE4_DENIED_WRITES.load(Ordering::Acquire);
+    if GATE4_REVOKED.load(Ordering::Acquire) == 0 || denied_reads == 0 || denied_writes == 0 {
+        serial_line!(
+            "AETHER_BOOT_FAILED reason=gate4 revoke denials read={denied_reads} write={denied_writes}"
+        );
+        return;
+    }
+    serial_line!(
+        "AETHER_GATE4_REVOKE_OK path={} read_denials={denied_reads} write_denials={denied_writes} source=kernel",
+        crate::fs::GATE4_NAMESPACE
+    );
+}
+
 /// Opens a file from the read-only Linux root and returns a file descriptor.
 pub fn linux_open(path: &str) -> Result<u64, i64> {
     let Some(file) = crate::linux::lookup(path) else {
@@ -4227,6 +4420,7 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
         }
         LinuxFileSource::Root(_)
         | LinuxFileSource::Overlay(_)
+        | LinuxFileSource::Portal { .. }
         | LinuxFileSource::Directory { .. } => {
             ready = events & (POLL_IN | POLL_OUT);
         }
@@ -4447,6 +4641,19 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
                 slot.offset += length;
                 Ok(length)
             }
+            LinuxFileSource::Portal { path, len, rights } => {
+                if rights & aether_abi::user::FileRights::READ as u8 == 0 {
+                    return Err(LINUX_EBADF);
+                }
+                let path =
+                    core::str::from_utf8(&path[..usize::from(len)]).map_err(|_| LINUX_ENOENT)?;
+                let length =
+                    crate::fs::portal_read_at(path, slot.offset, out).map_err(portal_fs_error)?;
+                slot.offset = slot.offset.saturating_add(length);
+                #[cfg(feature = "gate4-portal-test")]
+                GATE4_PORTAL_READ_BYTES.fetch_add(length, Ordering::Release);
+                Ok(length)
+            }
             LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
             LinuxFileSource::Pipe {
                 index,
@@ -4592,6 +4799,19 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
                 };
                 linux_inotify_emit(path, IN_MODIFY, false);
                 Ok(data.len())
+            }
+            LinuxFileSource::Portal { path, len, rights } => {
+                if rights & aether_abi::user::FileRights::WRITE as u8 == 0 {
+                    return Err(LINUX_EBADF);
+                }
+                let path =
+                    core::str::from_utf8(&path[..usize::from(len)]).map_err(|_| LINUX_ENOENT)?;
+                let length =
+                    crate::fs::portal_write_at(path, slot.offset, data).map_err(portal_fs_error)?;
+                slot.offset = slot.offset.saturating_add(length);
+                #[cfg(feature = "gate4-portal-test")]
+                GATE4_PORTAL_WRITE_BYTES.fetch_add(length, Ordering::Release);
+                Ok(length)
             }
             LinuxFileSource::Pipe { index, write: true } => {
                 let Some(pipe) = (unsafe { &mut (*PIPES.0.get())[index] }).as_mut() else {
@@ -4995,6 +5215,10 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
             out[..length].copy_from_slice(&entry.data[offset..offset + length]);
             Ok(length)
         }
+        LinuxFileSource::Portal { path, len, .. } => {
+            let path = core::str::from_utf8(&path[..usize::from(len)]).map_err(|_| LINUX_ENOENT)?;
+            crate::fs::portal_read_at(path, offset, out).map_err(portal_fs_error)
+        }
         LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
@@ -5139,6 +5363,12 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
             .get(index)
             .and_then(Option::as_ref)
             .map_or(0, |entry| entry.len),
+        LinuxFileSource::Portal { path, len, .. } => {
+            core::str::from_utf8(&path[..usize::from(len)])
+                .ok()
+                .and_then(|path| crate::fs::portal_size(path).ok())
+                .unwrap_or(0)
+        }
         LinuxFileSource::Directory { .. }
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
@@ -5517,6 +5747,11 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
                 .ok_or(LINUX_EBADF)?;
             Ok((entry.len as u64, index as u64 + 1, 0o100644))
         }
+        LinuxFileSource::Portal { path, len, .. } => {
+            let path = core::str::from_utf8(&path[..usize::from(len)]).map_err(|_| LINUX_ENOENT)?;
+            let size = crate::fs::portal_size(path).map_err(portal_fs_error)?;
+            Ok((size as u64, 0, 0o100644))
+        }
         LinuxFileSource::Directory { .. } | LinuxFileSource::PseudoDir(_) => Ok((0, 2, 0o040755)),
         LinuxFileSource::Pseudo(kind) => Ok(pseudo_stat(kind)),
         LinuxFileSource::Pipe { .. }
@@ -5580,6 +5815,12 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
             .and_then(Option::as_ref)
             .map(|entry| entry.len as u64)
             .ok_or(LINUX_EBADF),
+        LinuxFileSource::Portal { path, len, .. } => {
+            let path = core::str::from_utf8(&path[..usize::from(len)]).map_err(|_| LINUX_ENOENT)?;
+            crate::fs::portal_size(path)
+                .map(|size| size as u64)
+                .map_err(portal_fs_error)
+        }
         LinuxFileSource::Directory { .. }
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }

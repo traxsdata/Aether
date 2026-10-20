@@ -70,7 +70,7 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: futex wait/wake queues, timeout (`ETIMEDOUT`), clear-child-tid join, robust-futex registration and exit-time `FUTEX_OWNER_DIED` wakeup for the exact 24-byte x86-64 head layout, and eventfd counters shared by threads in one tgid; condition variables, semaphores, and other robust-list layouts remain |
 | Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Partial: x86-64 `rt_sigframe` with `siginfo_t`/`ucontext_t`, `SA_SIGINFO`, `SA_ONSTACK` with fallback, GPR/mask restore, `SA_RESTART` for `wait4`, self/group and cross-process SIGUSR1 handlers, and default `SIGKILL`/`SIGTERM`/`SIGCHLD`; stopping, queued real-time signals, and most `siginfo` variants remain |
 | Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; relative/absolute `nanosleep`/`clock_nanosleep` with `EINTR`; bounded `timerfd_create`/`settime`/`gettime` for `CLOCK_MONOTONIC`, one-shot and periodic, with poll/epoll integration. High-resolution clocks and `CLOCK_REALTIME` remain absent |
-| Files | `openat`, `statx`, `readlink`, `rename`, `unlink`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root, per-application `/tmp`, `/settings`, and `/logs` overlays with bounded `rename`/`unlink` confined to the current application, and inotify with blocking or nonblocking instances, four watches, file and directory events (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`, `IN_IGNORED`), bounded-queue `IN_Q_OVERFLOW`, and thread wakeups. Recursive watches, move/delete/unmount events, `renameat`/`unlinkat`, cross-process watch sharing, and deferred deletion for open descriptors are unsupported |
+| Files | `openat`, `statx`, `readlink`, `rename`, `unlink`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root, per-application `/tmp`, `/settings`, and `/logs` overlays with bounded `rename`/`unlink` confined to the current application, exact-file portal grants exposed as `/run/aether/portal/<grant-id>/<file>` for read and read+write opens with revocation, and inotify with blocking or nonblocking instances, four watches, file and directory events (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`, `IN_IGNORED`), bounded-queue `IN_Q_OVERFLOW`, and thread wakeups. Recursive watches, move/delete/unmount events, `renameat`/`unlinkat`, cross-process watch sharing, and deferred deletion for open descriptors are unsupported |
 | Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Blocking/finite `poll`/`epoll_wait`, same-tgid thread-shared eventfd, blocking pipes, and blocking/nonblocking inotify | Partial: `poll` and `epoll_wait` support finite and infinite timeouts with scheduler parking and deadlines; `epoll` is level-triggered by default with a bounded `EPOLLET` transition slice and honest `EPOLLONESHOT` re-arm via `EPOLL_CTL_MOD`; pipes block on empty read/full write across `fork`-inherited descriptors; inotify is bounded to one instance, four watches, and eight queued events per process. Full inotify, nested epoll watches, and cross-process eventfd sharing remain unsupported |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/proc/self/status`, `/proc/self/fd`, `/dev/urandom`, `/dev/zero`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | **Implemented** in the kernel prototype through open/read/stat/readdir, plus a read-only `/proc/aether/syscalls` audit view. `/sys`, tty, input, and GPU nodes are absent. `/dev/random` and `/dev/urandom` return the same deterministic boot PRNG stream as `getrandom`, not host entropy |
 | Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
@@ -342,8 +342,44 @@ Run `usr/bin/gridcraft` with the Wayland bridge and software renderer, present
 its window in the Aether compositor, accept keyboard and pointer input, and
 open/save a workbook through the portal.
 
-**Evidence:** screenshot or pixel checksum, input trace, portal grant and
-revocation tests, and a compatibility record no better than the suite supports.
+**Status: portal half met at QEMU prototype scope; GUI half open.**
+`make gate4-portal-test` builds a signed AppImage fixture, seeds an exact-file
+read+write grant for the demo root, and runs the fixture as a Linux task.
+The fixture opens
+`/run/aether/portal/dd8f879ba78d207c/gate4.xlsx`, reads the workbook fixture,
+saves new bytes through the same grant, and then asks a test-only kernel path
+to revoke the grant. Fresh read and write opens after revocation fail with
+`EACCES`/`ENOENT`.
+
+The namespace is resolved by the host-tested policy in
+`aether-services::portal_store`: the path must be exactly
+`/run/aether/portal/<16-hex-grant-id>/<file>`, the caller root must match the
+grant root exactly, the namespace file must be the grant's final path
+component, and the requested rights must be a subset of the grant. `..`,
+duplicate slashes, trailing slashes, extra components, overlong names, caller
+root mismatch, unknown grant ids, and revoked records all fail closed. There is
+no directory grant and no ambient `/home` mapping: the namespace descriptor
+carries the resolved backing path, which is `/home/gate4.xlsx` in this test.
+
+Kernel-owned evidence, emitted only after validating the operation:
+
+- `AETHER_GATE4_PORTAL_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx
+  read_bytes=48 source=kernel`
+- `AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx bytes=58 source=kernel` (the
+  kernel reads back the exact saved fixture bytes)
+- `AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx
+  read_denials=1 write_denials=1 source=kernel`
+
+The launch environment carries `AETHER_PORTAL_WORKBOOK` with the namespace
+path, and a dynamically linked GUI app can receive the same path through the
+existing `LINUX_APPIMAGE_ARGS` argv. The test fixture itself is static and uses
+the compiled namespace path.
+
+**Still open for Gate 4:** the Wayland bridge, compositor presentation,
+software Vulkan/GL, keyboard and pointer routing, the windowed
+`usr/bin/gridcraft` run, a screenshot or pixel checksum, an input trace, a real
+desktop file chooser/D-Bus portal, and a compatibility record stronger than
+`limited`. None of the GUI claims are made here.
 
 ## Security acceptance criteria
 

@@ -18,6 +18,9 @@ LINUX_INTERP_ELF := $(BUILD)/linux-interp.elf
 LINUX_EXEC_ELF := $(BUILD)/linux-exec.elf
 LINUX_DYN_EXEC_ELF := $(BUILD)/linux-dynamic-exec.elf
 LINUX_APP_ELF := $(BUILD)/linux-appimage-app.elf
+GATE4_APP_ELF := $(BUILD)/linux-gate4-portal.elf
+GATE4_APPIMAGE := $(BUILD)/linux-gate4-portal.AppImage
+GATE4_APPIMAGE_RECORD := $(BUILD)/linux-gate4-portal.import
 LINUX_RUNTIME_DIR := $(BUILD)/linux-runtime-pinned-root
 LINUX_ROOTFS := $(BUILD)/linux-runtime.sqfs
 LINUX_ROOTFS_RECORD := $(BUILD)/linux-runtime.import
@@ -58,7 +61,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test shell-test fault-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -90,6 +93,9 @@ linux-fixture:
 	$(AS) --64 tests/fixtures/linux/appimage.S -o $(BUILD)/linux-appimage-app.o
 	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
 		$(BUILD)/linux-appimage-app.o -o $(LINUX_APP_ELF)
+	$(AS) --64 tests/fixtures/linux/gate4-portal.S -o $(BUILD)/linux-gate4-portal.o
+	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
+		$(BUILD)/linux-gate4-portal.o -o $(GATE4_APP_ELF)
 	if [ "$(LINUX_RUNTIME_PREBUILT)" = "0" ]; then \
 		sh tools/build-pinned-runtime.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
 			$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED); \
@@ -184,6 +190,23 @@ gate3-test:
 	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK,AETHER_GATE3_DENIAL_OK \
 	AETHER_REQUIRE_TEXT='AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=19024376|AETHER_GATE3_APP_OK|AETHER_GATE3_DENIAL_OK|wrote /tmp/gate3-out.csv|item,value|alpha,1|beta,2|total,3|{"command":"formulas.evaluate","result":2.0}|{"command":"cell.set","result":{"cell":"B4","value":"3"}}' \
+	$(PYTHON) tools/test-boot.py
+
+# Gate 4 portal slice: run a small static Linux AppImage fixture that opens a
+# seeded workbook through the exact-file portal namespace, saves new bytes,
+# revokes the grant through a test-only kernel path, and proves the next read
+# and write fail closed. The GUI and Wayland parts of Gate 4 are separate.
+gate4-portal-test:
+	$(MAKE) linux-fixture
+	sh tools/build-appimage-fixture.sh $(GATE4_APPIMAGE) $(GATE4_APPIMAGE_RECORD) \
+		$(LINUX_RUNTIME_SEED) $(GATE4_APP_ELF)
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 KERNEL_FEATURES=gate4-portal-test \
+		LINUX_APPIMAGE_PROGRAM=/usr/bin/app \
+		STAGED_APPIMAGE=$(GATE4_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_EXTRA_MARKERS=AETHER_GATE4_PORTAL_OK,AETHER_GATE4_SAVE_OK,AETHER_GATE4_REVOKE_OK \
+	AETHER_REQUIRE_TEXT='AETHER_GATE4_PORTAL_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|portal: audit revoked' \
 	$(PYTHON) tools/test-boot.py
 
 shell-test: image
