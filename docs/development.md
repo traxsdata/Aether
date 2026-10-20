@@ -23,9 +23,10 @@ The first Cargo invocation downloads Rust 1.99.1 and the
 ## Common commands
 
 ```sh
-make unittest      # host tests for abi/, fs, services, memory, IPC, boot common,
-                   # crypto, packaging, updates, compatibility
+make unittest      # host tests for abi/, fs, services, memory, IPC, wm, boot
+                   # common, crypto, packaging, updates, compatibility
 make test          # build the image and boot it under QEMU/OVMF
+make iso-test      # boot the generated ISO through UEFI El Torito
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # boot a kernel that executes int3 after paging is enabled
 make negative-test # prove the boot harness rejects a deliberately failing kernel
@@ -35,6 +36,7 @@ make docs-check    # check relative links in Markdown files
 make license-check # check workspace and dependency licence metadata
 make lint          # rustfmt + clippy (host, kernel, user, loader)
 make iso           # timestamped UEFI El Torito ISO under build/ISOs
+make vmware-vmx    # write build/aether-vmware.vmx for the newest ISO
 make release       # signed release bundle (needs AETHER_SIGNING_KEY)
 make release-check # verify a release bundle (needs AETHER_TRUST)
 make release-demo  # signed bundle with the test key, then verify
@@ -48,9 +50,11 @@ make clean
 `AETHER_USER_OK`, `AETHER_FS_OK`, `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`,
 `AETHER_RECOVERY_OK`, `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`,
 `AETHER_RUNTIME_OK`, `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`,
-`AETHER_DESKTOP_OK`,
-`AETHER_INPUT_OK`, `AETHER_PORTAL_OK`, and `AETHER_BOOT_OK`, and fails on any
-failure marker. `make fault-test` requires the exception handler to report
+`AETHER_DESKTOP_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`, `AETHER_INPUT_OK`,
+`AETHER_PORTAL_OK`, and `AETHER_BOOT_OK`, and fails on any failure marker.
+`make iso-test` boots the same distribution ISO through OVMF and requires the
+loader, kernel, graphics, desktop, window-manager, pointer, shell, and boot
+markers. `make fault-test` requires the exception handler to report
 `breakpoint (3)` and `AETHER_BOOT_FAILED`. All use TCG and need no KVM or root
 access.
 
@@ -92,6 +96,7 @@ build/BOOTX64.EFI         UEFI loader with the kernel embedded
 build/aether.img          64 MiB FAT image with /EFI/BOOT/BOOTX64.EFI
 build/efiboot.img         8 MiB FAT image used as the ISO's El Torito entry
 build/ISOs/*.iso          timestamped UEFI ISO images
+build/aether-vmware.vmx   VMware Workstation definition for the newest ISO
 build/serial.log          last QEMU serial capture
 ```
 
@@ -178,16 +183,18 @@ a pull request:
    package/update policy.
 6. `make test` — real QEMU boot with the full marker set, including the ring-3,
    filesystem, sandbox, supervisor, recovery, package, runtime, update,
-   graphics, desktop, input, portal, and shell markers.
-7. `make shell-test` — drive `help`, `ls`, `cat`, `apps`, `security`, `mem`,
+   graphics, desktop, window manager, pointer, input, portal, and shell markers.
+7. `make iso-test` — boot the generated ISO through UEFI El Torito and require
+   the desktop markers.
+8. `make shell-test` — drive `help`, `ls`, `cat`, `apps`, `security`, `mem`,
    `services`, `portal`/`portal revoke`, `recovery`, `packages`, `runtime`,
    `updates`, `desktop`, `input`, and `uptime` over a serial socket.
-8. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
+9. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
    and failure marker.
-9. `make rollback-test` — discard the current image marker and require the
+10. `make rollback-test` — discard the current image marker and require the
    previous image with its user data, printing
    `AETHER_RECOVERY_ROLLBACK_OK`.
-10. `make negative-test` — a deliberately failing kernel must be rejected by
+11. `make negative-test` — a deliberately failing kernel must be rejected by
     the same harness used for the normal boot test.
 
 `make qualify` adds `make release-demo` and writes a report; run it before a

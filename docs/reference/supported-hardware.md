@@ -15,10 +15,16 @@ USB, no networking, no audio, no SMP, and no installer.
 | CPU | `-cpu max` on x86-64 with long mode, NX, supervisor write-protect, and legacy PIC/PIT |
 | RAM | 1024 MiB tested; the frame bitmap covers at most 16 GiB |
 | Firmware | OVMF 4 MiB images (`OVMF_CODE_4M.fd`, `OVMF_VARS_4M.fd`) |
-| Display | VGA/bochs-compatible adapter exposing a linear GOP framebuffer (`1280x800`) |
-| Input | Emulated PS/2 keyboard, IRQ1 |
+| Display | VGA/bochs-compatible adapter exposing a linear GOP framebuffer (`1280x800`, `1024x768`, and `800x600` tested) |
+| Input | Emulated PS/2 keyboard (IRQ1) and PS/2 mouse (IRQ12) |
 | Boot media | El Torito UEFI ISO or a 64 MiB FAT image with `/EFI/BOOT/BOOTX64.EFI` |
 | Serial | 16550-compatible COM1 at `0x3f8` |
+
+The same UEFI El Torito ISO is the intended VMware Workstation artifact. A
+generated `.vmx` and the required firmware settings are in
+[`vmware-workstation.md`](vmware-workstation.md). The ISO path is exercised by
+`make iso-test` under OVMF; a VMware Workstation smoke test is still required
+before VMware can be listed as a tested platform.
 
 The CI harness uses:
 
@@ -50,7 +56,7 @@ APIC, IOMMU, SMEP, SMAP, and AVX are not used or required.
 - UEFI Secure Boot in enforcing mode; the images are unsigned.
 - Multiple CPUs; the scheduler is single-core.
 - GPUs, accelerated graphics, and multi-monitor setups.
-- USB keyboards and pointing devices.
+- USB keyboards and pointing devices (PS/2 is required).
 - NVMe, AHCI, SCSI, or USB storage.
 - Networking, Wi-Fi, Bluetooth, and audio devices.
 - Removable media, suspend/resume, and power management.

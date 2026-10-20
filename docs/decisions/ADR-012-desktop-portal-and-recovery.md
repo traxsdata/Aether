@@ -1,6 +1,6 @@
 # ADR-012: Software desktop, file portal, and recovery prototype
 
-- Status: accepted
+- Status: accepted, superseded in part by ADR-015 for the window manager
 - Date: 2026-10-19
 
 ## Context
@@ -33,8 +33,9 @@ the project.
 
 - The desktop is testable on any OVMF configuration with a display and adds no
   external graphics dependency.
-- The compositor is immediate-mode and single-threaded; animation and
-  multi-window application rendering are deferred.
+- The original compositor was immediate-mode and single-threaded; ADR-015
+  replaces the fixed six-window set with a tested window manager, PS/2 mouse,
+  Spaces, Spotlight-style search, animation, and a double-buffered compositor.
 - The portal demonstrates least authority but still needs interactive consent
   and persistent grant storage.
 - The recovery prototype demonstrates selection and data preservation, not

@@ -18,11 +18,12 @@ grants, and the desktop is not a security authority.
 > 100 Hz preemptive scheduler, a ring-3 user/kernel boundary, validated
 > syscalls including user-mode IPC endpoints, a bounded filesystem with
 > per-process roots and generation-checked file capabilities, supervised
-> services, a console shell, a linear framebuffer compositor, keyboard input, a
-> file portal, a recovery prototype, signed package installation,
-> per-application runtime profiles, a compatibility database, Ed25519 update
-> verification with rollback protection, and a signed release bundle plus
-> qualification report.
+> services, a console shell, a double-buffered software compositor, a
+> Golden Gate-inspired window manager with Spaces and Spotlight-style search, a
+> PS/2 keyboard and mouse, a file portal, a recovery prototype, signed package
+> installation, per-application runtime profiles, a compatibility database,
+> Ed25519 update verification with rollback protection, and a signed release
+> bundle plus qualification report.
 >
 > Windows compatibility, networking, persistent storage, audio, GPU
 > acceleration, a general installer, Secure Boot, and an external security
@@ -71,9 +72,19 @@ grants, and the desktop is not a security authority.
   quarantine, plus an application lifecycle table.
 - A serial console shell with filesystem, service, application, recovery, and
   desktop commands.
-- A linear GOP framebuffer service, software compositor, six-window desktop,
-  PS/2 keyboard input, Security Center, file manager, settings, portal view,
-  and current/previous image recovery view.
+- A linear GOP framebuffer service, a double-buffered software compositor, a
+  keyboard-and-mouse desktop, and a clean-room Golden Gate-inspired window
+  manager: top menu bar with working menus, floating dock with magnification,
+  rounded windows with traffic-light controls, drag/resize/zoom/minimize, four
+  Spaces with an overview, a global Liquid Glass transparency setting,
+  high-contrast and reduced-motion modes, and Spotlight-style search. Painted
+  surfaces are composed into a 1920×1200 back buffer and presented atomically.
+- Original vector artwork, a procedural wallpaper, an original 5×7 typeface,
+  and a host-testable `aether-wm` state/layout crate with 35 model tests.
+- PS/2 keyboard and mouse input: IRQ1 and IRQ12, modifier capture, bounded
+  queues, packet validation, and a deterministic pointer self-test.
+- A UEFI El Torito ISO boot test (`make iso-test`) and a generated VMware
+  Workstation `.vmx` (`make vmware-vmx`) for the newest ISO.
 - A native application SDK (`sdk/`) for the initial syscall surface,
   including typed wrappers for the endpoint syscalls and error names.
 - A dependency-free `aether-crypto` crate with SHA-256, SHA-512, and Ed25519
@@ -105,16 +116,20 @@ grants, and the desktop is not a security authority.
   results, boot markers, and artifact digests.
 - Host unit tests for ABI layout and region validation, memory arithmetic, the
   frame allocator, page-table encoding, capability tables, IPC endpoints, the
-  filesystem, service supervision, application lifecycle, hashes, signatures,
-  package policy, update policy, runtime policy, and the defensive ELF parser.
+  filesystem, service supervision, application lifecycle, the window-manager
+  model and layout, hashes, signatures, package policy, update policy, runtime
+  policy, and the defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
   `AETHER_IPC_OK`, `AETHER_IPC_USER_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`,
   `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`,
   `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
-  `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`, `AETHER_SHELL_OK`, and
-  `AETHER_BOOT_OK`.
+  `AETHER_WM_OK`, `AETHER_POINTER_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
+  `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
+- `make iso-test`, which boots the generated ISO through UEFI El Torito and
+  requires the loader, kernel, graphics, desktop, window-manager, pointer,
+  shell, and boot markers.
 - `make shell-test`, which drives the console over a QEMU serial socket and
   checks filesystem, service, memory, portal grant/revocation, package,
   runtime, update, recovery, desktop, and input commands.
@@ -129,9 +144,10 @@ grants, and the desktop is not a security authority.
 - `make iso`, which builds a timestamped UEFI El Torito ISO under
   `build/ISOs/`.
 - A CI gate (`make ci`) that runs formatting, clippy, documentation and
-  licence checks, unit tests, the boot test, the shell test, the fault test,
-  the rollback test, the negative boot test, and the release/tamper
-  demonstration. A hosted GitHub Actions workflow is a separate follow-up.
+  licence checks, unit tests, the boot test, an ISO boot test, the shell test,
+  the fault test, the rollback test, the negative boot test, and the
+  release/tamper demonstration. A hosted GitHub Actions workflow is a separate
+  follow-up.
 
 A representative serial transcript from a successful `make test` boot (region
 counts, frame addresses, and ELF extents vary with firmware, build, and feature
@@ -151,7 +167,7 @@ boot: memory map: 39 regions, 1012 MiB allocatable
 boot: cpu: NX and write-protect enabled
 boot: paging: identity map to 1024 MiB, 9 page-table frames, CR3=0x0000000000100000
 boot: framebuffer mapped 1280x800 stride=1280 format=1
-graphics: framebuffer 1280x800 format=RedGreenBlueReserved
+graphics: framebuffer 1280x800 format=RedGreenBlueReserved backbuffer=on
 boot: graphics service ready
 boot: frame allocator: 1011 MiB free (258919 frames), bitmap capacity 16384 MiB
 AETHER_MM_OK
@@ -168,9 +184,12 @@ AETHER_RECOVERY_OK current=aether-0.1.0 previous=aether-0.0.9 selected=aether-0.
 portal: audit revoked root=/apps/org.aether.demo path=/portal/README.txt
 AETHER_REVOCATION_OK checks=4
 AETHER_GRAPHICS_OK mode=1280x800 format=linear
-AETHER_DESKTOP_OK windows=6 checksum=0xab05346d
-desktop: activated window=SECURITY CENTER
-AETHER_INPUT_OK keys=6 dropped=0 queue=32
+AETHER_DESKTOP_OK windows=3 spaces=4 checksum=0x31803549
+input: ps2 mouse ready
+AETHER_POINTER_OK dx=12 dy=-2 packets=1
+desktop: activated window=FILES
+AETHER_INPUT_OK keys=8 dropped=0 queue=32 mouse=ps2
+AETHER_WM_OK windows=3 spaces=4 dock=8 menus=6 search=1 glass=Tinted
 Aether console shell. Type 'help' for commands.
 AETHER_SHELL_OK
 aether>
@@ -243,12 +262,17 @@ make                        # build build/aether.img
 `/EFI/BOOT/BOOTX64.EFI`. The kernel ELF is embedded in the loader, so the two
 artifacts cannot drift apart. `make iso` builds a UEFI El Torito ISO containing
 a small EFI system image and writes it to `build/ISOs/aether-<UTC>.iso`.
+`make iso-test` boots that ISO through UEFI; `make vmware-vmx` writes a VMware
+Workstation definition for the newest ISO. See
+[`docs/reference/vmware-workstation.md`](docs/reference/vmware-workstation.md)
+for the UEFI, Secure Boot, PS/2, and video settings.
 
 ### Tests
 
 ```sh
 make unittest      # host unit tests (ABI, ELF, filesystem, services, IPC,
-                   # memory, crypto, packages, updates, compatibility)
+                   # memory, window manager, crypto, packages, updates,
+                   # compatibility)
 make compat-test   # compatibility database and classification rules
 make update-test   # package and update policy crates
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
@@ -260,6 +284,8 @@ make docs-check    # relative Markdown links
 make license-check # workspace and dependency licence metadata
 make lint          # rustfmt, host/kernel/user/loader clippy
 make iso           # timestamped UEFI El Torito ISO under build/ISOs
+make iso-test      # boot the ISO through UEFI and require the desktop markers
+make vmware-vmx    # write build/aether-vmware.vmx for the newest ISO
 make release       # signed release bundle (requires a signing key)
 make release-check # verify a release bundle against a trusted publisher key
 make release-demo  # same flow with the checked-in test key, verify, and tamper test
@@ -292,14 +318,17 @@ kernel/fs/           host-testable virtual block device and filesystem
 kernel/memory/       host-testable frame allocator and page-table encoding
 kernel/ipc/          host-testable capability tables and IPC endpoints
 kernel/services/     host-testable supervisor, lifecycle, and runtime profiles
+kernel/wm/           host-testable window-manager model, layout, and animation
 kernel/              Aether kernel (no_std, target x86_64-unknown-none)
   src/scheduler.rs   scheduler, ring-3 process, isolation and IPC tests
   src/syscall.rs     validated user syscall gate
   src/packaging.rs   package verification, installation, and self-test
   src/runtime.rs     runtime profile registration and isolation self-test
   src/updates.rs     signed update verification and policy self-test
-  src/desktop.rs     software compositor and desktop shell
-  src/input.rs       PS/2 keyboard service
+  src/desktop.rs     double-buffered Golden Gate-inspired desktop shell
+  src/graphics.rs    clipped, anti-aliased primitives and back-buffer present
+  src/icons.rs       original vector icon and wallpaper artwork
+  src/input.rs       PS/2 keyboard and mouse service
   src/portal.rs      scoped file portal grants
   src/recovery.rs    current/previous image selection
 sdk/                 native application SDK
@@ -393,8 +422,9 @@ keys, and there is no Secure Boot, measured boot, TPM counter, capability
 revocation UI, blocking IPC, SMP, networking, audio, or GPU acceleration. The
 serial console shell is a ring-0 diagnostic surface with full filesystem
 authority, not the ordinary-user terminal required by the specification; it
-does not provide an administrative elevation boundary. Do not store real data
-on it.
+does not provide an administrative elevation boundary. The window manager and
+PS/2 input code also run in the kernel, and the desktop has no screen reader,
+IME, GPU blur, or persistent preferences. Do not store real data on it.
 
 See [`docs/security/threat-model.md`](docs/security/threat-model.md) and
 [`docs/security/security-boundaries.md`](docs/security/security-boundaries.md)
@@ -419,11 +449,12 @@ Further reading: [memory and paging](docs/architecture/memory.md),
 [scheduler and address spaces](docs/architecture/scheduler.md),
 [capabilities](docs/architecture/capabilities.md), [IPC](docs/architecture/ipc.md),
 [filesystem and file handles](docs/architecture/filesystem.md),
-[compositor and desktop](docs/architecture/desktop.md),
+[compositor and window manager](docs/architecture/desktop.md),
 [package format](docs/specifications/package-format.md),
 [signed updates](docs/architecture/updates.md),
 [compatibility database](docs/specifications/compatibility.md),
 [supported hardware](docs/reference/supported-hardware.md),
+[VMware Workstation](docs/reference/vmware-workstation.md),
 [installer and recovery](docs/reference/installer-and-recovery.md),
 [security boundaries](docs/security/security-boundaries.md),
 [security response](docs/security/security-response.md),

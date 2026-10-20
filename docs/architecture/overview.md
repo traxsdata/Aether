@@ -8,7 +8,7 @@ Packages and signed updates               verified and installed by the kernel
         |
 Native application / SDK                  implemented (ring 3)
         |
-Desktop, file manager, Security Center   implemented (software compositor)
+Desktop, file manager, Security Center   implemented (window manager + compositor)
         |
 Services                                  implemented as supervised kernel modules
   storaged / fsd / appd / inputd / displayd / desktopd / portald / securityd
@@ -72,8 +72,8 @@ supervision rules are already declared.
 - `kernel/` contains the entry point, GDT/TSS/IDT, CPU NX/WP setup, serial,
   hand-off validation, physical memory, kernel and user page tables, timer,
   scheduler, syscall gate, filesystem service, package installation, runtime
-  profiles, update verification, portal, shell, graphics, compositor, input,
-  and recovery logic.
+  profiles, update verification, portal, shell, graphics, window manager,
+  compositor, PS/2 keyboard and mouse, and recovery logic.
 - `sdk/` and `user/` contain the native application SDK and the ring-3 init
   program.
 

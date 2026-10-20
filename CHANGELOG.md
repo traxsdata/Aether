@@ -7,6 +7,26 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- `aether-wm`, a `no_std`, `unsafe`-free, allocation-free window-manager crate:
+  geometry, responsive layout, window and workspace state, focus and z-order,
+  menus, dock targeting, Spotlight-style search, settings, hit testing, and
+  fixed-point animation, with 35 host tests across 640×480 through 1920×1080.
+- A clean-room Golden Gate-inspired desktop: top menu bar with working menus,
+  floating magnifying dock, rounded windows with traffic-light controls,
+  drag/resize/zoom/minimize, four Spaces, a workspace overview, a global
+  Clear/Balanced/Tinted Liquid Glass setting, high-contrast mode, reduced
+  motion, and an original procedural wallpaper and vector icon set.
+- A double-buffered software compositor: frames are composed into a bounded
+  1920×1200 back buffer and presented with one linear copy, removing tearing and
+  making animation pacing independent of framebuffer write latency.
+- A bounded PS/2 mouse driver on IRQ12 with controller initialization, 9-bit
+  packet decoding, pointer clamping, and a deterministic pointer self-test.
+- `AETHER_WM_OK` and `AETHER_POINTER_OK` boot markers, plus a live window-state
+  view in the `desktop` shell command.
+- `make iso-test`, which boots the generated El Torito ISO through UEFI and
+  requires the desktop markers, and `make vmware-vmx`, which writes a VMware
+  Workstation VM definition for the newest ISO.
+- `docs/reference/vmware-workstation.md` and ADR-015.
 - `aether-memory`: host-testable bitmap frame allocator and x86-64 page-table
   encoding, with tests for reservations, exhaustion, double free, and layout.
 - Kernel physical frame allocator over the validated boot memory map, with
@@ -142,6 +162,17 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Changed
 
+- The desktop now paints through a back buffer instead of writing the live
+  framebuffer mid-frame. The graphics service treats the common BGRX memory
+  layout for both linear GOP format codes; the previous channel swap produced
+  incorrect colours on QEMU/OVMF.
+- The boot test requires `AETHER_WM_OK` and `AETHER_POINTER_OK` in addition to
+  the existing graphics, desktop, and input markers.
+- The `desktop` shell command reports the active Space, window count, focus,
+  mode, pointer position, checksum, and display size, followed by per-window
+  state.
+- `make ci` and `make qualify` boot the distribution ISO through UEFI El Torito
+  in addition to the FAT-image boot test.
 - The loader keeps `BootInfo` and memory-map metadata below 4 GiB.
 - The identity map is built from mappable regions only; reserved holes and
   device MMIO stay unmapped, and a machine with more than 16 GiB still boots
