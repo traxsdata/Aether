@@ -140,43 +140,49 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     serial_line!("boot: cpu: NX and write-protect enabled");
 
-    let mut frames = memory::frame_allocator();
-    let _initial_stats = frames.initialize(regions, info.kernel_start, info.kernel_end);
+    memory::init_frame_allocator();
+    memory::with_frame_allocator(|frames| {
+        frames.initialize(regions, info.kernel_start, info.kernel_end)
+    });
 
     // The loader already reports these as loader-owned. Reserve them again so
     // a loader regression cannot hand the hand-off block to the allocator.
-    frames.reserve_range(boot_info as u64, core::mem::size_of::<BootInfo>() as u64);
-    let map_bytes = info
-        .memory_region_count
-        .saturating_mul(core::mem::size_of::<MemoryRegion>() as u64);
-    frames.reserve_range(info.memory_regions, map_bytes);
+    memory::with_frame_allocator(|frames| {
+        frames.reserve_range(boot_info as u64, core::mem::size_of::<BootInfo>() as u64);
+        let map_bytes = info
+            .memory_region_count
+            .saturating_mul(core::mem::size_of::<MemoryRegion>() as u64);
+        frames.reserve_range(info.memory_regions, map_bytes);
+    });
 
-    let framebuffer_mapped = match memory::paging::init(&mut frames, info, regions) {
-        Ok(paging) => {
-            serial_line!(
-                "boot: paging: identity map to {} MiB, {} page-table frames, CR3={:#018x}",
-                paging.mapped_bytes / (1024 * 1024),
-                paging.page_table_frames,
-                paging.pml4_address
-            );
-            if paging.framebuffer_mapped {
+    let framebuffer_mapped =
+        match memory::with_frame_allocator(|frames| memory::paging::init(frames, info, regions)) {
+            Some(Ok(paging)) => {
                 serial_line!(
-                    "boot: framebuffer mapped {}x{} stride={} format={}",
-                    info.framebuffer.width,
-                    info.framebuffer.height,
-                    info.framebuffer.stride,
-                    info.framebuffer.format
+                    "boot: paging: identity map to {} MiB, {} page-table frames, CR3={:#018x}",
+                    paging.mapped_bytes / (1024 * 1024),
+                    paging.page_table_frames,
+                    paging.pml4_address
                 );
-            } else {
-                serial_line!("boot: framebuffer unavailable; graphics disabled");
+                if paging.framebuffer_mapped {
+                    serial_line!(
+                        "boot: framebuffer mapped {}x{} stride={} format={}",
+                        info.framebuffer.width,
+                        info.framebuffer.height,
+                        info.framebuffer.stride,
+                        info.framebuffer.format
+                    );
+                } else {
+                    serial_line!("boot: framebuffer unavailable; graphics disabled");
+                }
+                paging.framebuffer_mapped
             }
-            paging.framebuffer_mapped
-        }
-        Err(error) => {
-            serial_line!("AETHER_BOOT_FAILED reason=paging: {error:?}");
-            arch::x86_64::halt();
-        }
-    };
+            Some(Err(error)) => {
+                serial_line!("AETHER_BOOT_FAILED reason=paging: {error:?}");
+                arch::x86_64::halt();
+            }
+            None => boot_failure("frame allocator unavailable"),
+        };
 
     match graphics::init(&info.framebuffer, framebuffer_mapped) {
         Ok(true) => serial_line!("boot: graphics service ready"),
@@ -189,12 +195,16 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     // Boot-services memory is safe to reuse only after CR3 points at our own
     // tables. This includes any firmware page tables left behind by UEFI.
-    for region in regions {
-        if region.kind() == Some(MemoryKind::BootServices) {
-            frames.free_range(region.start, region.len);
+    memory::with_frame_allocator(|frames| {
+        for region in regions {
+            if region.kind() == Some(MemoryKind::BootServices) {
+                frames.free_range(region.start, region.len);
+            }
         }
-    }
-    let frame_stats = frames.stats();
+    });
+    let Some(frame_stats) = memory::frame_stats() else {
+        boot_failure("frame allocator unavailable");
+    };
     serial_line!(
         "boot: frame allocator: {} MiB free ({} frames), bitmap capacity {} MiB",
         frame_stats.free_bytes() / (1024 * 1024),
@@ -212,7 +222,7 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
 
     serial_line!("boot: x86-64 execution environment ready");
-    scheduler::run(&mut frames)
+    scheduler::run()
 }
 
 fn boot_failure(reason: &str) -> ! {

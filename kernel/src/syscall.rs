@@ -312,17 +312,20 @@ fn linux_mmap(
         Err(aether_memory::vma::VmaError::Overlap) if no_replace => return LINUX_EEXIST,
         Err(error) => return vma_errno(error),
     };
-    // The arena pages may carry read-only permissions from a previous
-    // mapping. Make them writable while the kernel zero-fills and copies.
+    // Map fresh zeroed frames writable while the kernel copies file data.
     let writable = aether_memory::paging::PageFlags::PRESENT
         | aether_memory::paging::PageFlags::USER
         | aether_memory::paging::PageFlags::WRITABLE
         | aether_memory::paging::PageFlags::NO_EXECUTE;
-    if paging::protect_user_range(pml4, start, length, writable).is_err()
-        || !zero_user_range(pml4, start, length)
-    {
+    let Some(mapped) = crate::memory::with_frame_allocator(|allocator| {
+        paging::map_allocated_user_range(allocator, pml4, start, length, writable)
+    }) else {
         let _ = scheduler::linux_vma_remove(start, length);
-        return LINUX_EFAULT;
+        return LINUX_ENOMEM;
+    };
+    if mapped.is_err() {
+        let _ = scheduler::linux_vma_remove(start, length);
+        return LINUX_ENOMEM;
     }
     if !anonymous && let Err(error) = copy_file_range(pml4, fd, offset, start, length) {
         let _ = scheduler::linux_vma_remove(start, length);
@@ -359,22 +362,14 @@ fn linux_munmap(pml4: PhysFrame, address: u64, length: u64) -> i64 {
         Ok(false) | Err(_) => return 0,
         Ok(true) => {}
     }
-    // Keep the pre-mapped arena pages, but clear their contents and leave
-    // them non-writable so a later reuse cannot read the previous mapping.
-    let writable = aether_memory::paging::PageFlags::PRESENT
-        | aether_memory::paging::PageFlags::USER
-        | aether_memory::paging::PageFlags::WRITABLE
-        | aether_memory::paging::PageFlags::NO_EXECUTE;
-    if paging::protect_user_range(pml4, address, length, writable).is_err() {
-        return 0;
+    let Some(result) = crate::memory::with_frame_allocator(|allocator| {
+        paging::unmap_user_range(allocator, pml4, address, length)
+    }) else {
+        return LINUX_ENOMEM;
+    };
+    if result.is_err() {
+        return LINUX_EINVAL;
     }
-    if !zero_user_range(pml4, address, length) {
-        return LINUX_EFAULT;
-    }
-    let read_only = aether_memory::paging::PageFlags::PRESENT
-        | aether_memory::paging::PageFlags::USER
-        | aether_memory::paging::PageFlags::NO_EXECUTE;
-    let _ = paging::protect_user_range(pml4, address, length, read_only);
     0
 }
 
@@ -421,21 +416,6 @@ fn linux_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags
         flags = flags | aether_memory::paging::PageFlags::NO_EXECUTE;
     }
     Some(flags)
-}
-
-fn zero_user_range(pml4: PhysFrame, address: u64, length: u64) -> bool {
-    let mut offset = 0u64;
-    while offset < length {
-        let chunk = (length - offset).min(MAX_SYSCALL_IO as u64);
-        // SAFETY: The range is inside the Linux task's mapped arena and the
-        // syscall path has interrupts masked.
-        let Some(buffer) = (unsafe { user_bytes_mut(pml4, address + offset, chunk) }) else {
-            return false;
-        };
-        buffer.fill(0);
-        offset += chunk;
-    }
-    true
 }
 
 fn copy_file_range(

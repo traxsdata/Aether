@@ -324,7 +324,125 @@ pub fn map_user_page(
     )?;
     // SAFETY: `pt` was validated or allocated above and is identity-mapped.
     unsafe { (*table_ptr(pt)).set_entry(pt_index, entry) };
+    flush_page(virtual_address);
     Ok(())
+}
+
+/// Allocates and maps a user range eagerly.
+///
+/// Every page gets its own zeroed frame. On failure the pages mapped so far are
+/// unmapped and their frames are returned to the allocator.
+pub fn map_allocated_user_range(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    let end = validate_user_range(start, length)?;
+    let mut address = start;
+    while address < end {
+        let frame = allocator.allocate().ok_or(PagingError::OutOfMemory)?;
+        // SAFETY: The frame is exclusively owned and identity-mapped.
+        unsafe { ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize) };
+        if let Err(error) = map_user_page(pml4, allocator, address, frame, flags) {
+            let _ = allocator.deallocate(frame);
+            let _ = unmap_user_range(allocator, pml4, start, address - start);
+            return Err(error);
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(())
+}
+
+/// Unmaps a user range and returns its frames to the allocator.
+///
+/// Absent pages are skipped so a caller can release a partially populated
+/// range. The number of released frames is returned.
+pub fn unmap_user_range(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+) -> Result<usize, PagingError> {
+    let end = validate_user_range(start, length)?;
+    let mut released = 0usize;
+    let mut address = start;
+    while address < end {
+        if let Some(entry) = user_leaf_entry(pml4, address)
+            && entry.is_present()
+            && entry.flags().contains(PageFlags::USER)
+        {
+            if let Some(frame) = PhysFrame::from_address(entry.address()) {
+                let _ = allocator.deallocate(frame);
+            }
+            if clear_user_leaf(pml4, address) {
+                flush_page(address);
+                released += 1;
+            }
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(released)
+}
+
+fn validate_user_range(start: u64, length: u64) -> Result<u64, PagingError> {
+    if length == 0
+        || !start.is_multiple_of(PAGE_SIZE)
+        || !length.is_multiple_of(PAGE_SIZE)
+        || start < USER_BASE
+    {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    let end = start
+        .checked_add(length)
+        .ok_or(PagingError::UserImageOutsideWindow)?;
+    if end > USER_LIMIT {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    Ok(end)
+}
+
+fn clear_user_leaf(pml4: PhysFrame, address: u64) -> bool {
+    let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+    // SAFETY: The PML4 and child tables are task-owned and identity-mapped.
+    unsafe {
+        let pml4_entry = (*table_ptr(pml4)).entry(pml4_index);
+        if !pml4_entry.is_present() || pml4_entry.is_huge() {
+            return false;
+        }
+        let Some(pdpt) = PhysFrame::from_address(pml4_entry.address()) else {
+            return false;
+        };
+        let pdpt_entry = (*table_ptr(pdpt)).entry(pdpt_index);
+        if !pdpt_entry.is_present() || pdpt_entry.is_huge() {
+            return false;
+        }
+        let Some(pd) = PhysFrame::from_address(pdpt_entry.address()) else {
+            return false;
+        };
+        let pd_entry = (*table_ptr(pd)).entry(pd_index);
+        if !pd_entry.is_present() || pd_entry.is_huge() {
+            return false;
+        }
+        let Some(pt) = PhysFrame::from_address(pd_entry.address()) else {
+            return false;
+        };
+        (*table_ptr(pt)).set_entry(pt_index, PageTableEntry::EMPTY);
+    }
+    true
+}
+
+fn flush_page(address: u64) {
+    // SAFETY: INVLPG is valid at CPL0 for a mapped or unmapped user page. It
+    // only invalidates a TLB entry and has no memory side effects.
+    unsafe {
+        asm!(
+            "invlpg [{address}]",
+            address = in(reg) address,
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 fn ensure_user_table(
@@ -349,12 +467,10 @@ fn ensure_user_table(
     Ok(child)
 }
 
-/// Base of the pre-mapped Linux anonymous-memory arena.
+/// Base of the Linux virtual-memory window.
 ///
-/// The prototype has no runtime frame allocator, so the Linux task receives a
-/// fixed arena at boot. `mmap` carves from it; the pages are already mapped,
-/// nonzeroed by the allocator, and non-executable. This is a stepping stone to
-/// a real per-task VMA table and runtime frame allocation.
+/// The window is reserved address space, not pre-mapped memory. `mmap` and
+/// `brk` allocate frames on demand; `munmap` returns them to the allocator.
 pub const LINUX_ARENA_BASE: u64 = USER_BASE + 16 * 1024 * 1024;
 /// Number of pages in the Linux arena (32 MiB).
 pub const LINUX_ARENA_PAGES: u64 = 8192;
@@ -364,37 +480,6 @@ pub const LINUX_HEAP_PAGES: u64 = 256;
 pub const LINUX_MMAP_BASE: u64 = LINUX_ARENA_BASE + LINUX_HEAP_PAGES * PAGE_SIZE;
 /// Exclusive end of the Linux arena.
 pub const LINUX_ARENA_END: u64 = LINUX_ARENA_BASE + LINUX_ARENA_PAGES * PAGE_SIZE;
-
-/// Maps the Linux anonymous-memory arena into `pml4`.
-pub fn map_user_arena(
-    allocator: &mut FrameAllocator<'_>,
-    pml4: PhysFrame,
-    base: u64,
-    pages: u64,
-) -> Result<(), PagingError> {
-    if !base.is_multiple_of(PAGE_SIZE) || pages == 0 {
-        return Err(PagingError::UserImageOutsideWindow);
-    }
-    let end = base
-        .checked_add(pages * PAGE_SIZE)
-        .ok_or(PagingError::UserImageOutsideWindow)?;
-    if base < USER_BASE || end > USER_LIMIT || end > USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE {
-        return Err(PagingError::UserImageOutsideWindow);
-    }
-    for page in 0..pages {
-        let frame = allocate_table(allocator)?;
-        // SAFETY: The frame is exclusively owned and identity-mapped.
-        unsafe { ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize) };
-        map_user_page(
-            pml4,
-            allocator,
-            base + page * PAGE_SIZE,
-            frame,
-            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
-        )?;
-    }
-    Ok(())
-}
 
 /// Changes permissions on an existing user range.
 pub fn protect_user_range(
@@ -441,6 +526,7 @@ pub fn protect_user_range(
             PageTableEntry::new(address_phys, flags | PageFlags::USER | PageFlags::PRESENT)
                 .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
         unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
+        flush_page(address);
         address += PAGE_SIZE;
     }
     Ok(())

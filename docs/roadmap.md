@@ -141,10 +141,10 @@ user space. It is not a VM. The target and security gates are in
   network. Gate 1 is not an implementation gate: the missing ELF loader,
   process/thread, signal, Wayland, and Vulkan interfaces remain Gate 2 work.
 - [ ] Gate 2 — interface mapping and prototype: **partial**. A static Linux ELF
-  runs at CPL3 with a per-task VMA table, file-backed `mmap`, `munmap` reuse,
-  `mprotect`, growing `brk`, and W^X denial, but the dynamic loader, glibc,
-  user-space `linuxd`, runtime frame allocation, threads, and signals remain
-  missing.
+  runs at CPL3 with a per-task VMA table, runtime frame allocation and reclaim,
+  file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, and W^X
+  denial, but the dynamic loader, glibc, user-space `linuxd`, threads, and
+  signals remain missing.
 - [ ] Gate 3 — headless GridCraft: import
   `gridcraft-0.8.0-linux-x86_64.AppImage` and run its `gridcraft-cli`
   (`eval`, CSV import/export) with a read-only root and private overlay.
@@ -195,15 +195,18 @@ user space. It is not a VM. The target and security gates are in
 - [x] Static ELF loading into a private PML4, architectural `syscall` entry,
   validated user pointers, `write`/`exit`, and the `AETHER_LINUX_OK` boot gate.
   Linux tasks are denied the native `int 0x80` ABI.
-- [x] Anonymous memory and TLS: boot-reserved arena, `mmap`, `mprotect`, `brk`,
-  `arch_prctl` FS base with context switching, `clock_gettime`, `getrandom`,
-  `uname`, `getpid`/`gettid`, `set_tid_address`, and a single-task futex.
+- [x] Anonymous memory and TLS: reserved virtual window, `mmap`, `mprotect`,
+  `brk`, `arch_prctl` FS base with context switching, `clock_gettime`,
+  `getrandom`, `uname`, `getpid`/`gettid`, `set_tid_address`, and a single-task
+  futex.
 - [x] Read-only root file syscalls: validated absolute paths,
   `openat`/`read`/`pread64`/`close`/`lseek`/`access`, and a per-task descriptor
   table cleared on exit and fault.
-- [ ] Runtime frame allocator and per-task VMA table.
-- [ ] File-backed `mmap`, `munmap` reclaim, `mremap`, and page-fault handling;
-  keep `mprotect` within the existing arena and preserve W^X.
+- [x] Runtime frame allocator, per-task VMA table, file-backed `mmap`, `munmap`
+  reclaim, `mprotect`, and growing `brk`; pages are allocated on demand and
+  returned on unmap or task exit.
+- [ ] `mremap`, page-fault handling, and shared mappings; preserve W^X and
+  account every mapping against the domain limit.
 - [ ] Dynamic ELF loader: `PT_INTERP`, auxv, `ld.so`, relocations, library
   search, TLS, and `LD_LIBRARY_PATH` restrictions.
 - [ ] File syscalls: `stat`/`fstat`/`statx`, `readlink`, `getdents64`, `fcntl`,

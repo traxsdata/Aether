@@ -23,7 +23,7 @@ versioning scheme until the kernel ABI stabilises.
   arena, `mmap`/`mprotect`/`brk`, FS base through `arch_prctl` with context
   switching, single-task futex, `clock_gettime`, `getrandom`, and `uname`. The
   boot fixture now exercises allocation, TLS, write, and exit in one run.
-  Real threads and runtime frame allocation remain missing.
+  Real threads remain missing.
 - Linux VMA and mapping slice: `aether-memory::vma` is a host-tested,
   fixed-capacity range table that rejects overlaps and writable+executable
   mappings. Each Linux task tracks its own areas; `mmap` supports anonymous and
@@ -31,8 +31,10 @@ versioning scheme until the kernel ABI stabilises.
   `munmap` removes and clears ranges; `mprotect` updates permissions; `brk`
   grows a reserved heap window. The boot fixture maps `/etc/motd`, reuses a
   fixed address after `munmap`, grows the break, and proves W^X denial
-  (`AETHER_LINUX_VMA_OK`). Runtime frame allocation and PTE reclaim remain
-  missing.
+  (`AETHER_LINUX_VMA_OK`). The frame allocator is now reachable at runtime:
+  `mmap` and `brk` allocate zeroed frames on demand, and `munmap`, task exit,
+  and faults unmap the range, flush the TLB, and return the frames. `mremap`,
+  page-fault handling, and shared mappings remain missing.
 - Linux read-only root and file syscalls for the compatibility layer:
   validated absolute paths, a fixed embedded file set, `openat`, `read`,
   `pread64`, `close`, `lseek`, and `access`, with a per-task descriptor table

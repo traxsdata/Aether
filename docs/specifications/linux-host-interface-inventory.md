@@ -138,7 +138,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T07 | planned `make linux-fd-test` | Read/write/seek/dup/pipe/poll on read-only root and overlay; bad descriptor rejection | planned |
 | HI-T08 | planned `make linux-fs-test` | Stat/readdir/readlink/mkdir/unlink/rename within the domain root; outside paths denied | planned |
 | HI-T09 | planned `make linux-portal-test` | File chooser grant, exact-file open, revocation, denial, and no ambient home | planned |
-| HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixture maps a file, unmaps and reuses an address, grows `brk`, and denies W+X; runtime frame allocation and PTE reclaim still outstanding | partial |
+| HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixture maps a file, unmaps and reuses an address, grows `brk`, and denies W+X; frames are allocated at map time and reclaimed on unmap | partial |
 | HI-T11 | planned `make linux-sync-test` | Futex wait/wake, timeout, robust list, eventfd, and thread wake ordering | planned |
 | HI-T12 | planned `make linux-signal-test` | Handler delivery, alt stack, mask, fault-to-signal, and no delivery across domains | planned |
 | HI-T13 | planned `make linux-time-test` | Monotonic/realtime clocks, sleep, poll timeout, and timer cancellation | planned |

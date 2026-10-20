@@ -116,11 +116,12 @@ exact AppImage digest, and the runtime version.
   exits cleanly, and gates the boot with `AETHER_LINUX_ROOT_OK`,
   `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, and `AETHER_LINUX_OK`.
   A fixed per-task VMA table tracks ranges and rejects writable+executable
-  mappings. Memory still comes from a boot-reserved arena: there is no runtime
-  frame allocator and `munmap` does not return page-table frames yet. The root
-  is embedded and read-only; `/tmp` writes go to a bounded per-task overlay
-  that is cleared on exit/fault. This is not yet an AppImage import or a
-  persistent per-application store.
+  mappings. A runtime frame allocator backs `mmap` and `brk`; `munmap`, task
+  exit, and faults unmap the pages and return their frames. `mremap`, page-fault
+  handling, and shared mappings remain missing. The root is embedded and
+  read-only; `/tmp` writes go to a bounded per-task overlay that is cleared on
+  exit/fault. This is not yet an AppImage import or a persistent
+  per-application store.
 - Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
   a zstd SquashFS image and signs it as a `linux-rootfs` record. The populated
   glibc/Mesa/Wayland rootfs remains missing.

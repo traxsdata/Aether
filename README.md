@@ -128,8 +128,9 @@ grants, and the desktop is not a security authority.
   validated user pointer, and exits cleanly (`AETHER_LINUX_OK`). The layer now
   tracks a bounded per-task VMA table and supports file-backed `mmap`,
   `munmap` reuse, `mprotect`, and a growing `brk`, with write+execute mappings
-  rejected (`AETHER_LINUX_VMA_OK`). Dynamic libraries, threads, Wayland, and
-  Vulkan are still missing.
+  rejected (`AETHER_LINUX_VMA_OK`). Pages are allocated on demand and returned
+  on unmap or task exit. Dynamic libraries, threads, Wayland, and Vulkan are
+  still missing.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,

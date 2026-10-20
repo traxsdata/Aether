@@ -66,7 +66,7 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static `PT_LOAD` execution works; interpreter and shared libraries missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: one fixed boot process, no creation |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `arch_prctl` FS base and context-switched TLS pointer; no threads |
-| Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: boot-reserved arena with a per-task VMA table, file-backed `mmap`, `munmap` reuse, `mprotect`, and growing `brk`; no runtime frame allocator, PTE reclaim, or shared memory |
+| Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: runtime frame allocation, per-task VMA table, file-backed `mmap`, `munmap` reclaim, `mprotect`, and growing `brk`; no `mremap`, page-fault handling, or shared memory |
 | Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: single-task `FUTEX_WAIT`/`WAKE` no-ops; no wait queue |
 | Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Not implemented |
 | Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; no sleeps/timers |
@@ -165,9 +165,10 @@ file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 root, create/write/read through the `/tmp` overlay, `write`, and `exit`. It
 produces `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 `AETHER_LINUX_VMA_OK`, plus `AETHER_LINUX_OK`; a writable+executable mapping
-and a W+X `mprotect` are denied. The dynamic loader, threads, real futex
-waiting, signals, runtime frame allocation, PTE reclaim, and the user-space
-`linuxd` protocol remain missing.
+and a W+X `mprotect` are denied. Frames are allocated at `mmap`/`brk` time and
+returned on `munmap` and task exit. The dynamic loader, threads, real futex
+waiting, signals, `mremap`, page-fault handling, and the user-space `linuxd`
+protocol remain missing.
 
 ### Gate 3 — Headless GridCraft
 
@@ -204,8 +205,8 @@ revocation tests, and a compatibility record no better than the suite supports.
 
 1. No dynamic loader or glibc; the boot fixture is static.
 2. No user-space process creation, threads, real futex queues, or signals.
-3. No runtime frame allocator or PTE reclaim; `munmap` clears the VMA and
-   contents but keeps the pre-mapped arena pages.
+3. No `mremap`, page-fault handling, or shared mappings; every mapping is
+   eager and private.
 4. No populated and pinned glibc/Mesa/Wayland runtime rootfs.
 5. No `linuxd` service, Wayland service, or software renderer.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.

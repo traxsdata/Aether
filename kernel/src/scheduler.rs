@@ -240,8 +240,12 @@ impl From<CapError> for SchedulerError {
 ///
 /// This function never returns. It prints the Phase 2 and Phase 3 success
 /// markers and halts after every worker and the user process have completed.
-pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
-    if let Err(error) = init(allocator) {
+pub fn run() -> ! {
+    let Some(result) = crate::memory::with_frame_allocator(|allocator| init(allocator)) else {
+        serial_line!("AETHER_BOOT_FAILED reason=scheduler: frame allocator unavailable");
+        halt()
+    };
+    if let Err(error) = result {
         serial_line!("AETHER_BOOT_FAILED reason=scheduler: {error:?}");
         halt()
     }
@@ -472,12 +476,6 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // syscall entry, not yet an application domain with its own root.
     let linux_image = elf::parse(LINUX_ELF).map_err(|_| SchedulerError::LinuxImage)?;
     let linux_pml4 = paging::create_user_address_space(allocator, &linux_image, LINUX_ELF)?;
-    paging::map_user_arena(
-        allocator,
-        linux_pml4,
-        paging::LINUX_ARENA_BASE,
-        paging::LINUX_ARENA_PAGES,
-    )?;
     let linux_kernel_top = stack_top(&kernel_stacks[LINUX_TASK]);
     let linux_saved_rsp = prepare_user_stack(linux_kernel_top, linux_image.entry());
 
@@ -1247,7 +1245,8 @@ pub fn linux_file_read_at(fd: u64, offset: u64, out: &mut [u8]) -> Result<usize,
 /// leaves the break unchanged, matching Linux `brk` failure semantics.
 pub fn linux_brk(request: u64) -> u64 {
     let tasks = unsafe { &mut *TASKS.0.get() };
-    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &mut tasks[current];
     if task.abi != TaskAbi::Linux {
         return 0;
     }
@@ -1259,16 +1258,50 @@ pub fn linux_brk(request: u64) -> u64 {
     if request < base || request > limit {
         return task.brk;
     }
-    if request > task.brk {
-        let mut page = task.brk & !(PAGE_SIZE - 1);
-        while page < request {
-            // SAFETY: The heap window is inside the current Linux address
-            // space, pre-mapped writable at boot, and the syscall path has
-            // interrupts masked.
-            unsafe {
-                core::ptr::write_bytes(page as *mut u8, 0, PAGE_SIZE as usize);
+    let old = task.brk;
+    if request == old {
+        return old;
+    }
+    let Some(pml4) = PhysFrame::from_address(task.pml4) else {
+        return old;
+    };
+    let flags = aether_memory::paging::PageFlags::PRESENT
+        | aether_memory::paging::PageFlags::USER
+        | aether_memory::paging::PageFlags::WRITABLE
+        | aether_memory::paging::PageFlags::NO_EXECUTE;
+    let (start, length, map) = if request > old {
+        let start = old
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+            .unwrap_or(old);
+        let end = request
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+            .unwrap_or(request);
+        (start, end.saturating_sub(start), true)
+    } else {
+        let start = request
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+            .unwrap_or(request);
+        let end = old
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+            .unwrap_or(old);
+        (start, end.saturating_sub(start), false)
+    };
+    if length != 0 {
+        let Some(result) = crate::memory::with_frame_allocator(|allocator| {
+            if map {
+                paging::map_allocated_user_range(allocator, pml4, start, length, flags)
+            } else {
+                paging::unmap_user_range(allocator, pml4, start, length).map(|_| ())
             }
-            page += PAGE_SIZE;
+        }) else {
+            return old;
+        };
+        if result.is_err() {
+            return old;
         }
     }
     task.brk = request;
@@ -1290,15 +1323,50 @@ pub fn linux_fs_base() -> u64 {
     tasks[CURRENT.load(Ordering::Relaxed)].fs_base
 }
 
+/// Releases the Linux task's anonymous mappings and heap pages.
+fn release_linux_mappings(index: usize) {
+    let (pml4, vmas, brk) = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        let task = &tasks[index];
+        (task.pml4, task.vmas, task.brk)
+    };
+    let Some(pml4) = PhysFrame::from_address(pml4) else {
+        return;
+    };
+    let _ = crate::memory::with_frame_allocator(|allocator| {
+        for vma in vmas.iter() {
+            let _ = paging::unmap_user_range(allocator, pml4, vma.start, vma.end - vma.start);
+        }
+        let start = paging::LINUX_ARENA_BASE;
+        if brk > start {
+            let start = start
+                .checked_add(PAGE_SIZE - 1)
+                .map(|value| value & !(PAGE_SIZE - 1))
+                .unwrap_or(start);
+            let end = brk
+                .checked_add(PAGE_SIZE - 1)
+                .map(|value| value & !(PAGE_SIZE - 1))
+                .unwrap_or(brk);
+            if end > start {
+                let _ = paging::unmap_user_range(allocator, pml4, start, end - start);
+            }
+        }
+    });
+}
+
 /// Terminates the Linux ABI boot task.
 pub fn linux_exit(status: u64) -> *mut InterruptFrame {
-    let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
-    if current != LINUX_TASK || tasks[current].kind != TaskKind::Linux {
-        serial_line!("AETHER_BOOT_FAILED reason=linux exit from wrong task");
-        halt()
+    {
+        let tasks = unsafe { &*TASKS.0.get() };
+        if current != LINUX_TASK || tasks[current].kind != TaskKind::Linux {
+            serial_line!("AETHER_BOOT_FAILED reason=linux exit from wrong task");
+            halt()
+        }
     }
 
+    release_linux_mappings(current);
+    let tasks = unsafe { &mut *TASKS.0.get() };
     tasks[current].state = TaskState::Done;
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     tasks[current].linux_overlay = [None; OVERLAY_FILES];
@@ -1317,14 +1385,20 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
 /// Handles a fault raised by a ring-3 task. The task is retired and the kernel
 /// continues with the next runnable task.
 pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptFrame {
-    let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
-    let linux = tasks[current].kind == TaskKind::Linux;
-    if tasks[current].kind != TaskKind::User && !linux {
+    let (linux, kind) = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        (tasks[current].kind == TaskKind::Linux, tasks[current].kind)
+    };
+    if kind != TaskKind::User && !linux {
         serial_line!("AETHER_BOOT_FAILED reason=user-fault on non-user task");
         halt()
     }
 
+    if linux {
+        release_linux_mappings(current);
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
     tasks[current].state = TaskState::Faulted;
     tasks[current].saved_rsp = frame as u64;
     // Release the task's open-file slots on the fault path for the same
