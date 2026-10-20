@@ -42,6 +42,9 @@ versioning scheme until the kernel ABI stabilises.
   truncated, read, and written through the Linux file descriptors, with
   `AETHER_LINUX_OVERLAY_OK` boot evidence. The overlay is cleared on exit/fault;
   persistence, settings/logs paths, and user-visible erasure remain follow-up.
+- Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
+  a zstd SquashFS image and signs it as a `linux-rootfs` import record. The
+  populated glibc/Mesa/Wayland rootfs and in-OS consumption remain follow-up.
 - Signed AppImage import records: identity, version, runtime, digest, and
   publisher are covered by Ed25519; verification checks the publisher key and
   name against a trust store before comparing the image digest.

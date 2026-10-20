@@ -46,7 +46,7 @@ pub enum ManifestError {
     Digest,
     /// The publisher key is not 32 bytes of hexadecimal.
     PublisherKey,
-    /// The manifest runtime is not `linux-appimage`.
+    /// The manifest runtime is not `linux-appimage` or `linux-rootfs`.
     Runtime,
     /// The publisher is not in the trust store.
     UntrustedPublisher,
@@ -140,7 +140,7 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
     if !aether_packaging::manifest::is_valid_identity(id) {
         return Err(ManifestError::Identity);
     }
-    if runtime != "linux-appimage" {
+    if runtime != "linux-appimage" && runtime != "linux-rootfs" {
         return Err(ManifestError::Runtime);
     }
     if version.is_empty() || version.len() > 32 || publisher.is_empty() || publisher.len() > 64 {

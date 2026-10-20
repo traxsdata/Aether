@@ -114,9 +114,10 @@ grants, and the desktop is not a security authority.
   SquashFS bounds, compression, and table-offset validation, with a host
   diagnostic. It does not execute or mount the image; see
   [`docs/specifications/linux-compatibility.md`](docs/specifications/linux-compatibility.md).
-- Signed AppImage import records (`appimage-manifest`) binding identity,
-  version, runtime, digest, and publisher with Ed25519, verified against a trust
-  store.
+- Signed AppImage and runtime-rootfs import records (`appimage-manifest`)
+  binding identity, version, runtime, digest, and publisher with Ed25519,
+  verified against a trust store. `tools/build-runtime-rootfs.sh` packages and
+  signs a zstd SquashFS runtime rootfs.
 - A bounded `no_std` SquashFS 4 reader (`aether-squashfs`) with zstd, gzip,
   lz4, lzo, xz, and lzma decompression, symlink/hardlink policy, and a host extractor. It
   extracts the real GridCraft AppImage tree; in-OS mounting and persistent

@@ -115,6 +115,9 @@ exact AppImage digest, and the runtime version.
   allocator or VMA table yet. The root is embedded and read-only; `/tmp` writes
   go to a bounded per-task overlay that is cleared on exit/fault. This is not
   yet an AppImage import or a persistent per-application store.
+- Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
+  a zstd SquashFS image and signs it as a `linux-rootfs` record. The populated
+  glibc/Mesa/Wayland rootfs and in-OS consumption remain missing.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
   fragments, directories, symlinks, hardlink marking, xattr dropping,

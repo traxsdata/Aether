@@ -175,7 +175,7 @@ fn digest_pins_one_exact_artifact() {
     assert_eq!(parse_verified(&other, digest), Err(Error::DigestMismatch));
 }
 
-fn signed_record(image: &[u8], mutate: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+fn signed_record(image: &[u8], runtime: &str, mutate: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let digest = Digest::of(image);
     let mut hex = [0u8; 64];
     let length = aether_crypto::to_hex(digest.as_bytes(), &mut hex).unwrap();
@@ -185,7 +185,7 @@ fn signed_record(image: &[u8], mutate: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let length = aether_crypto::to_hex(&key, &mut key_hex).unwrap();
     let key_text = core::str::from_utf8(&key_hex[..length]).unwrap();
     let body = format!(
-        "id=org.artcraft.gridcraft\nversion=0.8.0\nsha256={digest_text}\nruntime=linux-appimage\npublisher={TEST_PUBLISHER}\npublisher-key={key_text}\n"
+        "id=org.artcraft.gridcraft\nversion=0.8.0\nsha256={digest_text}\nruntime={runtime}\npublisher={TEST_PUBLISHER}\npublisher-key={key_text}\n"
     );
     let signature = aether_crypto::ed25519::sign(&test_seed(), body.as_bytes());
     let mut record = Vec::new();
@@ -207,7 +207,7 @@ fn signed_import_record_verifies_the_image() {
         key,
     }];
     let trust = TrustStore::new(&publishers);
-    let record = signed_record(&image, |_| {});
+    let record = signed_record(&image, "linux-appimage", |_| {});
     let parsed = manifest::verify_image(&record, &trust, &image).expect("verified");
     assert_eq!(parsed.id, "org.artcraft.gridcraft");
     assert_eq!(parsed.version, "0.8.0");
@@ -223,6 +223,20 @@ fn signed_import_record_verifies_the_image() {
 }
 
 #[test]
+fn signed_runtime_rootfs_record_verifies() {
+    let image = image();
+    let key = aether_crypto::ed25519::public_key_from_seed(&test_seed());
+    let publishers = [TrustedPublisher {
+        name: TEST_PUBLISHER,
+        key,
+    }];
+    let trust = TrustStore::new(&publishers);
+    let record = signed_record(&image, "linux-rootfs", |_| {});
+    let parsed = manifest::verify_image(&record, &trust, &image).expect("verified");
+    assert_eq!(parsed.runtime, "linux-rootfs");
+}
+
+#[test]
 fn signed_import_record_rejects_bad_signature_and_untrusted_key() {
     let image = image();
     let key = aether_crypto::ed25519::public_key_from_seed(&test_seed());
@@ -231,7 +245,7 @@ fn signed_import_record_rejects_bad_signature_and_untrusted_key() {
         key,
     }];
     let trust = TrustStore::new(&publishers);
-    let record = signed_record(&image, |record| {
+    let record = signed_record(&image, "linux-appimage", |record| {
         let length = record.len();
         record[length - 1] ^= 0xff;
     });
@@ -240,7 +254,7 @@ fn signed_import_record_rejects_bad_signature_and_untrusted_key() {
         ManifestError::Signature
     );
 
-    let record = signed_record(&image, |_| {});
+    let record = signed_record(&image, "linux-appimage", |_| {});
     let empty_entries: [TrustedPublisher; 0] = [];
     let empty = TrustStore::new(&empty_entries);
     assert_eq!(

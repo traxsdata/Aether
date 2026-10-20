@@ -144,11 +144,18 @@ user space. It is not a VM. The target and security gates are in
   storage, user-visible erasure, and quotas that survive a crash.
 - [x] Signed import records with pinned digest, identity, version, runtime, and
   publisher; Ed25519 verification against a trust store, plus
-  `appimage-manifest sign|verify`.
-- [ ] Sign and verify the runtime rootfs package itself; record the runtime
-  version in the compatibility database.
-- [ ] Package the Linux runtime rootfs (glibc, `ld.so`, Mesa/lavapipe, Wayland
-  client libraries) as a signed Aether runtime package.
+  `appimage-manifest sign|verify`. The same record type covers
+  `runtime=linux-rootfs`.
+- [x] Runtime rootfs host packaging: `tools/build-runtime-rootfs.sh` builds a
+  zstd SquashFS rootfs and signs it as a `linux-rootfs` import record.
+- [ ] Populate and pin the actual glibc/Mesa/Wayland runtime rootfs, record its
+  version in the compatibility database, and consume the signed image in the
+  Linux layer.
+- [x] Runtime rootfs packaging and signing path (zstd SquashFS + signed
+  `linux-rootfs` record).
+- [ ] Populate the signed runtime rootfs with pinned glibc, `ld.so`,
+  Mesa/lavapipe, and Wayland client libraries, and install it as an Aether
+  runtime package.
 
 #### Linux ABI
 
