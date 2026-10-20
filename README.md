@@ -128,11 +128,10 @@ grants, and the desktop is not a security authority.
   failing kernel.
 - `make iso`, which builds a timestamped UEFI El Torito ISO under
   `build/ISOs/`.
-- A CI gate (`make ci` locally, and `.github/workflows/ci.yml` on GitHub
-  Actions for pull requests and pushes) that runs formatting, clippy,
-  documentation and licence checks, unit tests, the boot test, the shell test,
-  the fault test, the rollback test, the negative boot test, and the
-  release/tamper demonstration.
+- A CI gate (`make ci`) that runs formatting, clippy, documentation and
+  licence checks, unit tests, the boot test, the shell test, the fault test,
+  the rollback test, the negative boot test, and the release/tamper
+  demonstration. A hosted GitHub Actions workflow is a separate follow-up.
 
 A representative serial transcript from a successful `make test` boot (region
 counts, frame addresses, and ELF extents vary with firmware, build, and feature

@@ -135,7 +135,6 @@ versioning scheme until the kernel ABI stabilises.
   of denied events.
 - `tools/release-tamper-test.sh`: a poisoned `SHA256SUMS` entry and a flipped
   image byte must both fail `release verify`.
-- A GitHub Actions workflow running the full `tools/ci.sh` gate.
 - `fs::seed_application_roots`, which provisions the installed application's
   private directory after package installation; the `memory` shell command;
   and quota, portal, IPC-denial, exit, and fault counters in the `security`

@@ -27,9 +27,9 @@ git push -u origin feat/<short-topic>
 `make ci` runs formatting, clippy, documentation link checks, licence checks,
 host unit tests, the QEMU boot test, the shell test, the fault-path test, the
 rollback-path test, a negative boot test that proves the harness rejects a
-deliberately failing kernel, and the signed-release tamper demonstration. The
-same commands run in GitHub Actions (`.github/workflows/ci.yml`) for every
-pull request and push; run the gate locally before opening the pull request so
+deliberately failing kernel, and the signed-release tamper demonstration. A
+hosted GitHub Actions workflow that runs the same commands is a follow-up;
+until it is published, run `make ci` locally before opening the pull request so
 failures are not spread across reviewers.
 
 Open a pull request against `main`. Keep the branch rebased on current `main`;
