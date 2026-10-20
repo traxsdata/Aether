@@ -25,8 +25,8 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso test shell-test fault-test negative-test \
-	unittest lint docs-check license-check compat-test update-test release release-demo \
+.PHONY: all kernel user loader image iso test shell-test fault-test rollback-test \
+	negative-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	release-check qualify ci clean
 
 all: image
@@ -67,6 +67,12 @@ iso: image
 fault-test:
 	$(MAKE) KERNEL_FEATURES=fault-selftest image
 	AETHER_EXPECT_FAULT=1 $(PYTHON) tools/test-boot.py
+
+# Boot with the rollback self-test feature and require its own marker on top
+# of the standard set, so the lost-image branch is a boot gate.
+rollback-test:
+	$(MAKE) KERNEL_FEATURES=recovery-rollback-selftest image
+	AETHER_EXTRA_MARKERS=AETHER_RECOVERY_ROLLBACK_OK $(PYTHON) tools/test-boot.py
 
 # Build a kernel that deliberately fails after paging and require the normal
 # harness to detect the failure marker. This checks the CI gate itself, not
@@ -124,6 +130,11 @@ release-demo:
 	AETHER_TRUST="Aether Test Publisher:$$(cat tests/fixtures/keys/test.pub)" \
 	AETHER_RELEASE_DIR=$(abspath $(BUILD)/release-demo) \
 		sh tools/release-check.sh
+	# The tamper test proves the verify step above detects a mutated
+	# bundle; it must fail with the named cross-check or image digest error.
+	AETHER_TRUST="Aether Test Publisher:$$(cat tests/fixtures/keys/test.pub)" \
+	AETHER_BUNDLE=$(abspath $(BUILD)/release-demo) \
+		sh tools/release-tamper-test.sh
 
 release-check:
 	sh tools/release-check.sh
