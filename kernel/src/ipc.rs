@@ -14,6 +14,7 @@ pub const MAX_ENDPOINTS: usize = 4;
 struct Slot {
     alive: bool,
     generation: u16,
+    owner: u16,
     endpoint: Endpoint,
 }
 
@@ -21,6 +22,7 @@ impl Slot {
     const EMPTY: Self = Self {
         alive: false,
         generation: 0,
+        owner: 0,
         endpoint: Endpoint::new(),
     };
 }
@@ -37,7 +39,10 @@ fn slots() -> *mut Slot {
 }
 
 /// Creates a new endpoint object and returns its generation-checked id.
-pub fn create_endpoint() -> Option<ObjectId> {
+///
+/// `owner` is the kernel task id that may destroy the object. The owner is
+/// never taken from a user-supplied field.
+pub fn create_endpoint(owner: u16) -> Option<ObjectId> {
     let _guard = InterruptGuard::enter();
     for index in 0..MAX_ENDPOINTS {
         // SAFETY: `index` is inside the endpoint array and interrupts are
@@ -46,6 +51,7 @@ pub fn create_endpoint() -> Option<ObjectId> {
         if !slot.alive {
             slot.alive = true;
             slot.generation = slot.generation.wrapping_add(1).max(1);
+            slot.owner = owner;
             slot.endpoint = Endpoint::new();
             return Some(ObjectId {
                 index: index as u16,
@@ -54,6 +60,81 @@ pub fn create_endpoint() -> Option<ObjectId> {
         }
     }
     None
+}
+
+/// Destroys an endpoint object owned by `owner`.
+///
+/// Destruction advances the slot generation and clears the queue. Every
+/// outstanding capability for the object, in every task, is now stale:
+/// validating it reports [`IpcError::EndpointGone`]. The capability table of
+/// the caller is cleaned by [`close`]; other tasks keep stale slots until they
+/// attempt to use them or exit.
+pub fn destroy(id: ObjectId, owner: u16) -> Result<(), IpcError> {
+    let _guard = InterruptGuard::enter();
+    let index = usize::from(id.index);
+    if index >= MAX_ENDPOINTS {
+        return Err(IpcError::EndpointGone);
+    }
+    // SAFETY: Bounds checked and interrupts are masked.
+    let slot = unsafe { &mut *slots().add(index) };
+    if !slot.alive || slot.generation != id.generation {
+        return Err(IpcError::EndpointGone);
+    }
+    if slot.owner != owner {
+        return Err(IpcError::Capability(
+            aether_ipc::CapError::InsufficientRights,
+        ));
+    }
+    slot.alive = false;
+    slot.owner = 0;
+    slot.generation = slot.generation.wrapping_add(1).max(1);
+    slot.endpoint = Endpoint::new();
+    Ok(())
+}
+
+/// Closes one endpoint capability, revoking every alias in the caller's table.
+///
+/// A capability for an endpoint owned by another task is only dropped from the
+/// caller's table; the object itself remains until its owner destroys it or
+/// exits. Removing every alias in one operation is the documented revocation
+/// rule: a closed endpoint never leaves a usable alias behind in that table.
+pub fn close(caps: &mut CapTable, endpoint_cap: CapHandle, task: u16) -> Result<(), IpcError> {
+    let (id, _) = caps.endpoint(endpoint_cap, Rights::empty())?;
+    caps.revoke_object(id);
+    let owned = {
+        let _guard = InterruptGuard::enter();
+        let index = usize::from(id.index);
+        if index >= MAX_ENDPOINTS {
+            return Err(IpcError::EndpointGone);
+        }
+        // SAFETY: Bounds checked and interrupts are masked.
+        let slot = unsafe { &*slots().add(index) };
+        slot.alive && slot.generation == id.generation && slot.owner == task
+    };
+    if owned {
+        destroy(id, task)?;
+    }
+    Ok(())
+}
+
+/// Releases every endpoint capability a retiring task holds.
+///
+/// Endpoints owned by the task are destroyed, which invalidates any aliases
+/// other tasks received through capability transfer. The function returns
+/// `(revoked handles, destroyed objects)`.
+pub fn close_task_endpoints(caps: &mut CapTable, task: u16) -> (usize, usize) {
+    let (handles, count) = caps.handles_of_type(aether_ipc::ObjectType::Endpoint);
+    let mut revoked = 0usize;
+    let mut destroyed = 0usize;
+    for handle in handles.iter().take(count) {
+        if let Ok((id, _)) = caps.endpoint(*handle, Rights::empty()) {
+            revoked += caps.revoke_object(id);
+            if destroy(id, task).is_ok() {
+                destroyed += 1;
+            }
+        }
+    }
+    (revoked, destroyed)
 }
 
 fn endpoint_mut(id: ObjectId) -> Result<&'static mut Endpoint, IpcError> {

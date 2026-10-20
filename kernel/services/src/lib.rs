@@ -8,6 +8,7 @@
 
 #![no_std]
 
+pub mod portal_store;
 pub mod runtime;
 
 /// Maximum registered services.

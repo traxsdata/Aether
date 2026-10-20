@@ -627,6 +627,108 @@ impl<D: BlockDevice> AetherFs<D> {
         self.free_inode(inode_number)
     }
 
+    /// Renames or moves a file or directory below `scope`.
+    ///
+    /// The operation changes only the parent directory entry; the inode and
+    /// open handles remain valid. Existing destinations are refused, and a
+    /// directory cannot be moved inside itself.
+    pub fn rename(&mut self, scope: &str, from: &str, to: &str) -> Result<(), FsError> {
+        let source = resolve(scope, from)?;
+        let destination = resolve(scope, to)?;
+        if source.as_str() == destination.as_str() {
+            return Ok(());
+        }
+        let (source_parent_path, source_name) = source.parent_and_name()?;
+        let (destination_parent_path, destination_name) = destination.parent_and_name()?;
+        let source_parent = self.lookup(&source_parent_path)?;
+        let (inode_number, is_dir) = self
+            .dir_find(source_parent, source_name.as_bytes())?
+            .ok_or(FsError::NotFound)?;
+        if is_dir {
+            let prefix = source.as_str();
+            let target = destination.as_str();
+            if target
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+            {
+                return Err(FsError::Access);
+            }
+        }
+        let destination_parent = self.lookup(&destination_parent_path)?;
+        if !self.read_inode(destination_parent)?.is_dir() {
+            return Err(FsError::NotDirectory);
+        }
+        if self
+            .dir_find(destination_parent, destination_name.as_bytes())?
+            .is_some()
+        {
+            return Err(FsError::Exists);
+        }
+        self.dir_add(
+            destination_parent,
+            destination_name.as_bytes(),
+            inode_number,
+            is_dir,
+        )?;
+        if let Err(error) = self.dir_remove(source_parent, source_name.as_bytes()) {
+            // Roll back the destination entry rather than leaving two names for
+            // one inode after a partial rename.
+            let _ = self.dir_remove(destination_parent, destination_name.as_bytes());
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Copies a file below `scope`, preserving no metadata beyond its bytes.
+    ///
+    /// The destination must not exist. Directories and open destination files
+    /// are refused by the underlying open/write path.
+    pub fn copy_file(&mut self, scope: &str, from: &str, to: &str) -> Result<(), FsError> {
+        let mut buffer = [0u8; MAX_FILE_BYTES];
+        let length = self.read_file(scope, from, &mut buffer)?;
+        let resolved = resolve(scope, to)?;
+        if self.lookup(&resolved).is_ok() {
+            return Err(FsError::Exists);
+        }
+        self.write_file(scope, to, &buffer[..length])
+    }
+
+    /// Deletes an empty directory below `scope`.
+    pub fn rmdir(&mut self, scope: &str, path: &str) -> Result<(), FsError> {
+        let resolved = resolve(scope, path)?;
+        let (parent_path, name) = resolved.parent_and_name()?;
+        let parent = self.lookup(&parent_path)?;
+        let (inode_number, is_dir) = self
+            .dir_find(parent, name.as_bytes())?
+            .ok_or(FsError::NotFound)?;
+        if !is_dir {
+            return Err(FsError::NotDirectory);
+        }
+        let inode = self.read_inode(inode_number)?;
+        if inode.size != 0 {
+            return Err(FsError::Exists);
+        }
+        self.dir_remove(parent, name.as_bytes())?;
+        let mut inode = self.read_inode(inode_number)?;
+        self.free_inode_blocks(&mut inode)?;
+        self.free_inode(inode_number)
+    }
+
+    /// Deletes a file or empty directory below `scope`.
+    pub fn remove(&mut self, scope: &str, path: &str) -> Result<(), FsError> {
+        let resolved = resolve(scope, path)?;
+        let (parent_path, name) = resolved.parent_and_name()?;
+        let parent = self.lookup(&parent_path)?;
+        let (_, is_dir) = self
+            .dir_find(parent, name.as_bytes())?
+            .ok_or(FsError::NotFound)?;
+        if is_dir {
+            self.rmdir(scope, path)
+        } else {
+            self.unlink(scope, path)
+        }
+    }
+
     fn slot(&self, id: OpenId) -> Result<&OpenSlot, FsError> {
         let slot = self
             .open

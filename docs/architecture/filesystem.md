@@ -59,21 +59,36 @@ because capability tables are per task. Deletion is refused while any handle
 for the inode is open; after the last close the name can be removed and the
 blocks released.
 
+## Mutations and scope
+
+`rename`, `copy_file`, `remove`, and `rmdir` operate below a trusted service
+scope, using the same `resolve` rules as reads. `rename` changes only directory
+entries, refuses an existing destination, and refuses to move a directory
+inside itself. `copy_file` is bounded by `MAX_FILE_BYTES` and refuses an
+existing destination. `remove` deletes a file or empty directory, and deletion
+of an open file is refused until the last handle closes. The Files application
+exposes duplicate (`F3`), rename (`F2`, with a bounded prompt), and delete
+(`Delete`) on the same service methods; the console exposes `cp`, `mv`, and
+`rm`. `AETHER_FILES_MUTATE_OK` proves the copy/rename/delete path at boot.
+
 ## Portal grants
 
 An application cannot name a file outside its root. It may call `portal_open`,
 which succeeds only when a grant matches the exact process root, exact path,
 and requested right. Grants are single-file and revocable; a grant for a file
-never implies access to its parent or siblings. The boot prototype seeds one
-read grant for `demo` on `/home/welcome.txt`, displays it in the Security
-Center, and checks a temporary grant/revocation pair during boot
-(`AETHER_REVOCATION_OK`).
+never implies access to its parent or siblings. A `portal_request` queues an
+interactive consent request but grants nothing; the desktop Portal window (or
+`portal approve N` / `portal deny N` on the console) decides it. Approval
+installs an exact-file record and rewrites `/system/portal/grants` through the
+host-tested `aether_services::portal_store` codec. Corrupt, duplicate, or
+traversal-bearing records are rejected rather than partially loaded.
 
-`portal` lists the grant table and `portal revoke <index>` marks a grant
-revoked. Revocation applies to future portal opens. A file capability that was
-already issued remains open until the owner closes it, because revoking a grant
-cannot undo bytes the application has already read. There is no persistent
-grant store or interactive consent UI yet.
+`portal` lists grants and pending requests; `portal revoke <index>` marks a
+grant revoked. Revocation applies to future portal opens. A file capability
+that was already issued remains open until the owner closes it, because
+revoking a grant cannot undo bytes the application has already read. The
+record store survives service restarts within the volume, but the only block
+device is currently a RAM disk, so records do not yet survive a power cycle.
 
 ## Persistence and recovery
 

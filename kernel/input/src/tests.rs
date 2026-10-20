@@ -60,6 +60,7 @@ fn pause_and_print_screen_do_not_leave_fake_modifiers_held() {
     }
     assert_eq!(keyboard.modifiers(), Modifiers::default());
     assert_eq!(keyboard.push(0x44).unwrap().key, Key::Function(10));
+    assert_eq!(keyboard.push(0x53).unwrap().key, Key::Delete);
 }
 
 #[test]

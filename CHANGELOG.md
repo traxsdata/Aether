@@ -7,6 +7,48 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Per-object capability revocation: `revoke_object` invalidates every alias in
+  a table and advances slot generations. Endpoints now have explicit close and
+  destroy semantics, task exit/fault releases endpoint aliases and destroys
+  owned objects, and stale handles fail with `EBADF` instead of naming a
+  recycled endpoint.
+- Blocking endpoint receive with tick timeouts (`endpoint_receive_timeout`),
+  scheduler yield/wakeup while the queue is empty, and `ETIMEDOUT`. The boot
+  gate now requires real block, timeout, close, and stale-handle evidence from
+  ring 3.
+- Interactive file-portal consent: `portal_request` queues a request that
+  grants nothing; the Portal window has approve/deny controls and the console
+  has `portal approve`/`portal deny`. Approvals install exact-file records
+  through a host-tested codec and rewrite `/system/portal/grants`
+  (`AETHER_PORTAL_CONSENT_OK`).
+- Scoped filesystem mutations: `rename`, `copy_file`, `remove`, and `rmdir`,
+  with existing-destination refusal, directory-into-itself protection, and
+  open-file deletion checks. Files exposes duplicate (`F3`), rename (`F2`),
+  and delete (`Delete`); the console exposes `cp` and `mv`
+  (`AETHER_FILES_MUTATE_OK`).
+- Host tests for revocation aliases/generation reuse, grant-record parsing and
+  corruption rejection, filesystem copy/rename/delete, browser mutations, and
+  the Delete scancode.
+
+### Changed
+
+- Portal grant records are fixed-size validated records rather than
+  `&'static str` boot seeds. Corrupt or duplicate stores fail closed instead of
+  loading partially.
+- The system ABI documents calls 18–20 and `ETIMEDOUT`; the SDK exposes
+  `endpoint_close`, `endpoint_receive_timeout`, `syscall5`, and
+  `portal_request`.
+
+### Known limitations
+
+- Grant records live on the RAM disk, so they survive service restarts but not
+  a power cycle until a durable block device exists.
+- Blocking IPC uses timer-driven scheduler wakeups rather than a per-endpoint
+  wait list; cancellation and SMP wake IPIs remain follow-up work.
+- Files tabs/split panes, safe import/export, ring-3 compositor surfaces,
+  higher-half mapping, durable storage, networking, audio, and accelerated
+  graphics remain unimplemented.
+
 - `aether-wm`, a `no_std`, `unsafe`-free, allocation-free window-manager crate:
   geometry, responsive layout, window and workspace state, focus and z-order,
   menus, dock targeting, Spotlight-style search, settings, hit testing, and

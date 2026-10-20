@@ -275,6 +275,67 @@ fn failed_replacement_preserves_the_previous_file() {
 }
 
 #[test]
+fn rename_copy_move_and_delete_preserve_contents_and_reject_unsafe_targets() {
+    let mut fs = filesystem();
+    fs.write_file("/", "/apps/demo/private/notes.txt", b"hello")
+        .expect("write");
+    fs.copy_file("/apps/demo", "private/notes.txt", "private/copy.txt")
+        .expect("copy");
+    let mut buffer = [0u8; 32];
+    let length = fs
+        .read_file("/apps/demo", "private/copy.txt", &mut buffer)
+        .expect("read copy");
+    assert_eq!(&buffer[..length], b"hello");
+    assert_eq!(
+        fs.copy_file("/apps/demo", "private/notes.txt", "private/copy.txt"),
+        Err(FsError::Exists)
+    );
+
+    fs.rename("/apps/demo", "private/copy.txt", "private/moved.txt")
+        .expect("rename");
+    assert_eq!(
+        fs.stat("/apps/demo", "private/copy.txt"),
+        Err(FsError::NotFound)
+    );
+    assert_eq!(fs.stat("/apps/demo", "private/moved.txt"), Ok(5));
+
+    fs.mkdir("/apps/demo", "private/nested").expect("nested");
+    fs.rename("/apps/demo", "private/nested", "nested")
+        .expect("move dir");
+    assert!(fs.list("/apps/demo", "nested", &mut buffer).is_ok());
+
+    // A directory cannot be moved inside itself, and a non-empty directory
+    // cannot be removed. Both operations leave the tree intact.
+    assert_eq!(
+        fs.rename("/apps/demo", "nested", "nested/inside"),
+        Err(FsError::Access)
+    );
+    fs.write_file("/apps/demo", "nested/file", b"x")
+        .expect("nested file");
+    assert!(fs.remove("/apps/demo", "nested").is_err());
+    fs.remove("/apps/demo", "nested/file").expect("remove file");
+    fs.remove("/apps/demo", "nested").expect("remove empty dir");
+    assert_eq!(fs.stat("/apps/demo", "nested"), Err(FsError::NotFound));
+}
+
+#[test]
+fn open_files_block_deletion_until_closed() {
+    let mut fs = filesystem();
+    fs.write_file("/", "/apps/demo/private/notes.txt", b"abc")
+        .expect("write");
+    let id = fs
+        .open("/apps/demo", "private/notes.txt", Access::READ)
+        .expect("open");
+    assert_eq!(
+        fs.remove("/apps/demo", "private/notes.txt"),
+        Err(FsError::Access)
+    );
+    fs.close(id).expect("close");
+    fs.remove("/apps/demo", "private/notes.txt")
+        .expect("delete");
+}
+
+#[test]
 fn corrupt_inode_metadata_is_rejected_without_panicking() {
     let mut fs = filesystem();
 

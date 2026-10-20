@@ -217,17 +217,23 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
             // negative paths: sends, receives, and at least one denial of
             // every kind. A user task that exited by claiming success without
             // producing the evidence fails the boot.
-            if crate::syscall::ipc_sends() < 7
-                || crate::syscall::ipc_receives() < 7
-                || crate::syscall::ipc_denials() < 7
+            if crate::syscall::ipc_sends() < 8
+                || crate::syscall::ipc_receives() < 8
+                || crate::syscall::ipc_denials() < 8
+                || crate::syscall::ipc_blocks() < 1
+                || crate::syscall::ipc_timeouts() < 1
+                || crate::syscall::ipc_closes() < 1
                 || crate::fs::quota_denials() < 1
             {
                 serial_line!(
                     "AETHER_BOOT_FAILED reason=user-ipc sends={} receives={} denials={} \
-                     quota={}",
+                     blocks={} timeouts={} closes={} quota={}",
                     crate::syscall::ipc_sends(),
                     crate::syscall::ipc_receives(),
                     crate::syscall::ipc_denials(),
+                    crate::syscall::ipc_blocks(),
+                    crate::syscall::ipc_timeouts(),
+                    crate::syscall::ipc_closes(),
                     crate::fs::quota_denials()
                 );
                 halt()
@@ -250,10 +256,13 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
                 crate::fs::quota_denials()
             );
             serial_line!(
-                "AETHER_IPC_USER_OK sends={} receives={} denials={}",
+                "AETHER_IPC_USER_OK sends={} receives={} denials={} blocks={} timeouts={} closes={}",
                 crate::syscall::ipc_sends(),
                 crate::syscall::ipc_receives(),
-                crate::syscall::ipc_denials()
+                crate::syscall::ipc_denials(),
+                crate::syscall::ipc_blocks(),
+                crate::syscall::ipc_timeouts(),
+                crate::syscall::ipc_closes()
             );
             serial_line!(
                 "AETHER_BOOT_OK stage=kernel version={}",
@@ -315,8 +324,8 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
 
     // Create two endpoints and grant table-local capabilities. Worker 3 gets a
     // receive-only capability on endpoint A to exercise insufficient rights.
-    let endpoint_a = crate::ipc::create_endpoint().ok_or(SchedulerError::NoEndpoint)?;
-    let endpoint_b = crate::ipc::create_endpoint().ok_or(SchedulerError::NoEndpoint)?;
+    let endpoint_a = crate::ipc::create_endpoint(1).ok_or(SchedulerError::NoEndpoint)?;
+    let endpoint_b = crate::ipc::create_endpoint(2).ok_or(SchedulerError::NoEndpoint)?;
     let rights = ObjectType::Endpoint;
 
     tasks[1].handles.ep_a_recv = Some(tasks[1].caps.grant(endpoint_a, rights, Rights::RECEIVE)?);
@@ -777,6 +786,11 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
     // Release the task's open-file slots so a completed task cannot shrink
     // the filesystem's bounded open-file pool for everyone else.
     let closed = crate::fs::close_task_files(&mut tasks[current].caps);
+    // Destroy endpoints owned by the task and drop every endpoint alias it
+    // holds. Other tasks that received a transferred alias now see a stale
+    // object generation instead of a usable reference to a recycled slot.
+    let (endpoint_handles, endpoints) =
+        crate::ipc::close_task_endpoints(&mut tasks[current].caps, current as u16);
     let result = if status == 0 {
         UserTestResult::Passed
     } else {
@@ -784,7 +798,11 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
     };
     USER_RESULT.store(result as usize, Ordering::Release);
     crate::apps::exited(current, status as i64);
-    serial_line!("user: exit pid={} status={status} closed={closed}", current);
+    serial_line!(
+        "user: exit pid={} status={status} closed={closed} endpoints={endpoints} \
+         endpoint_handles={endpoint_handles}",
+        current
+    );
 
     schedule_next(current)
 }
@@ -805,6 +823,8 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     // reason as on exit. Only faulting-task state is touched here; unrelated
     // tasks and the kernel continue.
     let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
+    let (_endpoint_handles, _endpoints) =
+        crate::ipc::close_task_endpoints(&mut tasks[current].caps, current as u16);
     USER_FAULTS.fetch_add(1, Ordering::Release);
     USER_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
     crate::apps::faulted(current, vector);

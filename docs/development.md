@@ -51,7 +51,7 @@ make clean
 `AETHER_RECOVERY_OK`, `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`,
 `AETHER_RUNTIME_OK`, `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`,
 `AETHER_DESKTOP_OK`, `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`, `AETHER_INPUT_OK`,
-`AETHER_PORTAL_OK`, and `AETHER_BOOT_OK`, and fails on any failure marker.
+`AETHER_FILES_MUTATE_OK`, `AETHER_PORTAL_OK`, `AETHER_PORTAL_CONSENT_OK`, and `AETHER_BOOT_OK`, and fails on any failure marker.
 `make iso-test` boots the same distribution ISO through OVMF on VGA and QEMU's
 VMware SVGA adapter and requires the full boot/security marker set. It then
 drives real PS/2 arrows, dragging/resizing, Files folders/previews, denied vault
@@ -201,7 +201,7 @@ a pull request:
    SVGA emulation; exercise real window/Files input and compare screenshots.
    `make vmware-vmx` then generates the Workstation definition for that ISO.
 8. `make shell-test` — drive `help`, `ls`, `cat`, `apps`, `security`, `mem`,
-   `services`, `portal`/`portal revoke`, `recovery`, `packages`, `runtime`,
+   `services`, `portal`/`portal approve`/`portal deny`/`portal revoke`, `cp`, `mv`, `recovery`, `packages`, `runtime`,
    `updates`, `desktop`, `input`, and `uptime` over a serial socket.
 9. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
    and failure marker.

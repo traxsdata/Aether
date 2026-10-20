@@ -99,6 +99,8 @@ fn execute_line() {
         "cat" => cat(argument),
         "write" => write(argument),
         "rm" => remove(argument),
+        "cp" => copy_move(argument, false),
+        "mv" => copy_move(argument, true),
         "apps" => apps::print_table(),
         "services" => supervisor::print_security(),
         "portal" => portal_command(argument),
@@ -139,10 +141,14 @@ fn print_help() {
     serial_line!("  cat <path>       print a file");
     serial_line!("  write <path> <text>  replace a file");
     serial_line!("  rm <path>        delete a file");
+    serial_line!("  cp <src> <dst>   copy a file");
+    serial_line!("  mv <src> <dst>   move or rename a file");
     serial_line!("  apps             application lifecycle table");
     serial_line!("  services         service profiles and states");
     serial_line!("  portal           list file portal grants");
     serial_line!("  portal revoke N  revoke grant N (open handles stay valid)");
+    serial_line!("  portal approve N approve pending consent request N");
+    serial_line!("  portal deny N    deny pending consent request N");
     serial_line!("  security         permission and sandbox status");
     serial_line!("  input            keyboard and pointer queue status");
     serial_line!("  mem              memory pressure (MiB free/total)");
@@ -202,6 +208,25 @@ fn remove(path: &str) {
     }
 }
 
+fn copy_move(arguments: &str, move_file: bool) {
+    let Some((from, to)) = arguments.split_once(' ') else {
+        serial_line!("usage: cp|mv <source> <destination>");
+        return;
+    };
+    let result = if move_file {
+        fs::rename_path(from, to)
+    } else {
+        fs::copy_path(from, to)
+    };
+    match result {
+        Ok(()) => serial_line!(
+            "{}: ok from={from} to={to}",
+            if move_file { "mv" } else { "cp" }
+        ),
+        Err(error) => serial_line!("{}: {error:?}", if move_file { "mv" } else { "cp" }),
+    }
+}
+
 fn portal_command(arguments: &str) {
     let mut parts = arguments.split_whitespace();
     match parts.next() {
@@ -220,7 +245,30 @@ fn portal_command(arguments: &str) {
                 Err(_) => serial_line!("portal: no active grant {index}"),
             }
         }
-        Some(_) => serial_line!("portal: usage: portal [revoke <index>]"),
+        Some("approve") | Some("deny") => {
+            let approve = arguments.starts_with("approve");
+            let Some(index) = parts.next().and_then(|value| value.parse::<usize>().ok()) else {
+                serial_line!("portal: usage: portal [approve|deny <index>]");
+                return;
+            };
+            if parts.next().is_some() {
+                serial_line!("portal: usage: portal [approve|deny <index>]");
+                return;
+            }
+            let result = if approve {
+                crate::portal::approve(index)
+            } else {
+                crate::portal::deny(index)
+            };
+            match result {
+                Ok(()) => serial_line!(
+                    "portal: {} request {index}",
+                    if approve { "approved" } else { "denied" }
+                ),
+                Err(_) => serial_line!("portal: no pending request {index}"),
+            }
+        }
+        Some(_) => serial_line!("portal: usage: portal [approve|deny|revoke <index>]"),
     }
 }
 
