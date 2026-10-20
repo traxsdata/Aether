@@ -264,6 +264,7 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
             timer::enable_interrupts();
             loop {
                 crate::shell::poll();
+                crate::input::poll();
                 timer::halt_until_interrupt();
             }
         }

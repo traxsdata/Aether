@@ -21,8 +21,9 @@
 5. **Hand-off construction.** It allocates pages below 4 GiB for `BootInfo`, a
    64 KiB firmware-map buffer, and a fixed region array
    (`MAX_MEMORY_REGIONS = 256`). UEFI descriptors are converted to
-   `MemoryRegion` entries, adjacent regions of the same kind are merged, and
-   the result is checked for ordering and overlap.
+   `MemoryRegion` entries, sorted by physical start (some firmware returns an
+   unsorted map), and adjacent regions of the same kind are merged. The result
+   is checked for ordering and overlap.
 6. **Boot-services exit.** `ExitBootServices` is retried a bounded number of
    times if firmware reports a stale map key. The final successful call is
    followed immediately by the kernel jump.

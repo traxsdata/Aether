@@ -25,7 +25,9 @@ cp "$BUILD/BOOTX64.EFI" "$STAGE/EFI/BOOT/BOOTX64.EFI"
 # El Torito UEFI entries boot a FAT image, not a bare PE application. Build a
 # small EFI system image and point the catalog at it.
 truncate -s 8M "$EFI_IMAGE"
-mformat -i "$EFI_IMAGE" -F -v AETHER ::
+# Let mformat choose FAT12/16 for this small image. Forcing FAT32 (-F) creates
+# fewer clusters than the FAT32 minimum, which UEFI firmware refuses to mount.
+mformat -i "$EFI_IMAGE" -v AETHER ::
 mmd -i "$EFI_IMAGE" ::/EFI ::/EFI/BOOT
 mcopy -i "$EFI_IMAGE" "$BUILD/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
 cp "$EFI_IMAGE" "$STAGE/efiboot.img"
