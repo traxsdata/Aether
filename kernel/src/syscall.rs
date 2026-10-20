@@ -151,8 +151,20 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
 
     let result = match number {
         1 => linux_write(pml4, first, second, third),
+        9 => linux_mmap(first, second, third, unsafe { (*frame).r10 }, unsafe {
+            (*frame).r8
+        }),
+        10 => linux_mprotect(pml4, first, second, third),
+        11 => 0,
+        12 => scheduler::linux_brk(first) as i64,
         39 | 186 => scheduler::current_task() as i64,
-        218 => scheduler::current_task() as i64,
+        63 => linux_uname(pml4, first),
+        102 | 104 | 107 | 108 => 1000,
+        158 => linux_arch_prctl(pml4, first, second),
+        202 => linux_futex(first, second),
+        218 | 273 | 334 => 0,
+        228 => linux_clock_gettime(pml4, second),
+        318 => linux_getrandom(pml4, first, second),
         60 | 231 => return scheduler::linux_exit(first),
         _ => LINUX_ENOSYS,
     };
@@ -166,6 +178,120 @@ const LINUX_EBADF: i64 = -9;
 const LINUX_EFAULT: i64 = -14;
 const LINUX_EINVAL: i64 = -22;
 const LINUX_ENOSYS: i64 = -38;
+
+const LINUX_ENOMEM: i64 = -12;
+const LINUX_EPERM: i64 = -1;
+
+fn linux_mmap(address: u64, length: u64, protections: u64, flags: u64, fd: u64) -> i64 {
+    // Anonymous private memory only. File mappings need a filesystem service
+    // and a VMA table, which the layer does not have yet.
+    if flags & 0x20 == 0 || flags & 0x10 != 0 || fd != u64::MAX {
+        return LINUX_ENOSYS;
+    }
+    if protections & 4 != 0 {
+        // The boot arena is non-executable; do not silently weaken W^X.
+        return LINUX_EPERM;
+    }
+    let _ = address;
+    scheduler::linux_mmap(length).map_or(LINUX_ENOMEM, |address| address as i64)
+}
+
+fn linux_mprotect(pml4: PhysFrame, address: u64, length: u64, protections: u64) -> i64 {
+    let executable = protections & 4 != 0;
+    let writable = protections & 2 != 0;
+    if executable && writable {
+        return LINUX_EINVAL;
+    }
+    let mut flags =
+        aether_memory::paging::PageFlags::PRESENT | aether_memory::paging::PageFlags::USER;
+    if writable {
+        flags = flags | aether_memory::paging::PageFlags::WRITABLE;
+    }
+    if !executable {
+        flags = flags | aether_memory::paging::PageFlags::NO_EXECUTE;
+    }
+    match paging::protect_user_range(pml4, address, length, flags) {
+        Ok(()) => 0,
+        Err(_) => LINUX_EINVAL,
+    }
+}
+
+fn linux_arch_prctl(pml4: PhysFrame, code: u64, value: u64) -> i64 {
+    match code {
+        0x1002 => {
+            scheduler::set_linux_fs_base(value);
+            0
+        }
+        0x1003 => write_user_u64(pml4, value).map_or(LINUX_EFAULT, |()| 0),
+        _ => LINUX_ENOSYS,
+    }
+}
+
+fn linux_futex(_address: u64, operation: u64) -> i64 {
+    match operation & 0x7f {
+        // WAIT and WAKE are single-task no-ops for now. A real implementation
+        // needs a wait queue and a timeout service.
+        0 | 1 => 0,
+        _ => LINUX_ENOSYS,
+    }
+}
+
+fn linux_clock_gettime(pml4: PhysFrame, pointer: u64) -> i64 {
+    let ticks = scheduler::ticks();
+    let seconds = (ticks / 100) as i64;
+    let nanos = ((ticks % 100) * 10_000_000) as i64;
+    let mut buffer = [0u8; 16];
+    buffer[..8].copy_from_slice(&seconds.to_le_bytes());
+    buffer[8..].copy_from_slice(&nanos.to_le_bytes());
+    write_user_bytes(pml4, pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
+}
+
+fn linux_getrandom(pml4: PhysFrame, pointer: u64, length: u64) -> i64 {
+    if length as usize > MAX_SYSCALL_IO {
+        return LINUX_EINVAL;
+    }
+    let mut state = scheduler::ticks()
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(scheduler::current_task() as u64)
+        | 1;
+    let mut buffer = [0u8; MAX_SYSCALL_IO];
+    for byte in buffer.iter_mut().take(length as usize) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state as u8;
+    }
+    write_user_bytes(pml4, pointer, &buffer[..length as usize])
+        .map_or(LINUX_EFAULT, |()| length as i64)
+}
+
+fn linux_uname(pml4: PhysFrame, pointer: u64) -> i64 {
+    let mut buffer = [0u8; 390];
+    let fields = [
+        (0, b"Linux".as_slice()),
+        (65, b"aether".as_slice()),
+        (130, b"0.1.0-aether".as_slice()),
+        (195, b"#1".as_slice()),
+        (260, b"x86_64".as_slice()),
+        (325, b"".as_slice()),
+    ];
+    for (offset, value) in fields {
+        buffer[offset..offset + value.len()].copy_from_slice(value);
+    }
+    write_user_bytes(pml4, pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
+}
+
+fn write_user_bytes(pml4: PhysFrame, pointer: u64, bytes: &[u8]) -> Option<()> {
+    // SAFETY: `user_bytes_mut` validates the range and the syscall path runs
+    // with interrupts masked, so no concurrent user access can alias it.
+    let destination = unsafe { user_bytes_mut(pml4, pointer, bytes.len() as u64)? };
+    destination.copy_from_slice(bytes);
+    Some(())
+}
+
+fn write_user_u64(pml4: PhysFrame, pointer: u64) -> Option<()> {
+    write_user_bytes(pml4, pointer, &scheduler::linux_fs_base().to_le_bytes())
+}
 
 fn linux_write(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {
     if descriptor != 1 && descriptor != 2 {

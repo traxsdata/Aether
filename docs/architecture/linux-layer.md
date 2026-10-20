@@ -99,11 +99,16 @@ exact AppImage digest, and the runtime version.
   host tests and the `appimage-inspect` diagnostic.
 - Linux ELF loading into a private PML4: implemented for the boot test fixture.
 - Linux `syscall` entry: implemented, with `write`, `exit`/`exit_group`,
-  `getpid`, `gettid`, and `set_tid_address`. The static fixture
-  `tests/fixtures/linux/hello.S` runs at CPL3, writes through a validated user
-  pointer, exits cleanly, and gates the boot with `AETHER_LINUX_OK`.
+  `mmap`, `mprotect`, `brk`, `arch_prctl` FS base, single-task futex,
+  `clock_gettime`, `getrandom`, `uname`, `getpid`/`gettid`, and
+  `set_tid_address`. The static fixture `tests/fixtures/linux/hello.S` runs at
+  CPL3, allocates and writes anonymous memory, sets FS-based TLS, writes through
+  a validated user pointer, exits cleanly, and gates the boot with
+  `AETHER_LINUX_OK`. Anonymous memory comes from a boot-reserved arena; there
+  is no runtime frame allocator or VMA table yet.
 - SquashFS/zstd extraction: not implemented.
-- Dynamic glibc libraries, threads, futex, signals, mmap: not implemented.
+- Dynamic glibc libraries, threads, real futex waiting, signals, file-backed
+  mappings, and memory reclaim: not implemented.
 - Wayland bridge and software renderer: not implemented.
 
 The compatibility database records GridCraft 0.8.0 as `unsupported` until these

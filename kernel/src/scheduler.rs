@@ -91,6 +91,10 @@ struct Task {
     root: &'static str,
     caps: CapTable,
     handles: TaskHandles,
+    mmap_next: u64,
+    mmap_end: u64,
+    brk: u64,
+    fs_base: u64,
 }
 
 impl Task {
@@ -110,6 +114,10 @@ impl Task {
                 ep_b_send: None,
                 ep_b_recv: None,
             },
+            mmap_next: 0,
+            mmap_end: 0,
+            brk: 0,
+            fs_base: 0,
         }
     }
 }
@@ -417,6 +425,12 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // syscall entry, not yet an application domain with its own root.
     let linux_image = elf::parse(LINUX_ELF).map_err(|_| SchedulerError::LinuxImage)?;
     let linux_pml4 = paging::create_user_address_space(allocator, &linux_image, LINUX_ELF)?;
+    paging::map_user_arena(
+        allocator,
+        linux_pml4,
+        paging::LINUX_ARENA_BASE,
+        paging::LINUX_ARENA_PAGES,
+    )?;
     let linux_kernel_top = stack_top(&kernel_stacks[LINUX_TASK]);
     let linux_saved_rsp = prepare_user_stack(linux_kernel_top, linux_image.entry());
 
@@ -428,6 +442,9 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     linux.pml4 = linux_pml4.start_address();
     linux.kernel_stack_top = linux_kernel_top;
     linux.root = crate::fs::DEMO_ROOT;
+    linux.mmap_next = paging::LINUX_ARENA_BASE;
+    linux.mmap_end = paging::LINUX_ARENA_BASE + paging::LINUX_ARENA_PAGES * PAGE_SIZE;
+    linux.brk = paging::LINUX_ARENA_BASE;
     tasks[LINUX_TASK] = linux;
 
     // SAFETY: Interrupts are disabled during boot and the idle task is current.
@@ -861,6 +878,53 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
     schedule_next(current)
 }
 
+/// Reserves anonymous memory from the Linux task's pre-mapped arena.
+pub fn linux_mmap(length: u64) -> Result<u64, ()> {
+    if length == 0 {
+        return Err(());
+    }
+    let length = length.checked_add(PAGE_SIZE - 1).ok_or(())? & !(PAGE_SIZE - 1);
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &mut tasks[current];
+    if task.abi != TaskAbi::Linux {
+        return Err(());
+    }
+    let end = task.mmap_next.checked_add(length).ok_or(())?;
+    if end > task.mmap_end {
+        return Err(());
+    }
+    let address = task.mmap_next;
+    task.mmap_next = end;
+    Ok(address)
+}
+
+/// Returns the Linux program break. Growth is not implemented yet; the
+/// pre-mapped arena is reached through `mmap`, so a failed `brk` is recoverable.
+pub fn linux_brk(request: u64) -> u64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if request != 0 && request <= task.brk {
+        task.brk = request;
+    }
+    task.brk
+}
+
+/// Sets the current Linux task's FS base (TLS pointer).
+pub fn set_linux_fs_base(base: u64) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].fs_base = base;
+    // SAFETY: The syscall path runs at CPL0 with interrupts masked.
+    unsafe { crate::arch::x86_64::cpu::set_fs_base(base) };
+}
+
+/// Returns the current Linux task's FS base.
+#[must_use]
+pub fn linux_fs_base() -> u64 {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].fs_base
+}
+
 /// Terminates the Linux ABI boot task.
 pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -930,6 +994,8 @@ fn schedule_next(current: usize) -> *mut InterruptFrame {
     // SAFETY: Interrupts are masked in the exception/syscall path, and the
     // stack belongs to the selected task.
     unsafe { gdt::set_kernel_stack(tasks[next].kernel_stack_top) };
+    // SAFETY: The scheduler path runs at CPL0 with interrupts masked.
+    unsafe { crate::arch::x86_64::cpu::set_fs_base(tasks[next].fs_base) };
 
     if let Some(pml4) = PhysFrame::from_address(tasks[next].pml4) {
         paging::activate(pml4);
@@ -986,6 +1052,8 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // SAFETY: Interrupts are masked in the timer path and the stack belongs to
     // the task selected above.
     unsafe { gdt::set_kernel_stack(tasks[next].kernel_stack_top) };
+    // SAFETY: The timer path runs at CPL0 with interrupts masked.
+    unsafe { crate::arch::x86_64::cpu::set_fs_base(tasks[next].fs_base) };
 
     if next != current
         && let Some(pml4) = PhysFrame::from_address(tasks[next].pml4)

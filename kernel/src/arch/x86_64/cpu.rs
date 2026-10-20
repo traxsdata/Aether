@@ -22,6 +22,7 @@ const EFER_SCE: u64 = 1 << 0;
 const IA32_STAR: u32 = 0xc000_0081;
 const IA32_LSTAR: u32 = 0xc000_0082;
 const IA32_FMASK: u32 = 0xc000_0084;
+const IA32_FS_BASE: u32 = 0xc000_0100;
 
 const CR0_WP: u64 = 1 << 16;
 
@@ -53,6 +54,16 @@ pub unsafe fn enable_syscall(entry: u64, kernel_code: u16, user_code: u16) {
         write_msr(IA32_FMASK, 1 << 9);
         write_msr(IA32_EFER, read_msr(IA32_EFER) | EFER_SCE);
     }
+}
+
+/// Sets the FS segment base used by Linux TLS.
+///
+/// # Safety
+///
+/// Must run at CPL0 with interrupts serialized against a context switch.
+pub unsafe fn set_fs_base(base: u64) {
+    // SAFETY: The caller guarantees CPL0 and serialized execution.
+    unsafe { write_msr(IA32_FS_BASE, base) };
 }
 
 /// Enables NX page protection and supervisor write protection.

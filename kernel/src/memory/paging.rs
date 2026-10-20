@@ -349,6 +349,97 @@ fn ensure_user_table(
     Ok(child)
 }
 
+/// Base of the pre-mapped Linux anonymous-memory arena.
+///
+/// The prototype has no runtime frame allocator, so the Linux task receives a
+/// fixed arena at boot. `mmap` carves from it; the pages are already mapped,
+/// nonzeroed by the allocator, and non-executable. This is a stepping stone to
+/// a real per-task VMA table and runtime frame allocation.
+pub const LINUX_ARENA_BASE: u64 = USER_BASE + 16 * 1024 * 1024;
+/// Number of pages in the Linux arena (32 MiB).
+pub const LINUX_ARENA_PAGES: u64 = 8192;
+
+/// Maps the Linux anonymous-memory arena into `pml4`.
+pub fn map_user_arena(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    base: u64,
+    pages: u64,
+) -> Result<(), PagingError> {
+    if !base.is_multiple_of(PAGE_SIZE) || pages == 0 {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    let end = base
+        .checked_add(pages * PAGE_SIZE)
+        .ok_or(PagingError::UserImageOutsideWindow)?;
+    if base < USER_BASE || end > USER_LIMIT || end > USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    for page in 0..pages {
+        let frame = allocate_table(allocator)?;
+        // SAFETY: The frame is exclusively owned and identity-mapped.
+        unsafe { ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize) };
+        map_user_page(
+            pml4,
+            allocator,
+            base + page * PAGE_SIZE,
+            frame,
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
+        )?;
+    }
+    Ok(())
+}
+
+/// Changes permissions on an existing user range.
+pub fn protect_user_range(
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    if length == 0
+        || !start.is_multiple_of(PAGE_SIZE)
+        || !length.is_multiple_of(PAGE_SIZE)
+        || start < USER_BASE
+        || start.saturating_add(length) > USER_LIMIT
+    {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    let mut address = start;
+    while address < start + length {
+        let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+        let pml4e = unsafe { (*table_ptr(pml4)).entry(pml4_index) };
+        if !pml4e.is_present() || pml4e.is_huge() {
+            return Err(PagingError::MissingKernelMapping);
+        }
+        let pdpt = PhysFrame::from_address(pml4e.address())
+            .ok_or(PagingError::UnrepresentableAddress(pml4e.address()))?;
+        let pdpte = unsafe { (*table_ptr(pdpt)).entry(pdpt_index) };
+        if !pdpte.is_present() || pdpte.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        let pd = PhysFrame::from_address(pdpte.address())
+            .ok_or(PagingError::UnrepresentableAddress(pdpte.address()))?;
+        let pde = unsafe { (*table_ptr(pd)).entry(pd_index) };
+        if !pde.is_present() || pde.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        let pt = PhysFrame::from_address(pde.address())
+            .ok_or(PagingError::UnrepresentableAddress(pde.address()))?;
+        let entry = unsafe { (*table_ptr(pt)).entry(pt_index) };
+        if !entry.is_present() {
+            return Err(PagingError::MissingKernelMapping);
+        }
+        let address_phys = entry.address();
+        let updated =
+            PageTableEntry::new(address_phys, flags | PageFlags::USER | PageFlags::PRESENT)
+                .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
+        unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
+        address += PAGE_SIZE;
+    }
+    Ok(())
+}
+
 /// Validates that `address..address+len` lies in the user window and is mapped
 /// with user permissions.
 ///

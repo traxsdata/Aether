@@ -61,11 +61,11 @@ implemented only when a tested Aether interface exists and the runtime uses it.
 | AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection implemented**; SquashFS/zstd extraction missing |
 | ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static `PT_LOAD` execution works; interpreter and shared libraries missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: one fixed boot process, no creation |
-| Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Not implemented |
-| Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: fixed user image/stack window; no general mapping |
-| Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Not implemented |
+| Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `arch_prctl` FS base and context-switched TLS pointer; no threads |
+| Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: boot-reserved anonymous arena with `mmap`/`mprotect`/`brk`; no file mappings or reclaim |
+| Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: single-task `FUTEX_WAIT`/`WAKE` no-ops; no wait queue |
 | Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Not implemented |
-| Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: 100 Hz kernel tick |
+| Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; no sleeps/timers |
 | Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: kernel-internal filesystem, no user process API |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/dev/urandom`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | Not implemented |
 | Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
@@ -137,10 +137,10 @@ syscall and pointer is validated; unsupported calls fail with `ENOSYS`, never
 with ambient authority.
 
 **Evidence:** boot transcript, syscall coverage tests, denial tests. **Partial:**
-a static freestanding Linux ELF runs at CPL3, writes through a validated user
-pointer, exits cleanly, and produces `AETHER_LINUX_OK`; dynamic loader,
-threads, futex, signals, mmap, and the user-space `linuxd` protocol remain
-missing.
+a static freestanding Linux ELF runs at CPL3, exercises `mmap`, FS-based TLS,
+`write`, and `exit`, and produces `AETHER_LINUX_OK`; dynamic loader, threads,
+real futex waiting, signals, file mappings, and the user-space `linuxd`
+protocol remain missing.
 
 ### Gate 3 — Headless GridCraft
 

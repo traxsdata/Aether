@@ -19,6 +19,11 @@ versioning scheme until the kernel ABI stabilises.
   gates the boot with `AETHER_LINUX_OK`. The native `int 0x80` ABI is denied to
   Linux tasks. Dynamic libraries, threads, futex, signals, Wayland, and Vulkan
   are not implemented.
+- Linux memory and TLS primitives for the layer: a boot-reserved anonymous
+  arena, `mmap`/`mprotect`/`brk`, FS base through `arch_prctl` with context
+  switching, single-task futex, `clock_gettime`, `getrandom`, and `uname`. The
+  boot fixture now exercises allocation, TLS, write, and exit in one run.
+  File-backed mappings, reclaim, and real threads remain missing.
 - `docs/decisions/ADR-015-linux-app-runtime.md`,
   `docs/specifications/linux-compatibility.md`, and
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
