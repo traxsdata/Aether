@@ -143,7 +143,7 @@ interface, with owners and test cases.
 **Evidence:** [the Linux host-interface inventory](linux-host-interface-inventory.md)
 maps 32 facilities from the pinned GUI and CLI payloads to an interface, owner,
 and test ID, with decisions for X11, D-Bus, process spawning, clipboard, paths,
-locale, GPU, and network. **Met:** 2 facilities are existing, 13 partial, 12
+locale, GPU, and network. **Met:** 2 facilities are existing, 14 partial, 11
 missing, 2 deliberately denied, and 3 deferred. The inventory is complete; the
 missing interfaces are Gate 2 work and their absence does not invalidate the
 mapping. Do not claim compatibility.
@@ -174,7 +174,8 @@ bounded pipe with non-blocking `poll` are also exercised
 `clone(CLONE_VM|CLONE_THREAD)`, synchronizes through `FUTEX_WAIT`/`FUTEX_WAKE`,
 and joins through `CLONE_CHILD_CLEARTID` (`AETHER_LINUX_THREAD_OK`). `mremap`
 grows and moves a mapping while preserving contents (`AETHER_LINUX_MREMAP_OK`).
-A static freestanding Linux ELF runs at CPL3,
+A SIGUSR1 handler is installed, raised, run, and returned from through
+`rt_sigreturn` (`AETHER_LINUX_SIGNAL_OK`). A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only

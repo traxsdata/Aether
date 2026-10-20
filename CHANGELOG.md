@@ -73,6 +73,12 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Linux signal slice: `rt_sigaction`, `rt_sigprocmask`, `sigaltstack`, self and
+  thread-group `kill`/`tgkill`, user-stack signal frames, `rt_sigreturn`, and
+  fault-to-signal delivery. The boot fixture installs SIGUSR1, raises it, runs
+  the handler, and returns through the restorer (`AETHER_LINUX_SIGNAL_OK`).
+  siginfo/ucontext completeness, alt-stack delivery, and cross-process signals
+  remain missing.
 - Linux `mremap` slice: grow a mapping in place when possible, otherwise
   move it to a new VMA and preserve its contents; shrinking releases the tail.
   The boot fixture grows a 4 KiB mapping to 8 KiB and checks both pages

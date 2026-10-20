@@ -157,7 +157,9 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         4 | 6 => linux_stat(pml4, first, second),
         7 => linux_poll(pml4, first, second),
         5 => linux_fstat(pml4, first, second),
-        13 | 14 | 131 => 0,
+        13 => linux_rt_sigaction(pml4, first, second, third),
+        14 => linux_rt_sigprocmask(pml4, first, second, third),
+        15 => return linux_sigreturn(frame),
         17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
         20 => linux_writev(pml4, first, second, third),
         21 => linux_access(pml4, first, second),
@@ -184,6 +186,8 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             unsafe { (*frame).r10 },
             unsafe { (*frame).r8 },
         ),
+        62 => linux_kill(pml4, first, second),
+        234 => linux_tgkill(pml4, first, second, third),
         72 => linux_fcntl(first, second, third),
         89 => linux_readlink(pml4, first, second, third, 0),
         204 => linux_sched_getaffinity(pml4, first, second, third),
@@ -214,6 +218,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         10 => linux_mprotect(pml4, first, second, third),
         11 => linux_munmap(pml4, first, second),
         12 => scheduler::linux_brk(first) as i64,
+        131 => linux_sigaltstack(pml4, first, second),
         186 => scheduler::current_task() as i64,
         63 => linux_uname(pml4, first),
         102 | 104 | 107 | 108 => 1000,
@@ -229,6 +234,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // SAFETY: The assembly stub passes a live frame on this task's kernel
     // stack and keeps it valid until iretq.
     unsafe { (*frame).rax = result as u64 };
+    scheduler::linux_deliver_signal(frame);
     frame
 }
 
@@ -237,6 +243,7 @@ const LINUX_EINVAL: i64 = -22;
 const LINUX_ENOSYS: i64 = -38;
 
 const LINUX_ENOMEM: i64 = -12;
+const LINUX_EPERM: i64 = -1;
 const LINUX_ENOENT: i64 = -2;
 const LINUX_EACCES: i64 = -13;
 const LINUX_EAGAIN: i64 = -11;
@@ -301,9 +308,24 @@ fn linux_access(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
 }
 
 fn user_cstr<'a>(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<&'a str> {
-    let bytes = user_bytes(pml4, pointer, maximum, false)?;
-    let end = bytes.iter().position(|byte| *byte == 0)?;
-    core::str::from_utf8(&bytes[..end]).ok()
+    // A string may end near a page boundary while the caller's maximum scan
+    // length crosses into the next, unmapped page. Validate one page at a time
+    // and stop at the terminator instead of requiring the whole maximum range.
+    let mut scanned = 0u64;
+    while scanned < maximum {
+        let page_offset = (pointer + scanned) & 0xfff;
+        let chunk = (0x1000 - page_offset).min(maximum - scanned);
+        let bytes = user_bytes(pml4, pointer + scanned, chunk, false)?;
+        if let Some(position) = bytes.iter().position(|byte| *byte == 0) {
+            let length = usize::try_from(scanned + position as u64).ok()?;
+            // SAFETY: Every byte up to the terminator was validated page by
+            // page above, and the range lies in the caller's user mapping.
+            let bytes = unsafe { core::slice::from_raw_parts(pointer as *const u8, length) };
+            return core::str::from_utf8(bytes).ok();
+        }
+        scanned += chunk;
+    }
+    None
 }
 
 const LINUX_MAP_SHARED: u64 = 0x01;
@@ -897,6 +919,126 @@ fn linux_arch_prctl(pml4: PhysFrame, code: u64, value: u64) -> i64 {
         0x1003 => write_user_u64(pml4, value).map_or(LINUX_EFAULT, |()| 0),
         _ => LINUX_ENOSYS,
     }
+}
+
+fn linux_rt_sigaction(pml4: PhysFrame, signum: u64, action_pointer: u64, old_pointer: u64) -> i64 {
+    if signum == 0 || signum > 64 || signum == 9 || signum == 19 {
+        return LINUX_EINVAL;
+    }
+    let old = scheduler::linux_get_sigaction(signum as usize);
+    if action_pointer != 0 {
+        let Some(raw) = user_bytes(pml4, action_pointer, 32, false) else {
+            return LINUX_EFAULT;
+        };
+        let action = scheduler::SigAction {
+            handler: u64::from_ne_bytes(raw[0..8].try_into().unwrap_or([0; 8])),
+            flags: u64::from_ne_bytes(raw[8..16].try_into().unwrap_or([0; 8])),
+            restorer: u64::from_ne_bytes(raw[16..24].try_into().unwrap_or([0; 8])),
+            mask: u64::from_ne_bytes(raw[24..32].try_into().unwrap_or([0; 8])),
+        };
+        scheduler::linux_set_sigaction(signum as usize, action);
+    }
+    if old_pointer != 0 {
+        let mut raw = [0u8; 32];
+        if let Some(action) = old {
+            raw[0..8].copy_from_slice(&action.handler.to_ne_bytes());
+            raw[8..16].copy_from_slice(&action.flags.to_ne_bytes());
+            raw[16..24].copy_from_slice(&action.restorer.to_ne_bytes());
+            raw[24..32].copy_from_slice(&action.mask.to_ne_bytes());
+        }
+        if write_user_bytes(pml4, old_pointer, &raw).is_none() {
+            return LINUX_EFAULT;
+        }
+    }
+    0
+}
+
+fn linux_rt_sigprocmask(pml4: PhysFrame, how: u64, set_pointer: u64, old_pointer: u64) -> i64 {
+    let old = scheduler::linux_sigmask();
+    if set_pointer != 0 {
+        let Some(raw) = user_bytes(pml4, set_pointer, 8, false) else {
+            return LINUX_EFAULT;
+        };
+        let set = u64::from_ne_bytes(raw.try_into().unwrap_or([0; 8]));
+        let updated = match how {
+            0 => old | set,
+            1 => old & !set,
+            2 => set,
+            _ => return LINUX_EINVAL,
+        };
+        scheduler::linux_set_sigmask(updated);
+    }
+    if old_pointer != 0 && write_user_bytes(pml4, old_pointer, &old.to_ne_bytes()).is_none() {
+        return LINUX_EFAULT;
+    }
+    0
+}
+
+fn linux_sigaltstack(pml4: PhysFrame, stack_pointer: u64, old_pointer: u64) -> i64 {
+    if stack_pointer != 0 {
+        let Some(raw) = user_bytes(pml4, stack_pointer, 24, false) else {
+            return LINUX_EFAULT;
+        };
+        let pointer = u64::from_ne_bytes(raw[0..8].try_into().unwrap_or([0; 8]));
+        let flags = u32::from_ne_bytes(raw[8..12].try_into().unwrap_or([0; 4]));
+        let size = u64::from_ne_bytes(raw[16..24].try_into().unwrap_or([0; 8]));
+        if flags & 2 != 0 {
+            scheduler::linux_set_altstack(0, 0);
+        } else {
+            scheduler::linux_set_altstack(pointer, size);
+        }
+    }
+    if old_pointer != 0 {
+        let mut raw = [0u8; 24];
+        if let Some((pointer, size)) = scheduler::linux_altstack() {
+            if pointer != 0 {
+                raw[0..8].copy_from_slice(&pointer.to_ne_bytes());
+                raw[16..24].copy_from_slice(&size.to_ne_bytes());
+            } else {
+                raw[8..12].copy_from_slice(&2u32.to_ne_bytes());
+            }
+        } else {
+            raw[8..12].copy_from_slice(&2u32.to_ne_bytes());
+        }
+        if write_user_bytes(pml4, old_pointer, &raw).is_none() {
+            return LINUX_EFAULT;
+        }
+    }
+    0
+}
+
+fn linux_kill(pml4: PhysFrame, pid: u64, signal: u64) -> i64 {
+    let current = scheduler::linux_getpid() as u64;
+    if pid != 0 && pid != current && pid != u64::from(u32::MAX) {
+        return LINUX_EPERM;
+    }
+    let _ = pml4;
+    if signal == 0 {
+        return 0;
+    }
+    scheduler::linux_send_signal(signal)
+}
+
+fn linux_tgkill(pml4: PhysFrame, tgid: u64, tid: u64, signal: u64) -> i64 {
+    let current = scheduler::linux_getpid() as u64;
+    if tgid != current {
+        return LINUX_EPERM;
+    }
+    let _ = tid;
+    let _ = pml4;
+    if signal == 0 {
+        return 0;
+    }
+    scheduler::linux_send_signal(signal)
+}
+
+fn linux_sigreturn(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    if scheduler::linux_sigreturn(frame) {
+        return frame;
+    }
+    // SAFETY: The frame is live on the current kernel stack.
+    unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+    frame
 }
 
 fn linux_clone(

@@ -56,8 +56,8 @@ acceptance checklist are recorded below. Implementation status is uneven:
 | Status | Meaning | Facilities |
 |---|---|---:|
 | Existing | A tested interface exists and can be used by the runtime | 2 |
-| Partial | Some interface or host tests exist; the runtime cannot use it yet | 13 |
-| Missing | No interface exists | 12 |
+| Partial | Some interface or host tests exist; the runtime cannot use it yet | 14 |
+| Missing | No interface exists | 11 |
 | Denied | Deliberate absence; the runtime must fail closed | 2 |
 | Deferred | Not required for Gate 3 or Gate 4 | 3 |
 
@@ -90,7 +90,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Portal grant handles and `/run/aether/portal/<grant>` paths; `/home/user` is the private overlay | `kernel/src/portal.rs`, planned `user/portald` | HI-T09 | missing |
 | HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `mremap`, `brk`, file mappings, W^X | Per-task VMA table; file-backed `mmap`, `munmap` reclaim, `mprotect`, `mremap` grow/move, growing `brk` | `kernel/src/memory`, `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T10 | partial |
 | HI-11 | Synchronization: `futex`, pthread mutex/condition variables, robust lists, `eventfd` | Futex wait/wake queues with timeouts | `kernel/src/scheduler.rs`, `kernel/src/ipc.rs` | HI-T11 | partial |
-| HI-12 | Signals: `sigaction`, `signal`, `sigemptyset`, `sigaddset`, `sigaltstack`, `kill`, `pause` | Fault-to-signal delivery and per-thread masks | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T12 | missing |
+| HI-12 | Signals: `sigaction`, `signal`, `sigemptyset`, `sigaddset`, `sigaltstack`, `kill`, `pause` | `rt_sigaction`/`rt_sigprocmask`/`sigaltstack`, self/group `kill`/`tgkill`, user-stack handler frames, restorer return, and fault-to-signal delivery; siginfo/ucontext and cross-process signals remain | `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T12 | partial |
 | HI-13 | Time and waits: `clock_gettime`, `clock_nanosleep`, `poll` timeouts, `timerfd` | Time service plus a blocking wait queue | `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T13 | partial |
 | HI-14 | Random: `getrandom` | Kernel random source | `kernel/src/syscall.rs` | HI-T14 | partial |
 | HI-15 | Pseudo-files: `/proc/self/{exe,maps,status,fd}`, `/dev/{null,zero,random}`, bounded `/sys` | `linuxd` synthesis plus fixed device nodes | planned `user/linuxd` | HI-T15 | missing |
@@ -140,7 +140,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T09 | planned `make linux-portal-test` | File chooser grant, exact-file open, revocation, denial, and no ambient home | planned |
 | HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixture maps a file, unmaps/reuses, grows `brk`, grows a mapping with `mremap`, and denies W+X; page-fault and shared mappings remain | partial |
 | HI-T11 | `make test`; planned `make linux-sync-test` | Boot fixture blocks on FUTEX_WAIT and wakes through FUTEX_WAKE during thread join; timeouts, robust lists, and condition variables remain planned | partial |
-| HI-T12 | planned `make linux-signal-test` | Handler delivery, alt stack, mask, fault-to-signal, and no delivery across domains | planned |
+| HI-T12 | `make test`; planned `make linux-signal-test` | Boot fixture installs SIGUSR1, raises it with `kill`, runs the handler, and returns through `rt_sigreturn`; alt stack, siginfo/ucontext, and cross-process delivery remain planned | partial |
 | HI-T13 | planned `make linux-time-test` | Monotonic/realtime clocks, sleep, poll timeout, and timer cancellation | planned |
 | HI-T14 | planned `make linux-random-test` | `getrandom` fills a bounded buffer and fails closed at the domain boundary | planned |
 | HI-T15 | planned `make linux-procfs-test` | Synthesized `/proc` and `/dev` nodes; no host process or device enumeration | planned |

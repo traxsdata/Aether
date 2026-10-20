@@ -230,8 +230,10 @@ user space. It is not a VM. The target and security gates are in
 - [x] Synchronization: futex wait/wake queues and clear-child-tid join; thread
   wake ordering.
 - [ ] Futex timeouts, robust lists, condition variables, and semaphores.
-- [ ] Signals: `rt_sigaction`, `rt_sigprocmask`, `sigaltstack`,
-  `rt_sigreturn`, fault-to-signal delivery, and per-thread masks.
+- [x] Signals: `rt_sigaction`/`rt_sigprocmask`/`sigaltstack`, self/group
+  `kill`/`tgkill`, handler frames, `rt_sigreturn`, and fault-to-signal delivery.
+- [ ] siginfo/ucontext completeness, alt-stack delivery, cross-process signals,
+  and signal-safe restart semantics.
 - [ ] Time and scheduling: `nanosleep`, `clock_nanosleep`, `timerfd`,
   `sched_getaffinity`, `prlimit64`, and bounded CPU/memory quotas.
 - [ ] Pseudo-files: `/proc/self/{exe,maps,status,fd}`, `/dev/{null,zero,random}`,

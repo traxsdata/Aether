@@ -175,6 +175,28 @@ struct TaskHandles {
     ep_b_recv: Option<CapHandle>,
 }
 
+/// Installed signal action.
+#[derive(Clone, Copy)]
+pub struct SigAction {
+    /// Handler address, `0` for default, `1` for ignore.
+    pub handler: u64,
+    /// `SA_*` flags.
+    pub flags: u64,
+    /// Restorer trampoline.
+    pub restorer: u64,
+    /// Additional blocked mask.
+    pub mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SignalFrame {
+    saved: InterruptFrame,
+    blocked: u64,
+}
+
+const MAX_SIGNALS: usize = 64;
+
 struct Task {
     state: TaskState,
     kind: TaskKind,
@@ -196,6 +218,10 @@ struct Task {
     linux_pipes: [Option<LinuxPipe>; MAX_PIPES],
     linux_eventfds: [Option<u64>; MAX_EVENTFDS],
     linux_epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
+    sigactions: [Option<SigAction>; MAX_SIGNALS],
+    sigblocked: u64,
+    sigpending: u64,
+    sigaltstack: Option<(u64, u64)>,
 }
 
 impl Task {
@@ -226,6 +252,10 @@ impl Task {
             linux_pipes: [None; MAX_PIPES],
             linux_eventfds: [None; MAX_EVENTFDS],
             linux_epolls: [None; MAX_EPOLLS],
+            sigactions: [None; MAX_SIGNALS],
+            sigblocked: 0,
+            sigpending: 0,
+            sigaltstack: None,
         }
     }
 }
@@ -1174,6 +1204,159 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
         }
     }
     woken as i64
+}
+
+/// Installs a signal action for the current task.
+pub fn linux_set_sigaction(signum: usize, action: SigAction) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if signum > 0 && signum <= MAX_SIGNALS {
+        task.sigactions[signum - 1] = Some(action);
+    }
+}
+
+/// Returns the current signal action, if installed.
+#[must_use]
+pub fn linux_get_sigaction(signum: usize) -> Option<SigAction> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)]
+        .sigactions
+        .get(signum.saturating_sub(1))
+        .copied()
+        .flatten()
+}
+
+/// Replaces the current signal mask and returns the previous mask.
+pub fn linux_set_sigmask(mask: u64) -> u64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let old = task.sigblocked;
+    task.sigblocked = mask;
+    old
+}
+
+/// Returns the current signal mask.
+#[must_use]
+pub fn linux_sigmask() -> u64 {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].sigblocked
+}
+
+/// Sets the alternate signal stack for the current task.
+pub fn linux_set_altstack(address: u64, size: u64) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].sigaltstack = Some((address, size));
+}
+
+/// Returns the alternate signal stack for the current task.
+#[must_use]
+pub fn linux_altstack() -> Option<(u64, u64)> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].sigaltstack
+}
+
+/// Queues a signal on the current thread group.
+pub fn linux_send_signal(signum: u64) -> i64 {
+    if signum == 0 || signum > MAX_SIGNALS as u64 {
+        return LINUX_EINVAL;
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let tgid = tasks[current].tgid;
+    for task in tasks.iter_mut() {
+        if task.tgid == tgid && task.abi == TaskAbi::Linux {
+            task.sigpending |= 1u64 << (signum - 1);
+        }
+    }
+    0
+}
+
+/// Delivers the lowest pending unblocked signal, if a handler is installed.
+pub fn linux_deliver_signal(frame: *mut InterruptFrame) -> bool {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &mut tasks[current];
+    if task.abi != TaskAbi::Linux || frame.is_null() {
+        return false;
+    }
+    let pending = task.sigpending & !task.sigblocked;
+    if pending == 0 {
+        return false;
+    }
+    let signum = pending.trailing_zeros() as usize + 1;
+    let Some(action) = task.sigactions[signum - 1] else {
+        return false;
+    };
+    if action.handler == 0 || action.restorer == 0 {
+        return false;
+    }
+    task.sigpending &= !(1u64 << (signum - 1));
+    let Some(pml4) = PhysFrame::from_address(task.pml4) else {
+        return false;
+    };
+    let saved = unsafe { *frame };
+    if saved.cs & 3 != 3 {
+        return false;
+    }
+    let size = core::mem::size_of::<SignalFrame>() as u64;
+    let Some(frame_pointer) = saved.rsp.checked_sub(size).map(|value| value & !15) else {
+        return false;
+    };
+    let Some(restorer_pointer) = frame_pointer.checked_sub(8) else {
+        return false;
+    };
+    if frame_pointer < USER_BASE
+        || !paging::user_range_valid(pml4, restorer_pointer, size + 8, true)
+    {
+        return false;
+    }
+    let signal_frame = SignalFrame {
+        saved,
+        blocked: task.sigblocked,
+    };
+    // SAFETY: The user range was validated as writable and the syscall or
+    // interrupt path keeps the task from running concurrently.
+    unsafe {
+        ptr::write(frame_pointer as *mut SignalFrame, signal_frame);
+        ptr::write(restorer_pointer as *mut u64, action.restorer);
+        (*frame).rax = 0;
+        (*frame).rdi = signum as u64;
+        (*frame).rsi = 0;
+        (*frame).rdx = 0;
+        (*frame).rip = action.handler;
+        (*frame).rsp = restorer_pointer;
+    }
+    task.sigblocked |= action.mask;
+    true
+}
+
+/// Consumes a signal frame and restores the interrupted context.
+pub fn linux_sigreturn(frame: *mut InterruptFrame) -> bool {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &mut tasks[current];
+    let Some(pml4) = PhysFrame::from_address(task.pml4) else {
+        return false;
+    };
+    // The handler popped the restorer address; RSP now points at the saved
+    // signal frame.
+    let frame_pointer = unsafe { (*frame).rsp };
+    let size = core::mem::size_of::<SignalFrame>() as u64;
+    if !paging::user_range_valid(pml4, frame_pointer, size, false) {
+        return false;
+    }
+    // SAFETY: The saved frame was validated as readable.
+    let saved = unsafe { ptr::read(frame_pointer as *const SignalFrame) };
+    // SAFETY: The caller supplied the live interrupt frame.
+    unsafe { ptr::write(frame, saved.saved) };
+    task.sigblocked = saved.blocked;
+    true
+}
+
+/// Queues and delivers a fault signal to the current task.
+pub fn linux_deliver_fault(frame: *mut InterruptFrame, signum: u64) -> bool {
+    let _ = linux_send_signal(signum);
+    linux_deliver_signal(frame)
 }
 
 /// Returns the thread-group id for `getpid`.
@@ -2254,6 +2437,12 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     }
 
     if linux {
+        let signum = if vector == 14 { 7 } else { 11 };
+        if linux_deliver_fault(frame, signum) {
+            let tasks = unsafe { &mut *TASKS.0.get() };
+            tasks[current].state = TaskState::Running;
+            return frame;
+        }
         release_linux_mappings(current);
     }
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -2333,8 +2522,11 @@ pub fn yield_current(frame: *mut InterruptFrame) -> *mut InterruptFrame {
 /// Called from the timer interrupt before returning to a task.
 pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
+    // Deliver a pending signal to the interrupted Linux task before it is
+    // saved and possibly scheduled out.
+    let _ = linux_deliver_signal(frame);
+    let tasks = unsafe { &mut *TASKS.0.get() };
 
     tasks[current].saved_rsp = frame as u64;
     if tasks[current].state == TaskState::Running {

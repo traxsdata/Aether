@@ -513,6 +513,55 @@ _start:
     mov $mremap_message_len, %rdx
     syscall
 
+    /* Signal: install SIGUSR1, raise it, and verify the handler ran. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_signal
+    mov %rax, %r12
+    movl $0, (%r12)
+    sub $64, %rsp
+    lea signal_handler(%rip), %rax
+    mov %rax, 0(%rsp)
+    movq $0x04000000, 8(%rsp)   /* SA_RESTORER */
+    lea signal_restorer(%rip), %rax
+    mov %rax, 16(%rsp)
+    movq $0, 24(%rsp)
+    mov $13, %rax               /* rt_sigaction */
+    mov $10, %rdi               /* SIGUSR1 */
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_signal
+    mov $39, %rax               /* getpid */
+    syscall
+    mov %rax, %rdi
+    mov $10, %rsi
+    mov $62, %rax               /* kill */
+    syscall
+    test %rax, %rax
+    jne fail_signal
+    cmpl $1, (%r12)
+    jne fail_signal
+    add $64, %rsp
+    mov %r12, %rdi
+    mov $4096, %rsi
+    mov $11, %rax
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea signal_message(%rip), %rsi
+    mov $signal_message_len, %rdx
+    syscall
+
     /* Thread + futex: map a shared page, clone, wait for the child. */
     mov $9, %rax
     xor %rdi, %rdi
@@ -664,6 +713,10 @@ fail_thread:
 fail_mremap:
     lea mremap_failure(%rip), %rsi
     mov $mremap_failure_len, %rdx
+    jmp report_failure
+fail_signal:
+    lea signal_failure(%rip), %rsi
+    mov $signal_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -722,6 +775,20 @@ mremap_message:
 mremap_failure:
     .ascii "AETHER_LINUX_MREMAP_FAIL\n"
     .set mremap_failure_len, . - mremap_failure
+signal_message:
+    .ascii "AETHER_LINUX_SIGNAL_OK handler=ok return=ok\n"
+    .set signal_message_len, . - signal_message
+signal_failure:
+    .ascii "AETHER_LINUX_SIGNAL_FAIL\n"
+    .set signal_failure_len, . - signal_failure
+
+signal_handler:
+    movl $1, (%r12)
+    ret
+signal_restorer:
+    mov $15, %rax
+    syscall
+    jmp signal_restorer
 root_path:
     .asciz "/"
 usrbin_path:
