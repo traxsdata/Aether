@@ -934,6 +934,841 @@ after_thread:
     mov $futex_timeout_message_len, %rdx
     syscall
 
+    /* ================= blocking multiplexing and time ================= */
+    sub $1024, %rsp
+    /* Scratch page: signal flag at 0, thread tid at 8, thread data at 16. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_sleep
+    mov %rax, %r12
+    movl $0, (%r12)
+    movl $0, 8(%r12)
+
+    /* --- nanosleep: a 60 ms relative sleep advances the monotonic clock. */
+    mov $228, %rax              /* clock_gettime(CLOCK_MONOTONIC) */
+    mov $1, %rdi
+    lea 32(%rsp), %rsi
+    syscall
+    test %rax, %rax
+    jne fail_sleep_rel
+    movq $0, 0(%rsp)
+    movq $60000000, 8(%rsp)
+    mov $35, %rax               /* nanosleep */
+    lea 0(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_sleep_rel
+    mov $228, %rax
+    mov $1, %rdi
+    lea 0(%rsp), %rsi
+    syscall
+    test %rax, %rax
+    jne fail_sleep_rel
+    mov 0(%rsp), %rbx
+    mov 32(%rsp), %rax
+    sub %rax, %rbx
+    imul $1000000000, %rbx, %rbx
+    add 8(%rsp), %rbx
+    sub 40(%rsp), %rbx
+    cmp $50000000, %rbx         /* at least 50 ms of the 60 ms elapsed */
+    jl fail_sleep_rel
+
+    /* --- clock_nanosleep(TIMER_ABSTIME): deadline 40 ms ahead. */
+    mov $228, %rax
+    mov $1, %rdi
+    lea 0(%rsp), %rsi
+    syscall
+    test %rax, %rax
+    jne fail_sleep_abs
+    mov 0(%rsp), %rax
+    mov 8(%rsp), %rdx
+    add $40000000, %rdx
+    cmp $1000000000, %rdx
+    jb .Lnanosleep_nowrap
+    sub $1000000000, %rdx
+    inc %rax
+.Lnanosleep_nowrap:
+    mov %rax, 0(%rsp)
+    mov %rdx, 8(%rsp)
+    mov $230, %rax              /* clock_nanosleep */
+    mov $1, %rdi                /* CLOCK_MONOTONIC */
+    mov $1, %rsi                /* TIMER_ABSTIME */
+    lea 0(%rsp), %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_sleep_abs
+
+    /* --- A deliverable signal interrupts nanosleep with EINTR. --- */
+    mov $57, %rax               /* fork */
+    syscall
+    test %rax, %rax
+    jns .Lintr_forked
+    cmp $-11, %rax
+    je fail_sleep_intr_fork_eagain
+    cmp $-38, %rax
+    je fail_sleep_intr_fork_enosys
+    jmp fail_sleep_intr
+.Lintr_forked:
+    jz .Lintr_child
+    mov %rax, %r15
+    movq $2, 0(%rsp)
+    movq $0, 8(%rsp)
+    mov $35, %rax
+    lea 0(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    cmp $-4, %rax               /* -EINTR */
+    jne fail_sleep_intr_ret
+    cmpl $1, (%r12)             /* the SIGUSR1 handler ran */
+    jne fail_sleep_intr_handler
+    sub $16, %rsp
+    mov $61, %rax
+    mov %r15, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    add $16, %rsp
+    test %rax, %rax
+    jns .Lintr_reaped
+    cmp $-10, %rax
+    je fail_sleep_intr_echild
+    cmp $-4, %rax
+    je fail_sleep_intr_eintr
+    cmp $-3, %rax
+    je fail_sleep_intr_esrch
+    cmp $-22, %rax
+    je fail_sleep_intr_einval
+    jmp fail_sleep_intr
+.Lintr_reaped:
+    mov $1, %rax
+    mov $1, %rdi
+    lea nanosleep_message(%rip), %rsi
+    mov $nanosleep_message_len, %rdx
+    syscall
+    jmp .Lpipe_block_start
+
+.Lintr_child:
+    mov $5000000, %ecx
+.Lintr_delay:
+    dec %ecx
+    jnz .Lintr_delay
+    mov $110, %rax              /* getppid */
+    syscall
+    mov %rax, %rdi
+    mov $10, %rsi               /* SIGUSR1 */
+    mov $62, %rax
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+
+    /* --- Cross-process blocking pipe write and read. --- */
+.Lpipe_block_start:
+    mov $293, %rax              /* pipe2 */
+    lea 96(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_pipe_block
+    mov 96(%rsp), %r13d
+    mov 100(%rsp), %r14d
+    mov $57, %rax
+    syscall
+    test %rax, %rax
+    js fail_pipe_block
+    jz .Lpipe_block_child
+    mov %rax, %r15
+    movq $0, 0(%rsp)
+    movq $60000000, 8(%rsp)
+    mov $35, %rax               /* let the child fill and block */
+    lea 0(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_pipe_block
+    mov $0, %rax                /* drain the full pipe */
+    mov %r13, %rdi
+    lea 192(%rsp), %rsi
+    mov $512, %rdx
+    syscall
+    cmp $512, %rax
+    jne fail_pipe_block
+    mov $0, %rax                /* blocking read wakes the blocked writer */
+    mov %r13, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_pipe_block
+    cmpb $0x58, 192(%rsp)
+    jne fail_pipe_block
+    mov $3, %rax
+    mov %r14, %rdi
+    syscall
+    sub $16, %rsp
+    mov $61, %rax
+    mov %r15, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    add $16, %rsp
+    test %rax, %rax
+    js fail_pipe_block
+    mov $0, %rax                /* empty pipe, no writers: EOF */
+    mov %r13, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    test %rax, %rax
+    jne fail_pipe_block
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea pipe_block_message(%rip), %rsi
+    mov $pipe_block_message_len, %rdx
+    syscall
+    jmp .Lpoll_block_start
+
+.Lpipe_block_child:
+    lea 192(%rsp), %rdi
+    mov $512, %rcx
+    mov $0x41, %al
+.Lpipe_fill:
+    mov %al, (%rdi)
+    inc %rdi
+    dec %rcx
+    jnz .Lpipe_fill
+    mov $1, %rax
+    mov %r14, %rdi
+    lea 192(%rsp), %rsi
+    mov $512, %rdx
+    syscall
+    cmp $512, %rax
+    jne fail_pipe_block
+    movb $0x58, 192(%rsp)
+    mov $1, %rax                /* blocks until the parent drains */
+    mov %r14, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_pipe_block
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $3, %rax
+    mov %r14, %rdi
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+
+    /* --- poll: finite timeout, infinite timeout, pipe and eventfd. --- */
+.Lpoll_block_start:
+    mov $293, %rax
+    lea 96(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_poll_block
+    mov 96(%rsp), %r13d
+    mov 100(%rsp), %r14d
+    movl %r13d, 32(%rsp)
+    movw $1, 36(%rsp)           /* POLLIN */
+    movw $0, 38(%rsp)
+    mov $228, %rax
+    mov $1, %rdi
+    lea 704(%rsp), %rsi
+    syscall
+    mov $7, %rax                /* 30 ms finite poll on an empty pipe */
+    lea 32(%rsp), %rdi
+    mov $1, %rsi
+    mov $30, %rdx
+    syscall
+    test %rax, %rax
+    jne fail_poll_block
+    mov $228, %rax
+    mov $1, %rdi
+    lea 720(%rsp), %rsi
+    syscall
+    mov 720(%rsp), %rbx
+    mov 704(%rsp), %rax
+    sub %rax, %rbx
+    imul $1000000000, %rbx, %rbx
+    add 728(%rsp), %rbx
+    sub 712(%rsp), %rbx
+    cmp $20000000, %rbx
+    jl fail_poll_block
+    mov $57, %rax
+    syscall
+    test %rax, %rax
+    js fail_poll_block
+    jz .Lpoll_block_child
+    mov %rax, %r15
+    movl %r13d, 32(%rsp)
+    movw $1, 36(%rsp)
+    movw $0, 38(%rsp)
+    mov $7, %rax                /* infinite poll wakes on the child write */
+    lea 32(%rsp), %rdi
+    mov $1, %rsi
+    mov $-1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_poll_block
+    movzwl 38(%rsp), %eax
+    test $1, %eax
+    jz fail_poll_block
+    mov $0, %rax
+    mov %r13, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_poll_block
+    cmpb $0x50, 192(%rsp)
+    jne fail_poll_block
+    sub $16, %rsp
+    mov $61, %rax
+    mov %r15, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    add $16, %rsp
+    test %rax, %rax
+    js fail_poll_block
+
+    /* eventfd readiness: a CLONE_VM thread writes while poll blocks. */
+    movq $0, 0(%rsp)
+    mov $290, %rax
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    js fail_poll_block
+    mov %rax, 104(%rsp)
+    mov %rax, (%r12)
+    mov 104(%rsp), %eax
+    mov %eax, 32(%rsp)
+    movw $1, 36(%rsp)
+    movw $0, 38(%rsp)
+    mov $7, %rax                /* finite poll on a zero counter */
+    lea 32(%rsp), %rdi
+    mov $1, %rsi
+    mov $30, %rdx
+    syscall
+    test %rax, %rax
+    jne fail_poll_block
+    mov $56, %rax               /* clone thread */
+    mov $0x1290100, %rdi
+    lea 0xf00(%r12), %rsi
+    xor %rdx, %rdx
+    lea 8(%r12), %r10
+    lea 0xf00(%r12), %r8
+    syscall
+    test %rax, %rax
+    js fail_poll_block
+    jz .Lpoll_event_thread
+    mov 104(%rsp), %eax
+    mov %eax, 32(%rsp)
+    movw $1, 36(%rsp)
+    movw $0, 38(%rsp)
+    mov $7, %rax                /* infinite poll wakes on the eventfd */
+    lea 32(%rsp), %rdi
+    mov $1, %rsi
+    mov $-1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_poll_block
+    mov $0, %rax
+    mov 104(%rsp), %rdi
+    lea 192(%rsp), %rsi
+    mov $8, %rdx
+    syscall
+    cmp $8, %rax
+    jne fail_poll_block
+    cmpq $1, 192(%rsp)
+    jne fail_poll_block
+    mov $3, %rax
+    mov 104(%rsp), %rdi
+    syscall
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $3, %rax
+    mov %r14, %rdi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea poll_block_message(%rip), %rsi
+    mov $poll_block_message_len, %rdx
+    syscall
+    jmp .Lepoll_block_start
+
+.Lpoll_block_child:
+    movq $0, 0(%rsp)
+    movq $60000000, 8(%rsp)
+    mov $35, %rax
+    lea 0(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_poll_block
+    movb $0x50, 192(%rsp)
+    mov $1, %rax
+    mov %r14, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_poll_block
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+
+.Lpoll_event_thread:
+    mov $20000000, %ecx
+.Lpoll_event_delay:
+    dec %ecx
+    jnz .Lpoll_event_delay
+    mov (%r12), %rdi
+    movq $1, 16(%r12)
+    mov $1, %rax
+    lea 16(%r12), %rsi
+    mov $8, %rdx
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+
+    /* --- epoll: blocking wait, level, edge, and one-shot. --- */
+.Lepoll_block_start:
+    mov $293, %rax
+    lea 96(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s1
+    mov 96(%rsp), %r13d
+    mov 100(%rsp), %r14d
+    mov $291, %rax
+    xor %rdi, %rdi
+    syscall
+    test %rax, %rax
+    js fail_epoll_s2
+    mov %rax, 108(%rsp)
+    movl $1, 160(%rsp)
+    movq $0x1234, 164(%rsp)
+    mov $233, %rax              /* ADD read end, level-triggered */
+    mov 108(%rsp), %rdi
+    mov $1, %rsi
+    mov %r13, %rdx
+    lea 160(%rsp), %r10
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s3
+    mov $232, %rax              /* 30 ms finite wait on an empty pipe */
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    mov $30, %r10
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s4
+    mov $57, %rax
+    syscall
+    test %rax, %rax
+    js fail_epoll_s5
+    jz .Lepoll_block_child
+    mov %rax, %r15
+    mov $232, %rax              /* infinite wait wakes on readiness */
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    mov $-1, %r10
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s6
+    cmpl $1, 176(%rsp)
+    jne fail_epoll_s7
+    cmpq $0x1234, 180(%rsp)
+    jne fail_epoll_s8
+    mov $232, %rax              /* level-triggered re-report */
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s9
+    mov $0, %rax
+    mov %r13, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s10
+    sub $16, %rsp
+    mov $61, %rax
+    mov %r15, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    add $16, %rsp
+    test %rax, %rax
+    js fail_epoll_s11
+
+    /* Edge-triggered slice: one report per new readiness transition. */
+    movl $0x80000001, 160(%rsp)
+    movq $0x1234, 164(%rsp)
+    mov $233, %rax
+    mov 108(%rsp), %rdi
+    mov $3, %rsi                /* MOD */
+    mov %r13, %rdx
+    lea 160(%rsp), %r10
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s12
+    movb $0x45, 192(%rsp)
+    mov $1, %rax
+    mov %r14, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s13
+    mov $232, %rax
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s14
+    mov $232, %rax              /* no new edge: zero */
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s15
+    mov $0, %rax
+    mov %r13, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s16
+    movb $0x45, 192(%rsp)
+    mov $1, %rax
+    mov %r14, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s17
+    mov $232, %rax              /* a second write is a new edge */
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s18
+    mov $0, %rax
+    mov %r13, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s19
+
+    /* One-shot: disarmed after a report, re-armed by MOD. */
+    movl $0x40000001, 160(%rsp)
+    movq $0x1234, 164(%rsp)
+    mov $233, %rax
+    mov 108(%rsp), %rdi
+    mov $3, %rsi
+    mov %r13, %rdx
+    lea 160(%rsp), %r10
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s20
+    movb $0x4f, 192(%rsp)
+    mov $1, %rax
+    mov %r14, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s21
+    mov $232, %rax
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s22
+    mov $232, %rax              /* disarmed: no report */
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s23
+    mov $233, %rax              /* MOD re-arms */
+    mov 108(%rsp), %rdi
+    mov $3, %rsi
+    mov %r13, %rdx
+    lea 160(%rsp), %r10
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s24
+    mov $232, %rax
+    mov 108(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s25
+    mov $0, %rax
+    mov %r13, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s26
+    mov $3, %rax
+    mov 108(%rsp), %rdi
+    syscall
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $3, %rax
+    mov %r14, %rdi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea epoll_block_message(%rip), %rsi
+    mov $epoll_block_message_len, %rdx
+    syscall
+    jmp .Ltimerfd_start
+
+.Lepoll_block_child:
+    movq $0, 0(%rsp)
+    movq $60000000, 8(%rsp)
+    mov $35, %rax
+    lea 0(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_epoll_s1
+    movb $0x45, 192(%rsp)
+    mov $1, %rax
+    mov %r14, %rdi
+    lea 192(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_epoll_s1
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+
+    /* --- timerfd: one-shot, periodic, poll, and epoll. --- */
+.Ltimerfd_start:
+    mov $283, %rax              /* timerfd_create(CLOCK_MONOTONIC, 0) */
+    mov $1, %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    js fail_timerfd_s1
+    mov %rax, 112(%rsp)
+    movq $0, 768(%rsp)          /* interval 0 */
+    movq $0, 776(%rsp)
+    movq $0, 784(%rsp)          /* value 40 ms */
+    movq $40000000, 792(%rsp)
+    mov $286, %rax              /* timerfd_settime relative */
+    mov 112(%rsp), %rdi
+    xor %rsi, %rsi
+    lea 768(%rsp), %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s2
+    mov 112(%rsp), %eax
+    mov %eax, 32(%rsp)
+    movw $1, 36(%rsp)
+    movw $0, 38(%rsp)
+    mov $7, %rax                /* poll blocks until the timer expires */
+    lea 32(%rsp), %rdi
+    mov $1, %rsi
+    mov $300, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_timerfd_s3
+    mov $0, %rax
+    mov 112(%rsp), %rdi
+    lea 192(%rsp), %rsi
+    mov $8, %rdx
+    syscall
+    cmp $8, %rax
+    jne fail_timerfd_s4
+    cmpq $1, 192(%rsp)
+    jne fail_timerfd_s5
+    mov $287, %rax              /* one-shot read leaves it disarmed */
+    mov 112(%rsp), %rdi
+    lea 800(%rsp), %rsi
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s6
+    cmpq $0, 800(%rsp)
+    jne fail_timerfd_s7
+    cmpq $0, 816(%rsp)
+    jne fail_timerfd_s8
+
+    movq $0, 768(%rsp)          /* periodic: 20 ms interval and value */
+    movq $20000000, 776(%rsp)
+    movq $0, 784(%rsp)
+    movq $20000000, 792(%rsp)
+    mov $286, %rax
+    mov 112(%rsp), %rdi
+    xor %rsi, %rsi
+    lea 768(%rsp), %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s9
+    movq $0, 0(%rsp)
+    movq $60000000, 8(%rsp)
+    mov $35, %rax
+    lea 0(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s10
+    mov $0, %rax
+    mov 112(%rsp), %rdi
+    lea 192(%rsp), %rsi
+    mov $8, %rdx
+    syscall
+    cmp $8, %rax
+    jne fail_timerfd_s11
+    cmpq $2, 192(%rsp)
+    jb fail_timerfd_s12
+    mov $287, %rax
+    mov 112(%rsp), %rdi
+    lea 800(%rsp), %rsi
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s13
+    cmpq $20000000, 808(%rsp)
+    jne fail_timerfd_s14
+
+    /* timerfd readiness through epoll. */
+    mov $291, %rax
+    xor %rdi, %rdi
+    syscall
+    test %rax, %rax
+    js fail_timerfd_s15
+    mov %rax, 120(%rsp)
+    movl $1, 160(%rsp)
+    movq $0x55, 164(%rsp)
+    mov $233, %rax
+    mov 120(%rsp), %rdi
+    mov $1, %rsi
+    mov 112(%rsp), %rdx
+    lea 160(%rsp), %r10
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s16
+    movq $0, 768(%rsp)
+    movq $0, 776(%rsp)
+    movq $0, 784(%rsp)
+    movq $30000000, 792(%rsp)
+    mov $286, %rax
+    mov 112(%rsp), %rdi
+    xor %rsi, %rsi
+    lea 768(%rsp), %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s17
+    mov $232, %rax
+    mov 120(%rsp), %rdi
+    lea 176(%rsp), %rsi
+    mov $1, %rdx
+    mov $-1, %r10
+    syscall
+    cmp $1, %rax
+    jne fail_timerfd_s18
+    cmpq $0x55, 180(%rsp)
+    jne fail_timerfd_s19
+    mov $0, %rax
+    mov 112(%rsp), %rdi
+    lea 192(%rsp), %rsi
+    mov $8, %rdx
+    syscall
+    cmp $8, %rax
+    jne fail_timerfd_s20
+
+    movq $0, 768(%rsp)          /* disarm and verify poll reports zero */
+    movq $0, 776(%rsp)
+    movq $0, 784(%rsp)
+    movq $0, 792(%rsp)
+    mov $286, %rax
+    mov 112(%rsp), %rdi
+    xor %rsi, %rsi
+    lea 768(%rsp), %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s21
+    mov 112(%rsp), %eax
+    mov %eax, 32(%rsp)
+    movw $1, 36(%rsp)
+    movw $0, 38(%rsp)
+    mov $7, %rax
+    lea 32(%rsp), %rdi
+    mov $1, %rsi
+    xor %rdx, %rdx
+    syscall
+    test %rax, %rax
+    jne fail_timerfd_s22
+    mov $3, %rax
+    mov 120(%rsp), %rdi
+    syscall
+    mov $3, %rax
+    mov 112(%rsp), %rdi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea timerfd_message(%rip), %rsi
+    mov $timerfd_message_len, %rdx
+    syscall
+
+    add $1024, %rsp
+    jmp .Lafter_multiplex
+
+.Lafter_multiplex:
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea event_message(%rip), %rsi
@@ -1075,6 +1910,256 @@ fail_signal:
 fail_fork:
     lea fork_failure(%rip), %rsi
     mov $fork_failure_len, %rdx
+    jmp report_failure
+fail_sleep:
+    lea sleep_failure(%rip), %rsi
+    mov $sleep_failure_len, %rdx
+    jmp report_failure
+fail_sleep_rel:
+    lea sleep_rel_failure(%rip), %rsi
+    mov $sleep_rel_failure_len, %rdx
+    jmp report_failure
+fail_sleep_abs:
+    lea sleep_abs_failure(%rip), %rsi
+    mov $sleep_abs_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr:
+    lea sleep_intr_failure(%rip), %rsi
+    mov $sleep_intr_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr_ret:
+    lea sleep_intr_ret_failure(%rip), %rsi
+    mov $sleep_intr_ret_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr_handler:
+    lea sleep_intr_handler_failure(%rip), %rsi
+    mov $sleep_intr_handler_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr_fork_eagain:
+    lea sleep_intr_fork_eagain_failure(%rip), %rsi
+    mov $sleep_intr_fork_eagain_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr_fork_enosys:
+    lea sleep_intr_fork_enosys_failure(%rip), %rsi
+    mov $sleep_intr_fork_enosys_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr_echild:
+    lea sleep_intr_echild_failure(%rip), %rsi
+    mov $sleep_intr_echild_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr_eintr:
+    lea sleep_intr_eintr_failure(%rip), %rsi
+    mov $sleep_intr_eintr_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr_esrch:
+    lea sleep_intr_esrch_failure(%rip), %rsi
+    mov $sleep_intr_esrch_failure_len, %rdx
+    jmp report_failure
+fail_sleep_intr_einval:
+    lea sleep_intr_einval_failure(%rip), %rsi
+    mov $sleep_intr_einval_failure_len, %rdx
+    jmp report_failure
+fail_pipe_block:
+    lea pipe_block_failure(%rip), %rsi
+    mov $pipe_block_failure_len, %rdx
+    jmp report_failure
+fail_poll_block:
+    lea poll_block_failure(%rip), %rsi
+    mov $poll_block_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s1:
+    lea epoll_s1_failure(%rip), %rsi
+    mov $epoll_s1_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s2:
+    lea epoll_s2_failure(%rip), %rsi
+    mov $epoll_s2_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s3:
+    lea epoll_s3_failure(%rip), %rsi
+    mov $epoll_s3_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s4:
+    lea epoll_s4_failure(%rip), %rsi
+    mov $epoll_s4_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s5:
+    lea epoll_s5_failure(%rip), %rsi
+    mov $epoll_s5_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s6:
+    lea epoll_s6_failure(%rip), %rsi
+    mov $epoll_s6_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s7:
+    lea epoll_s7_failure(%rip), %rsi
+    mov $epoll_s7_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s8:
+    lea epoll_s8_failure(%rip), %rsi
+    mov $epoll_s8_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s9:
+    lea epoll_s9_failure(%rip), %rsi
+    mov $epoll_s9_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s10:
+    lea epoll_s10_failure(%rip), %rsi
+    mov $epoll_s10_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s11:
+    lea epoll_s11_failure(%rip), %rsi
+    mov $epoll_s11_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s12:
+    lea epoll_s12_failure(%rip), %rsi
+    mov $epoll_s12_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s13:
+    lea epoll_s13_failure(%rip), %rsi
+    mov $epoll_s13_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s14:
+    lea epoll_s14_failure(%rip), %rsi
+    mov $epoll_s14_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s15:
+    lea epoll_s15_failure(%rip), %rsi
+    mov $epoll_s15_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s16:
+    lea epoll_s16_failure(%rip), %rsi
+    mov $epoll_s16_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s17:
+    lea epoll_s17_failure(%rip), %rsi
+    mov $epoll_s17_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s18:
+    lea epoll_s18_failure(%rip), %rsi
+    mov $epoll_s18_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s19:
+    lea epoll_s19_failure(%rip), %rsi
+    mov $epoll_s19_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s20:
+    lea epoll_s20_failure(%rip), %rsi
+    mov $epoll_s20_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s21:
+    lea epoll_s21_failure(%rip), %rsi
+    mov $epoll_s21_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s22:
+    lea epoll_s22_failure(%rip), %rsi
+    mov $epoll_s22_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s23:
+    lea epoll_s23_failure(%rip), %rsi
+    mov $epoll_s23_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s24:
+    lea epoll_s24_failure(%rip), %rsi
+    mov $epoll_s24_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s25:
+    lea epoll_s25_failure(%rip), %rsi
+    mov $epoll_s25_failure_len, %rdx
+    jmp report_failure
+fail_epoll_s26:
+    lea epoll_s26_failure(%rip), %rsi
+    mov $epoll_s26_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s1:
+    lea timerfd_s1_failure(%rip), %rsi
+    mov $timerfd_s1_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s2:
+    lea timerfd_s2_failure(%rip), %rsi
+    mov $timerfd_s2_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s3:
+    lea timerfd_s3_failure(%rip), %rsi
+    mov $timerfd_s3_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s4:
+    lea timerfd_s4_failure(%rip), %rsi
+    mov $timerfd_s4_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s5:
+    lea timerfd_s5_failure(%rip), %rsi
+    mov $timerfd_s5_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s6:
+    lea timerfd_s6_failure(%rip), %rsi
+    mov $timerfd_s6_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s7:
+    lea timerfd_s7_failure(%rip), %rsi
+    mov $timerfd_s7_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s8:
+    lea timerfd_s8_failure(%rip), %rsi
+    mov $timerfd_s8_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s9:
+    lea timerfd_s9_failure(%rip), %rsi
+    mov $timerfd_s9_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s10:
+    lea timerfd_s10_failure(%rip), %rsi
+    mov $timerfd_s10_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s11:
+    lea timerfd_s11_failure(%rip), %rsi
+    mov $timerfd_s11_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s12:
+    lea timerfd_s12_failure(%rip), %rsi
+    mov $timerfd_s12_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s13:
+    lea timerfd_s13_failure(%rip), %rsi
+    mov $timerfd_s13_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s14:
+    lea timerfd_s14_failure(%rip), %rsi
+    mov $timerfd_s14_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s15:
+    lea timerfd_s15_failure(%rip), %rsi
+    mov $timerfd_s15_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s16:
+    lea timerfd_s16_failure(%rip), %rsi
+    mov $timerfd_s16_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s17:
+    lea timerfd_s17_failure(%rip), %rsi
+    mov $timerfd_s17_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s18:
+    lea timerfd_s18_failure(%rip), %rsi
+    mov $timerfd_s18_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s19:
+    lea timerfd_s19_failure(%rip), %rsi
+    mov $timerfd_s19_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s20:
+    lea timerfd_s20_failure(%rip), %rsi
+    mov $timerfd_s20_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s21:
+    lea timerfd_s21_failure(%rip), %rsi
+    mov $timerfd_s21_failure_len, %rdx
+    jmp report_failure
+fail_timerfd_s22:
+    lea timerfd_s22_failure(%rip), %rsi
+    mov $timerfd_s22_failure_len, %rdx
+    jmp report_failure
+
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -1179,6 +2264,207 @@ thread_failure:
 futex_timeout_message:
     .ascii "AETHER_LINUX_FUTEX_TIMEOUT_OK etimedout=ok\n"
     .set futex_timeout_message_len, . - futex_timeout_message
+nanosleep_message:
+    .ascii "AETHER_LINUX_NANOSLEEP_OK relative=ok absolute=ok eintr=ok\n"
+    .set nanosleep_message_len, . - nanosleep_message
+sleep_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=setup\n"
+    .set sleep_failure_len, . - sleep_failure
+sleep_rel_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=relative\n"
+    .set sleep_rel_failure_len, . - sleep_rel_failure
+sleep_abs_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=absolute\n"
+    .set sleep_abs_failure_len, . - sleep_abs_failure
+sleep_intr_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr\n"
+    .set sleep_intr_failure_len, . - sleep_intr_failure
+sleep_intr_ret_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_ret\n"
+    .set sleep_intr_ret_failure_len, . - sleep_intr_ret_failure
+sleep_intr_handler_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_handler\n"
+    .set sleep_intr_handler_failure_len, . - sleep_intr_handler_failure
+sleep_intr_echild_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_echild\n"
+    .set sleep_intr_echild_failure_len, . - sleep_intr_echild_failure
+sleep_intr_fork_eagain_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_fork_eagain\n"
+    .set sleep_intr_fork_eagain_failure_len, . - sleep_intr_fork_eagain_failure
+sleep_intr_fork_enosys_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_fork_enosys\n"
+    .set sleep_intr_fork_enosys_failure_len, . - sleep_intr_fork_enosys_failure
+sleep_intr_eintr_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_wait4_eintr\n"
+    .set sleep_intr_eintr_failure_len, . - sleep_intr_eintr_failure
+sleep_intr_esrch_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_wait4_esrch\n"
+    .set sleep_intr_esrch_failure_len, . - sleep_intr_esrch_failure
+sleep_intr_einval_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_wait4_einval\n"
+    .set sleep_intr_einval_failure_len, . - sleep_intr_einval_failure
+pipe_block_message:
+    .ascii "AETHER_LINUX_PIPE_BLOCK_OK write=block read=block eof=ok cross_process=ok\n"
+    .set pipe_block_message_len, . - pipe_block_message
+pipe_block_failure:
+    .ascii "AETHER_LINUX_PIPE_BLOCK_FAIL\n"
+    .set pipe_block_failure_len, . - pipe_block_failure
+poll_block_message:
+    .ascii "AETHER_LINUX_POLL_BLOCK_OK finite=ok infinite=ok pipe=ok eventfd=ok\n"
+    .set poll_block_message_len, . - poll_block_message
+poll_block_failure:
+    .ascii "AETHER_LINUX_POLL_BLOCK_FAIL\n"
+    .set poll_block_failure_len, . - poll_block_failure
+epoll_block_message:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_OK finite=ok infinite=ok level=ok edge=ok oneshot=ok\n"
+    .set epoll_block_message_len, . - epoll_block_message
+epoll_s1_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=1\n"
+    .set epoll_s1_failure_len, . - epoll_s1_failure
+epoll_s2_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=2\n"
+    .set epoll_s2_failure_len, . - epoll_s2_failure
+epoll_s3_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=3\n"
+    .set epoll_s3_failure_len, . - epoll_s3_failure
+epoll_s4_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=4\n"
+    .set epoll_s4_failure_len, . - epoll_s4_failure
+epoll_s5_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=5\n"
+    .set epoll_s5_failure_len, . - epoll_s5_failure
+epoll_s6_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=6\n"
+    .set epoll_s6_failure_len, . - epoll_s6_failure
+epoll_s7_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=7\n"
+    .set epoll_s7_failure_len, . - epoll_s7_failure
+epoll_s8_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=8\n"
+    .set epoll_s8_failure_len, . - epoll_s8_failure
+epoll_s9_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=9\n"
+    .set epoll_s9_failure_len, . - epoll_s9_failure
+epoll_s10_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=10\n"
+    .set epoll_s10_failure_len, . - epoll_s10_failure
+epoll_s11_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=11\n"
+    .set epoll_s11_failure_len, . - epoll_s11_failure
+epoll_s12_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=12\n"
+    .set epoll_s12_failure_len, . - epoll_s12_failure
+epoll_s13_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=13\n"
+    .set epoll_s13_failure_len, . - epoll_s13_failure
+epoll_s14_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=14\n"
+    .set epoll_s14_failure_len, . - epoll_s14_failure
+epoll_s15_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=15\n"
+    .set epoll_s15_failure_len, . - epoll_s15_failure
+epoll_s16_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=16\n"
+    .set epoll_s16_failure_len, . - epoll_s16_failure
+epoll_s17_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=17\n"
+    .set epoll_s17_failure_len, . - epoll_s17_failure
+epoll_s18_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=18\n"
+    .set epoll_s18_failure_len, . - epoll_s18_failure
+epoll_s19_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=19\n"
+    .set epoll_s19_failure_len, . - epoll_s19_failure
+epoll_s20_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=20\n"
+    .set epoll_s20_failure_len, . - epoll_s20_failure
+epoll_s21_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=21\n"
+    .set epoll_s21_failure_len, . - epoll_s21_failure
+epoll_s22_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=22\n"
+    .set epoll_s22_failure_len, . - epoll_s22_failure
+epoll_s23_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=23\n"
+    .set epoll_s23_failure_len, . - epoll_s23_failure
+epoll_s24_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=24\n"
+    .set epoll_s24_failure_len, . - epoll_s24_failure
+epoll_s25_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=25\n"
+    .set epoll_s25_failure_len, . - epoll_s25_failure
+epoll_s26_failure:
+    .ascii "AETHER_LINUX_EPOLL_BLOCK_FAIL stage=26\n"
+    .set epoll_s26_failure_len, . - epoll_s26_failure
+timerfd_message:
+    .ascii "AETHER_LINUX_TIMERFD_OK oneshot=ok periodic=ok poll=ok epoll=ok\n"
+    .set timerfd_message_len, . - timerfd_message
+timerfd_s1_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=1\n"
+    .set timerfd_s1_failure_len, . - timerfd_s1_failure
+timerfd_s2_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=2\n"
+    .set timerfd_s2_failure_len, . - timerfd_s2_failure
+timerfd_s3_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=3\n"
+    .set timerfd_s3_failure_len, . - timerfd_s3_failure
+timerfd_s4_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=4\n"
+    .set timerfd_s4_failure_len, . - timerfd_s4_failure
+timerfd_s5_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=5\n"
+    .set timerfd_s5_failure_len, . - timerfd_s5_failure
+timerfd_s6_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=6\n"
+    .set timerfd_s6_failure_len, . - timerfd_s6_failure
+timerfd_s7_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=7\n"
+    .set timerfd_s7_failure_len, . - timerfd_s7_failure
+timerfd_s8_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=8\n"
+    .set timerfd_s8_failure_len, . - timerfd_s8_failure
+timerfd_s9_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=9\n"
+    .set timerfd_s9_failure_len, . - timerfd_s9_failure
+timerfd_s10_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=10\n"
+    .set timerfd_s10_failure_len, . - timerfd_s10_failure
+timerfd_s11_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=11\n"
+    .set timerfd_s11_failure_len, . - timerfd_s11_failure
+timerfd_s12_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=12\n"
+    .set timerfd_s12_failure_len, . - timerfd_s12_failure
+timerfd_s13_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=13\n"
+    .set timerfd_s13_failure_len, . - timerfd_s13_failure
+timerfd_s14_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=14\n"
+    .set timerfd_s14_failure_len, . - timerfd_s14_failure
+timerfd_s15_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=15\n"
+    .set timerfd_s15_failure_len, . - timerfd_s15_failure
+timerfd_s16_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=16\n"
+    .set timerfd_s16_failure_len, . - timerfd_s16_failure
+timerfd_s17_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=17\n"
+    .set timerfd_s17_failure_len, . - timerfd_s17_failure
+timerfd_s18_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=18\n"
+    .set timerfd_s18_failure_len, . - timerfd_s18_failure
+timerfd_s19_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=19\n"
+    .set timerfd_s19_failure_len, . - timerfd_s19_failure
+timerfd_s20_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=20\n"
+    .set timerfd_s20_failure_len, . - timerfd_s20_failure
+timerfd_s21_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=21\n"
+    .set timerfd_s21_failure_len, . - timerfd_s21_failure
+timerfd_s22_failure:
+    .ascii "AETHER_LINUX_TIMERFD_FAIL stage=22\n"
+    .set timerfd_s22_failure_len, . - timerfd_s22_failure
 mremap_message:
     .ascii "AETHER_LINUX_MREMAP_OK grow=ok data=ok\n"
     .set mremap_message_len, . - mremap_message

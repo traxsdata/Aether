@@ -141,6 +141,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         return frame;
     }
     let number = unsafe { (*frame).rax };
+    scheduler::linux_begin_syscall(number);
     let first = unsafe { (*frame).rdi };
     let second = unsafe { (*frame).rsi };
     let third = unsafe { (*frame).rdx };
@@ -150,12 +151,22 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     };
 
     let result = match number {
-        0 => linux_read(pml4, first, second, third),
-        1 => linux_write(pml4, first, second, third),
+        0 => return linux_read(frame, pml4, first, second, third),
+        1 => return linux_write(frame, pml4, first, second, third),
         3 => scheduler::linux_close(first),
         8 => scheduler::linux_lseek(first, second as i64, third),
         4 | 6 => linux_stat(pml4, first, second),
-        7 => linux_poll(pml4, first, second, third),
+        7 => return linux_poll(frame, pml4, first, second, third),
+        35 => return linux_nanosleep(frame, pml4, first, second),
+        230 => {
+            return linux_clock_nanosleep(frame, pml4, first, second, third, unsafe {
+                (*frame).r10
+            });
+        }
+        283 => scheduler::linux_timerfd_create(first, second)
+            .map_or_else(|error| error, |fd| fd as i64),
+        286 => linux_timerfd_settime(pml4, first, second, third, unsafe { (*frame).r10 }),
+        287 => linux_timerfd_gettime(pml4, first, second),
         5 => linux_fstat(pml4, first, second),
         13 => linux_rt_sigaction(pml4, first, second, third),
         14 => linux_rt_sigprocmask(pml4, first, second, third),
@@ -175,12 +186,13 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             unsafe { (*frame).r10 },
             unsafe { (*frame).r8 },
         ),
-        232 => linux_epoll_wait(pml4, first, second, third, unsafe { (*frame).r10 }),
+        232 => return linux_epoll_wait(frame, pml4, first, second, third, unsafe { (*frame).r10 }),
         233 => linux_epoll_ctl(pml4, first, second, third, unsafe { (*frame).r10 }),
         28 => 0,
         32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
         33 => scheduler::linux_dup2(first, second).map_or_else(|error| error, |fd| fd as i64),
         39 => scheduler::linux_getpid() as i64,
+        110 => scheduler::linux_getppid() as i64,
         109 => linux_setpgid(first, second),
         112 => scheduler::linux_setsid(),
         121 => linux_getpgid(first),
@@ -264,6 +276,8 @@ fn linux_result(frame: *mut InterruptFrame, result: i64) -> *mut InterruptFrame 
 }
 
 const LINUX_EFAULT: i64 = -14;
+const LINUX_EINTR: i64 = -4;
+const LINUX_EPIPE: i64 = -32;
 const LINUX_EINVAL: i64 = -22;
 const LINUX_ENOSYS: i64 = -38;
 const LINUX_ESRCH: i64 = -3;
@@ -297,15 +311,42 @@ fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i6
     scheduler::linux_open_read(path).map_or_else(|error| error, |fd| fd as i64)
 }
 
-fn linux_read(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {
+fn linux_read(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    descriptor: u64,
+    pointer: u64,
+    length: u64,
+) -> *mut InterruptFrame {
+    let _ = scheduler::linux_take_restart(0);
     if length as usize > MAX_SYSCALL_IO {
-        return LINUX_EINVAL;
+        return linux_result(frame, LINUX_EINVAL);
     }
-    // SAFETY: The range is validated and the syscall path is non-preemptible.
+    if length == 0 {
+        return linux_result(frame, 0);
+    }
+    // SAFETY: The range is validated once and the syscall path is
+    // non-preemptible; the buffer remains mapped while the task is parked.
     let Some(buffer) = (unsafe { user_bytes_mut(pml4, pointer, length) }) else {
-        return LINUX_EFAULT;
+        return linux_result(frame, LINUX_EFAULT);
     };
-    scheduler::linux_read(descriptor, buffer).map_or_else(|error| error, |count| count as i64)
+    match scheduler::linux_read(descriptor, buffer) {
+        Ok(count) => linux_result(frame, count as i64),
+        Err(LINUX_EAGAIN) => {
+            let Some((index, false)) = scheduler::linux_pipe_end(descriptor) else {
+                return linux_result(frame, LINUX_EAGAIN);
+            };
+            // An empty pipe with no writer is end-of-file, not a wait.
+            if scheduler::linux_pipe_writers(index) == 0 {
+                return linux_result(frame, 0);
+            }
+            if scheduler::linux_signal_pending() {
+                return linux_result(frame, LINUX_EINTR);
+            }
+            scheduler::linux_park(frame, 0, scheduler::LinuxWait::PipeRead(index), None)
+        }
+        Err(error) => linux_result(frame, error),
+    }
 }
 
 fn linux_pread(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64, offset: u64) -> i64 {
@@ -814,34 +855,61 @@ fn linux_epoll_ctl(
         .map_or_else(|error| error, |()| 0)
 }
 
+/// Converts a Linux millisecond timeout into an absolute tick deadline.
+/// `None` means an infinite wait; a zero timeout yields the current tick so
+/// the caller returns after one non-blocking check.
+fn linux_poll_deadline(timeout: i64) -> Option<u64> {
+    let now = scheduler::ticks();
+    if timeout < 0 {
+        None
+    } else if timeout == 0 {
+        Some(now)
+    } else {
+        let ticks = (timeout as u64).div_ceil(10).max(1);
+        Some(now.saturating_add(ticks))
+    }
+}
+
 fn linux_epoll_wait(
+    frame: *mut InterruptFrame,
     pml4: PhysFrame,
     epoll_fd: u64,
     events_pointer: u64,
     max_events: u64,
     timeout: u64,
-) -> i64 {
-    // Only timeout-zero probing is supported; blocking waits need a scheduler
-    // wait queue to handle readiness, deadlines, and signal interruption.
-    if timeout != 0 {
-        return -95;
-    }
+) -> *mut InterruptFrame {
     if max_events == 0 || max_events > 16 {
-        return LINUX_EINVAL;
+        return linux_result(frame, LINUX_EINVAL);
     }
+    let timeout = timeout as i64;
+    let deadline = match scheduler::linux_take_restart(232) {
+        Some(deadline) => deadline,
+        None => linux_poll_deadline(timeout),
+    };
     let mut events = [scheduler::LinuxEpollEvent { events: 0, data: 0 }; 16];
     let count = match scheduler::linux_epoll_wait(epoll_fd, &mut events[..max_events as usize]) {
         Ok(count) => count,
-        Err(error) => return error,
+        Err(error) => return linux_result(frame, error),
     };
-    let mut buffer = [0u8; 16 * 12];
-    for (index, event) in events[..count].iter().enumerate() {
-        let offset = index * 12;
-        buffer[offset..offset + 4].copy_from_slice(&event.events.to_ne_bytes());
-        buffer[offset + 4..offset + 12].copy_from_slice(&event.data.to_ne_bytes());
+    if count != 0 {
+        let mut buffer = [0u8; 16 * 12];
+        for (index, event) in events[..count].iter().enumerate() {
+            let offset = index * 12;
+            buffer[offset..offset + 4].copy_from_slice(&event.events.to_ne_bytes());
+            buffer[offset + 4..offset + 12].copy_from_slice(&event.data.to_ne_bytes());
+        }
+        return match write_user_bytes(pml4, events_pointer, &buffer[..count * 12]) {
+            Some(()) => linux_result(frame, count as i64),
+            None => linux_result(frame, LINUX_EFAULT),
+        };
     }
-    write_user_bytes(pml4, events_pointer, &buffer[..count * 12])
-        .map_or(LINUX_EFAULT, |()| count as i64)
+    if timeout == 0 || deadline.is_some_and(|deadline| scheduler::ticks() >= deadline) {
+        return linux_result(frame, 0);
+    }
+    if scheduler::linux_signal_pending() {
+        return linux_result(frame, LINUX_EINTR);
+    }
+    scheduler::linux_park(frame, 232, scheduler::LinuxWait::Poll, deadline)
 }
 
 fn linux_pipe2(pml4: PhysFrame, fds_pointer: u64, _flags: u64) -> i64 {
@@ -854,18 +922,27 @@ fn linux_pipe2(pml4: PhysFrame, fds_pointer: u64, _flags: u64) -> i64 {
     write_user_bytes(pml4, fds_pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
 }
 
-fn linux_poll(pml4: PhysFrame, fds_pointer: u64, count: u64, timeout: u64) -> i64 {
-    // poll's timeout is signed: nonzero includes both finite and infinite waits.
-    if timeout != 0 {
-        return -95;
-    }
+fn linux_poll(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    fds_pointer: u64,
+    count: u64,
+    timeout: u64,
+) -> *mut InterruptFrame {
     if count > 16 {
-        return LINUX_EINVAL;
+        return linux_result(frame, LINUX_EINVAL);
     }
+    // poll's timeout is signed: negative waits forever, zero probes once.
+    let timeout = timeout as i64;
+    let deadline = match scheduler::linux_take_restart(7) {
+        Some(deadline) => deadline,
+        None => linux_poll_deadline(timeout),
+    };
     let length = count * 8;
-    // SAFETY: The pollfd array is validated as writable user memory.
+    // SAFETY: The pollfd array is validated as writable user memory on
+    // every entry; the task is parked with the syscall rewound.
     let Some(fds) = (unsafe { user_bytes_mut(pml4, fds_pointer, length) }) else {
-        return LINUX_EFAULT;
+        return linux_result(frame, LINUX_EFAULT);
     };
     let mut ready = 0i64;
     for index in 0..count as usize {
@@ -882,7 +959,16 @@ fn linux_poll(pml4: PhysFrame, fds_pointer: u64, count: u64, timeout: u64) -> i6
             ready += 1;
         }
     }
-    ready
+    if ready != 0 || (count == 0 && timeout == 0) {
+        return linux_result(frame, ready);
+    }
+    if timeout == 0 || deadline.is_some_and(|deadline| scheduler::ticks() >= deadline) {
+        return linux_result(frame, 0);
+    }
+    if scheduler::linux_signal_pending() {
+        return linux_result(frame, LINUX_EINTR);
+    }
+    scheduler::linux_park(frame, 7, scheduler::LinuxWait::Poll, deadline)
 }
 
 fn linux_getdents(
@@ -1532,6 +1618,190 @@ fn linux_clock_gettime(pml4: PhysFrame, pointer: u64) -> i64 {
     write_user_bytes(pml4, pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
 }
 
+const NANOS_PER_TICK: u64 = 10_000_000;
+
+/// Reads and validates a `timespec`. Negative values and out-of-range
+/// nanoseconds are rejected rather than normalized.
+fn read_timespec(pml4: PhysFrame, pointer: u64) -> Option<(u64, u64)> {
+    let raw = user_bytes(pml4, pointer, 16, false)?;
+    let seconds = i64::from_ne_bytes(raw[..8].try_into().ok()?);
+    let nanoseconds = i64::from_ne_bytes(raw[8..].try_into().ok()?);
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+        return None;
+    }
+    Some((seconds as u64, nanoseconds as u64))
+}
+
+fn timespec_ticks(seconds: u64, nanoseconds: u64) -> Option<u64> {
+    seconds
+        .checked_mul(100)?
+        .checked_add(nanoseconds.div_ceil(NANOS_PER_TICK))
+}
+
+fn write_timespec(pml4: PhysFrame, pointer: u64, ticks: u64) -> Option<()> {
+    let seconds = ticks / 100;
+    let nanos = (ticks % 100) * NANOS_PER_TICK;
+    let mut buffer = [0u8; 16];
+    buffer[..8].copy_from_slice(&(seconds as i64).to_le_bytes());
+    buffer[8..].copy_from_slice(&(nanos as i64).to_le_bytes());
+    write_user_bytes(pml4, pointer, &buffer)
+}
+
+fn write_itimerspec(pml4: PhysFrame, pointer: u64, interval: u64, remaining: u64) -> Option<()> {
+    let mut buffer = [0u8; 32];
+    let interval_seconds = interval / 100;
+    let interval_nanos = (interval % 100) * NANOS_PER_TICK;
+    let remaining_seconds = remaining / 100;
+    let remaining_nanos = (remaining % 100) * NANOS_PER_TICK;
+    buffer[..8].copy_from_slice(&(interval_seconds as i64).to_le_bytes());
+    buffer[8..16].copy_from_slice(&(interval_nanos as i64).to_le_bytes());
+    buffer[16..24].copy_from_slice(&(remaining_seconds as i64).to_le_bytes());
+    buffer[24..].copy_from_slice(&(remaining_nanos as i64).to_le_bytes());
+    write_user_bytes(pml4, pointer, &buffer)
+}
+
+fn linux_nanosleep(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    request_pointer: u64,
+    remaining_pointer: u64,
+) -> *mut InterruptFrame {
+    linux_sleep_common(frame, pml4, 35, 0, request_pointer, remaining_pointer)
+}
+
+fn linux_clock_nanosleep(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    clockid: u64,
+    flags: u64,
+    request_pointer: u64,
+    remaining_pointer: u64,
+) -> *mut InterruptFrame {
+    if clockid > 1 || flags & !1 != 0 {
+        return linux_result(frame, LINUX_EINVAL);
+    }
+    linux_sleep_common(
+        frame,
+        pml4,
+        230,
+        flags & 1,
+        request_pointer,
+        remaining_pointer,
+    )
+}
+
+/// Shared relative/absolute sleep. `TIMER_ABSTIME` selects an absolute
+/// monotonic deadline. A deliverable pending signal returns `EINTR`; the
+/// relative `nanosleep` form also reports the remaining time.
+fn linux_sleep_common(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    syscall: u64,
+    flags: u64,
+    request_pointer: u64,
+    remaining_pointer: u64,
+) -> *mut InterruptFrame {
+    let absolute = flags & 1 != 0;
+    let deadline = match scheduler::linux_take_restart(syscall) {
+        Some(Some(deadline)) => deadline,
+        Some(None) => scheduler::ticks(),
+        None => {
+            let Some((seconds, nanoseconds)) = read_timespec(pml4, request_pointer) else {
+                return linux_result(frame, LINUX_EINVAL);
+            };
+            let Some(ticks) = timespec_ticks(seconds, nanoseconds) else {
+                return linux_result(frame, LINUX_EINVAL);
+            };
+            if absolute {
+                ticks
+            } else {
+                scheduler::ticks().saturating_add(ticks)
+            }
+        }
+    };
+    if remaining_pointer != 0 && !linux_user_range_valid(pml4, remaining_pointer, 16, true) {
+        return linux_result(frame, LINUX_EFAULT);
+    }
+    let now = scheduler::ticks();
+    if scheduler::linux_signal_pending() {
+        if remaining_pointer != 0 && syscall == 35 {
+            let _ = write_timespec(pml4, remaining_pointer, deadline.saturating_sub(now));
+        }
+        return linux_result(frame, LINUX_EINTR);
+    }
+    if now >= deadline {
+        return linux_result(frame, 0);
+    }
+    scheduler::linux_park(frame, syscall, scheduler::LinuxWait::Sleep, Some(deadline))
+}
+
+fn linux_timerfd_settime(
+    pml4: PhysFrame,
+    fd: u64,
+    flags: u64,
+    new_pointer: u64,
+    old_pointer: u64,
+) -> i64 {
+    if flags & !1 != 0 {
+        return LINUX_EINVAL;
+    }
+    let Some(raw) = user_bytes(pml4, new_pointer, 32, false) else {
+        return LINUX_EFAULT;
+    };
+    let read = |offset: usize| -> Option<(u64, u64)> {
+        let seconds = i64::from_ne_bytes(raw[offset..offset + 8].try_into().ok()?);
+        let nanoseconds = i64::from_ne_bytes(raw[offset + 8..offset + 16].try_into().ok()?);
+        if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+            return None;
+        }
+        Some((seconds as u64, nanoseconds as u64))
+    };
+    let Some((interval_seconds, interval_nanos)) = read(0) else {
+        return LINUX_EINVAL;
+    };
+    let Some((value_seconds, value_nanos)) = read(16) else {
+        return LINUX_EINVAL;
+    };
+    let Some(interval) = timespec_ticks(interval_seconds, interval_nanos) else {
+        return LINUX_EINVAL;
+    };
+    let Some(value) = timespec_ticks(value_seconds, value_nanos) else {
+        return LINUX_EINVAL;
+    };
+    if old_pointer != 0 && !linux_user_range_valid(pml4, old_pointer, 32, true) {
+        return LINUX_EFAULT;
+    }
+    let deadline = if value_seconds == 0 && value_nanos == 0 {
+        None
+    } else if flags & 1 != 0 {
+        Some(value)
+    } else {
+        Some(scheduler::ticks().saturating_add(value.max(1)))
+    };
+    match scheduler::linux_timerfd_settime(fd, deadline, interval) {
+        Ok((remaining, previous_interval)) => {
+            if old_pointer != 0
+                && write_itimerspec(pml4, old_pointer, previous_interval, remaining).is_none()
+            {
+                return LINUX_EFAULT;
+            }
+            0
+        }
+        Err(error) => error,
+    }
+}
+
+fn linux_timerfd_gettime(pml4: PhysFrame, fd: u64, current_pointer: u64) -> i64 {
+    if !linux_user_range_valid(pml4, current_pointer, 32, true) {
+        return LINUX_EFAULT;
+    }
+    match scheduler::linux_timerfd_gettime(fd) {
+        Ok((remaining, interval)) => write_itimerspec(pml4, current_pointer, interval, remaining)
+            .map_or(LINUX_EFAULT, |()| 0),
+        Err(error) => error,
+    }
+}
+
 fn linux_getrandom(pml4: PhysFrame, pointer: u64, length: u64) -> i64 {
     if length as usize > MAX_SYSCALL_IO {
         return LINUX_EINVAL;
@@ -1579,18 +1849,40 @@ fn write_user_u64(pml4: PhysFrame, pointer: u64) -> Option<()> {
     write_user_bytes(pml4, pointer, &scheduler::linux_fs_base().to_le_bytes())
 }
 
-fn linux_write(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {
+fn linux_write(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    descriptor: u64,
+    pointer: u64,
+    length: u64,
+) -> *mut InterruptFrame {
+    let _ = scheduler::linux_take_restart(1);
     if length as usize > MAX_SYSCALL_IO {
-        return LINUX_EINVAL;
+        return linux_result(frame, LINUX_EINVAL);
     }
     let Some(bytes) = user_bytes(pml4, pointer, length, false) else {
-        return LINUX_EFAULT;
+        return linux_result(frame, LINUX_EFAULT);
     };
     if descriptor == 1 || descriptor == 2 {
         serial::write_bytes(bytes);
-        return length as i64;
+        return linux_result(frame, length as i64);
     }
-    scheduler::linux_write_file(descriptor, bytes).map_or_else(|error| error, |count| count as i64)
+    match scheduler::linux_write_file(descriptor, bytes) {
+        Ok(count) => linux_result(frame, count as i64),
+        Err(LINUX_EAGAIN) => {
+            let Some((index, true)) = scheduler::linux_pipe_end(descriptor) else {
+                return linux_result(frame, LINUX_EAGAIN);
+            };
+            if scheduler::linux_pipe_readers(index) == 0 {
+                return linux_result(frame, LINUX_EPIPE);
+            }
+            if scheduler::linux_signal_pending() {
+                return linux_result(frame, LINUX_EINTR);
+            }
+            scheduler::linux_park(frame, 1, scheduler::LinuxWait::PipeWrite(index), None)
+        }
+        Err(error) => linux_result(frame, error),
+    }
 }
 
 fn write_console(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {

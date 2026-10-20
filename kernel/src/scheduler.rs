@@ -92,14 +92,25 @@ enum LinuxFileSource {
     Pipe { index: usize, write: bool },
     EventFd { index: usize },
     Epoll { index: usize },
+    TimerFd { index: usize },
     Inotify,
 }
 
 const PIPE_BYTES: usize = 512;
-const MAX_PIPES: usize = 2;
+/// Global pipe slots. Forked processes share the same slot, so a write on one
+/// side is visible to the other.
+const MAX_PIPES: usize = 4;
 const MAX_EVENTFDS: usize = 2;
 const MAX_EPOLLS: usize = 1;
 const MAX_EPOLL_WATCH: usize = 8;
+const MAX_TIMERFDS: usize = 2;
+const POLL_IN: i16 = 1;
+const POLL_OUT: i16 = 4;
+const POLL_ERR: i16 = 8;
+const POLL_HUP: i16 = 0x10;
+const POLL_NVAL: i16 = 0x20;
+const EPOLLET: u32 = 1 << 31;
+const EPOLLONESHOT: u32 = 1 << 30;
 
 /// One ready epoll entry returned to user space.
 #[derive(Clone, Copy)]
@@ -111,14 +122,66 @@ pub struct LinuxEpollEvent {
 }
 
 #[derive(Clone, Copy)]
+struct LinuxEpollWatch {
+    fd: u64,
+    events: u32,
+    data: u64,
+    /// Previous readiness for edge-triggered watches.
+    last_ready: bool,
+    /// Cleared after reporting an `EPOLLONESHOT` watch; `EPOLL_CTL_MOD`
+    /// re-arms it.
+    armed: bool,
+}
+
+#[derive(Clone, Copy)]
 struct LinuxEpoll {
-    watches: [Option<(u64, u32, u64)>; MAX_EPOLL_WATCH],
+    watches: [Option<LinuxEpollWatch>; MAX_EPOLL_WATCH],
 }
 
 impl LinuxEpoll {
     const EMPTY: Self = Self {
         watches: [None; MAX_EPOLL_WATCH],
     };
+}
+
+/// One bounded monotonic timer descriptor.
+#[derive(Clone, Copy)]
+struct LinuxTimerFd {
+    next_expiry: u64,
+    interval: u64,
+    armed: bool,
+}
+
+impl LinuxTimerFd {
+    const EMPTY: Self = Self {
+        next_expiry: 0,
+        interval: 0,
+        armed: false,
+    };
+}
+
+/// Why a task is parked. Wakeups are filtered by this kind so a pipe write
+/// does not spuriously wake an unrelated sleeper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinuxWaitKind {
+    None,
+    Poll,
+    Sleep,
+    PipeRead(usize),
+    PipeWrite(usize),
+}
+
+/// Public wait reasons for syscall handlers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinuxWait {
+    /// A `poll`/`epoll_wait` or timerfd wait; any readiness transition wakes it.
+    Poll,
+    /// An interruptible sleep.
+    Sleep,
+    /// A blocking read on the global pipe slot.
+    PipeRead(usize),
+    /// A blocking write on the global pipe slot.
+    PipeWrite(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -240,11 +303,16 @@ struct Task {
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
     linux_overlay: [Option<LinuxOverlay>; OVERLAY_FILES],
     linux_inotify: Option<LinuxInotify>,
-    linux_pipes: [Option<LinuxPipe>; MAX_PIPES],
     // Descriptor-local allocation map; counters live in EVENTFD_COUNTERS and
     // are addressed by (tgid, slot), so cloned threads share them.
     linux_eventfds: [Option<()>; MAX_EVENTFDS],
     linux_epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
+    linux_timerfds: [Option<LinuxTimerFd>; MAX_TIMERFDS],
+    wait_kind: LinuxWaitKind,
+    wait_deadline: u64,
+    restart_syscall: u64,
+    restart_deadline: u64,
+    restart_infinite: bool,
     sigactions: [Option<SigAction>; MAX_SIGNALS],
     sigblocked: u64,
     sigpending: u64,
@@ -286,9 +354,14 @@ impl Task {
             linux_fds: [None; crate::linux::MAX_FDS],
             linux_overlay: [None; OVERLAY_FILES],
             linux_inotify: None,
-            linux_pipes: [None; MAX_PIPES],
             linux_eventfds: [None; MAX_EVENTFDS],
             linux_epolls: [None; MAX_EPOLLS],
+            linux_timerfds: [None; MAX_TIMERFDS],
+            wait_kind: LinuxWaitKind::None,
+            wait_deadline: 0,
+            restart_syscall: u64::MAX,
+            restart_deadline: 0,
+            restart_infinite: false,
             sigactions: [None; MAX_SIGNALS],
             sigblocked: 0,
             sigpending: 0,
@@ -313,6 +386,9 @@ static TASKS: Global<[Task; MAX_TASKS]> =
     Global(UnsafeCell::new([const { Task::new() }; MAX_TASKS]));
 static EVENTFD_COUNTERS: Global<[[Option<u64>; MAX_EVENTFDS]; MAX_TASKS]> =
     Global(UnsafeCell::new([[None; MAX_EVENTFDS]; MAX_TASKS]));
+/// Pipe storage is global so `fork`-inherited descriptors share one buffer.
+/// A slot is freed once no task references either end.
+static PIPES: Global<[Option<LinuxPipe>; MAX_PIPES]> = Global(UnsafeCell::new([None; MAX_PIPES]));
 #[repr(align(16))]
 struct WorkerStacks([[u8; STACK_SIZE]; WORKER_COUNT]);
 
@@ -1163,9 +1239,9 @@ pub fn linux_clone(
         parent_fds,
         parent_overlay,
         parent_inotify,
-        parent_pipes,
         parent_eventfds,
         parent_epolls,
+        parent_timerfds,
         parent_handles,
     ) = {
         let parent = &tasks[current];
@@ -1182,9 +1258,9 @@ pub fn linux_clone(
             parent.linux_fds,
             parent.linux_overlay,
             parent.linux_inotify,
-            parent.linux_pipes,
             parent.linux_eventfds,
             parent.linux_epolls,
+            parent.linux_timerfds,
             parent.handles,
         )
     };
@@ -1220,9 +1296,9 @@ pub fn linux_clone(
     thread.linux_fds = parent_fds;
     thread.linux_overlay = parent_overlay;
     thread.linux_inotify = parent_inotify;
-    thread.linux_pipes = parent_pipes;
     thread.linux_eventfds = parent_eventfds;
     thread.linux_epolls = parent_epolls;
+    thread.linux_timerfds = parent_timerfds;
     thread.handles = parent_handles;
 
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
@@ -1283,10 +1359,10 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         fds,
         overlay,
         inotify,
-        pipes,
         eventfds,
         parent_tgid,
         epolls,
+        timerfds,
         sigactions,
         sigblocked,
         sigaltstack,
@@ -1303,10 +1379,10 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
             parent.linux_fds,
             parent.linux_overlay,
             parent.linux_inotify,
-            parent.linux_pipes,
             parent.linux_eventfds,
             parent.tgid,
             parent.linux_epolls,
+            parent.linux_timerfds,
             parent.sigactions,
             parent.sigblocked,
             parent.sigaltstack,
@@ -1334,7 +1410,6 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.linux_fds = fds;
     child.linux_overlay = overlay;
     child.linux_inotify = inotify;
-    child.linux_pipes = pipes;
     child.linux_eventfds = eventfds;
     // fork gets a process-private snapshot; threads continue to address the
     // parent's counters via their shared tgid.
@@ -1343,6 +1418,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         counters[slot] = counters[parent_tgid];
     }
     child.linux_epolls = epolls;
+    child.linux_timerfds = timerfds;
     child.sigactions = sigactions;
     child.sigblocked = sigblocked;
     child.sigaltstack = sigaltstack;
@@ -1521,6 +1597,114 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
     woken as i64
 }
 
+/// Parks the current task and rewinds the saved user context to the
+/// `syscall` instruction. When the task is woken, the syscall is re-executed
+/// and the handler resumes with its stored absolute deadline. This is the
+/// kernel's blocking model: a syscall never continues on the kernel stack
+/// after handing control to another task.
+pub fn linux_park(
+    frame: *mut InterruptFrame,
+    syscall: u64,
+    kind: LinuxWait,
+    deadline: Option<u64>,
+) -> *mut InterruptFrame {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    tasks[current].wait_kind = match kind {
+        LinuxWait::Poll => LinuxWaitKind::Poll,
+        LinuxWait::Sleep => LinuxWaitKind::Sleep,
+        LinuxWait::PipeRead(index) => LinuxWaitKind::PipeRead(index),
+        LinuxWait::PipeWrite(index) => LinuxWaitKind::PipeWrite(index),
+    };
+    tasks[current].wait_deadline = deadline.unwrap_or(0);
+    tasks[current].restart_syscall = syscall;
+    tasks[current].restart_deadline = deadline.unwrap_or(0);
+    tasks[current].restart_infinite = deadline.is_none();
+    tasks[current].state = TaskState::Blocked;
+    // SAFETY: `frame` is the live Linux syscall frame on the current task's
+    // kernel stack; the Linux entry stub is always reached through `syscall`
+    // (0f 05), so rewinding two bytes re-executes the instruction on resume.
+    unsafe { (*frame).rip = (*frame).rip.wrapping_sub(2) };
+    yield_current(frame)
+}
+
+/// Clears a stale restart marker when a different syscall starts.
+pub fn linux_begin_syscall(number: u64) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.restart_syscall != u64::MAX && task.restart_syscall != number {
+        task.restart_syscall = u64::MAX;
+        task.wait_kind = LinuxWaitKind::None;
+        task.wait_deadline = 0;
+    }
+}
+
+/// Consumes a restart marker for `number`. `Some(None)` means an infinite
+/// wait; `Some(Some(deadline))` carries the original absolute deadline.
+pub fn linux_take_restart(number: u64) -> Option<Option<u64>> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.restart_syscall != number {
+        return None;
+    }
+    let deadline = if task.restart_infinite {
+        None
+    } else {
+        Some(task.restart_deadline)
+    };
+    task.restart_syscall = u64::MAX;
+    task.wait_kind = LinuxWaitKind::None;
+    task.wait_deadline = 0;
+    Some(deadline)
+}
+
+fn linux_wake_matching(matches: impl Fn(LinuxWaitKind) -> bool) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    for task in tasks.iter_mut() {
+        if task.state == TaskState::Blocked && matches(task.wait_kind) {
+            task.wait_kind = LinuxWaitKind::None;
+            task.wait_deadline = 0;
+            task.state = TaskState::Ready;
+        }
+    }
+}
+
+/// Wakes every poll, epoll, and timerfd waiter. Spurious wakeups are harmless:
+/// the syscall handler re-evaluates readiness and parks again.
+pub fn linux_wake_pollers() {
+    linux_wake_matching(|kind| kind == LinuxWaitKind::Poll);
+}
+
+/// Wakes tasks blocked on either end of a pipe when its state changes.
+fn linux_wake_pipe(index: usize) {
+    linux_wake_matching(|kind| {
+        matches!(
+            kind,
+            LinuxWaitKind::PipeRead(slot) | LinuxWaitKind::PipeWrite(slot) if slot == index
+        )
+    });
+}
+
+/// Returns true when an unblocked signal with an installed handler is pending.
+/// This is the "deliverable" condition used for `EINTR`.
+#[must_use]
+pub fn linux_signal_pending() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return false;
+    }
+    let pending = task.sigpending & !task.sigblocked;
+    if pending == 0 {
+        return false;
+    }
+    (0..MAX_SIGNALS).any(|index| {
+        pending & (1u64 << index) != 0
+            && task.sigactions[index]
+                .is_some_and(|action| action.handler != 0 && action.restorer != 0)
+    })
+}
+
 /// Installs a signal action for the current task.
 pub fn linux_set_sigaction(signum: usize, action: SigAction) {
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -1621,9 +1805,13 @@ pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64
                 task.wait_pid = 0;
                 task.wait_status_pointer = 0;
             }
-            // A queued signal interrupts blocking syscall waits. The handler
-            // is delivered from the normal timer path.
-            unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64 };
+            // A queued signal interrupts blocking syscall waits. Restartable
+            // poll/sleep/pipe waits resume at the syscall instruction so the
+            // handler can report EINTR (and remaining time); futex and wait4
+            // use the saved-frame result directly.
+            if task.restart_syscall == u64::MAX {
+                unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64 };
+            }
             task.futex_address = 0;
             task.futex_deadline = 0;
             task.state = TaskState::Ready;
@@ -1725,6 +1913,23 @@ pub fn linux_deliver_fault(frame: *mut InterruptFrame, signum: u64) -> bool {
 pub fn linux_getpid() -> usize {
     let tasks = unsafe { &*TASKS.0.get() };
     tasks[CURRENT.load(Ordering::Relaxed)].tgid
+}
+
+/// Returns the parent process id, or 0 when the task has no live parent.
+#[must_use]
+pub fn linux_getppid() -> usize {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let parent = task.parent;
+    if parent >= MAX_TASKS || parent == CURRENT.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let parent_task = &tasks[parent];
+    if parent_task.state == TaskState::Empty || parent_task.state == TaskState::Done {
+        0
+    } else {
+        parent_task.tgid
+    }
 }
 
 /// Current process group/session IDs. IDs are process leaders' task slots.
@@ -1949,6 +2154,7 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
 
 const LINUX_EBADF: i64 = -9;
 const LINUX_ECHILD: i64 = -10;
+const LINUX_EEXIST: i64 = -17;
 const LINUX_EAGAIN: i64 = -11;
 const LINUX_ENOMEM: i64 = -12;
 const LINUX_ENOSYS: i64 = -38;
@@ -2114,14 +2320,66 @@ pub fn linux_overlay_open(path: &str, create: bool, truncate: bool) -> Result<u6
     Err(LINUX_EMFILE)
 }
 
+/// Counts open read and write ends of a global pipe slot.
+fn pipe_users(index: usize) -> (usize, usize) {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let mut readers = 0usize;
+    let mut writers = 0usize;
+    for task in tasks.iter() {
+        for file in task.linux_fds.iter().flatten() {
+            if let LinuxFileSource::Pipe { index: slot, write } = file.source
+                && slot == index
+            {
+                if write {
+                    writers += 1;
+                } else {
+                    readers += 1;
+                }
+            }
+        }
+    }
+    (readers, writers)
+}
+
+/// Returns the pipe slot and direction for a descriptor.
+#[must_use]
+pub fn linux_pipe_end(fd: u64) -> Option<(usize, bool)> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    match task
+        .linux_fds
+        .get(fd as usize)
+        .and_then(Option::as_ref)?
+        .source
+    {
+        LinuxFileSource::Pipe { index, write } => Some((index, write)),
+        _ => None,
+    }
+}
+
+/// Number of open writer ends for a pipe slot.
+#[must_use]
+pub fn linux_pipe_writers(index: usize) -> usize {
+    pipe_users(index).1
+}
+
+/// Number of open reader ends for a pipe slot.
+#[must_use]
+pub fn linux_pipe_readers(index: usize) -> usize {
+    pipe_users(index).0
+}
+
 /// Creates a bounded pipe and returns its read and write descriptors.
 pub fn linux_pipe() -> Result<(u64, u64), i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    let Some(index) = task.linux_pipes.iter().position(|pipe| pipe.is_none()) else {
+    let Some(index) = (unsafe { &*PIPES.0.get() })
+        .iter()
+        .position(Option::is_none)
+    else {
         return Err(LINUX_EMFILE);
     };
-    task.linux_pipes[index] = Some(LinuxPipe::EMPTY);
+    unsafe { (*PIPES.0.get())[index] = Some(LinuxPipe::EMPTY) };
     let mut read_fd = None;
     let mut write_fd = None;
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
@@ -2156,7 +2414,7 @@ pub fn linux_pipe() -> Result<(u64, u64), i64> {
                     *slot = None;
                 }
             }
-            task.linux_pipes[index] = None;
+            unsafe { (*PIPES.0.get())[index] = None };
             Err(LINUX_EMFILE)
         }
     }
@@ -2192,6 +2450,108 @@ pub fn linux_eventfd(initial: u64) -> Result<u64, i64> {
     task.linux_eventfds[index] = None;
     unsafe { (*EVENTFD_COUNTERS.0.get())[tgid][index] = None };
     Err(LINUX_EMFILE)
+}
+
+/// Creates a monotonic timer descriptor. `CLOCK_REALTIME` (0) and
+/// `CLOCK_MONOTONIC` (1) are accepted and backed by the tick clock; any other
+/// clock id is rejected.
+pub fn linux_timerfd_create(clockid: u64, flags: u64) -> Result<u64, i64> {
+    const O_NONBLOCK: u64 = 0x800;
+    const O_CLOEXEC: u64 = 0x80000;
+    if clockid > 1 || flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
+        return Err(LINUX_EINVAL);
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(index) = task.linux_timerfds.iter().position(|timer| timer.is_none()) else {
+        return Err(LINUX_EMFILE);
+    };
+    task.linux_timerfds[index] = Some(LinuxTimerFd::EMPTY);
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::TimerFd { index },
+                offset: 0,
+            });
+            return Ok(descriptor as u64);
+        }
+    }
+    task.linux_timerfds[index] = None;
+    Err(LINUX_EMFILE)
+}
+
+/// Returns a timer descriptor slot for a file descriptor.
+fn timerfd_slot(fd: u64) -> Result<(usize, usize), i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &tasks[current];
+    let Some(entry) = task.linux_fds.get(fd as usize).and_then(Option::as_ref) else {
+        return Err(LINUX_EBADF);
+    };
+    let LinuxFileSource::TimerFd { index } = entry.source else {
+        return Err(LINUX_EINVAL);
+    };
+    if !task.linux_timerfds.get(index).is_some_and(Option::is_some) {
+        return Err(LINUX_EBADF);
+    }
+    Ok((current, index))
+}
+
+/// Arms or disarms a timer descriptor. `deadline` is an absolute tick count;
+/// `None` disarms. Returns the previous remaining ticks and interval.
+pub fn linux_timerfd_settime(
+    fd: u64,
+    deadline: Option<u64>,
+    interval: u64,
+) -> Result<(u64, u64), i64> {
+    let (current, index) = timerfd_slot(fd)?;
+    let now = TICKS.load(Ordering::Relaxed);
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let Some(timer) = tasks[current]
+        .linux_timerfds
+        .get_mut(index)
+        .and_then(Option::as_mut)
+    else {
+        return Err(LINUX_EBADF);
+    };
+    let previous = if timer.armed {
+        (timer.next_expiry.saturating_sub(now), timer.interval)
+    } else {
+        (0, 0)
+    };
+    match deadline {
+        Some(deadline) => {
+            timer.next_expiry = deadline;
+            timer.interval = interval;
+            timer.armed = true;
+        }
+        None => {
+            timer.next_expiry = 0;
+            timer.interval = 0;
+            timer.armed = false;
+        }
+    }
+    linux_wake_pollers();
+    Ok(previous)
+}
+
+/// Returns the remaining ticks and interval of a timer descriptor.
+pub fn linux_timerfd_gettime(fd: u64) -> Result<(u64, u64), i64> {
+    let (current, index) = timerfd_slot(fd)?;
+    let now = TICKS.load(Ordering::Relaxed);
+    let tasks = unsafe { &*TASKS.0.get() };
+    let Some(timer) = tasks[current]
+        .linux_timerfds
+        .get(index)
+        .and_then(Option::as_ref)
+    else {
+        return Err(LINUX_EBADF);
+    };
+    if timer.armed {
+        Ok((timer.next_expiry.saturating_sub(now), timer.interval))
+    } else {
+        Ok((0, 0))
+    }
 }
 
 /// Creates an epoll instance.
@@ -2235,106 +2595,219 @@ pub fn linux_epoll_ctl(
     let LinuxFileSource::Epoll { index } = slot.source else {
         return Err(LINUX_EINVAL);
     };
-    if task
+    let Some(target) = task
         .linux_fds
         .get(target_fd as usize)
         .and_then(Option::as_ref)
-        .is_none()
-    {
+    else {
         return Err(LINUX_EBADF);
+    };
+    // Nested epoll watches would need recursive readiness evaluation; reject
+    // them explicitly instead of reporting a false readiness.
+    if matches!(target.source, LinuxFileSource::Epoll { .. }) {
+        return Err(LINUX_EINVAL);
     }
     let Some(epoll) = task.linux_epolls.get_mut(index).and_then(Option::as_mut) else {
         return Err(LINUX_EBADF);
     };
+    let existing = epoll
+        .watches
+        .iter()
+        .position(|entry| entry.is_some_and(|watch| watch.fd == target_fd));
     match operation {
-        1 | 3 => {
-            if let Some(entry) = epoll
-                .watches
-                .iter_mut()
-                .find(|entry| entry.is_some_and(|(fd, _, _)| fd == target_fd))
-            {
-                *entry = Some((target_fd, events, data));
-            } else {
-                let Some(entry) = epoll.watches.iter_mut().find(|entry| entry.is_none()) else {
-                    return Err(LINUX_ENOSPC);
-                };
-                *entry = Some((target_fd, events, data));
+        1 => {
+            if existing.is_some() {
+                return Err(LINUX_EEXIST);
             }
+            let Some(entry) = epoll.watches.iter_mut().find(|entry| entry.is_none()) else {
+                return Err(LINUX_ENOSPC);
+            };
+            *entry = Some(LinuxEpollWatch {
+                fd: target_fd,
+                events,
+                data,
+                last_ready: false,
+                armed: true,
+            });
         }
         2 => {
-            for entry in epoll.watches.iter_mut() {
-                if entry.is_some_and(|(fd, _, _)| fd == target_fd) {
-                    *entry = None;
-                }
-            }
+            let Some(position) = existing else {
+                return Err(LINUX_ENOENT);
+            };
+            epoll.watches[position] = None;
+        }
+        3 => {
+            let Some(position) = existing else {
+                return Err(LINUX_ENOENT);
+            };
+            epoll.watches[position] = Some(LinuxEpollWatch {
+                fd: target_fd,
+                events,
+                data,
+                last_ready: false,
+                armed: true,
+            });
         }
         _ => return Err(LINUX_EINVAL),
     }
     Ok(())
 }
 
-/// Collects ready epoll entries without blocking.
+/// Collects ready epoll entries, updating edge/one-shot state. Level-triggered
+/// watches are reported on every call while ready; edge-triggered watches only
+/// on a not-ready to ready transition; one-shot watches are disarmed after a
+/// report and re-armed by `EPOLL_CTL_MOD`.
 pub fn linux_epoll_wait(epoll_fd: u64, out: &mut [LinuxEpollEvent]) -> Result<usize, i64> {
-    let tasks = unsafe { &*TASKS.0.get() };
-    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
-    let Some(slot) = task
-        .linux_fds
-        .get(epoll_fd as usize)
-        .and_then(Option::as_ref)
-    else {
-        return Err(LINUX_EBADF);
+    let current = CURRENT.load(Ordering::Relaxed);
+    let watches = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        let task = &tasks[current];
+        let Some(slot) = task
+            .linux_fds
+            .get(epoll_fd as usize)
+            .and_then(Option::as_ref)
+        else {
+            return Err(LINUX_EBADF);
+        };
+        let LinuxFileSource::Epoll { index } = slot.source else {
+            return Err(LINUX_EINVAL);
+        };
+        let Some(epoll) = task.linux_epolls.get(index).and_then(Option::as_ref) else {
+            return Err(LINUX_EBADF);
+        };
+        epoll.watches
     };
-    let LinuxFileSource::Epoll { index } = slot.source else {
-        return Err(LINUX_EINVAL);
-    };
-    let Some(epoll) = task.linux_epolls.get(index).and_then(Option::as_ref) else {
-        return Err(LINUX_EBADF);
-    };
+    let mut updated = watches;
     let mut count = 0usize;
-    for watch in epoll.watches.iter().flatten() {
+    for watch in updated.iter_mut().flatten() {
         if count == out.len() {
             break;
         }
-        let (fd, events, data) = *watch;
-        let ready = linux_poll(fd, events as i16);
-        if ready != 0 {
+        let requested = watch.events & 0x1f;
+        let ready = linux_poll(watch.fd, requested as i16) as u32 & requested;
+        let edge = watch.events & EPOLLET != 0;
+        let oneshot = watch.events & EPOLLONESHOT != 0;
+        let report = watch.armed && ready != 0 && if edge { !watch.last_ready } else { true };
+        if edge {
+            watch.last_ready = ready != 0;
+        }
+        if report {
             out[count] = LinuxEpollEvent {
-                events: ready as u32,
-                data,
+                events: ready,
+                data: watch.data,
             };
             count += 1;
+            if oneshot {
+                watch.armed = false;
+            }
+        }
+    }
+    if count != 0 || updated.iter().flatten().any(|watch| watch.armed) {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        let task = &mut tasks[current];
+        let Some(slot) = task
+            .linux_fds
+            .get(epoll_fd as usize)
+            .and_then(Option::as_ref)
+        else {
+            return Err(LINUX_EBADF);
+        };
+        let LinuxFileSource::Epoll { index } = slot.source else {
+            return Err(LINUX_EINVAL);
+        };
+        if let Some(epoll) = task.linux_epolls.get_mut(index).and_then(Option::as_mut) {
+            epoll.watches = updated;
         }
     }
     Ok(count)
 }
 
+/// Refreshes edge-triggered watch state after a descriptor changes, so a
+/// readiness drop that happens between two `epoll_wait` calls is observed and
+/// the next transition is reported. Only watches in the calling task's epoll
+/// instances can be refreshed here.
+fn refresh_epoll_edges(fd: u64) {
+    let current = CURRENT.load(Ordering::Relaxed);
+    let mut updates = [(usize::MAX, false); MAX_EPOLLS * MAX_EPOLL_WATCH];
+    let mut count = 0usize;
+    {
+        let tasks = unsafe { &*TASKS.0.get() };
+        let task = &tasks[current];
+        for (epoll_index, slot) in task.linux_epolls.iter().enumerate() {
+            let Some(epoll) = slot else {
+                continue;
+            };
+            for (watch_index, watch) in epoll.watches.iter().enumerate() {
+                let Some(watch) = watch else {
+                    continue;
+                };
+                if watch.fd != fd || watch.events & EPOLLET == 0 {
+                    continue;
+                }
+                let ready = linux_poll(fd, (watch.events & 0x1f) as i16) != 0;
+                updates[count] = (epoll_index * MAX_EPOLL_WATCH + watch_index, ready);
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[current];
+    for (slot, ready) in updates[..count].iter() {
+        let epoll_index = slot / MAX_EPOLL_WATCH;
+        let watch_index = slot % MAX_EPOLL_WATCH;
+        if let Some(watch) = task
+            .linux_epolls
+            .get_mut(epoll_index)
+            .and_then(Option::as_mut)
+            .and_then(|epoll| epoll.watches.get_mut(watch_index))
+            .and_then(Option::as_mut)
+        {
+            watch.last_ready = *ready;
+        }
+    }
+}
+
 /// Returns poll readiness bits for a Linux descriptor.
 pub fn linux_poll(fd: u64, events: i16) -> i16 {
-    const POLLIN: i16 = 1;
-    const POLLOUT: i16 = 4;
-    const POLLNVAL: i16 = 0x20;
     let tasks = unsafe { &*TASKS.0.get() };
     let task = &tasks[CURRENT.load(Ordering::Relaxed)];
     let Some(slot) = task.linux_fds.get(fd as usize).and_then(Option::as_ref) else {
-        return POLLNVAL;
+        return POLL_NVAL;
     };
     let mut ready = 0i16;
     match slot.source {
-        LinuxFileSource::Pipe { index, .. } => {
-            let Some(pipe) = task.linux_pipes.get(index).and_then(Option::as_ref) else {
-                return POLLNVAL;
+        LinuxFileSource::Pipe { index, write } => {
+            let Some(pipe) = (unsafe { &*PIPES.0.get() })
+                .get(index)
+                .and_then(Option::as_ref)
+            else {
+                return POLL_NVAL;
             };
-            if events & POLLIN != 0 && pipe.len > 0 {
-                ready |= POLLIN;
-            }
-            if events & POLLOUT != 0 && pipe.len < PIPE_BYTES {
-                ready |= POLLOUT;
+            let (readers, writers) = pipe_users(index);
+            if !write {
+                if events & POLL_IN != 0 && pipe.len > 0 {
+                    ready |= POLL_IN;
+                }
+                // End-of-file is a hangup once the last writer closes.
+                if writers == 0 {
+                    ready |= POLL_HUP;
+                }
+            } else {
+                if events & POLL_OUT != 0 && pipe.len < PIPE_BYTES {
+                    ready |= POLL_OUT;
+                }
+                if readers == 0 {
+                    ready |= POLL_ERR;
+                }
             }
         }
         LinuxFileSource::Root(_)
         | LinuxFileSource::Overlay(_)
         | LinuxFileSource::Directory { .. } => {
-            ready = events & (POLLIN | POLLOUT);
+            ready = events & (POLL_IN | POLL_OUT);
         }
         LinuxFileSource::EventFd { index } => {
             let counter = if task.tgid < MAX_TASKS {
@@ -2342,20 +2815,36 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
             } else {
                 0
             };
-            if events & POLLIN != 0 && counter > 0 {
-                ready |= POLLIN;
+            if events & POLL_IN != 0 && counter > 0 {
+                ready |= POLL_IN;
             }
-            if events & POLLOUT != 0 && counter < u64::MAX {
-                ready |= POLLOUT;
+            if events & POLL_OUT != 0 && counter < u64::MAX {
+                ready |= POLL_OUT;
             }
         }
-        LinuxFileSource::Epoll { .. } => {
-            ready = events & POLLIN;
+        LinuxFileSource::Epoll { index } => {
+            let Some(epoll) = task.linux_epolls.get(index).and_then(Option::as_ref) else {
+                return POLL_NVAL;
+            };
+            let ready_child = epoll.watches.iter().flatten().any(|watch| {
+                watch.armed && linux_poll(watch.fd, (watch.events & 0x1f) as i16) != 0
+            });
+            if ready_child {
+                ready = events & POLL_IN;
+            }
+        }
+        LinuxFileSource::TimerFd { index } => {
+            let Some(timer) = task.linux_timerfds.get(index).and_then(Option::as_ref) else {
+                return POLL_NVAL;
+            };
+            if timer.armed && TICKS.load(Ordering::Relaxed) >= timer.next_expiry {
+                ready |= events & POLL_IN;
+            }
         }
         LinuxFileSource::Inotify => {
-            if events & POLLIN != 0 && task.linux_inotify.is_some_and(|watch| watch.pending_modify)
+            if events & POLL_IN != 0 && task.linux_inotify.is_some_and(|watch| watch.pending_modify)
             {
-                ready |= POLLIN;
+                ready |= POLL_IN;
             }
         }
     }
@@ -2364,155 +2853,235 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
 
 /// Reads from a Linux file descriptor into a validated user buffer.
 pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
-    let tasks = unsafe { &mut *TASKS.0.get() };
-    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
-        return Err(LINUX_EBADF);
+    let pipe = linux_pipe_end(fd);
+    let pollers = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+        matches!(
+            task.linux_fds
+                .get(fd as usize)
+                .and_then(Option::as_ref)
+                .map(|file| file.source),
+            Some(
+                LinuxFileSource::EventFd { .. }
+                    | LinuxFileSource::TimerFd { .. }
+                    | LinuxFileSource::Inotify
+            )
+        )
     };
-    match slot.source {
-        LinuxFileSource::Root(file) => {
-            let Some(file) = crate::linux::file(file) else {
-                return Err(LINUX_EBADF);
-            };
-            let remaining = file.data.len().saturating_sub(slot.offset);
-            let length = remaining.min(out.len());
-            out[..length].copy_from_slice(&file.data[slot.offset..slot.offset + length]);
-            slot.offset += length;
-            Ok(length)
+    let result = {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+        let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
+            return Err(LINUX_EBADF);
+        };
+        match slot.source {
+            LinuxFileSource::Root(file) => {
+                let Some(file) = crate::linux::file(file) else {
+                    return Err(LINUX_EBADF);
+                };
+                let remaining = file.data.len().saturating_sub(slot.offset);
+                let length = remaining.min(out.len());
+                out[..length].copy_from_slice(&file.data[slot.offset..slot.offset + length]);
+                slot.offset += length;
+                Ok(length)
+            }
+            LinuxFileSource::Overlay(index) => {
+                let Some(entry) = task.linux_overlay.get(index).and_then(Option::as_ref) else {
+                    return Err(LINUX_EBADF);
+                };
+                let remaining = entry.len.saturating_sub(slot.offset);
+                let length = remaining.min(out.len());
+                out[..length].copy_from_slice(&entry.data[slot.offset..slot.offset + length]);
+                slot.offset += length;
+                Ok(length)
+            }
+            LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
+            LinuxFileSource::Pipe {
+                index,
+                write: false,
+            } => {
+                let Some(pipe) = (unsafe { &mut (*PIPES.0.get())[index] }).as_mut() else {
+                    return Err(LINUX_EBADF);
+                };
+                if pipe.len == 0 {
+                    return Err(LINUX_EAGAIN);
+                }
+                let length = pipe.len.min(out.len());
+                for (offset, byte) in out.iter_mut().take(length).enumerate() {
+                    *byte = pipe.data[(pipe.read + offset) % PIPE_BYTES];
+                }
+                pipe.read = (pipe.read + length) % PIPE_BYTES;
+                pipe.len -= length;
+                Ok(length)
+            }
+            LinuxFileSource::Pipe { write: true, .. } => Err(LINUX_EBADF),
+            LinuxFileSource::EventFd { index } => {
+                if !task.linux_eventfds.get(index).is_some_and(Option::is_some)
+                    || task.tgid >= MAX_TASKS
+                {
+                    return Err(LINUX_EBADF);
+                }
+                let Some(counter) =
+                    (unsafe { &mut (*EVENTFD_COUNTERS.0.get())[task.tgid][index] }).as_mut()
+                else {
+                    return Err(LINUX_EBADF);
+                };
+                if *counter == 0 {
+                    return Err(LINUX_EAGAIN);
+                }
+                if out.len() < 8 {
+                    return Err(LINUX_EINVAL);
+                }
+                let value = *counter;
+                *counter = 0;
+                out[..8].copy_from_slice(&value.to_le_bytes());
+                Ok(8)
+            }
+            LinuxFileSource::Epoll { .. } => Err(LINUX_EINVAL),
+            LinuxFileSource::TimerFd { index } => {
+                let Some(timer) = task.linux_timerfds.get(index).and_then(Option::as_ref) else {
+                    return Err(LINUX_EBADF);
+                };
+                let timer = *timer;
+                let now = TICKS.load(Ordering::Relaxed);
+                if !timer.armed || now < timer.next_expiry {
+                    return Err(LINUX_EAGAIN);
+                }
+                if out.len() < 8 {
+                    return Err(LINUX_EINVAL);
+                }
+                let (count, next, armed) = if timer.interval == 0 {
+                    (1u64, 0u64, false)
+                } else {
+                    let elapsed = now - timer.next_expiry;
+                    let count = elapsed.checked_div(timer.interval).unwrap_or(0) + 1;
+                    (
+                        count,
+                        timer
+                            .next_expiry
+                            .saturating_add(count.saturating_mul(timer.interval)),
+                        true,
+                    )
+                };
+                if let Some(timer) = task.linux_timerfds.get_mut(index).and_then(Option::as_mut) {
+                    timer.next_expiry = next;
+                    timer.armed = armed;
+                    if !armed {
+                        timer.interval = 0;
+                    }
+                }
+                out[..8].copy_from_slice(&count.to_le_bytes());
+                Ok(8)
+            }
+            LinuxFileSource::Inotify => {
+                let watch = task.linux_inotify.as_mut().ok_or(LINUX_EBADF)?;
+                if !watch.pending_modify {
+                    return Err(LINUX_EAGAIN);
+                }
+                if out.len() < 16 {
+                    return Err(LINUX_EINVAL);
+                }
+                out[..16].fill(0);
+                out[..4].copy_from_slice(&1i32.to_ne_bytes());
+                out[4..8].copy_from_slice(&2u32.to_ne_bytes());
+                watch.pending_modify = false;
+                Ok(16)
+            }
         }
-        LinuxFileSource::Overlay(index) => {
-            let Some(entry) = task.linux_overlay.get(index).and_then(Option::as_ref) else {
-                return Err(LINUX_EBADF);
-            };
-            let remaining = entry.len.saturating_sub(slot.offset);
-            let length = remaining.min(out.len());
-            out[..length].copy_from_slice(&entry.data[slot.offset..slot.offset + length]);
-            slot.offset += length;
-            Ok(length)
+    };
+    if result.is_ok() {
+        if let Some((index, false)) = pipe {
+            linux_wake_pipe(index);
         }
-        LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
-        LinuxFileSource::Pipe {
-            index,
-            write: false,
-        } => {
-            let Some(pipe) = task.linux_pipes.get_mut(index).and_then(Option::as_mut) else {
-                return Err(LINUX_EBADF);
-            };
-            if pipe.len == 0 {
-                return Err(LINUX_EAGAIN);
-            }
-            let length = pipe.len.min(out.len());
-            for (offset, byte) in out.iter_mut().take(length).enumerate() {
-                *byte = pipe.data[(pipe.read + offset) % PIPE_BYTES];
-            }
-            pipe.read = (pipe.read + length) % PIPE_BYTES;
-            pipe.len -= length;
-            Ok(length)
-        }
-        LinuxFileSource::Pipe { write: true, .. } => Err(LINUX_EBADF),
-        LinuxFileSource::EventFd { index } => {
-            if !task.linux_eventfds.get(index).is_some_and(Option::is_some)
-                || task.tgid >= MAX_TASKS
-            {
-                return Err(LINUX_EBADF);
-            }
-            let Some(counter) =
-                (unsafe { &mut (*EVENTFD_COUNTERS.0.get())[task.tgid][index] }).as_mut()
-            else {
-                return Err(LINUX_EBADF);
-            };
-            if *counter == 0 {
-                return Err(LINUX_EAGAIN);
-            }
-            if out.len() < 8 {
-                return Err(LINUX_EINVAL);
-            }
-            let value = *counter;
-            *counter = 0;
-            out[..8].copy_from_slice(&value.to_le_bytes());
-            Ok(8)
-        }
-        LinuxFileSource::Epoll { .. } => Err(LINUX_EINVAL),
-        LinuxFileSource::Inotify => {
-            let watch = task.linux_inotify.as_mut().ok_or(LINUX_EBADF)?;
-            if !watch.pending_modify {
-                return Err(LINUX_EAGAIN);
-            }
-            if out.len() < 16 {
-                return Err(LINUX_EINVAL);
-            }
-            out[..16].fill(0);
-            out[..4].copy_from_slice(&1i32.to_ne_bytes());
-            out[4..8].copy_from_slice(&2u32.to_ne_bytes());
-            watch.pending_modify = false;
-            Ok(16)
+        if pipe.is_some() || pollers {
+            linux_wake_pollers();
         }
     }
+    if result.is_ok() && pipe.is_some() {
+        refresh_epoll_edges(fd);
+    }
+    result
 }
 
 /// Writes to a writable overlay or pipe descriptor.
 pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
-    let tasks = unsafe { &mut *TASKS.0.get() };
-    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
-        return Err(LINUX_EBADF);
+    let pipe = linux_pipe_end(fd);
+    let result = {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+        let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
+            return Err(LINUX_EBADF);
+        };
+        match slot.source {
+            LinuxFileSource::Overlay(index) => {
+                let Some(entry) = task.linux_overlay.get_mut(index).and_then(Option::as_mut) else {
+                    return Err(LINUX_EBADF);
+                };
+                let end = slot.offset.checked_add(data.len()).ok_or(LINUX_ENOSPC)?;
+                if end > OVERLAY_BYTES {
+                    return Err(LINUX_ENOSPC);
+                }
+                entry.data[slot.offset..end].copy_from_slice(data);
+                entry.len = entry.len.max(end);
+                slot.offset = end;
+                let path = entry.path();
+                if let Some(watch) = task.linux_inotify.as_mut()
+                    && watch.watched
+                    && &watch.path[..watch.path_len] == path.as_bytes()
+                {
+                    watch.pending_modify = true;
+                }
+                Ok(data.len())
+            }
+            LinuxFileSource::Pipe { index, write: true } => {
+                let Some(pipe) = (unsafe { &mut (*PIPES.0.get())[index] }).as_mut() else {
+                    return Err(LINUX_EBADF);
+                };
+                if pipe.len == PIPE_BYTES {
+                    return Err(LINUX_EAGAIN);
+                }
+                let length = data.len().min(PIPE_BYTES - pipe.len);
+                for (offset, byte) in data.iter().take(length).enumerate() {
+                    pipe.data[(pipe.write + offset) % PIPE_BYTES] = *byte;
+                }
+                pipe.write = (pipe.write + length) % PIPE_BYTES;
+                pipe.len += length;
+                Ok(length)
+            }
+            LinuxFileSource::EventFd { index } => {
+                if data.len() < 8 {
+                    return Err(LINUX_EINVAL);
+                }
+                let value = u64::from_le_bytes(data[..8].try_into().unwrap_or([0; 8]));
+                if !task.linux_eventfds.get(index).is_some_and(Option::is_some)
+                    || task.tgid >= MAX_TASKS
+                {
+                    return Err(LINUX_EBADF);
+                }
+                let Some(counter) =
+                    (unsafe { &mut (*EVENTFD_COUNTERS.0.get())[task.tgid][index] }).as_mut()
+                else {
+                    return Err(LINUX_EBADF);
+                };
+                *counter = counter.saturating_add(value);
+                Ok(8)
+            }
+            _ => Err(LINUX_EROFS),
+        }
     };
-    match slot.source {
-        LinuxFileSource::Overlay(index) => {
-            let Some(entry) = task.linux_overlay.get_mut(index).and_then(Option::as_mut) else {
-                return Err(LINUX_EBADF);
-            };
-            let end = slot.offset.checked_add(data.len()).ok_or(LINUX_ENOSPC)?;
-            if end > OVERLAY_BYTES {
-                return Err(LINUX_ENOSPC);
-            }
-            entry.data[slot.offset..end].copy_from_slice(data);
-            entry.len = entry.len.max(end);
-            slot.offset = end;
-            let path = entry.path();
-            if let Some(watch) = task.linux_inotify.as_mut()
-                && watch.watched
-                && &watch.path[..watch.path_len] == path.as_bytes()
-            {
-                watch.pending_modify = true;
-            }
-            Ok(data.len())
+    if result.is_ok() {
+        if let Some((index, true)) = pipe {
+            linux_wake_pipe(index);
         }
-        LinuxFileSource::Pipe { index, write: true } => {
-            let Some(pipe) = task.linux_pipes.get_mut(index).and_then(Option::as_mut) else {
-                return Err(LINUX_EBADF);
-            };
-            if pipe.len == PIPE_BYTES {
-                return Err(LINUX_EAGAIN);
-            }
-            let length = data.len().min(PIPE_BYTES - pipe.len);
-            for (offset, byte) in data.iter().take(length).enumerate() {
-                pipe.data[(pipe.write + offset) % PIPE_BYTES] = *byte;
-            }
-            pipe.write = (pipe.write + length) % PIPE_BYTES;
-            pipe.len += length;
-            Ok(length)
+        if pipe.is_some() {
+            linux_wake_pollers();
         }
-        LinuxFileSource::EventFd { index } => {
-            if data.len() < 8 {
-                return Err(LINUX_EINVAL);
-            }
-            let value = u64::from_le_bytes(data[..8].try_into().unwrap_or([0; 8]));
-            if !task.linux_eventfds.get(index).is_some_and(Option::is_some)
-                || task.tgid >= MAX_TASKS
-            {
-                return Err(LINUX_EBADF);
-            }
-            let Some(counter) =
-                (unsafe { &mut (*EVENTFD_COUNTERS.0.get())[task.tgid][index] }).as_mut()
-            else {
-                return Err(LINUX_EBADF);
-            };
-            *counter = counter.saturating_add(value);
-            Ok(8)
-        }
-        _ => Err(LINUX_EROFS),
     }
+    if result.is_ok() && pipe.is_some() {
+        refresh_epoll_edges(fd);
+    }
+    result
 }
 
 /// Creates one inotify descriptor per task. Only `IN_NONBLOCK` is supported;
@@ -2639,35 +3208,106 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
         LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
-        | LinuxFileSource::Epoll { .. } => Err(LINUX_ESPIPE),
+        | LinuxFileSource::Epoll { .. }
+        | LinuxFileSource::TimerFd { .. } => Err(LINUX_ESPIPE),
         LinuxFileSource::Inotify => Err(LINUX_ESPIPE),
     }
 }
 
 /// Closes a Linux file descriptor.
 pub fn linux_close(fd: u64) -> i64 {
-    let tasks = unsafe { &mut *TASKS.0.get() };
-    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    let Some(slot) = task.linux_fds.get_mut(fd as usize) else {
-        return LINUX_EBADF;
-    };
-    let was_inotify = slot
-        .as_ref()
-        .is_some_and(|file| matches!(file.source, LinuxFileSource::Inotify));
-    if slot.take().is_some() {
-        if was_inotify
-            && !task
-                .linux_fds
-                .iter()
-                .flatten()
-                .any(|file| matches!(file.source, LinuxFileSource::Inotify))
-        {
-            task.linux_inotify = None;
+    let current = CURRENT.load(Ordering::Relaxed);
+    let pipe = {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        let task = &mut tasks[current];
+        let Some(slot) = task.linux_fds.get_mut(fd as usize) else {
+            return LINUX_EBADF;
+        };
+        let source = slot.as_ref().map(|file| file.source);
+        if slot.take().is_none() {
+            return LINUX_EBADF;
         }
-        0
-    } else {
-        LINUX_EBADF
+        let mut pipe = None;
+        match source {
+            Some(LinuxFileSource::Pipe { index, .. }) => pipe = Some(index),
+            Some(LinuxFileSource::Epoll { index })
+                if !task.linux_fds.iter().flatten().any(
+                    |file| matches!(file.source, LinuxFileSource::Epoll { index: slot } if slot == index)
+                ) =>
+            {
+                if let Some(epoll) = task.linux_epolls.get_mut(index) {
+                    *epoll = None;
+                }
+            }
+            Some(LinuxFileSource::TimerFd { index }) => {
+                if !task
+                    .linux_fds
+                    .iter()
+                    .flatten()
+                    .any(|file| matches!(file.source, LinuxFileSource::TimerFd { index: slot } if slot == index))
+                    && let Some(timer) = task.linux_timerfds.get_mut(index)
+                {
+                    *timer = None;
+                }
+            }
+            Some(LinuxFileSource::EventFd { index })
+                if !task.linux_fds.iter().flatten().any(
+                    |file| matches!(file.source, LinuxFileSource::EventFd { index: slot } if slot == index)
+                ) =>
+            {
+                if let Some(eventfd) = task.linux_eventfds.get_mut(index) {
+                    *eventfd = None;
+                }
+                let tgid = task.tgid;
+                if tgid < MAX_TASKS {
+                    unsafe { (*EVENTFD_COUNTERS.0.get())[tgid][index] = None };
+                }
+            }
+            Some(LinuxFileSource::Inotify)
+                if !task
+                    .linux_fds
+                    .iter()
+                    .flatten()
+                    .any(|file| matches!(file.source, LinuxFileSource::Inotify)) =>
+            {
+                task.linux_inotify = None;
+            }
+            _ => {}
+        }
+        pipe
+    };
+    if let Some(index) = pipe {
+        linux_release_pipe(index);
+        linux_wake_pipe(index);
+        linux_wake_pollers();
     }
+    0
+}
+
+/// Frees a global pipe slot once no task references either end.
+fn linux_release_pipe(index: usize) {
+    if index >= MAX_PIPES {
+        return;
+    }
+    let (readers, writers) = pipe_users(index);
+    if readers == 0 && writers == 0 {
+        unsafe { (*PIPES.0.get())[index] = None };
+    }
+}
+
+/// Releases pipe slots that no task references after an exit or fault and
+/// wakes pipe peers so they observe end-of-file or a closed reader.
+fn linux_release_task_pipes() {
+    for index in 0..MAX_PIPES {
+        linux_release_pipe(index);
+    }
+    linux_wake_matching(|kind| {
+        matches!(
+            kind,
+            LinuxWaitKind::PipeRead(_) | LinuxWaitKind::PipeWrite(_)
+        )
+    });
+    linux_wake_pollers();
 }
 
 /// Repositions a Linux file descriptor.
@@ -2687,7 +3327,8 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
         LinuxFileSource::Directory { .. }
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
-        | LinuxFileSource::Epoll { .. } => 0,
+        | LinuxFileSource::Epoll { .. }
+        | LinuxFileSource::TimerFd { .. } => 0,
         LinuxFileSource::Inotify => 0,
     };
     let base = match whence {
@@ -2994,7 +3635,8 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
         LinuxFileSource::Directory { .. } => Ok((0, 2, 0o040755)),
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
-        | LinuxFileSource::Epoll { .. } => Ok((0, 0, 0o010600)),
+        | LinuxFileSource::Epoll { .. }
+        | LinuxFileSource::TimerFd { .. } => Ok((0, 0, 0o010600)),
         LinuxFileSource::Inotify => Ok((0, 0, 0o010600)),
     }
 }
@@ -3056,7 +3698,8 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
         LinuxFileSource::Directory { .. }
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
-        | LinuxFileSource::Epoll { .. } => Ok(0),
+        | LinuxFileSource::Epoll { .. }
+        | LinuxFileSource::TimerFd { .. } => Ok(0),
         LinuxFileSource::Inotify => Ok(0),
     }
 }
@@ -3198,10 +3841,11 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].exit_status = ((status & 0xff) << 8) as i64;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
-        tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
         serial_line!("linux: process exit pid={current} status={status}");
+        linux_release_task_pipes();
         wake_waiting_parent(current);
         return schedule_next(current);
     }
@@ -3213,10 +3857,11 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].state = TaskState::Done;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
-        tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
         serial_line!("linux: thread exit tid={current} status={status}");
+        linux_release_task_pipes();
         return schedule_next(current);
     }
     if (current != LINUX_TASK && current != LINUX_DYN_TASK) || kind != TaskKind::Linux {
@@ -3231,9 +3876,9 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].state = TaskState::Done;
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     tasks[current].linux_overlay = [None; OVERLAY_FILES];
-    tasks[current].linux_pipes = [None; MAX_PIPES];
     tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
     tasks[current].linux_epolls = [None; MAX_EPOLLS];
+    tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
     tasks[current].vmas.reset();
     tasks[current].anonymous_vmas.reset();
     let result = if status == 0 {
@@ -3256,6 +3901,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         }
     }
     serial_line!("linux: exit pid={} status={status}", current);
+    linux_release_task_pipes();
     schedule_next(current)
 }
 
@@ -3333,10 +3979,11 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].exit_status = 128 + vector as i64;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
-        tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
         serial_line!("linux: process fault pid={current} vector={vector}");
+        linux_release_task_pipes();
         wake_waiting_parent(current);
         return schedule_next(current);
     }
@@ -3347,10 +3994,11 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].saved_rsp = frame as u64;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
-        tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
         serial_line!("linux: thread fault tid={current} vector={vector}");
+        linux_release_task_pipes();
         return schedule_next(current);
     }
 
@@ -3373,9 +4021,9 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     if linux {
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
-        tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
         tasks[current].vmas.reset();
         tasks[current].anonymous_vmas.reset();
         if current == LINUX_DYN_TASK {
@@ -3390,6 +4038,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         USER_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
         crate::apps::faulted(current, vector);
     }
+    linux_release_task_pipes();
     serial_line!("sched: user task {current} faulted vector={vector}");
 
     schedule_next(current)
@@ -3459,6 +4108,31 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             task.futex_address = 0;
             task.futex_deadline = 0;
             task.state = TaskState::Ready;
+        }
+        // Sleep, poll, epoll, and pipe waits re-check their own condition when
+        // resumed, so only the deadline expiry needs a wake here.
+        if task.state == TaskState::Blocked && task.wait_deadline != 0 && now >= task.wait_deadline
+        {
+            task.wait_kind = LinuxWaitKind::None;
+            task.wait_deadline = 0;
+            task.state = TaskState::Ready;
+        }
+    }
+
+    // An armed timerfd crossing its deadline wakes poll/epoll waiters so they
+    // can report the descriptor as readable. The handlers re-check the timer.
+    let timer_expired = tasks.iter().any(|task| {
+        task.linux_timerfds
+            .iter()
+            .flatten()
+            .any(|timer| timer.armed && now >= timer.next_expiry)
+    });
+    if timer_expired {
+        for task in tasks.iter_mut() {
+            if task.state == TaskState::Blocked && task.wait_kind == LinuxWaitKind::Poll {
+                task.wait_kind = LinuxWaitKind::None;
+                task.state = TaskState::Ready;
+            }
         }
     }
 

@@ -115,16 +115,21 @@ exact AppImage digest, and the runtime version.
   `wait4` (with nonchild/selector checks), static and dynamic `execve` with
   bounded argv/envp, bounded same-session process groups, and self/cross-process
   SIGUSR1 fixtures. Descriptor/filesystem calls include `openat`, read/write,
-  stat/statx, `readlink`, `fcntl`, dup, `getdents64`, pipes, nonblocking poll,
+  stat/statx, `readlink`, `fcntl`, dup, `getdents64`, pipes, `poll`,
   eventfd/basic epoll, and narrow inotify. Eventfd counters are shared by
-  threads in one tgid; futex timeouts are implemented. The inotify prototype
-  requires
+  threads in one tgid; futex timeouts are implemented. Blocking waits are
+  scheduler-parked: `poll` and `epoll_wait` accept finite and infinite
+  timeouts, pipe storage is global so `fork`-inherited descriptors block and
+  wake across processes, `epoll` reports level-triggered readiness, a bounded
+  edge-transition slice, and one-shot re-arm, and `nanosleep`/
+  `clock_nanosleep` implement relative and absolute deadlines with `EINTR`.
+  `timerfd_create`/`settime`/`gettime` provide one-shot and periodic monotonic
+  timers visible through `poll`/`epoll`. The inotify prototype requires
   `IN_NONBLOCK` and supports `IN_MODIFY` on one exact existing overlay file;
   default blocking init and blocking reads are unsupported. Named fixture
   markers are enumerated in the roadmap and host-interface inventory. Shared
-  mappings, blocking/finite poll and epoll waits (`-EOPNOTSUPP`), pipe and
-  cross-process waits, full inotify, and
-  complete siginfo/ucontext remain missing.
+  mappings, cross-process eventfd counters, nested epoll watches, full inotify,
+  high-resolution timers, and complete siginfo/ucontext remain missing.
 - A fixed per-task VMA table tracks ranges and rejects writable+executable
   mappings. Anonymous private pages are faulted in on demand with bounded
   allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.

@@ -68,9 +68,9 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: bounded demand paging for anonymous mappings; `MAP_SHARED|MAP_ANONYMOUS` is supported only among threads sharing one `CLONE_VM` address space, with thread-group VMA metadata kept in sync. File-backed shared mappings remain unsupported. `fork()` returns `ENOSYS` while such a mapping exists because cross-process shared-frame ownership is not implemented. |
 | Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: futex wait/wake queues, timeout (`ETIMEDOUT`), clear-child-tid join, and eventfd counters shared by threads in one tgid; robust lists, condition variables, and semaphores remain |
 | Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Partial: self/group and cross-process SIGUSR1 fixture coverage; siginfo/ucontext and complete alt-stack/restart semantics remain missing |
-| Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; no sleeps/timers |
+| Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; relative/absolute `nanosleep`/`clock_nanosleep` with `EINTR`; bounded `timerfd_create`/`settime`/`gettime` for `CLOCK_MONOTONIC`, one-shot and periodic, with poll/epoll integration. High-resolution clocks and `CLOCK_REALTIME` remain absent |
 | Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root plus bounded `/tmp` overlay and one exact existing overlay-file `IN_MODIFY` watch; requires `IN_NONBLOCK`. Default blocking init/reads, rootfs/directory watches, other events, overflow, and persistent/shared-thread watch identity are unsupported |
-| Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Timeout-zero `poll`/`epoll_wait`, same-tgid thread-shared eventfd, and narrow nonblocking inotify | Partial: blocking/finite poll and epoll waits, pipe/cross-process waits, and full inotify remain unsupported |
+| Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Blocking/finite `poll`/`epoll_wait`, same-tgid thread-shared eventfd, blocking pipes, and narrow nonblocking inotify | Partial: `poll` and `epoll_wait` support finite and infinite timeouts with scheduler parking and deadlines; `epoll` is level-triggered by default with a bounded `EPOLLET` transition slice and honest `EPOLLONESHOT` re-arm via `EPOLL_CTL_MOD`; pipes block on empty read/full write across `fork`-inherited descriptors. Full inotify, nested epoll watches, and cross-process eventfd sharing remain unsupported |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/dev/urandom`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | Not implemented |
 | Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
 | Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Not implemented; no GPU service |
@@ -79,12 +79,22 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | Audio | ALSA/PipeWire | Audio service | Not implemented; not required for first milestone |
 | Network | Sockets, DNS | Network service and capability policy | Not implemented; denied by default |
 
-`poll` and `epoll_wait` are timeout-zero only. Finite and infinite/blocking
-timeouts return `-EOPNOTSUPP`; pipe and cross-process waits are unsupported.
+`poll` and `epoll_wait` accept zero, finite millisecond, and infinite
+(negative) timeouts. A waiting task is parked through the scheduler and is
+woken by readiness or by the tick deadline; the syscall is re-executed after
+the wakeup, so the handler re-evaluates readiness with the original absolute
+deadline. `epoll` reports level-triggered readiness on every call,
+edge-triggered readiness only on a new transition for the tested same-task
+slice, and `EPOLLONESHOT` watches are disarmed after one report and re-armed by
+`EPOLL_CTL_MOD`. Nested epoll watches return `EINVAL`. Pipe storage is global:
+`fork`-inherited descriptors share one bounded 512-byte buffer, blocking reads
+return `0` at end-of-file once all writers close, and blocking writes wait for
+space. A deliverable pending signal interrupts these waits with `EINTR`.
 Eventfd counters are shared between threads with the same tgid; fork creates a
-process-private counter snapshot. Futex timed waits are implemented and the
-fixture verifies `ETIMEDOUT` (`AETHER_LINUX_FUTEX_TIMEOUT_OK`); this does not
-provide blocking poll/epoll waits or their wakeup/deadline integration.
+process-private counter snapshot. `timerfd` is limited to two descriptors per
+task, `CLOCK_MONOTONIC`/`CLOCK_REALTIME` aliased to the tick clock, one-shot and
+periodic modes, and integration with `poll`/`epoll`. Futex timed waits remain
+covered by `AETHER_LINUX_FUTEX_TIMEOUT_OK`.
 
 ## Runtime architecture
 
@@ -194,9 +204,15 @@ is forked and reaped through blocking `wait4`, with nonchild/selector checks
 (`AETHER_LINUX_FORK_OK`), and bounded same-session process groups are exercised
 (`AETHER_LINUX_PROCESS_GROUP_OK`). Futex timeout behavior is tested
 (`AETHER_LINUX_FUTEX_TIMEOUT_OK`). Eventfd counters are shared across threads
-in one tgid (and remain process-private across fork); `poll`/`epoll_wait` support
-timeout zero only, with finite and blocking waits returning `-EOPNOTSUPP`.
-Pipe and cross-process waits remain unsupported. A static freestanding Linux ELF runs at CPL3,
+in one tgid (and remain process-private across fork). Blocking multiplexing is
+covered by `poll` finite/infinite timeouts over a pipe and an eventfd
+(`AETHER_LINUX_POLL_BLOCK_OK`), `epoll_wait` finite/infinite waits with
+level-triggered re-reporting, an edge-triggered transition slice, and
+one-shot re-arm (`AETHER_LINUX_EPOLL_BLOCK_OK`), and cross-process blocking
+pipe read/write plus end-of-file (`AETHER_LINUX_PIPE_BLOCK_OK`). Relative and
+absolute sleeps with signal `EINTR` (`AETHER_LINUX_NANOSLEEP_OK`) and
+one-shot/periodic timerfds seen through `poll` and `epoll`
+(`AETHER_LINUX_TIMERFD_OK`) are also exercised. A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only
@@ -205,9 +221,9 @@ produces `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 `AETHER_LINUX_VMA_OK`, plus `AETHER_LINUX_OK`; a writable+executable mapping
 and a W+X `mprotect` are denied. Private anonymous pages are allocated on demand
 and reclaimed on `munmap` and task exit. Shared mappings and per-domain mapping
-quotas, blocking poll/epoll waits, pipe/cross-process waits, full inotify,
-siginfo/ucontext, and the user-space `linuxd` protocol remain missing. Gate 2
-remains partial.
+quotas, cross-process shared eventfd counters, nested epoll watches, full
+inotify, high-resolution timers, siginfo/ucontext, and the user-space `linuxd`
+protocol remain missing. Gate 2 remains partial.
 
 ### Gate 3 — Headless GridCraft
 
@@ -250,9 +266,10 @@ revocation tests, and a compatibility record no better than the suite supports.
    `CLONE_VM` thread group. File-backed shared mappings are unsupported, and
    `fork()` returns `ENOSYS` while a shared mapping exists. There are no
    per-domain mapping quotas.
-4. Blocking/finite poll and epoll waits (including pipe/cross-process waits),
-   full inotify, and complete
-   siginfo/ucontext semantics remain absent.
+4. Full inotify, cross-process eventfd counters, nested epoll watches,
+   high-resolution timers, and complete siginfo/ucontext semantics remain
+   absent; blocking/finite poll, epoll, pipe, sleep, and timerfd slices are
+   present for the tested same-task and pipe `fork` cases.
 5. No populated and pinned glibc/Mesa/Wayland runtime rootfs, Wayland service,
    or software renderer.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.
