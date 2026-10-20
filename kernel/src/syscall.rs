@@ -161,6 +161,14 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
         20 => linux_writev(pml4, first, second, third),
         21 => linux_access(pml4, first, second),
+        25 => linux_mremap(
+            pml4,
+            first,
+            second,
+            third,
+            unsafe { (*frame).r10 },
+            unsafe { (*frame).r8 },
+        ),
         232 => linux_epoll_wait(pml4, first, second, third, unsafe { (*frame).r10 }),
         233 => linux_epoll_ctl(pml4, first, second, third, unsafe { (*frame).r10 }),
         28 => 0,
@@ -395,6 +403,128 @@ fn linux_mmap(
         return LINUX_EINVAL;
     }
     start as i64
+}
+
+fn linux_mremap(
+    pml4: PhysFrame,
+    old_address: u64,
+    old_size: u64,
+    new_size: u64,
+    flags: u64,
+    new_address: u64,
+) -> i64 {
+    const MREMAP_MAYMOVE: u64 = 1;
+    const MREMAP_FIXED: u64 = 2;
+    if new_size == 0 || old_size == 0 || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED) != 0 {
+        return LINUX_EINVAL;
+    }
+    let Some(old_size) = old_size.checked_add(0xfff).map(|value| value & !0xfff) else {
+        return LINUX_EINVAL;
+    };
+    let Some(new_size) = new_size.checked_add(0xfff).map(|value| value & !0xfff) else {
+        return LINUX_EINVAL;
+    };
+    if !old_address.is_multiple_of(aether_memory::PAGE_SIZE)
+        || !scheduler::linux_vma_covers(old_address, old_size)
+    {
+        return LINUX_EINVAL;
+    }
+    let Some(prot) = scheduler::linux_vma_prot(old_address) else {
+        return LINUX_EINVAL;
+    };
+    if new_size <= old_size {
+        let tail = old_size - new_size;
+        if tail != 0 {
+            let _ = scheduler::linux_vma_remove(old_address + new_size, tail);
+            let _ = crate::memory::with_frame_allocator(|allocator| {
+                paging::unmap_user_range(allocator, pml4, old_address + new_size, tail)
+            });
+        }
+        return old_address as i64;
+    }
+    let delta = new_size - old_size;
+    if flags & MREMAP_FIXED == 0 {
+        // Try to grow in place first.
+        if scheduler::linux_vma_insert(delta, prot, old_address + old_size, true, true).is_ok() {
+            let writable = aether_memory::paging::PageFlags::PRESENT
+                | aether_memory::paging::PageFlags::USER
+                | aether_memory::paging::PageFlags::WRITABLE
+                | aether_memory::paging::PageFlags::NO_EXECUTE;
+            let Some(result) = crate::memory::with_frame_allocator(|allocator| {
+                paging::map_allocated_user_range(
+                    allocator,
+                    pml4,
+                    old_address + old_size,
+                    delta,
+                    writable,
+                )
+            }) else {
+                return LINUX_ENOMEM;
+            };
+            if result.is_err() {
+                return LINUX_ENOMEM;
+            }
+            let Some(page_flags) = linux_page_flags(prot as u64) else {
+                return LINUX_EINVAL;
+            };
+            let _ = paging::protect_user_range(pml4, old_address + old_size, delta, page_flags);
+            return old_address as i64;
+        }
+        if flags & MREMAP_MAYMOVE == 0 {
+            return LINUX_ENOMEM;
+        }
+    }
+    let fixed = flags & MREMAP_FIXED != 0;
+    let target = if fixed { new_address } else { 0 };
+    if fixed {
+        if target == 0
+            || target < old_address.saturating_add(old_size)
+                && old_address < target.saturating_add(new_size)
+        {
+            return LINUX_EINVAL;
+        }
+        let _ = scheduler::linux_vma_remove(target, new_size);
+        let _ = crate::memory::with_frame_allocator(|allocator| {
+            paging::unmap_user_range(allocator, pml4, target, new_size)
+        });
+    }
+    let Ok(new_start) = scheduler::linux_vma_insert(new_size, prot, target, fixed, false) else {
+        return LINUX_ENOMEM;
+    };
+    let writable = aether_memory::paging::PageFlags::PRESENT
+        | aether_memory::paging::PageFlags::USER
+        | aether_memory::paging::PageFlags::WRITABLE
+        | aether_memory::paging::PageFlags::NO_EXECUTE;
+    let Some(mapped) = crate::memory::with_frame_allocator(|allocator| {
+        paging::map_allocated_user_range(allocator, pml4, new_start, new_size, writable)
+    }) else {
+        let _ = scheduler::linux_vma_remove(new_start, new_size);
+        return LINUX_ENOMEM;
+    };
+    if mapped.is_err() {
+        let _ = scheduler::linux_vma_remove(new_start, new_size);
+        return LINUX_ENOMEM;
+    }
+    // SAFETY: Both ranges are mapped in the current address space, do not
+    // overlap, and the syscall path has interrupts masked.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            old_address as *const u8,
+            new_start as *mut u8,
+            old_size as usize,
+        );
+    }
+    let Some(page_flags) = linux_page_flags(prot as u64) else {
+        return LINUX_EINVAL;
+    };
+    if paging::protect_user_range(pml4, new_start, new_size, page_flags).is_err() {
+        return LINUX_EINVAL;
+    }
+    let _ = scheduler::linux_vma_remove(old_address, old_size);
+    let _ = crate::memory::with_frame_allocator(|allocator| {
+        paging::unmap_user_range(allocator, pml4, old_address, old_size)
+    });
+    new_start as i64
 }
 
 fn linux_munmap(pml4: PhysFrame, address: u64, length: u64) -> i64 {

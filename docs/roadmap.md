@@ -206,8 +206,8 @@ user space. It is not a VM. The target and security gates are in
 - [x] Runtime frame allocator, per-task VMA table, file-backed `mmap`, `munmap`
   reclaim, `mprotect`, and growing `brk`; pages are allocated on demand and
   returned on unmap or task exit.
-- [ ] `mremap`, page-fault handling, and shared mappings; preserve W^X and
-  account every mapping against the domain limit.
+- [x] `mremap` grow-in-place and may-move with content preservation.
+- [ ] Page-fault handling, shared mappings, and per-domain mapping quotas.
 - [x] Dynamic ELF slice: `ET_DYN` and `PT_INTERP` parsing, image mapping,
   auxv construction, runtime-rootfs interpreter resolution, and
   interpreter-to-main handoff (`AETHER_LINUX_DYN_*`).

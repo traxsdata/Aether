@@ -172,8 +172,9 @@ bounded pipe with non-blocking `poll` are also exercised
 (`AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
 `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). A thread is created with
 `clone(CLONE_VM|CLONE_THREAD)`, synchronizes through `FUTEX_WAIT`/`FUTEX_WAKE`,
-and joins through `CLONE_CHILD_CLEARTID` (`AETHER_LINUX_THREAD_OK`). A static
-freestanding Linux ELF runs at CPL3,
+and joins through `CLONE_CHILD_CLEARTID` (`AETHER_LINUX_THREAD_OK`). `mremap`
+grows and moves a mapping while preserving contents (`AETHER_LINUX_MREMAP_OK`).
+A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only

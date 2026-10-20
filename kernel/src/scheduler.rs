@@ -1929,6 +1929,14 @@ pub fn linux_vma_remove(address: u64, length: u64) -> Result<bool, VmaError> {
     task.vmas.remove(address, length)
 }
 
+/// Returns the protection bits for the VMA containing `address`.
+#[must_use]
+pub fn linux_vma_prot(address: u64) -> Option<u32> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    task.vmas.get(address).map(|vma| vma.prot)
+}
+
 /// Changes protections for a mapped Linux range.
 pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), VmaError> {
     let tasks = unsafe { &mut *TASKS.0.get() };

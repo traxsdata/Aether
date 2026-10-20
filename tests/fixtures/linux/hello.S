@@ -475,6 +475,44 @@ _start:
     syscall
     add $64, %rsp
 
+    /* mremap: grow a mapping and preserve its contents. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_mremap
+    mov %rax, %r12
+    movb $0x5a, (%r12)
+    mov $25, %rax               /* mremap */
+    mov %r12, %rdi
+    mov $4096, %rsi
+    mov $8192, %rdx
+    mov $1, %r10                /* MREMAP_MAYMOVE */
+    xor %r8, %r8
+    syscall
+    test %rax, %rax
+    js fail_mremap
+    mov %rax, %r13
+    cmpb $0x5a, (%r13)
+    jne fail_mremap
+    movb $0x5b, 4096(%r13)
+    cmpb $0x5b, 4096(%r13)
+    jne fail_mremap
+    mov $11, %rax
+    mov %r13, %rdi
+    mov $8192, %rsi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea mremap_message(%rip), %rsi
+    mov $mremap_message_len, %rdx
+    syscall
+
     /* Thread + futex: map a shared page, clone, wait for the child. */
     mov $9, %rax
     xor %rdi, %rdi
@@ -622,6 +660,10 @@ fail_event:
 fail_thread:
     lea thread_failure(%rip), %rsi
     mov $thread_failure_len, %rdx
+    jmp report_failure
+fail_mremap:
+    lea mremap_failure(%rip), %rsi
+    mov $mremap_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -674,6 +716,12 @@ thread_message:
 thread_failure:
     .ascii "AETHER_LINUX_THREAD_FAIL\n"
     .set thread_failure_len, . - thread_failure
+mremap_message:
+    .ascii "AETHER_LINUX_MREMAP_OK grow=ok data=ok\n"
+    .set mremap_message_len, . - mremap_message
+mremap_failure:
+    .ascii "AETHER_LINUX_MREMAP_FAIL\n"
+    .set mremap_failure_len, . - mremap_failure
 root_path:
     .asciz "/"
 usrbin_path:

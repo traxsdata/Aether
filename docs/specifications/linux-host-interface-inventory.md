@@ -88,7 +88,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 |---|---|---|---|---|---|
 | HI-08 | Metadata and directories: `stat64`, `statx`, `fstat64`, `newfstatat`, `readlink`, `getdents64`, `mkdir`, `unlink`, `rename`, `dirfd` | Synthetic stat/statx and directory enumeration over the imported root; filesystem service mutations remain missing | `kernel/src/linux.rs`, `kernel/src/scheduler.rs`, `kernel/fs` | HI-T08 | partial |
 | HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Portal grant handles and `/run/aether/portal/<grant>` paths; `/home/user` is the private overlay | `kernel/src/portal.rs`, planned `user/portald` | HI-T09 | missing |
-| HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `brk`, file mappings, W^X | Per-task VMA table over the boot arena; file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk` | `kernel/src/memory`, `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T10 | partial |
+| HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `mremap`, `brk`, file mappings, W^X | Per-task VMA table; file-backed `mmap`, `munmap` reclaim, `mprotect`, `mremap` grow/move, growing `brk` | `kernel/src/memory`, `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T10 | partial |
 | HI-11 | Synchronization: `futex`, pthread mutex/condition variables, robust lists, `eventfd` | Futex wait/wake queues with timeouts | `kernel/src/scheduler.rs`, `kernel/src/ipc.rs` | HI-T11 | partial |
 | HI-12 | Signals: `sigaction`, `signal`, `sigemptyset`, `sigaddset`, `sigaltstack`, `kill`, `pause` | Fault-to-signal delivery and per-thread masks | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T12 | missing |
 | HI-13 | Time and waits: `clock_gettime`, `clock_nanosleep`, `poll` timeouts, `timerfd` | Time service plus a blocking wait queue | `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T13 | partial |
@@ -138,7 +138,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T07 | `make test`; planned `make linux-fd-test` | Boot fixture exercises open/read/seek/dup/fcntl/close, pipe2 write/read, and poll; bad-descriptor and bounce-buffer matrices remain planned | partial |
 | HI-T08 | `make test`; planned `make linux-fs-test` | Boot fixture exercises newfstatat/fstat/statx/readlink and getdents64 on `/` and `/usr/bin`; mutations and outside-path denial remain planned | partial |
 | HI-T09 | planned `make linux-portal-test` | File chooser grant, exact-file open, revocation, denial, and no ambient home | planned |
-| HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixture maps a file, unmaps and reuses an address, grows `brk`, and denies W+X; frames are allocated at map time and reclaimed on unmap | partial |
+| HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixture maps a file, unmaps/reuses, grows `brk`, grows a mapping with `mremap`, and denies W+X; page-fault and shared mappings remain | partial |
 | HI-T11 | `make test`; planned `make linux-sync-test` | Boot fixture blocks on FUTEX_WAIT and wakes through FUTEX_WAKE during thread join; timeouts, robust lists, and condition variables remain planned | partial |
 | HI-T12 | planned `make linux-signal-test` | Handler delivery, alt stack, mask, fault-to-signal, and no delivery across domains | planned |
 | HI-T13 | planned `make linux-time-test` | Monotonic/realtime clocks, sleep, poll timeout, and timer cancellation | planned |
