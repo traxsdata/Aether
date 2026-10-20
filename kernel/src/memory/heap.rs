@@ -17,10 +17,25 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 // scratch buffers; 64 MiB and 256 MiB both exhausted during that import. Keep
 // the arena large enough for the largest staged fixture while the importer is
 // allocation-only; replacing it with a reclaiming allocator is follow-up work.
+//
+// The Gate 4 Mesa/lavapipe rootfs carries ~164 MiB of uncompressed libraries
+// (LLVM alone is ~139 MiB). The allocation-only importer uses roughly 1 GiB
+// for that tree because decompression scratch is never reclaimed, so the
+// profile selects a 1.5 GiB arena and a 3 GiB guest. A reclaiming allocator is
+// the follow-up that removes this multiplier.
+#[cfg(feature = "gate4-runtime")]
+const HEAP_BYTES: usize = 1536 * 1024 * 1024;
+#[cfg(not(feature = "gate4-runtime"))]
 const HEAP_BYTES: usize = 512 * 1024 * 1024;
 
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 static OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+/// Bytes reserved by the bump heap since boot.
+#[must_use]
+pub fn used_bytes() -> usize {
+    OFFSET.load(Ordering::Relaxed)
+}
 
 /// Bounded bump allocator.
 pub struct BumpAllocator;

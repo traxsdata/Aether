@@ -148,6 +148,8 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // before the kernel ever forms a slice over it.
     if !artifact_in_loader_memory(info.linux_appimage, regions)
         || !artifact_in_loader_memory(info.linux_appimage_record, regions)
+        || !artifact_in_loader_memory(info.linux_runtime_rootfs, regions)
+        || !artifact_in_loader_memory(info.linux_runtime_rootfs_record, regions)
     {
         boot_failure("staged artifact outside loader memory");
     }
@@ -186,6 +188,18 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                 info.linux_appimage_record.length,
             );
         }
+        if info.linux_runtime_rootfs.is_present() {
+            frames.reserve_range(
+                info.linux_runtime_rootfs.address,
+                info.linux_runtime_rootfs.length,
+            );
+        }
+        if info.linux_runtime_rootfs_record.is_present() {
+            frames.reserve_range(
+                info.linux_runtime_rootfs_record.address,
+                info.linux_runtime_rootfs_record.length,
+            );
+        }
     });
 
     if info.linux_appimage.is_present() && info.linux_appimage_record.is_present() {
@@ -199,7 +213,17 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     } else {
         serial_line!("boot: no loader-staged AppImage in the hand-off");
     }
+    if info.linux_runtime_rootfs.is_present() && info.linux_runtime_rootfs_record.is_present() {
+        serial_line!(
+            "boot: loader staged runtime rootfs address={:#x} length={} record={:#x} record_length={}",
+            info.linux_runtime_rootfs.address,
+            info.linux_runtime_rootfs.length,
+            info.linux_runtime_rootfs_record.address,
+            info.linux_runtime_rootfs_record.length
+        );
+    }
     linux::stage_appimage(info.linux_appimage, info.linux_appimage_record);
+    linux::stage_runtime_rootfs(info.linux_runtime_rootfs, info.linux_runtime_rootfs_record);
 
     let framebuffer_mapped =
         match memory::with_frame_allocator(|frames| memory::paging::init(frames, info, regions)) {

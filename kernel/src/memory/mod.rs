@@ -5,6 +5,8 @@ mod heap;
 pub mod paging;
 pub mod shared;
 
+pub use heap::used_bytes as heap_used_bytes;
+
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, FrameStats};
 use core::cell::UnsafeCell;

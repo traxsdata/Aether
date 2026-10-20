@@ -30,3 +30,6 @@ fault-selftest = []
 # Boot with a rollback self-test that removes the current image marker and
 # re-selects, exercising the lost-image branch on every test boot.
 recovery-rollback-selftest = []
+# Gate 4 staged Mesa/lavapipe rootfs needs more import heap than the embedded
+# Gate 3 fixture. The boot image also needs more guest RAM.
+gate4-runtime = []

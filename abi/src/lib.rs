@@ -24,7 +24,7 @@ pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"AETHEROS");
 ///
 /// Bump this for any layout or semantic change. The kernel refuses versions it
 /// does not implement.
-pub const BOOT_INFO_VERSION: u32 = 4;
+pub const BOOT_INFO_VERSION: u32 = 5;
 
 /// Maximum number of memory regions passed to the kernel.
 ///
@@ -44,6 +44,14 @@ pub const MAX_STAGED_APPIMAGE_BYTES: u64 = 32 * 1024 * 1024;
 /// Records are a small fixed header with a signature; anything larger is
 /// malformed or hostile.
 pub const MAX_STAGED_RECORD_BYTES: u64 = 64 * 1024;
+
+/// Largest runtime rootfs the loader will stage into memory (256 MiB).
+///
+/// The Gate 4 Mesa/lavapipe rootfs is far larger than the embedded Gate 3
+/// fixture because it carries LLVM and the Vulkan software driver. Staging it
+/// keeps the kernel image small; the bound keeps the loader allocation and the
+/// kernel slice construction finite.
+pub const MAX_STAGED_RUNTIME_ROOTFS_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Prototype bound on visible dimensions and scan-line stride.
 /// Keeps software-compositor arithmetic and firmware-driven work bounded.
@@ -385,6 +393,10 @@ pub enum BootInfoError {
     InvalidStagedAppImage,
     /// The loader-staged import record address or length is invalid.
     InvalidStagedRecord,
+    /// The loader-staged runtime rootfs address or length is invalid.
+    InvalidStagedRuntimeRootfs,
+    /// The loader-staged runtime rootfs record address or length is invalid.
+    InvalidStagedRuntimeRootfsRecord,
 }
 
 impl fmt::Display for BootInfoError {
@@ -421,6 +433,12 @@ impl fmt::Display for BootInfoError {
             Self::InvalidStagedAppImage => write!(f, "invalid loader-staged AppImage descriptor"),
             Self::InvalidStagedRecord => {
                 write!(f, "invalid loader-staged import record descriptor")
+            }
+            Self::InvalidStagedRuntimeRootfs => {
+                write!(f, "invalid loader-staged runtime rootfs descriptor")
+            }
+            Self::InvalidStagedRuntimeRootfsRecord => {
+                write!(f, "invalid loader-staged runtime rootfs record descriptor")
             }
         }
     }
@@ -463,6 +481,11 @@ pub struct BootInfo {
     /// Signed import record for [`Self::linux_appimage`], or
     /// [`BootArtifact::NONE`].
     pub linux_appimage_record: BootArtifact,
+    /// Loader-staged runtime rootfs, or [`BootArtifact::NONE`].
+    pub linux_runtime_rootfs: BootArtifact,
+    /// Signed import record for [`Self::linux_runtime_rootfs`], or
+    /// [`BootArtifact::NONE`].
+    pub linux_runtime_rootfs_record: BootArtifact,
     /// Reserved; must be zero.
     pub reserved: [u64; 4],
 }
@@ -484,6 +507,8 @@ impl BootInfo {
             framebuffer: FramebufferInfo::NONE,
             linux_appimage: BootArtifact::NONE,
             linux_appimage_record: BootArtifact::NONE,
+            linux_runtime_rootfs: BootArtifact::NONE,
+            linux_runtime_rootfs_record: BootArtifact::NONE,
             reserved: [0; 4],
         }
     }
@@ -544,6 +569,18 @@ impl BootInfo {
         }
         if !self.linux_appimage_record.validate(MAX_STAGED_RECORD_BYTES) {
             return Err(BootInfoError::InvalidStagedRecord);
+        }
+        if !self
+            .linux_runtime_rootfs
+            .validate(MAX_STAGED_RUNTIME_ROOTFS_BYTES)
+        {
+            return Err(BootInfoError::InvalidStagedRuntimeRootfs);
+        }
+        if !self
+            .linux_runtime_rootfs_record
+            .validate(MAX_STAGED_RECORD_BYTES)
+        {
+            return Err(BootInfoError::InvalidStagedRuntimeRootfsRecord);
         }
         Ok(())
     }
@@ -755,7 +792,7 @@ mod tests {
         assert_eq!(size_of::<MemoryRegion>(), 24);
         assert_eq!(size_of::<FramebufferInfo>(), 40);
         assert_eq!(size_of::<BootArtifact>(), 16);
-        assert_eq!(size_of::<BootInfo>(), 168);
+        assert_eq!(size_of::<BootInfo>(), 200);
     }
 
     #[test]
@@ -829,6 +866,24 @@ mod tests {
         };
         assert_eq!(info.validate(), Err(BootInfoError::InvalidStagedRecord));
         info.linux_appimage_record = BootArtifact::NONE;
+        info.linux_runtime_rootfs = BootArtifact {
+            address: 0x30_0001,
+            length: 1,
+        };
+        assert_eq!(
+            info.validate(),
+            Err(BootInfoError::InvalidStagedRuntimeRootfs)
+        );
+        info.linux_runtime_rootfs = BootArtifact::NONE;
+        info.linux_runtime_rootfs_record = BootArtifact {
+            address: 0x40_0000,
+            length: MAX_STAGED_RECORD_BYTES + 1,
+        };
+        assert_eq!(
+            info.validate(),
+            Err(BootInfoError::InvalidStagedRuntimeRootfsRecord)
+        );
+        info.linux_runtime_rootfs_record = BootArtifact::NONE;
         assert_eq!(info.validate(), Ok(()));
     }
 
