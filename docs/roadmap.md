@@ -220,8 +220,9 @@ user space. It is not a VM. The target and security gates are in
 - [x] File metadata and descriptor calls: `stat`/`fstat`/`newfstatat`/`statx`,
   `readlink`, `getdents64`, `fcntl`, `dup`, `dup2`, `pipe2`, non-blocking
   `poll`, and descriptor table cleanup.
-- [ ] Remaining file calls: blocking `poll`, `epoll`, `eventfd`, and bounded
-  `inotify`.
+- [x] Notification calls: non-blocking `poll`, `eventfd2`, and basic
+  `epoll_create1`/`epoll_ctl`/`epoll_wait`.
+- [ ] Blocking waits, edge-triggered epoll semantics, and bounded `inotify`.
 - [ ] Process and thread syscalls: `clone`, `clone3`, `wait4`, `execve`,
   `set_tid_address`, `set_robust_list`, `rseq`, thread-local storage.
 - [ ] Synchronization: real futex wait/wake queues, timeouts, robust lists;

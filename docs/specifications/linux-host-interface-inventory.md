@@ -94,7 +94,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | HI-13 | Time and waits: `clock_gettime`, `clock_nanosleep`, `poll` timeouts, `timerfd` | Time service plus a blocking wait queue | `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T13 | partial |
 | HI-14 | Random: `getrandom` | Kernel random source | `kernel/src/syscall.rs` | HI-T14 | partial |
 | HI-15 | Pseudo-files: `/proc/self/{exe,maps,status,fd}`, `/dev/{null,zero,random}`, bounded `/sys` | `linuxd` synthesis plus fixed device nodes | planned `user/linuxd` | HI-T15 | missing |
-| HI-16 | Multiplexing and notification: `poll`, `epoll`, `eventfd`, `inotify` | Non-blocking `poll` over files and pipes; blocking waits, epoll, eventfd, and inotify are missing | planned `user/linuxd`, `kernel/src/ipc.rs` | HI-T16 | partial |
+| HI-16 | Multiplexing and notification: `poll`, `epoll`, `eventfd`, `inotify` | Non-blocking `poll`, per-task `eventfd2`, and basic `epoll_create1`/`epoll_ctl`/`epoll_wait`; blocking waits and inotify are missing | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T16 | partial |
 | HI-17 | Unix sockets: `socketpair`, `connect`, `bind`, `listen`, `accept4`, `sendmsg`, `recvmsg`, `getsockopt`, `setsockopt` | Brokered local sockets with validated `SCM_RIGHTS` | planned `user/linuxd`, `kernel/src/ipc.rs` | HI-T17 | missing |
 | HI-18 | Network: `socket`, `getaddrinfo`, `freeaddrinfo`, `gai_strerror`, `shutdown`; AF_INET/AF_INET6 | Network service with explicit capability | planned network service | HI-T18 | denied |
 
@@ -144,7 +144,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T13 | planned `make linux-time-test` | Monotonic/realtime clocks, sleep, poll timeout, and timer cancellation | planned |
 | HI-T14 | planned `make linux-random-test` | `getrandom` fills a bounded buffer and fails closed at the domain boundary | planned |
 | HI-T15 | planned `make linux-procfs-test` | Synthesized `/proc` and `/dev` nodes; no host process or device enumeration | planned |
-| HI-T16 | `make test`; planned `make linux-poll-test` | Boot fixture polls a pipe for `POLLIN`; epoll/eventfd/inotify and blocking wake behavior remain planned | partial |
+| HI-T16 | `make test`; planned `make linux-poll-test` | Boot fixture polls a pipe and drives an eventfd through epoll (`POLLIN`); blocking wake behavior and inotify remain planned | partial |
 | HI-T17 | planned `make linux-socket-test` | Local socket pairing and `SCM_RIGHTS` validation; no network sockets | planned |
 | HI-T18 | planned `make linux-net-deny-test` | AF_INET/AF_INET6 and DNS fail closed without a capability | planned |
 | HI-T19 | planned `make wayland-test` | Registry, surfaces, commits, frame callbacks, xdg-shell toplevel, and teardown | planned |

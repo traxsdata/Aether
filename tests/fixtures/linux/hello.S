@@ -402,6 +402,85 @@ _start:
     syscall
     add $64, %rsp
 
+    sub $64, %rsp
+    movq $1, 0(%rsp)            /* eventfd initial value */
+    mov $290, %rax              /* eventfd2 */
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    js fail_event
+    mov %rax, %r13
+    mov $1, %rax                /* write value 1 */
+    mov %r13, %rdi
+    mov %rsp, %rsi
+    mov $8, %rdx
+    syscall
+    cmp $8, %rax
+    jne fail_event
+    mov %r13d, 16(%rsp)
+    movw $1, 20(%rsp)
+    movw $0, 22(%rsp)
+    mov $7, %rax                /* poll POLLIN */
+    lea 16(%rsp), %rdi
+    mov $1, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_event
+
+    mov $291, %rax              /* epoll_create1 */
+    xor %rdi, %rdi
+    syscall
+    test %rax, %rax
+    js fail_event
+    mov %rax, %r14
+    movl $1, 32(%rsp)           /* epoll_event.events = POLLIN */
+    movq $0x1234, 36(%rsp)      /* epoll_event.data */
+    mov $233, %rax              /* epoll_ctl ADD */
+    mov %r14, %rdi
+    mov $1, %rsi
+    mov %r13, %rdx
+    lea 32(%rsp), %r10
+    syscall
+    test %rax, %rax
+    jne fail_event
+    mov $232, %rax              /* epoll_wait */
+    mov %r14, %rdi
+    lea 48(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $1, %rax
+    jne fail_event
+    cmpl $1, 48(%rsp)
+    jne fail_event
+    cmpq $0x1234, 52(%rsp)
+    jne fail_event
+
+    mov $0, %rax                /* read eventfd */
+    mov %r13, %rdi
+    mov %rsp, %rsi
+    mov $8, %rdx
+    syscall
+    cmp $8, %rax
+    jne fail_event
+    cmpq $1, 0(%rsp)
+    jne fail_event
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $3, %rax
+    mov %r14, %rdi
+    syscall
+    add $64, %rsp
+
+    mov $1, %rax                /* write */
+    mov $1, %rdi                /* stdout */
+    lea event_message(%rip), %rsi
+    mov $event_message_len, %rdx
+    syscall
+
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea pipe_message(%rip), %rsi
@@ -469,6 +548,10 @@ fail_dir:
 fail_pipe:
     lea pipe_failure(%rip), %rsi
     mov $pipe_failure_len, %rdx
+    jmp report_failure
+fail_event:
+    lea event_failure(%rip), %rsi
+    mov $event_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -509,6 +592,12 @@ pipe_failure:
     .set pipe_failure_len, . - pipe_failure
 pipe_data:
     .ascii "ping"
+event_message:
+    .ascii "AETHER_LINUX_EVENT_OK eventfd=ok epoll=ok\n"
+    .set event_message_len, . - event_message
+event_failure:
+    .ascii "AETHER_LINUX_EVENT_FAIL\n"
+    .set event_failure_len, . - event_failure
 root_path:
     .asciz "/"
 usrbin_path:

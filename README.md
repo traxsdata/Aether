@@ -131,9 +131,9 @@ grants, and the desktop is not a security authority.
   rejected (`AETHER_LINUX_VMA_OK`). Pages are allocated on demand and returned
   on unmap or task exit. File metadata (`stat`/`fstat`/`newfstatat`/`statx`),
   `readlink`, `fcntl`, and descriptor duplication are implemented
-  (`AETHER_LINUX_FILEMETA_OK`). Directory enumeration and bounded pipes with
-  non-blocking `poll` are available (`AETHER_LINUX_DIR_OK`,
-  `AETHER_LINUX_PIPE_OK`). A dynamic `ET_DYN`/`PT_INTERP` loader maps a
+  (`AETHER_LINUX_FILEMETA_OK`). Directory enumeration, bounded pipes, non-blocking `poll`, `eventfd`, and
+  basic `epoll` are available (`AETHER_LINUX_DIR_OK`,
+  `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). A dynamic `ET_DYN`/`PT_INTERP` loader maps a
   main image and its interpreter from the verified runtime rootfs, builds
   auxv, and hands control from the interpreter to the main entry
   (`AETHER_LINUX_DYN_*`). `make glibc-test` packages the host glibc in a signed
@@ -171,7 +171,7 @@ grants, and the desktop is not a security authority.
   `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`,
   `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_IMPORT_OK`,
   `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`,
-  `AETHER_LINUX_DIR_OK`, `AETHER_LINUX_PIPE_OK`,
+  `AETHER_LINUX_DIR_OK`, `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`,
   `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
   `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`,
   `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,

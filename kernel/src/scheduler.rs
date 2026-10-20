@@ -87,10 +87,35 @@ enum LinuxFileSource {
     Overlay(usize),
     Directory { path: [u8; 64], len: usize },
     Pipe { index: usize, write: bool },
+    EventFd { index: usize },
+    Epoll { index: usize },
 }
 
 const PIPE_BYTES: usize = 512;
 const MAX_PIPES: usize = 2;
+const MAX_EVENTFDS: usize = 2;
+const MAX_EPOLLS: usize = 1;
+const MAX_EPOLL_WATCH: usize = 8;
+
+/// One ready epoll entry returned to user space.
+#[derive(Clone, Copy)]
+pub struct LinuxEpollEvent {
+    /// Requested/returned event mask.
+    pub events: u32,
+    /// Caller data associated with the watched descriptor.
+    pub data: u64,
+}
+
+#[derive(Clone, Copy)]
+struct LinuxEpoll {
+    watches: [Option<(u64, u32, u64)>; MAX_EPOLL_WATCH],
+}
+
+impl LinuxEpoll {
+    const EMPTY: Self = Self {
+        watches: [None; MAX_EPOLL_WATCH],
+    };
+}
 
 #[derive(Clone, Copy)]
 struct LinuxPipe {
@@ -164,6 +189,8 @@ struct Task {
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
     linux_overlay: [Option<LinuxOverlay>; OVERLAY_FILES],
     linux_pipes: [Option<LinuxPipe>; MAX_PIPES],
+    linux_eventfds: [Option<u64>; MAX_EVENTFDS],
+    linux_epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
 }
 
 impl Task {
@@ -189,6 +216,8 @@ impl Task {
             linux_fds: [None; crate::linux::MAX_FDS],
             linux_overlay: [None; OVERLAY_FILES],
             linux_pipes: [None; MAX_PIPES],
+            linux_eventfds: [None; MAX_EVENTFDS],
+            linux_epolls: [None; MAX_EPOLLS],
         }
     }
 }
@@ -1279,6 +1308,145 @@ pub fn linux_pipe() -> Result<(u64, u64), i64> {
     }
 }
 
+/// Creates an eventfd with the given initial counter.
+pub fn linux_eventfd(initial: u64) -> Result<u64, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(index) = task
+        .linux_eventfds
+        .iter()
+        .position(|eventfd| eventfd.is_none())
+    else {
+        return Err(LINUX_EMFILE);
+    };
+    task.linux_eventfds[index] = Some(initial);
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::EventFd { index },
+                offset: 0,
+            });
+            return Ok(descriptor as u64);
+        }
+    }
+    task.linux_eventfds[index] = None;
+    Err(LINUX_EMFILE)
+}
+
+/// Creates an epoll instance.
+pub fn linux_epoll_create() -> Result<u64, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(index) = task.linux_epolls.iter().position(|epoll| epoll.is_none()) else {
+        return Err(LINUX_EMFILE);
+    };
+    task.linux_epolls[index] = Some(LinuxEpoll::EMPTY);
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::Epoll { index },
+                offset: 0,
+            });
+            return Ok(descriptor as u64);
+        }
+    }
+    task.linux_epolls[index] = None;
+    Err(LINUX_EMFILE)
+}
+
+/// Adds, modifies, or removes an epoll watch.
+pub fn linux_epoll_ctl(
+    epoll_fd: u64,
+    operation: u64,
+    target_fd: u64,
+    events: u32,
+    data: u64,
+) -> Result<(), i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task
+        .linux_fds
+        .get(epoll_fd as usize)
+        .and_then(Option::as_ref)
+    else {
+        return Err(LINUX_EBADF);
+    };
+    let LinuxFileSource::Epoll { index } = slot.source else {
+        return Err(LINUX_EINVAL);
+    };
+    if task
+        .linux_fds
+        .get(target_fd as usize)
+        .and_then(Option::as_ref)
+        .is_none()
+    {
+        return Err(LINUX_EBADF);
+    }
+    let Some(epoll) = task.linux_epolls.get_mut(index).and_then(Option::as_mut) else {
+        return Err(LINUX_EBADF);
+    };
+    match operation {
+        1 | 3 => {
+            if let Some(entry) = epoll
+                .watches
+                .iter_mut()
+                .find(|entry| entry.is_some_and(|(fd, _, _)| fd == target_fd))
+            {
+                *entry = Some((target_fd, events, data));
+            } else {
+                let Some(entry) = epoll.watches.iter_mut().find(|entry| entry.is_none()) else {
+                    return Err(LINUX_ENOSPC);
+                };
+                *entry = Some((target_fd, events, data));
+            }
+        }
+        2 => {
+            for entry in epoll.watches.iter_mut() {
+                if entry.is_some_and(|(fd, _, _)| fd == target_fd) {
+                    *entry = None;
+                }
+            }
+        }
+        _ => return Err(LINUX_EINVAL),
+    }
+    Ok(())
+}
+
+/// Collects ready epoll entries without blocking.
+pub fn linux_epoll_wait(epoll_fd: u64, out: &mut [LinuxEpollEvent]) -> Result<usize, i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task
+        .linux_fds
+        .get(epoll_fd as usize)
+        .and_then(Option::as_ref)
+    else {
+        return Err(LINUX_EBADF);
+    };
+    let LinuxFileSource::Epoll { index } = slot.source else {
+        return Err(LINUX_EINVAL);
+    };
+    let Some(epoll) = task.linux_epolls.get(index).and_then(Option::as_ref) else {
+        return Err(LINUX_EBADF);
+    };
+    let mut count = 0usize;
+    for watch in epoll.watches.iter().flatten() {
+        if count == out.len() {
+            break;
+        }
+        let (fd, events, data) = *watch;
+        let ready = linux_poll(fd, events as i16);
+        if ready != 0 {
+            out[count] = LinuxEpollEvent {
+                events: ready as u32,
+                data,
+            };
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Returns poll readiness bits for a Linux descriptor.
 pub fn linux_poll(fd: u64, events: i16) -> i16 {
     const POLLIN: i16 = 1;
@@ -1306,6 +1474,22 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
         | LinuxFileSource::Overlay(_)
         | LinuxFileSource::Directory { .. } => {
             ready = events & (POLLIN | POLLOUT);
+        }
+        LinuxFileSource::EventFd { index } => {
+            let counter = task
+                .linux_eventfds
+                .get(index)
+                .and_then(|value| *value)
+                .unwrap_or(0);
+            if events & POLLIN != 0 && counter > 0 {
+                ready |= POLLIN;
+            }
+            if events & POLLOUT != 0 && counter < u64::MAX {
+                ready |= POLLOUT;
+            }
+        }
+        LinuxFileSource::Epoll { .. } => {
+            ready = events & POLLIN;
         }
     }
     ready
@@ -1359,6 +1543,22 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
             Ok(length)
         }
         LinuxFileSource::Pipe { write: true, .. } => Err(LINUX_EBADF),
+        LinuxFileSource::EventFd { index } => {
+            let Some(counter) = task.linux_eventfds.get_mut(index).and_then(Option::as_mut) else {
+                return Err(LINUX_EBADF);
+            };
+            if *counter == 0 {
+                return Err(LINUX_EAGAIN);
+            }
+            if out.len() < 8 {
+                return Err(LINUX_EINVAL);
+            }
+            let value = *counter;
+            *counter = 0;
+            out[..8].copy_from_slice(&value.to_le_bytes());
+            Ok(8)
+        }
+        LinuxFileSource::Epoll { .. } => Err(LINUX_EINVAL),
     }
 }
 
@@ -1398,6 +1598,17 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
             pipe.len += length;
             Ok(length)
         }
+        LinuxFileSource::EventFd { index } => {
+            if data.len() < 8 {
+                return Err(LINUX_EINVAL);
+            }
+            let value = u64::from_le_bytes(data[..8].try_into().unwrap_or([0; 8]));
+            let Some(counter) = task.linux_eventfds.get_mut(index).and_then(Option::as_mut) else {
+                return Err(LINUX_EBADF);
+            };
+            *counter = counter.saturating_add(value);
+            Ok(8)
+        }
         _ => Err(LINUX_EROFS),
     }
 }
@@ -1434,7 +1645,9 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
             Ok(length)
         }
         LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
-        LinuxFileSource::Pipe { .. } => Err(LINUX_ESPIPE),
+        LinuxFileSource::Pipe { .. }
+        | LinuxFileSource::EventFd { .. }
+        | LinuxFileSource::Epoll { .. } => Err(LINUX_ESPIPE),
     }
 }
 
@@ -1466,7 +1679,10 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
             .get(index)
             .and_then(Option::as_ref)
             .map_or(0, |entry| entry.len),
-        LinuxFileSource::Directory { .. } | LinuxFileSource::Pipe { .. } => 0,
+        LinuxFileSource::Directory { .. }
+        | LinuxFileSource::Pipe { .. }
+        | LinuxFileSource::EventFd { .. }
+        | LinuxFileSource::Epoll { .. } => 0,
     };
     let base = match whence {
         0 => 0i64,
@@ -1582,7 +1798,9 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
             Ok((entry.len as u64, index as u64 + 1, 0o100644))
         }
         LinuxFileSource::Directory { .. } => Ok((0, 2, 0o040755)),
-        LinuxFileSource::Pipe { .. } => Ok((0, 0, 0o010600)),
+        LinuxFileSource::Pipe { .. }
+        | LinuxFileSource::EventFd { .. }
+        | LinuxFileSource::Epoll { .. } => Ok((0, 0, 0o010600)),
     }
 }
 
@@ -1640,7 +1858,10 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
             .and_then(Option::as_ref)
             .map(|entry| entry.len as u64)
             .ok_or(LINUX_EBADF),
-        LinuxFileSource::Directory { .. } | LinuxFileSource::Pipe { .. } => Ok(0),
+        LinuxFileSource::Directory { .. }
+        | LinuxFileSource::Pipe { .. }
+        | LinuxFileSource::EventFd { .. }
+        | LinuxFileSource::Epoll { .. } => Ok(0),
     }
 }
 
@@ -1784,6 +2005,8 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     tasks[current].linux_overlay = [None; OVERLAY_FILES];
     tasks[current].linux_pipes = [None; MAX_PIPES];
+    tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
+    tasks[current].linux_epolls = [None; MAX_EPOLLS];
     tasks[current].vmas.reset();
     let result = if status == 0 {
         UserTestResult::Passed
@@ -1828,6 +2051,8 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
         tasks[current].linux_pipes = [None; MAX_PIPES];
+        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
+        tasks[current].linux_epolls = [None; MAX_EPOLLS];
         tasks[current].vmas.reset();
         if current == LINUX_DYN_TASK {
             LINUX_DYN_FAULTS.fetch_add(1, Ordering::Release);

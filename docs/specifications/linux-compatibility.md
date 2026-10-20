@@ -170,7 +170,7 @@ is a host-ABI smoke test, not the pinned production runtime. File metadata,
 `readlink`, `fcntl`, descriptor duplication, directory enumeration, and a
 bounded pipe with non-blocking `poll` are also exercised
 (`AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
-`AETHER_LINUX_PIPE_OK`). A static freestanding Linux ELF runs at CPL3,
+`AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only

@@ -161,6 +161,8 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
         20 => linux_writev(pml4, first, second, third),
         21 => linux_access(pml4, first, second),
+        232 => linux_epoll_wait(pml4, first, second, third, unsafe { (*frame).r10 }),
+        233 => linux_epoll_ctl(pml4, first, second, third, unsafe { (*frame).r10 }),
         28 => 0,
         32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
         33 => scheduler::linux_dup2(first, second).map_or_else(|error| error, |fd| fd as i64),
@@ -169,6 +171,8 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         204 => linux_sched_getaffinity(pml4, first, second, third),
         217 => linux_getdents(pml4, first, second, third),
         262 => linux_newfstatat(pml4, first, second, third),
+        290 => scheduler::linux_eventfd(first).map_or_else(|error| error, |fd| fd as i64),
+        291 => scheduler::linux_epoll_create().map_or_else(|error| error, |fd| fd as i64),
         293 => linux_pipe2(pml4, first, second),
         267 => linux_readlink(pml4, second, third, unsafe { (*frame).r10 }, first),
         302 => linux_prlimit(pml4, first, second, unsafe { (*frame).r10 }),
@@ -564,6 +568,47 @@ fn linux_readlink(
     let length = target.len().min(buffer_length as usize);
     write_user_bytes(pml4, buffer_pointer, &target[..length])
         .map_or(LINUX_EFAULT, |()| length as i64)
+}
+
+fn linux_epoll_ctl(
+    pml4: PhysFrame,
+    epoll_fd: u64,
+    operation: u64,
+    target_fd: u64,
+    event_pointer: u64,
+) -> i64 {
+    let Some(raw) = user_bytes(pml4, event_pointer, 12, false) else {
+        return LINUX_EFAULT;
+    };
+    let events = u32::from_ne_bytes(raw[..4].try_into().unwrap_or([0; 4]));
+    let data = u64::from_ne_bytes(raw[4..12].try_into().unwrap_or([0; 8]));
+    scheduler::linux_epoll_ctl(epoll_fd, operation, target_fd, events, data)
+        .map_or_else(|error| error, |()| 0)
+}
+
+fn linux_epoll_wait(
+    pml4: PhysFrame,
+    epoll_fd: u64,
+    events_pointer: u64,
+    max_events: u64,
+    _timeout: u64,
+) -> i64 {
+    if max_events == 0 || max_events > 16 {
+        return LINUX_EINVAL;
+    }
+    let mut events = [scheduler::LinuxEpollEvent { events: 0, data: 0 }; 16];
+    let count = match scheduler::linux_epoll_wait(epoll_fd, &mut events[..max_events as usize]) {
+        Ok(count) => count,
+        Err(error) => return error,
+    };
+    let mut buffer = [0u8; 16 * 12];
+    for (index, event) in events[..count].iter().enumerate() {
+        let offset = index * 12;
+        buffer[offset..offset + 4].copy_from_slice(&event.events.to_ne_bytes());
+        buffer[offset + 4..offset + 12].copy_from_slice(&event.data.to_ne_bytes());
+    }
+    write_user_bytes(pml4, events_pointer, &buffer[..count * 12])
+        .map_or(LINUX_EFAULT, |()| count as i64)
 }
 
 fn linux_pipe2(pml4: PhysFrame, fds_pointer: u64, _flags: u64) -> i64 {

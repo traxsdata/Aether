@@ -73,6 +73,10 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Linux notification slice: `eventfd2` counters and basic
+  `epoll_create1`/`epoll_ctl`/`epoll_wait` over files, directories, and pipes.
+  The boot fixture watches an eventfd through epoll and reads it back
+  (`AETHER_LINUX_EVENT_OK`). Blocking waits and inotify remain missing.
 - Linux directory and pipe slice: `getdents64` over the imported root,
   bounded `pipe2` rings, and non-blocking `poll` for files, directories, and
   pipes. The boot fixture enumerates `/` and `/usr/bin`, writes and reads a
