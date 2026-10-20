@@ -27,9 +27,10 @@ grants, and the desktop is not a security authority.
 >
 > Windows compatibility, the Linux AppImage layer, networking, persistent
 > storage, audio, GPU acceleration, a general installer, Secure Boot, and an
-> external security review are not implemented. The Linux work is at Gate 0:
-> the AppImage container inspector exists, but no Linux binary can run yet. Do
-> not use this tree for real data.
+> external security review are not implemented. The Linux work has a validated
+> AppImage importer and a ring-3 Linux `syscall` path that runs a static test
+> ELF; it cannot run a dynamic AppImage such as GridCraft yet. Do not use this
+> tree for real data.
 
 ## What works today
 
@@ -113,6 +114,10 @@ grants, and the desktop is not a security authority.
   SquashFS bounds, compression, and table-offset validation, with a host
   diagnostic. It does not execute or mount the image; see
   [`docs/specifications/linux-compatibility.md`](docs/specifications/linux-compatibility.md).
+- A first Linux ABI slice: a static freestanding x86-64 Linux ELF is loaded
+  into its own PML4, enters through the `syscall` instruction, writes through a
+  validated user pointer, and exits cleanly (`AETHER_LINUX_OK`). Dynamic
+  libraries, threads, Wayland, and Vulkan are still missing.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,
@@ -140,7 +145,8 @@ grants, and the desktop is not a security authority.
   `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`,
   `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
-  `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
+  `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`, `AETHER_LINUX_OK`,
+  `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
   `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
 - `make iso-test`, which boots the generated ISO through UEFI El Torito and
   requires the full boot/security marker set. It drives real PS/2 window and

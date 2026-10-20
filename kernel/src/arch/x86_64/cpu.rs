@@ -17,6 +17,11 @@ use core::arch::x86_64::__cpuid;
 
 const IA32_EFER: u32 = 0xc000_0080;
 const EFER_NXE: u64 = 1 << 11;
+const EFER_SCE: u64 = 1 << 0;
+
+const IA32_STAR: u32 = 0xc000_0081;
+const IA32_LSTAR: u32 = 0xc000_0082;
+const IA32_FMASK: u32 = 0xc000_0084;
 
 const CR0_WP: u64 = 1 << 16;
 
@@ -29,6 +34,25 @@ const CPUID_FEATURE_NX: u32 = 1 << 20;
 pub enum CpuError {
     /// The processor does not implement the no-execute page protection.
     NxUnsupported,
+}
+
+/// Enables the architectural `syscall` instruction for the Linux ABI task.
+///
+/// # Safety
+///
+/// Must run once during boot at CPL0, with interrupts disabled and after the
+/// GDT is installed. `entry` must be the Linux syscall assembly entry point and
+/// must preserve the frame contract expected by the handler.
+pub unsafe fn enable_syscall(entry: u64, kernel_code: u16, user_code: u16) {
+    let star = (u64::from(user_code) << 48) | (u64::from(kernel_code) << 32);
+    // SAFETY: The caller guarantees CPL0 and valid selectors/entry address.
+    unsafe {
+        write_msr(IA32_STAR, star);
+        write_msr(IA32_LSTAR, entry);
+        // Clear IF on entry; the assembly stub runs with interrupts masked.
+        write_msr(IA32_FMASK, 1 << 9);
+        write_msr(IA32_EFER, read_msr(IA32_EFER) | EFER_SCE);
+    }
 }
 
 /// Enables NX page protection and supervisor write protection.

@@ -161,4 +161,7 @@ pub unsafe fn set_kernel_stack(top: u64) {
         let tss = core::ptr::addr_of_mut!(TSS);
         core::ptr::addr_of_mut!((*tss).rsp0).write_unaligned(top);
     }
+    // Keep the syscall instruction's stack in step with the interrupt stack.
+    // SAFETY: The caller passes a valid stack and serializes the update.
+    unsafe { super::idt::set_linux_syscall_stack(top) };
 }

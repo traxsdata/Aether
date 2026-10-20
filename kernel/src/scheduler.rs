@@ -32,8 +32,10 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 pub const WORKER_COUNT: usize = 3;
 /// Task index of the ring-3 process.
 pub const USER_TASK: usize = WORKER_COUNT + 1;
+/// Task index of the Linux ABI boot test.
+pub const LINUX_TASK: usize = USER_TASK + 1;
 
-const MAX_TASKS: usize = WORKER_COUNT + 2;
+const MAX_TASKS: usize = WORKER_COUNT + 3;
 const STACK_SIZE: usize = 16 * 1024;
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const ROUNDS: usize = 4;
@@ -41,6 +43,8 @@ const MAGIC_PREFIX: u64 = 0xa5a5_0000_0000_0000;
 
 /// Native user program embedded by the kernel build.
 static USER_ELF: &[u8] = include_bytes!(env!("AETHER_USER_ELF"));
+/// Static Linux program used to exercise the Linux syscall entry.
+static LINUX_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_ELF"));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TaskState {
@@ -57,6 +61,16 @@ enum TaskKind {
     Idle,
     Worker,
     User,
+    Linux,
+}
+
+/// Syscall ABI selected for a ring-3 task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskAbi {
+    /// Aether's native `int 0x80` ABI.
+    Aether,
+    /// Linux x86-64 `syscall` ABI.
+    Linux,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -70,6 +84,7 @@ struct TaskHandles {
 struct Task {
     state: TaskState,
     kind: TaskKind,
+    abi: TaskAbi,
     saved_rsp: u64,
     pml4: u64,
     kernel_stack_top: u64,
@@ -83,6 +98,7 @@ impl Task {
         Self {
             state: TaskState::Empty,
             kind: TaskKind::Empty,
+            abi: TaskAbi::Aether,
             saved_rsp: 0,
             pml4: 0,
             kernel_stack_top: 0,
@@ -121,6 +137,9 @@ static MESSAGES: AtomicUsize = AtomicUsize::new(0);
 static USER_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
 static USER_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static USER_EXITS: AtomicUsize = AtomicUsize::new(0);
+static LINUX_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
+static LINUX_EXITS: AtomicUsize = AtomicUsize::new(0);
+static LINUX_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static MEM_FREE_MIB: AtomicUsize = AtomicUsize::new(0);
 static MEM_TOTAL_MIB: AtomicUsize = AtomicUsize::new(0);
 
@@ -137,6 +156,8 @@ pub enum SchedulerError {
     NoEndpoint,
     /// Capability table initialization failed.
     Capability(CapError),
+    /// The embedded Linux test program is not a valid executable.
+    LinuxImage,
     /// The embedded user program is not a valid executable.
     UserImage(elf::ParseError),
     /// The virtual filesystem could not be formatted or seeded.
@@ -182,6 +203,7 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
     loop {
         if DONE.load(Ordering::Acquire) == WORKER_COUNT
             && USER_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
+            && LINUX_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
         {
             timer::disable_interrupts();
             let denied = DENIED.load(Ordering::Acquire);
@@ -199,6 +221,20 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
                 );
                 halt()
             }
+            let linux_result = LINUX_RESULT.load(Ordering::Acquire);
+            if linux_result != UserTestResult::Passed as usize {
+                serial_line!(
+                    "AETHER_BOOT_FAILED reason=linux-test result={} faults={}",
+                    linux_result,
+                    LINUX_FAULTS.load(Ordering::Acquire)
+                );
+                halt()
+            }
+            serial_line!(
+                "AETHER_LINUX_OK abi=linux exits={} faults={}",
+                linux_exits(),
+                LINUX_FAULTS.load(Ordering::Acquire)
+            );
 
             serial_line!(
                 "AETHER_SCHED_OK workers={} ticks={}",
@@ -377,6 +413,23 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     tasks[USER_TASK] = user;
     crate::apps::started(USER_TASK);
 
+    // Load the static Linux test program. It is a boot gate for the Linux
+    // syscall entry, not yet an application domain with its own root.
+    let linux_image = elf::parse(LINUX_ELF).map_err(|_| SchedulerError::LinuxImage)?;
+    let linux_pml4 = paging::create_user_address_space(allocator, &linux_image, LINUX_ELF)?;
+    let linux_kernel_top = stack_top(&kernel_stacks[LINUX_TASK]);
+    let linux_saved_rsp = prepare_user_stack(linux_kernel_top, linux_image.entry());
+
+    let mut linux = Task::new();
+    linux.state = TaskState::Ready;
+    linux.kind = TaskKind::Linux;
+    linux.abi = TaskAbi::Linux;
+    linux.saved_rsp = linux_saved_rsp;
+    linux.pml4 = linux_pml4.start_address();
+    linux.kernel_stack_top = linux_kernel_top;
+    linux.root = crate::fs::DEMO_ROOT;
+    tasks[LINUX_TASK] = linux;
+
     // SAFETY: Interrupts are disabled during boot and the idle task is current.
     unsafe { gdt::set_kernel_stack(tasks[0].kernel_stack_top) };
     serial_line!(
@@ -385,6 +438,12 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         user_pml4.start_address(),
         image.entry(),
         USER_STACK_TOP
+    );
+    serial_line!(
+        "sched: linux task ready pid={} pml4={:#018x} entry={:#018x}",
+        LINUX_TASK,
+        linux_pml4.start_address(),
+        linux_image.entry()
     );
 
     // Record the allocator's pressure after every boot allocation for the
@@ -720,6 +779,19 @@ pub fn user_exits() -> usize {
     USER_EXITS.load(Ordering::Acquire)
 }
 
+/// Returns the number of Linux ABI tasks that exited normally.
+#[must_use]
+pub fn linux_exits() -> usize {
+    LINUX_EXITS.load(Ordering::Acquire)
+}
+
+/// Returns the syscall ABI of the running task.
+#[must_use]
+pub fn current_abi() -> TaskAbi {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].abi
+}
+
 /// Returns the number of user tasks retired for a fault.
 #[must_use]
 pub fn user_faults() -> usize {
@@ -789,12 +861,34 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
     schedule_next(current)
 }
 
+/// Terminates the Linux ABI boot task.
+pub fn linux_exit(status: u64) -> *mut InterruptFrame {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    if current != LINUX_TASK || tasks[current].kind != TaskKind::Linux {
+        serial_line!("AETHER_BOOT_FAILED reason=linux exit from wrong task");
+        halt()
+    }
+
+    tasks[current].state = TaskState::Done;
+    LINUX_EXITS.fetch_add(1, Ordering::Release);
+    let result = if status == 0 {
+        UserTestResult::Passed
+    } else {
+        UserTestResult::Failed
+    };
+    LINUX_RESULT.store(result as usize, Ordering::Release);
+    serial_line!("linux: exit pid={} status={status}", current);
+    schedule_next(current)
+}
+
 /// Handles a fault raised by a ring-3 task. The task is retired and the kernel
 /// continues with the next runnable task.
 pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptFrame {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
-    if tasks[current].kind != TaskKind::User {
+    let linux = tasks[current].kind == TaskKind::Linux;
+    if tasks[current].kind != TaskKind::User && !linux {
         serial_line!("AETHER_BOOT_FAILED reason=user-fault on non-user task");
         halt()
     }
@@ -805,9 +899,14 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     // reason as on exit. Only faulting-task state is touched here; unrelated
     // tasks and the kernel continue.
     let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
-    USER_FAULTS.fetch_add(1, Ordering::Release);
-    USER_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
-    crate::apps::faulted(current, vector);
+    if linux {
+        LINUX_FAULTS.fetch_add(1, Ordering::Release);
+        LINUX_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+    } else {
+        USER_FAULTS.fetch_add(1, Ordering::Release);
+        USER_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+        crate::apps::faulted(current, vector);
+    }
     serial_line!("sched: user task {current} faulted vector={vector}");
 
     schedule_next(current)

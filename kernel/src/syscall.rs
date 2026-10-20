@@ -58,6 +58,11 @@ fn ipc_denied(error: IpcError) -> i64 {
 /// Returning a different frame lets `exit` schedule the next task without
 /// returning to a dead user context.
 pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    if scheduler::current_abi() != scheduler::TaskAbi::Aether {
+        // A Linux task must not reach the native ABI through `int 0x80`.
+        unsafe { (*frame).rax = errno::ENOSYS as u64 };
+        return frame;
+    }
     // Read fields individually. The ring-3 syscall gate supplies RSP/SS on the
     // stack, but a ring-0 `int 0x80` would not; copying the whole frame would
     // then read past the initialized part of the stack.
@@ -122,6 +127,58 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // SAFETY: Same frame invariant as above.
     unsafe { (*frame).rax = result as u64 };
     frame
+}
+
+/// Dispatches a Linux x86-64 `syscall` frame.
+///
+/// This is the compatibility layer's kernel entry, not a Linux kernel. Only
+/// the calls implemented here can reach kernel state; everything else returns
+/// `ENOSYS`. User pointers are validated with the same page-table walk as the
+/// native ABI before any copy.
+pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    if scheduler::current_abi() != scheduler::TaskAbi::Linux {
+        unsafe { (*frame).rax = LINUX_ENOSYS as u64 };
+        return frame;
+    }
+    let number = unsafe { (*frame).rax };
+    let first = unsafe { (*frame).rdi };
+    let second = unsafe { (*frame).rsi };
+    let third = unsafe { (*frame).rdx };
+    let Some(pml4) = scheduler::current_pml4() else {
+        serial_line!("AETHER_BOOT_FAILED reason=linux syscall without pml4");
+        crate::arch::x86_64::halt()
+    };
+
+    let result = match number {
+        1 => linux_write(pml4, first, second, third),
+        39 | 186 => scheduler::current_task() as i64,
+        218 => scheduler::current_task() as i64,
+        60 | 231 => return scheduler::linux_exit(first),
+        _ => LINUX_ENOSYS,
+    };
+    // SAFETY: The assembly stub passes a live frame on this task's kernel
+    // stack and keeps it valid until iretq.
+    unsafe { (*frame).rax = result as u64 };
+    frame
+}
+
+const LINUX_EBADF: i64 = -9;
+const LINUX_EFAULT: i64 = -14;
+const LINUX_EINVAL: i64 = -22;
+const LINUX_ENOSYS: i64 = -38;
+
+fn linux_write(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {
+    if descriptor != 1 && descriptor != 2 {
+        return LINUX_EBADF;
+    }
+    if length as usize > MAX_SYSCALL_IO {
+        return LINUX_EINVAL;
+    }
+    let Some(bytes) = user_bytes(pml4, pointer, length, false) else {
+        return LINUX_EFAULT;
+    };
+    serial::write_bytes(bytes);
+    length as i64
 }
 
 fn write_console(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {

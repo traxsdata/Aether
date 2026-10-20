@@ -97,9 +97,14 @@ exact AppImage digest, and the runtime version.
 
 - AppImage container inspection: implemented in `apps/linux/appimage`, with
   host tests and the `appimage-inspect` diagnostic.
+- Linux ELF loading into a private PML4: implemented for the boot test fixture.
+- Linux `syscall` entry: implemented, with `write`, `exit`/`exit_group`,
+  `getpid`, `gettid`, and `set_tid_address`. The static fixture
+  `tests/fixtures/linux/hello.S` runs at CPL3, writes through a validated user
+  pointer, exits cleanly, and gates the boot with `AETHER_LINUX_OK`.
 - SquashFS/zstd extraction: not implemented.
-- Linux ELF loader, syscall personality, threads, signals: not implemented.
+- Dynamic glibc libraries, threads, futex, signals, mmap: not implemented.
 - Wayland bridge and software renderer: not implemented.
 
 The compatibility database records GridCraft 0.8.0 as `unsupported` until these
-gates pass.
+gates pass. A static test program is not an ArtCraft application.

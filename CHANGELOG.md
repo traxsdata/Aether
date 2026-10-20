@@ -13,6 +13,12 @@ versioning scheme until the kernel ABI stabilises.
   checks compression, block geometry, filesystem size, and table offsets. A
   host `appimage-inspect` binary reports the metadata without executing the
   image. This is Gate 0 of the Linux layer; no Linux binary runs yet.
+- The first Linux ABI execution slice: a static freestanding x86-64 ELF runs at
+  CPL3 in a private PML4, enters through the architectural `syscall`
+  instruction, calls `write` with a validated user pointer, exits cleanly, and
+  gates the boot with `AETHER_LINUX_OK`. The native `int 0x80` ABI is denied to
+  Linux tasks. Dynamic libraries, threads, futex, signals, Wayland, and Vulkan
+  are not implemented.
 - `docs/decisions/ADR-015-linux-app-runtime.md`,
   `docs/specifications/linux-compatibility.md`, and
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,

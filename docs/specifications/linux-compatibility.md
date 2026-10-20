@@ -1,8 +1,8 @@
 # Linux application compatibility
 
 **Document ID:** AETHER-LINUX-001
-**Status:** Feasibility and first import stage only; no Linux runtime exists and
-no compatibility is claimed
+**Status:** Import and static Linux ELF execution stages only; no dynamic
+runtime and no compatibility claim
 **Related:** [ADR-015](../decisions/ADR-015-linux-app-runtime.md), technical
 specification §7 (compatibility)
 
@@ -59,7 +59,7 @@ implemented only when a tested Aether interface exists and the runtime uses it.
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
 | AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection implemented**; SquashFS/zstd extraction missing |
-| ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Not implemented |
+| ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static `PT_LOAD` execution works; interpreter and shared libraries missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: one fixed boot process, no creation |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Not implemented |
 | Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: fixed user image/stack window; no general mapping |
@@ -136,7 +136,11 @@ Linux test binaries first, then dynamically linked glibc binaries. Every
 syscall and pointer is validated; unsupported calls fail with `ENOSYS`, never
 with ambient authority.
 
-**Evidence:** boot transcript, syscall coverage tests, denial tests.
+**Evidence:** boot transcript, syscall coverage tests, denial tests. **Partial:**
+a static freestanding Linux ELF runs at CPL3, writes through a validated user
+pointer, exits cleanly, and produces `AETHER_LINUX_OK`; dynamic loader,
+threads, futex, signals, mmap, and the user-space `linuxd` protocol remain
+missing.
 
 ### Gate 3 — Headless GridCraft
 
@@ -171,7 +175,7 @@ revocation tests, and a compatibility record no better than the suite supports.
 
 ## Current blockers
 
-1. No user-space process creation or general `mmap`.
+1. No dynamic loader / glibc, user-space process creation, or general `mmap`.
 2. No pthread/futex/TLS ABI.
 3. No signal delivery.
 4. No Wayland compositor service.

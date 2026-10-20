@@ -107,8 +107,10 @@ It is a planning model, not a delivery promise.
 - [x] Linux AppImage container inspection (Gate 0): validated ELF/SquashFS
   bounds, compression, and table offsets
   ([plan](specifications/linux-compatibility.md)). No Linux binary runs yet.
-- [ ] Linux compatibility layer: ELF loader, syscall/thread/futex/signal
-  personality, SquashFS import, Wayland bridge, and software renderer.
+- [x] Linux ABI entry slice: static ELF loading, validated Linux `syscall`
+  entry, `write`/`exit`, and a boot gate (`AETHER_LINUX_OK`).
+- [ ] Linux compatibility layer: dynamic loader/glibc, process/thread/futex/
+  signal personality, SquashFS import, Wayland bridge, and software renderer.
 - [ ] Better storage (persistent block device), networking, audio, and
   accelerated graphics.
 - [ ] Interactive permission consent and grant revocation UI.

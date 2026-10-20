@@ -3,12 +3,15 @@
 SHELL := /bin/sh
 
 CARGO ?= cargo
+AS ?= as
+LD ?= ld
 PYTHON ?= python3
 
 BUILD := build
 KERNEL_ELF := $(BUILD)/aether-kernel.elf
 USER_ELF := $(BUILD)/aether-init.elf
 LOADER_EFI := $(BUILD)/BOOTX64.EFI
+LINUX_ELF := $(BUILD)/linux-hello.elf
 IMAGE := $(BUILD)/aether.img
 
 KERNEL_TARGET := x86_64-unknown-none
@@ -37,9 +40,16 @@ user:
 		$(CARGO) build -p aether-init --release --target $(KERNEL_TARGET) --locked
 	cp target/$(KERNEL_TARGET)/release/aether-init $(USER_ELF)
 
-kernel: user
+linux-fixture:
+	@mkdir -p $(BUILD)
+	$(AS) --64 tests/fixtures/linux/hello.S -o $(BUILD)/linux-hello.o
+	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
+		$(BUILD)/linux-hello.o -o $(LINUX_ELF)
+
+kernel: user linux-fixture
 	@mkdir -p $(BUILD)
 	AETHER_USER_ELF=$(abspath $(USER_ELF)) \
+	AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
 
@@ -115,9 +125,11 @@ lint: kernel
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
+		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
+		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
 			--features fault-selftest --locked -- -D warnings
 	RUSTFLAGS="$(USER_RUSTFLAGS)" \
