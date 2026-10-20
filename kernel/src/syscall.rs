@@ -924,7 +924,7 @@ fn linux_mprotect(pml4: PhysFrame, address: u64, length: u64, protections: u64) 
     if let Err(error) = scheduler::linux_vma_protect(address, length, protections as u32) {
         return vma_errno(error);
     }
-    match paging::protect_user_range(pml4, address, length, flags) {
+    match paging::protect_user_range_if_present(pml4, address, length, flags) {
         Ok(()) => 0,
         Err(_) => LINUX_EINVAL,
     }

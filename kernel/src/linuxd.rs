@@ -358,6 +358,13 @@ fn failed(reason: &str) -> ! {
 /// `linux-erase` shell command uses. Nothing here survives a power cycle: the
 /// filesystem service is a RAM disk and there is no persistent block device.
 pub fn post_app_exit() {
+    // The static fixture writes three files to prove overlay persistence. A
+    // real dynamically linked application is not required to write anything,
+    // so its successful exit is checked by the scheduler result instead.
+    if crate::linux::app_is_dynamic() {
+        serial_line!("AETHER_LINUX_OVERLAY_SKIP_OK reason=dynamic-app");
+        return;
+    }
     let (entries, bytes) = crate::scheduler::linux_overlay_stats(APP_OVERLAY_ID);
     if entries == 0 {
         serial_line!("AETHER_BOOT_FAILED reason=linuxd overlay did not persist");

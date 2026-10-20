@@ -663,6 +663,10 @@ pub enum SchedulerError {
     Capability(CapError),
     /// The embedded Linux test program is not a valid executable.
     LinuxImage,
+    /// The imported AppImage program is malformed or its interpreter is missing.
+    LinuxAppImage,
+    /// The imported AppImage arguments or environment exceed loader limits.
+    LinuxAppArguments,
     /// The embedded signed Linux runtime rootfs could not be imported.
     LinuxRoot,
     /// The user AppImage could not be imported or launched.
@@ -776,6 +780,13 @@ pub fn run() -> ! {
                     APPIMAGE_FAULTS.load(Ordering::Acquire)
                 );
                 halt()
+            }
+            // Kernel-owned evidence that a dynamically linked AppImage task
+            // exited with status zero. The selected path comes from the signed
+            // record; a guest string alone is not accepted as proof of a run.
+            if crate::linux::app_is_dynamic() {
+                let path = crate::linux::app_identity().map_or("unknown", |(_, _, path)| path);
+                serial_line!("AETHER_GATE3_APP_OK status=0 pid={APPIMAGE_TASK} path={path}");
             }
             serial_line!(
                 "AETHER_LINUX_OK abi=linux exits={} faults={}",
@@ -1147,19 +1158,80 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
         return Err(SchedulerError::Linuxd);
     }
     let program = crate::linux::app_program().ok_or(SchedulerError::Linuxd)?;
-    let image = elf::parse(program).map_err(|_| SchedulerError::Linuxd)?;
-    let pml4 = crate::memory::with_frame_allocator(|allocator| {
-        paging::create_user_address_space(allocator, &image, program)
-    })
-    .ok_or(SchedulerError::OutOfMemory)??;
+    // The Linux parser rejects the static fixture's linker layout (its program
+    // headers are not covered by a PT_LOAD), so a parse failure falls back to
+    // the existing static loader rather than becoming a hard error. A malformed
+    // image is still rejected when both parsers fail.
+    let linux_image = aether_linux_elf::parse(program).ok();
     let tasks = unsafe { &mut *TASKS.0.get() };
     if tasks[APPIMAGE_TASK].state != TaskState::Empty || !tasks[APPIMAGE_TASK].reserved {
         return Err(SchedulerError::Linuxd);
     }
+
+    // A dynamically linked image is entered through the interpreter named by
+    // PT_INTERP. The interpreter and its shared libraries come from the
+    // verified runtime rootfs; the AppImage supplies only the main program.
+    let dynamic = if let Some(image) = linux_image
+        && let Some(interpreter_path) = image.interpreter()
+    {
+        let interpreter =
+            crate::linux::file_data(interpreter_path).ok_or(SchedulerError::LinuxAppImage)?;
+        let interpreter_image =
+            aether_linux_elf::parse(interpreter).map_err(|_| SchedulerError::LinuxAppImage)?;
+        let program_path = crate::linux::app_identity()
+            .map(|(_, _, path)| path)
+            .ok_or(SchedulerError::LinuxAppImage)?;
+        let (configured, count) =
+            crate::linux::app_arguments().ok_or(SchedulerError::LinuxAppArguments)?;
+        let mut arguments = [""; crate::linux::MAX_APPIMAGE_ARGUMENTS + 1];
+        arguments[0] = program_path;
+        arguments[1..1 + count].copy_from_slice(&configured[..count]);
+        serial_line!(
+            "sched: linux appimage argv={} first={} second={}",
+            1 + count,
+            program_path,
+            if count > 0 { configured[0] } else { "" }
+        );
+        let environment = [
+            "LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64",
+            "HOME=/tmp",
+            "TMPDIR=/tmp",
+        ];
+        let loaded = crate::memory::with_frame_allocator(|allocator| {
+            crate::linux_loader::load(
+                allocator,
+                program,
+                interpreter,
+                program_path,
+                &arguments[..1 + count],
+                &environment,
+            )
+        })
+        .ok_or(SchedulerError::OutOfMemory)?
+        .map_err(|error| match error {
+            crate::linux_loader::LoadError::Stack => SchedulerError::LinuxAppArguments,
+            _ => SchedulerError::LinuxAppImage,
+        })?;
+        Some((loaded, image, interpreter_image))
+    } else {
+        None
+    };
+
+    let (pml4, entry, stack_pointer) = if let Some((loaded, _, _)) = dynamic {
+        (loaded.pml4, loaded.entry, loaded.stack_pointer)
+    } else {
+        let static_image = elf::parse(program).map_err(|_| SchedulerError::LinuxAppImage)?;
+        let pml4 = crate::memory::with_frame_allocator(|allocator| {
+            paging::create_user_address_space(allocator, &static_image, program)
+        })
+        .ok_or(SchedulerError::OutOfMemory)??;
+        (pml4, static_image.entry(), (USER_STACK_TOP - 16) & !0xf)
+    };
+
     // SAFETY: The kernel stack array is static and this task slot was reserved
     // for the imported payload; no other task owns its stack.
     let kernel_top = stack_top(&unsafe { &*KERNEL_STACKS.0.get() }.0[APPIMAGE_TASK]);
-    let saved_rsp = prepare_user_stack(kernel_top, image.entry(), (USER_STACK_TOP - 16) & !0xf);
+    let saved_rsp = prepare_user_stack(kernel_top, entry, stack_pointer);
     let mut app_task = Task::new();
     app_task.state = TaskState::Ready;
     app_task.kind = TaskKind::Linux;
@@ -1173,12 +1245,26 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     app_task.tgid = APPIMAGE_TASK;
     app_task.pgid = APPIMAGE_TASK;
     app_task.sid = APPIMAGE_TASK;
+    if let Some((_, main_image, interpreter_image)) = dynamic {
+        seed_linux_vmas(&mut app_task, &main_image, crate::linux_loader::MAIN_BASE);
+        seed_linux_vmas(
+            &mut app_task,
+            &interpreter_image,
+            crate::linux_loader::INTERP_BASE,
+        );
+        let _ = app_task.vmas.insert_at(
+            USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE,
+            USER_STACK_PAGES * PAGE_SIZE,
+            aether_memory::vma::PROT_READ | aether_memory::vma::PROT_WRITE,
+        );
+    }
     tasks[APPIMAGE_TASK] = app_task;
     serial_line!(
-        "sched: linux appimage task ready pid={} pml4={:#018x} entry={:#018x} approved=linuxd",
+        "sched: linux appimage task ready pid={} pml4={:#018x} entry={:#018x} approved=linuxd dynamic={}",
         APPIMAGE_TASK,
         pml4.start_address(),
-        image.entry()
+        entry,
+        dynamic.is_some()
     );
     Ok(())
 }

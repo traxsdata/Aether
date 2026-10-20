@@ -32,6 +32,18 @@ pub const MAX_FDS: usize = 8;
 const ROOTFS: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS"));
 const ROOTFS_RECORD: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS_RECORD"));
 const APPIMAGE_PROGRAM: &str = env!("AETHER_LINUX_APPIMAGE_PROGRAM");
+/// Optional arguments passed to the selected AppImage program.
+///
+/// The value is a `|`-separated list compiled into the kernel, for example
+/// `eval|=1+1`. It is empty by default so the static boot fixture keeps its
+/// original argv (the program path only).
+const APPIMAGE_ARGS: &str = match option_env!("AETHER_LINUX_APPIMAGE_ARGS") {
+    Some(value) => value,
+    None => "",
+};
+/// Maximum configured arguments; the loader allows 16 argv entries including
+/// the program path that this list is prefixed with.
+pub const MAX_APPIMAGE_ARGUMENTS: usize = 15;
 const TRUST_PUBLIC_KEY: &str = include_str!("../../tests/fixtures/keys/test.pub");
 const TRUST_PUBLISHER: &str = "Aether Test Publisher";
 /// Build-time pin of the runtime manifest's SHA-256.
@@ -91,6 +103,8 @@ pub struct ImportedApp {
     pub path: String,
     /// Program bytes copied out of the imported tree.
     program: Vec<u8>,
+    /// Whether the program requests a `PT_INTERP` interpreter.
+    dynamic: bool,
 }
 
 static RUNTIME: Global<Option<RuntimeProfile>> = Global(UnsafeCell::new(None));
@@ -285,6 +299,9 @@ pub fn import_appimage() -> Result<(), ()> {
     let program = program.ok_or_else(|| {
         serial_line!("linux: AppImage lacks the selected program");
     })?;
+    let dynamic = aether_linux_elf::parse(&program)
+        .map(|image| image.interpreter().is_some())
+        .unwrap_or(false);
     // SAFETY: Boot is single-threaded and this is the only write to APP.
     unsafe {
         *APP.0.get() = Some(ImportedApp {
@@ -292,6 +309,7 @@ pub fn import_appimage() -> Result<(), ()> {
             version: String::from(record.version),
             path: String::from(APPIMAGE_PROGRAM),
             program,
+            dynamic,
         })
     };
     Ok(())
@@ -326,6 +344,35 @@ pub fn app_program() -> Option<&'static [u8]> {
     // SAFETY: APP is written once during boot and immutable afterwards.
     let app = unsafe { (*APP.0.get()).as_ref() }?;
     Some(app.program.as_slice())
+}
+
+/// Returns `true` when the imported program requests an interpreter.
+///
+/// A dynamically linked application does not own the runtime-configuration
+/// files the static fixture writes, so the post-exit overlay self-test is only
+/// meaningful for the static fixture.
+#[must_use]
+pub fn app_is_dynamic() -> bool {
+    // SAFETY: APP is written once during boot and immutable afterwards.
+    unsafe { (*APP.0.get()).as_ref() }.is_some_and(|app| app.dynamic)
+}
+
+/// Returns the configured arguments for the imported program.
+///
+/// `None` means the compile-time list exceeds the loader's bounded argv array;
+/// the caller must reject the launch rather than silently truncate it.
+#[must_use]
+pub fn app_arguments() -> Option<([&'static str; MAX_APPIMAGE_ARGUMENTS], usize)> {
+    let mut arguments = [""; MAX_APPIMAGE_ARGUMENTS];
+    let mut count = 0usize;
+    for argument in APPIMAGE_ARGS.split('|').filter(|value| !value.is_empty()) {
+        if count == MAX_APPIMAGE_ARGUMENTS {
+            return None;
+        }
+        arguments[count] = argument;
+        count += 1;
+    }
+    Some((arguments, count))
 }
 
 /// Returns the file index for an absolute, normalized path.

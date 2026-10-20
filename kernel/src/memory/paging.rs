@@ -659,6 +659,62 @@ pub fn protect_user_range(
     Ok(())
 }
 
+/// Changes the protections of the present pages in a user range.
+///
+/// Anonymous VMAs are demand-paged, so `mprotect` may legally run before any
+/// page has been faulted in. Missing leaf entries are skipped; the VMA table
+/// carries the new protection for the fault path to apply later. This mirrors
+/// `protect_user_range`, which remains strict for callers that require every
+/// page to be mapped.
+pub fn protect_user_range_if_present(
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    if length == 0
+        || !start.is_multiple_of(PAGE_SIZE)
+        || !length.is_multiple_of(PAGE_SIZE)
+        || start < USER_BASE
+        || start.saturating_add(length) > USER_LIMIT
+    {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    let mut address = start;
+    while address < start + length {
+        let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+        let pml4e = unsafe { (*table_ptr(pml4)).entry(pml4_index) };
+        if !pml4e.is_present() || pml4e.is_huge() {
+            return Err(PagingError::MissingKernelMapping);
+        }
+        let pdpt = PhysFrame::from_address(pml4e.address())
+            .ok_or(PagingError::UnrepresentableAddress(pml4e.address()))?;
+        let pdpte = unsafe { (*table_ptr(pdpt)).entry(pdpt_index) };
+        if !pdpte.is_present() || pdpte.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        let pd = PhysFrame::from_address(pdpte.address())
+            .ok_or(PagingError::UnrepresentableAddress(pdpte.address()))?;
+        let pde = unsafe { (*table_ptr(pd)).entry(pd_index) };
+        if !pde.is_present() || pde.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        let pt = PhysFrame::from_address(pde.address())
+            .ok_or(PagingError::UnrepresentableAddress(pde.address()))?;
+        let entry = unsafe { (*table_ptr(pt)).entry(pt_index) };
+        if entry.is_present() {
+            let address_phys = entry.address();
+            let updated =
+                PageTableEntry::new(address_phys, flags | PageFlags::USER | PageFlags::PRESENT)
+                    .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
+            unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
+            flush_page(address);
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(())
+}
+
 /// Validates that `address..address+len` lies in the user window and is mapped
 /// with user permissions.
 ///

@@ -11,7 +11,13 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const HEAP_BYTES: usize = 64 * 1024 * 1024;
+// The importer never reclaims, so every decompression scratch buffer and every
+// imported file accumulates for the rest of the boot. A real 19 MiB AppImage
+// carries both GridCraft binaries (~48 MiB uncompressed) plus hundreds of zstd
+// scratch buffers; 64 MiB and 256 MiB both exhausted during that import. Keep
+// the arena large enough for the largest staged fixture while the importer is
+// allocation-only; replacing it with a reclaiming allocator is follow-up work.
+const HEAP_BYTES: usize = 512 * 1024 * 1024;
 
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 static OFFSET: AtomicUsize = AtomicUsize::new(0);

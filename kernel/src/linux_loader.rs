@@ -258,16 +258,21 @@ fn build_stack(
     environment: &[&str],
 ) -> Result<u64, LoadError> {
     const STACK_PAGE_BASE: u64 = USER_STACK_TOP - PAGE_SIZE;
+    // The vector area sits at the initial RSP and grows upward; the string
+    // area must sit ABOVE it because the user stack itself grows DOWN from RSP
+    // and would otherwise overwrite argv/envp strings during startup.
+    const VECTOR_BASE: usize = 1024;
+    const STRING_BASE: usize = 2048;
     let mut page = [0u8; PAGE_SIZE as usize];
 
     if arguments.is_empty() || arguments.len() > 16 || environment.len() > 16 {
         return Err(LoadError::Stack);
     }
-    let mut string_cursor = 0usize;
+    let mut string_cursor = STRING_BASE;
     let mut put_string = |value: &str| -> Result<u64, LoadError> {
         let length = value.len().checked_add(1).ok_or(LoadError::Stack)?;
         let end = string_cursor.checked_add(length).ok_or(LoadError::Stack)?;
-        if end > 1024 {
+        if end > page.len() {
             return Err(LoadError::Stack);
         }
         let pointer = STACK_PAGE_BASE + string_cursor as u64;
@@ -287,6 +292,12 @@ fn build_stack(
     let path_pointer = put_string(executable_path)?;
     let platform_pointer = put_string("x86_64")?;
     string_cursor = string_cursor.checked_add(16).ok_or(LoadError::Stack)?;
+    if string_cursor
+        .checked_add(16)
+        .is_none_or(|end| end > page.len())
+    {
+        return Err(LoadError::Stack);
+    }
     let random_pointer = STACK_PAGE_BASE + string_cursor as u64;
     for (index, byte) in page[string_cursor..string_cursor + 16]
         .iter_mut()
@@ -294,9 +305,10 @@ fn build_stack(
     {
         *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
     }
+    string_cursor += 16;
 
     // Keep the vector/auxv area below the strings and align the entry stack.
-    let mut offset = 1024usize;
+    let mut offset = VECTOR_BASE;
     let mut push = |value: u64| -> Result<(), LoadError> {
         let end = offset.checked_add(8).ok_or(LoadError::Stack)?;
         if end > page.len() {
@@ -340,10 +352,13 @@ fn build_stack(
         push(value)?;
     }
 
+    // Strings live above the vector area, so copy through whichever region
+    // ends last rather than just through the auxv table.
+    let copied = offset.max(string_cursor);
     // SAFETY: The stack page was mapped writable in the active address space;
     // all strings and vectors are within the copied prefix.
     unsafe {
-        ptr::copy_nonoverlapping(page.as_ptr(), STACK_PAGE_BASE as *mut u8, offset);
+        ptr::copy_nonoverlapping(page.as_ptr(), STACK_PAGE_BASE as *mut u8, copied);
     }
-    Ok(STACK_PAGE_BASE + 1024)
+    Ok(STACK_PAGE_BASE + VECTOR_BASE as u64)
 }

@@ -31,6 +31,14 @@ STAGED_APPIMAGE ?= $(LINUX_APPIMAGE)
 STAGED_APPIMAGE_RECORD ?= $(LINUX_APPIMAGE_RECORD)
 TAMPERED_APPIMAGE := $(BUILD)/linux-user-tampered.AppImage
 LINUX_APPIMAGE_PROGRAM ?= /usr/bin/app
+# Optional | separated argv for the selected AppImage program. The default is
+# empty so the static boot fixture keeps argv = [program path].
+LINUX_APPIMAGE_ARGS ?=
+# Experimental Gate 3 headless GridCraft run.
+GATECRAFT_APPIMAGE ?= /tmp/opencode/gridcraft.AppImage
+GATE3_APP_PROGRAM ?= /usr/bin/gridcraft-cli
+GATE3_APP_ARGS ?= eval|=SUM(B2:B3)|--in|/usr/share/gridcraft/gate3-in.csv
+GATE3_RUNTIME_VERSION ?= $(shell getconf GNU_LIBC_VERSION | tr ' ' '-')
 LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
 LINUX_DYN_PATH ?= /usr/bin/dynamic
 LINUX_RUNTIME_PREBUILT ?= 0
@@ -50,7 +58,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test shell-test fault-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -98,6 +106,7 @@ kernel: user linux-fixture
 	AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 	AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
 	AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
+	AETHER_LINUX_APPIMAGE_ARGS="$(LINUX_APPIMAGE_ARGS)" \
 	AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
@@ -138,6 +147,42 @@ glibc-test:
 	$(MAKE) LINUX_RUNTIME_PREBUILT=1 LINUX_DYN_PATH=/usr/bin/hello image
 	AETHER_SKIP_MARKERS=AETHER_LINUX_DYN_INTERP_OK,AETHER_LINUX_DYN_MAIN_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GLIBC_OK $(PYTHON) tools/test-boot.py
+
+# Experimental Gate 3: run the real headless GridCraft CLI from the staged
+# AppImage through PT_INTERP and the pinned runtime rootfs. The selected
+# program and its argv are compiled into the kernel, so the image must be
+# rebuilt after changing GATE3_APP_ARGS. This is deliberately outside `ci`
+# until the Gate 3 runtime surface is complete.
+gate3-test:
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 linux-fixture
+	sh tools/build-gate3-runtime.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
+		$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED)
+	# The Gate 3 root intentionally contains only the application runtime, but
+	# the boot gate still runs the Linux ABI fixtures. Add them after the Gate 3
+	# manifest/pin are fixed (the manifest hashes glibc and ld.so only) and
+	# re-sign the resulting tree so the loader-staged record matches it.
+	@mkdir -p $(BUILD)/gate3-runtime-root/usr/bin
+	# The Linux VMA fixture checks the first bytes of /etc/motd, so keep the
+	# standard fixture line first and the Gate 3 provenance line after it.
+	printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\nAETHER_GATE3_ROOT_OK source=/etc/motd\n' \
+		> $(BUILD)/gate3-runtime-root/etc/motd
+	cp $(LINUX_INTERP_ELF) $(BUILD)/gate3-runtime-root/lib/ld-aether.so
+	cp $(LINUX_DYN_ELF) $(BUILD)/gate3-runtime-root/usr/bin/dynamic
+	cp $(LINUX_EXEC_ELF) $(BUILD)/gate3-runtime-root/usr/bin/exec
+	cp $(LINUX_DYN_EXEC_ELF) $(BUILD)/gate3-runtime-root/usr/bin/dynamic-exec
+	sh tools/build-runtime-rootfs.sh $(BUILD)/gate3-runtime-root \
+		$(LINUX_ROOTFS) $(LINUX_RUNTIME_SEED) org.aether.linux-runtime \
+		"$(GATE3_RUNTIME_VERSION)" "Aether Test Publisher" \
+		$(LINUX_ROOTFS_RECORD)
+	sh tools/build-gate3-appimage.sh $(GATECRAFT_APPIMAGE) \
+		$(BUILD)/gridcraft.import $(LINUX_RUNTIME_SEED)
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		LINUX_APPIMAGE_PROGRAM=$(GATE3_APP_PROGRAM) \
+		LINUX_APPIMAGE_ARGS="$(GATE3_APP_ARGS)" \
+		STAGED_APPIMAGE=$(GATECRAFT_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(BUILD)/gridcraft.import image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK $(PYTHON) tools/test-boot.py
 
 shell-test: image
 	$(PYTHON) tools/test-shell.py
@@ -226,6 +271,7 @@ lint: kernel
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 		AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
 		AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
+		AETHER_LINUX_APPIMAGE_ARGS="$(LINUX_APPIMAGE_ARGS)" \
 		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
@@ -236,6 +282,7 @@ lint: kernel
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 		AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
 		AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
+		AETHER_LINUX_APPIMAGE_ARGS="$(LINUX_APPIMAGE_ARGS)" \
 		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
 			--features fault-selftest --locked -- -D warnings
