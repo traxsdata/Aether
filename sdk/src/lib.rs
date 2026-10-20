@@ -30,7 +30,6 @@ pub unsafe fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) 
             in("rsi") arg1,
             in("rdx") arg2,
             in("r10") arg3,
-            options(nostack)
         );
     }
     result
@@ -235,6 +234,7 @@ pub fn error_name(error: i64) -> &'static str {
         errno::EPERM => "EPERM",
         errno::EBADF => "EBADF",
         errno::ENOGRANT => "ENOGRANT",
+        errno::EIO => "EIO",
         _ => "unknown",
     }
 }

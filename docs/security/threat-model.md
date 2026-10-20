@@ -107,8 +107,13 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
   service-isolation boundary.
 - The native application is the only ring-3 component; there is no dynamic
   process creation, waiting, or per-process resource accounting.
-- Per-task address spaces are tested by positive boot-time checks; there is no
-  fuzzing or deliberately broken configuration in CI.
+- The serial console shell runs at ring 0 with full kernel and filesystem
+  authority. It is a development diagnostic surface, not the ordinary-user
+  terminal or an administrative elevation boundary.
+- Per-task address spaces are tested by positive boot-time checks across
+  ring-0 workers; the two-ring-3-task isolation test and a user-fault
+  containment test are follow-up work. There is no fuzzing or deliberately
+  broken configuration in CI.
 - NX and WP are enabled and visible in the boot log, but there is no
   fault-injection test that attempts a write to kernel text or an instruction
   fetch from data.
@@ -117,8 +122,10 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
   object lifetime are not implemented.
 - The filesystem is a volatile RAM disk with a bring-up format; it is not
   crash-consistent and does not survive reboot.
-- Portal grants are seeded at boot. There is no interactive consent, persistent
-  grant store, or revocation UI.
+- Portal grants are seeded at boot and can be revoked through the console.
+  There is no interactive consent, persistent grant store, or graphical
+  revocation control; an already-open capability is not invalidated by grant
+  revocation.
 - The kernel identity-maps physical memory and caps the map bitmap at 16 GiB;
   there is no higher-half mapping, kernel heap, or guard page.
 - The boot image is unsigned. Secure Boot, measured boot, and bootloader

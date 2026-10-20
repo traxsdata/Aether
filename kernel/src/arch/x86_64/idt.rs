@@ -415,7 +415,16 @@ pub fn init() {
 /// returns the next runnable frame, so a misbehaving application cannot take
 /// the kernel down.
 extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
-    let saved = unsafe { *frame };
+    // Read fields individually. A ring-0 exception frame does not contain the
+    // hardware `RSP`/`SS` slots that exist for a ring-3 transition, so copying
+    // the whole `InterruptFrame` would read past the initialized part of the
+    // stack.
+    let saved_vector = unsafe { (*frame).vector };
+    let saved_error = unsafe { (*frame).error };
+    let saved_rip = unsafe { (*frame).rip };
+    let saved_cs = unsafe { (*frame).cs };
+    let saved_rflags = unsafe { (*frame).rflags };
+    let is_user = unsafe { (*frame).is_user() };
     let cr2: u64;
     // SAFETY: Reading CR2 is valid at CPL 0 and has no side effects. It is
     // meaningful for page faults and harmless for other vectors.
@@ -429,28 +438,28 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
 
     serial_line!(
         "KERNEL EXCEPTION: {} ({}) error={:#x} rip={:#018x} cs={:#x} rflags={:#018x} cr2={:#018x}",
-        exception_name(saved.vector),
-        saved.vector,
-        saved.error,
-        saved.rip,
-        saved.cs,
-        saved.rflags,
+        exception_name(saved_vector),
+        saved_vector,
+        saved_error,
+        saved_rip,
+        saved_cs,
+        saved_rflags,
         cr2
     );
 
-    if saved.is_user() {
+    if is_user {
         serial_line!(
             "user: fault terminated task vector={} rip={:#018x} cr2={:#018x}",
-            saved.vector,
-            saved.rip,
+            saved_vector,
+            saved_rip,
             cr2
         );
-        return crate::scheduler::on_user_fault(frame, saved.vector);
+        return crate::scheduler::on_user_fault(frame, saved_vector);
     }
 
     serial_line!(
         "AETHER_BOOT_FAILED reason=exception vector={}",
-        saved.vector
+        saved_vector
     );
     crate::arch::x86_64::halt()
 }

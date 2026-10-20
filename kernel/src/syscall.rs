@@ -20,17 +20,23 @@ use aether_memory::frame::PhysFrame;
 /// Returning a different frame lets `exit` schedule the next task without
 /// returning to a dead user context.
 pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
-    // SAFETY: The assembly stub passes a complete InterruptFrame on the current
-    // kernel stack and does not move it for the duration of the call.
-    let saved = unsafe { *frame };
-    if !saved.is_user() {
+    // Read fields individually. The ring-3 syscall gate supplies RSP/SS on the
+    // stack, but a ring-0 `int 0x80` would not; copying the whole frame would
+    // then read past the initialized part of the stack.
+    let cs = unsafe { (*frame).cs };
+    if cs & 3 != 3 {
         serial_line!("AETHER_BOOT_FAILED reason=syscall from ring 0");
         crate::arch::x86_64::halt()
     }
 
-    let number = saved.rax;
+    let number = unsafe { (*frame).rax };
+    let rdi = unsafe { (*frame).rdi };
+    let rsi = unsafe { (*frame).rsi };
+    let rdx = unsafe { (*frame).rdx };
+    let r10 = unsafe { (*frame).r10 };
     let Some(call) = Syscall::from_raw(number) else {
-        // SAFETY: Same frame invariant as above.
+        // SAFETY: The assembly stub passes a live frame on the current kernel
+        // stack and does not move it for the duration of the call.
         unsafe { (*frame).rax = errno::ENOSYS as u64 };
         return frame;
     };
@@ -43,30 +49,32 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // `exit` does not return to the caller. Handle it before the generic
     // result write so the retired frame is never reused.
     if call == Syscall::Exit {
-        return scheduler::user_exit(saved.rdi);
+        return scheduler::user_exit(unsafe { (*frame).rdi });
+    }
+
+    // Yield and sleep must actually give another ready task a chance to run.
+    // The frame is saved by the scheduler and resumed after the next tick (or
+    // immediately if another task is ready), with RAX set to zero.
+    if matches!(call, Syscall::Yield | Syscall::Sleep) {
+        // SAFETY: Same frame invariant as above.
+        unsafe { (*frame).rax = 0 };
+        return scheduler::yield_current(frame);
     }
 
     let result = match call {
-        Syscall::Yield | Syscall::Sleep => 0,
-        Syscall::Write => write_console(pml4, saved.rdi, saved.rsi, saved.rdx),
+        Syscall::Write => write_console(pml4, rdi, rsi, rdx),
         Syscall::GetPid => scheduler::current_task() as i64,
         Syscall::Uptime => scheduler::ticks() as i64,
         Syscall::TaskCount => scheduler::task_count() as i64,
-        Syscall::Open => {
-            crate::fs::sys_open(pml4, saved.rdi, saved.rsi, saved.rdx).unwrap_or(errno::EINVAL)
+        Syscall::Open => crate::fs::sys_open(pml4, rdi, rsi, rdx).unwrap_or(errno::EINVAL),
+        Syscall::PortalOpen => {
+            crate::fs::sys_portal_open(pml4, rdi, rsi, rdx).unwrap_or(errno::EINVAL)
         }
-        Syscall::PortalOpen => crate::fs::sys_portal_open(pml4, saved.rdi, saved.rsi, saved.rdx)
-            .unwrap_or(errno::EINVAL),
-        Syscall::Read => {
-            crate::fs::sys_read(pml4, saved.rdi, saved.rsi, saved.rdx).unwrap_or(errno::EINVAL)
-        }
-        Syscall::WriteFile => {
-            crate::fs::sys_write(pml4, saved.rdi, saved.rsi, saved.rdx).unwrap_or(errno::EINVAL)
-        }
-        Syscall::Close => crate::fs::sys_close(saved.rdi).unwrap_or(errno::EBADF),
-        Syscall::List => crate::fs::sys_list(pml4, saved.rdi, saved.rsi, saved.rdx, saved.r10)
-            .unwrap_or(errno::EINVAL),
-        Syscall::Stat => crate::fs::sys_stat(pml4, saved.rdi, saved.rsi).unwrap_or(errno::EINVAL),
+        Syscall::Read => crate::fs::sys_read(pml4, rdi, rsi, rdx).unwrap_or(errno::EINVAL),
+        Syscall::WriteFile => crate::fs::sys_write(pml4, rdi, rsi, rdx).unwrap_or(errno::EINVAL),
+        Syscall::Close => crate::fs::sys_close(rdi).unwrap_or(errno::EBADF),
+        Syscall::List => crate::fs::sys_list(pml4, rdi, rsi, rdx, r10).unwrap_or(errno::EINVAL),
+        Syscall::Stat => crate::fs::sys_stat(pml4, rdi, rsi).unwrap_or(errno::EINVAL),
         _ => errno::ENOSYS,
     };
 

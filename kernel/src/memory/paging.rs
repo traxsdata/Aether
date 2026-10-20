@@ -308,7 +308,9 @@ pub fn map_user_page(
     physical: PhysFrame,
     flags: PageFlags,
 ) -> Result<(), PagingError> {
-    if !(USER_BASE..USER_LIMIT).contains(&virtual_address) {
+    if !(USER_BASE..USER_LIMIT).contains(&virtual_address)
+        || !virtual_address.is_multiple_of(PAGE_SIZE)
+    {
         return Err(PagingError::UserImageOutsideWindow);
     }
     let [pml4_index, pdpt_index, pd_index, pt_index] =

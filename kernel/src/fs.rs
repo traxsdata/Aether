@@ -131,11 +131,16 @@ fn map_cap_error(error: CapError) -> i64 {
             ACCESS_DENIALS.fetch_add(1, Ordering::Release);
             errno::EACCES
         }
-        _ => errno::EBADF,
+        CapError::TableFull => errno::ENOSPC,
+        CapError::InvalidHandle | CapError::WrongObjectType => errno::EBADF,
     }
 }
 
 fn access_from_rights(rights: u64) -> Option<Access> {
+    let known = FileRights::READ | FileRights::WRITE | FileRights::CREATE;
+    if rights & !known != 0 {
+        return None;
+    }
     let mut access = Access::from_bits(0);
     if rights & FileRights::READ != 0 {
         access = access | Access::READ;
@@ -251,7 +256,7 @@ pub fn sys_read(pml4: PhysFrame, handle: u64, buffer: u64, length: u64) -> Optio
             .map(|length| length as i64)
             .map_err(map_error)
     });
-    Some(result.unwrap_or(errno::EBADF))
+    Some(result.unwrap_or_else(|error| error))
 }
 
 /// Writes to an open file.
@@ -271,7 +276,7 @@ pub fn sys_write(pml4: PhysFrame, handle: u64, buffer: u64, length: u64) -> Opti
             .map(|length| length as i64)
             .map_err(map_error)
     });
-    Some(result.unwrap_or(errno::EBADF))
+    Some(result.unwrap_or_else(|error| error))
 }
 
 /// Closes an open file and revokes its capability.
@@ -303,14 +308,25 @@ pub fn sys_list(
     buffer: u64,
     length: u64,
 ) -> Option<i64> {
-    let path = user_str(pml4, path_pointer, path_length)?;
+    // Copy the path before creating the mutable output slice. A caller can
+    // pass overlapping path and output ranges; keeping both a borrowed user
+    // path and a mutable user slice would violate Rust's aliasing rules even
+    // though the kernel never dereferences them concurrently.
+    let mut path_buffer = [0u8; 256];
+    let path_bytes = {
+        let path = user_str(pml4, path_pointer, path_length)?;
+        let end = path.len();
+        path_buffer.get_mut(..end)?.copy_from_slice(path.as_bytes());
+        end
+    };
+    let path = core::str::from_utf8(&path_buffer[..path_bytes]).ok()?;
     let output = unsafe { user_bytes_mut(pml4, buffer, length)? };
     let result = scheduler::with_current_caps(|root, _caps| {
         with_fs(|filesystem| filesystem.list(root, path, output))
             .map(|length| length as i64)
             .map_err(map_error)
     });
-    Some(result.unwrap_or(errno::EBADF))
+    Some(result.unwrap_or_else(|error| error))
 }
 
 /// Creates a directory for the kernel console (no user pointer involved).
@@ -346,5 +362,5 @@ pub fn sys_stat(pml4: PhysFrame, path_pointer: u64, path_length: u64) -> Option<
             .map(|length| length as i64)
             .map_err(map_error)
     });
-    Some(result.unwrap_or(errno::EBADF))
+    Some(result.unwrap_or_else(|error| error))
 }

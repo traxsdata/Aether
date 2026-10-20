@@ -269,11 +269,26 @@ fn draw_content(window: &Window) {
         WindowKind::Security => {
             let running = supervisor::running_count();
             let quarantined = supervisor::quarantined_count();
+            let grants = portal::grant_count();
             let lines = [
                 ("DEMO ROOT", crate::fs::DEMO_ROOT),
                 ("SANDBOX", "PRIVATE ROOTS"),
-                ("SERVICES", "RUNNING"),
-                ("PORTAL", "GRANTS ACTIVE"),
+                (
+                    "SERVICES",
+                    if quarantined == 0 {
+                        "RUNNING"
+                    } else {
+                        "DEGRADED"
+                    },
+                ),
+                (
+                    "PORTAL",
+                    if grants == 0 {
+                        "NO GRANTS"
+                    } else {
+                        "GRANTS ACTIVE"
+                    },
+                ),
             ];
             for (label, value) in lines {
                 draw_line(x, y, label.as_bytes(), color::MUTED);

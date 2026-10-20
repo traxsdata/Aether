@@ -14,7 +14,7 @@
    - `p_filesz <= p_memsz`, non-zero memory size, and no overlaps;
    - physical addresses above the first page and page-aligned consistently
      with file offsets;
-   - an entry point inside a loadable segment.
+   - an entry point inside a loadable, executable segment.
 4. **Loading.** The loader allocates the image's aligned physical range with
    `AllocateAddress`, copies file bytes, and zeroes the remainder of each
    segment.
@@ -34,8 +34,10 @@
    NX and supervisor write protection, builds a bitmap frame allocator, creates
    kernel page tables, switches CR3, and only then releases boot-services
    memory.
-10. **Execution.** It starts the timer and scheduler, runs the isolation and
-    capability/IPC checks, prints the `AETHER_*_OK` markers, and halts.
+10. **Execution.** It starts the timer and scheduler, runs the isolation,
+    capability/IPC, sandbox, package, update, and portal-revocation checks, then
+    loads the ring-3 application. After the boot markers it keeps the console
+    shell alive for inspection.
 
 See [memory.md](memory.md) for allocator and paging details.
 
@@ -86,8 +88,12 @@ qemu-system-x86_64 -machine q35,accel=tcg -cpu max -m 1024M \
   -drive if=pflash,format=raw,readonly=on,file=OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=OVMF_VARS.fd \
   -drive file=build/aether.img,format=raw,if=virtio \
-  -display none -serial file:build/serial.log -no-reboot
+  -display vnc=127.0.0.1:9 -device VGA \
+  -serial file:build/serial.log -no-reboot
 ```
+
+The harness uses a headless VNC display and an emulated VGA adapter so OVMF
+exposes a linear GOP framebuffer.
 
 The harness waits for `AETHER_BOOT_OK`, fails on loader/kernel failure markers,
 and prints the serial transcript. It uses TCG so it works without KVM or root.
@@ -101,6 +107,8 @@ and prints the serial transcript. It uses TCG so it works without KVM or root.
 - Kernel validation failure prints `AETHER_BOOT_FAILED reason=...` and halts.
 - A CPU without NX support fails with `AETHER_BOOT_FAILED reason=cpu: ...`
   rather than booting with executable data.
-- A page fault, general-protection fault, or other CPU exception prints
-  `KERNEL EXCEPTION` with vector, error code, RIP, RFLAGS, and CR2, then emits
-  `AETHER_BOOT_FAILED` and halts. There is no user task to terminate yet.
+- A page fault, general-protection fault, or other CPU exception from ring 0
+  prints `KERNEL EXCEPTION` with vector, error code, RIP, RFLAGS, and CR2, then
+  emits `AETHER_BOOT_FAILED` and halts.
+- The same diagnostic from ring 3 retires only the faulting user task; the
+  kernel continues with the next runnable task.

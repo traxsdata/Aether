@@ -23,7 +23,7 @@ fn image(segments: &[(u64, &[u8], u64)]) -> Vec<u8> {
 
     for (index, (address, contents, memory_size)) in segments.iter().enumerate() {
         // Real linkers page-align segment file offsets and addresses.
-        while bytes.len() % PAGE_SIZE as usize != 0 {
+        while !bytes.len().is_multiple_of(PAGE_SIZE as usize) {
             bytes.push(0);
         }
         let file_offset = bytes.len() as u64;
@@ -122,6 +122,13 @@ fn rejects_overlapping_segments() {
         (BASE + PAGE_SIZE, &[0x90; 16], PAGE_SIZE),
     ]);
     assert_eq!(parse(&bytes), Err(ParseError::OverlappingSegments));
+}
+
+#[test]
+fn rejects_entry_in_a_non_executable_segment() {
+    let mut bytes = image(&[(BASE, &[0x90; 16], PAGE_SIZE)]);
+    write_u32(&mut bytes, ELF_HEADER_SIZE + 4, PF_R | PF_W);
+    assert_eq!(parse(&bytes), Err(ParseError::BadEntry));
 }
 
 #[test]

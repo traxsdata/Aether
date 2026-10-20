@@ -27,8 +27,6 @@ versioning scheme until the kernel ABI stabilises.
   virtual address, and CR3 switching on context switches.
 - A boot-time address-space isolation test across three kernel tasks.
 - `docs/architecture/scheduler.md`.
-- An emergency stack for exception reporting when the interrupted stack is
-  unusable.
 - `aether-ipc`: host-tested generation-checked capability tables and bounded
   endpoint queues.
 - Per-task capability tables, endpoint rights, kernel-mediated capability
@@ -71,6 +69,9 @@ versioning scheme until the kernel ABI stabilises.
   self-test (`AETHER_INPUT_OK`).
 - Exact-path file portal grants and a portal-granted read from the native
   application (`AETHER_PORTAL_OK`).
+- Portal grant revocation (`AETHER_REVOCATION_OK`), the `portal` and
+  `portal revoke <index>` console commands, and a Security Center portal view
+  derived from the live grant table.
 - Recovery prototype with current/previous image markers, selection, and
   preserved user data (`AETHER_RECOVERY_OK`).
 - `make iso`: timestamped UEFI El Torito ISO with an embedded FAT EFI system
@@ -131,18 +132,49 @@ versioning scheme until the kernel ABI stabilises.
   them.
 - Package and update verification use one `no_std` implementation in both the
   kernel and host tooling.
+- `make lint` also checks host test targets (`--all-targets`).
+- The `list` syscall copies the path before creating the mutable output slice,
+  so overlapping user ranges cannot create aliasing references.
+- File-service read/write/list/stat errors preserve their specific errno instead
+  of collapsing to `EBADF`.
+- The `yield` and `sleep` syscalls now enter the scheduler instead of returning
+  immediately.
+- Update verification rejects a non-empty unsigned record payload, and the
+  selected-update record is derived from the verified manifest.
+- Update image names have their own bounded validator, so version strings such
+  as `aether-0.10.0.iso` are accepted without widening package payload names.
+
+### Fixed
+
+- Filesystem inode metadata is validated before use. An oversized size, an
+  out-of-device block number, or a malformed directory size is rejected with
+  `Corrupt` instead of panicking the kernel. Unformatted devices and unknown
+  superblock versions are rejected before any inode is trusted.
+- Replacing file contents now allocates and writes the new blocks before
+  committing the inode and releasing the old blocks. A failed write preserves
+  the previous file instead of leaving it pointing at freed storage.
+- Directory and file creation release their inode/block allocations when a
+  later step fails.
+- A file with live open handles cannot be unlinked, so a handle cannot outlive
+  its inode or read blocks recycled by another file.
+- A restarted service must still have all dependencies running, matching the
+  first-start rule. Failed services must use the bounded restart path, and
+  quarantined services cannot be started again.
 
 ### Known limitations
 
 - Services and the desktop still execute as kernel modules; only the native
   application runs at CPL3. Moving service bodies into supervised user
   processes is follow-up work.
+- The serial console shell is a ring-0 diagnostic surface with full filesystem
+  authority. It is not the ordinary-user terminal or an elevation boundary.
 - Storage is a volatile RAM disk. There is no persistent block device,
   networking, audio, GPU acceleration, or package manager.
 - The filesystem is a bring-up format: 32 inodes, 4 KiB per file, one
   directory block per directory, and no crash-consistency protocol.
-- Portal grants are seeded at boot; there is no interactive consent UI,
-  persistent grant store, or revocation UI.
+- Portal grants are seeded at boot and can be revoked from the console; there
+  is no interactive consent UI, persistent grant store, or graphical revocation
+  control, and revocation does not invalidate an already-open capability.
 - The scheduler has no priorities, sleeping/wakeup queues, or dynamic task
   creation; IPC is polled rather than blocking.
 - Capability revocation, endpoint destruction, and complete object-lifetime

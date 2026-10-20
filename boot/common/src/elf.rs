@@ -246,10 +246,10 @@ pub fn parse(bytes: &[u8]) -> Result<Image, ParseError> {
         return Err(ParseError::NoSegments);
     }
 
-    // The entry must execute from a loaded segment.
+    // The entry must execute from a loaded, executable segment.
     let entry_in_image = segments[..count].iter().any(|segment| {
         let end = segment.physical_address.saturating_add(segment.file_size);
-        entry >= segment.physical_address && entry < end
+        segment.flags & PF_X != 0 && entry >= segment.physical_address && entry < end
     });
     if !entry_in_image {
         return Err(ParseError::BadEntry);

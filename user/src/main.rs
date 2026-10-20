@@ -36,6 +36,22 @@ fn report_open(label: &str, path: &str, rights: u64) {
     }
 }
 
+fn report_portal(label: &str, path: &str, rights: u64) {
+    match sdk::portal_open(path, rights) {
+        Ok(handle) => {
+            puts(label);
+            puts(": unexpectedly opened\n");
+            let _ = sdk::close(handle);
+        }
+        Err(error) => {
+            puts(label);
+            puts(": denied ");
+            puts(sdk::error_name(error));
+            puts("\n");
+        }
+    }
+}
+
 fn print_file(path: &str) {
     let mut buffer = [0u8; 128];
     match sdk::open(path, sdk::READ) {
@@ -85,6 +101,22 @@ pub extern "C" fn _start() -> ! {
     puts_u64(sdk::pid());
     puts("\n");
 
+    // Yield and sleep must enter the scheduler and return only after another
+    // task has had a chance to run (at minimum, after the next timer tick).
+    let before_yield = sdk::uptime();
+    let _ = sdk::yield_now();
+    if sdk::uptime() <= before_yield {
+        puts("init: yield did not schedule\n");
+        sdk::exit(1);
+    }
+    let before_sleep = sdk::uptime();
+    let _ = sdk::sleep();
+    if sdk::uptime() <= before_sleep {
+        puts("init: sleep did not schedule\n");
+        sdk::exit(1);
+    }
+    puts("init: yield/sleep ok\n");
+
     write_note();
     print_file(PRIVATE_NOTE);
     report_open("init: own-private", PRIVATE_NOTE, sdk::READ);
@@ -99,6 +131,11 @@ pub extern "C" fn _start() -> ! {
     puts("\n");
 
     portal_read();
+    // A grant for one file must not imply access to its parent directory or a
+    // sibling. Both attempts must fail with ENOGRANT.
+    report_portal("init: portal-parent", "/home", sdk::READ);
+    report_portal("init: portal-sibling", "/home/other.txt", sdk::READ);
+    report_portal("init: portal-write", "/home/welcome.txt", sdk::WRITE);
 
     puts("AETHER_APP_OK\n");
     sdk::exit(0)

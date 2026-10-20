@@ -58,8 +58,10 @@ image.sha256=<64 hex characters>
 ## Verification
 
 `aether_update::verify_update` checks framing, manifest fields, trust-store
-membership, publisher name, signature, and the image digest. The kernel runs the
-same crate as the release tooling.
+membership, publisher name, signature, and the image digest. It also rejects a
+non-empty record payload: the update format carries no unsigned data, and
+accepting trailing bytes would make the record larger than the authenticated
+manifest describes. The kernel runs the same crate as the release tooling.
 
 ## Activation policy
 

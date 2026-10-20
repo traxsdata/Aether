@@ -147,6 +147,8 @@ pub enum SchedulerError {
     Runtime(RuntimeError),
     /// Update verification policy failed.
     Update(&'static str),
+    /// Portal grant/revocation self-test failed.
+    Portal,
 }
 
 impl From<PagingError> for SchedulerError {
@@ -316,6 +318,8 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     crate::supervisor::init().map_err(SchedulerError::Service)?;
     crate::recovery::init().map_err(SchedulerError::Filesystem)?;
     crate::portal::init();
+    let revocation_checks = crate::portal::self_test().map_err(|_| SchedulerError::Portal)?;
+    serial_line!("AETHER_REVOCATION_OK checks={revocation_checks}");
     crate::apps::init();
     crate::desktop::init();
     crate::input::init();
@@ -742,6 +746,22 @@ fn schedule_next(current: usize) -> *mut InterruptFrame {
         paging::activate(pml4);
     }
     tasks[next].saved_rsp as *mut InterruptFrame
+}
+
+/// Yields the current task and returns the frame that should be resumed.
+///
+/// The syscall gate calls this with interrupts masked. If another task is
+/// ready, it runs immediately; otherwise the idle task runs until the next
+/// timer tick selects this task again. `Sleep` uses the same scheduling point:
+/// the prototype has no sleep queue, but it must not return without yielding.
+pub fn yield_current(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    tasks[current].saved_rsp = frame as u64;
+    if tasks[current].state == TaskState::Running {
+        tasks[current].state = TaskState::Ready;
+    }
+    schedule_next(current)
 }
 
 /// Called from the timer interrupt before returning to a task.

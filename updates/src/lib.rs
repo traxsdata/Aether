@@ -29,7 +29,7 @@
 extern crate std;
 
 use aether_crypto::{from_hex, sha256, to_hex, verify};
-use aether_packaging::manifest::{Channel, ManifestError, Version, is_safe_relative_path};
+use aether_packaging::manifest::{Channel, ManifestError, Version};
 use aether_packaging::signed::{FrameError, TrustStore, decode_frame};
 use aether_packaging::text::{FieldError, Fields};
 
@@ -50,6 +50,39 @@ const KNOWN_KEYS: [&str; 8] = [
     "publisher-key",
     "image.sha256",
 ];
+
+/// Maximum image file name length.
+///
+/// Release image names are longer than package payload names because they
+/// carry the version (for example `aether-0.10.0.iso`).
+pub const MAX_IMAGE_NAME: usize = 64;
+
+/// Returns `true` for a safe relative update image name.
+#[must_use]
+pub fn is_safe_image_name(path: &str) -> bool {
+    if path.is_empty()
+        || path.len() > MAX_IMAGE_NAME
+        || path.bytes().any(|byte| {
+            !(byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'-' | b'_' | b'/'))
+        })
+    {
+        return false;
+    }
+    let mut components = 0usize;
+    for component in path.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.len() > MAX_IMAGE_NAME
+        {
+            return false;
+        }
+        components += 1;
+    }
+    components <= 4
+}
 
 /// Update manifest validation errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +109,9 @@ pub enum UpdateError {
     BadSignature,
     /// The image digest does not match the manifest.
     DigestMismatch,
+    /// An update record carried a payload, which is unsigned and has no
+    /// meaning for an update manifest.
+    UnexpectedPayload,
 }
 
 impl From<FrameError> for UpdateError {
@@ -124,7 +160,7 @@ impl<'a> UpdateManifest<'a> {
             return Err(UpdateError::UnsupportedVersion);
         }
         let image = fields.require("image")?;
-        if !is_safe_relative_path(image) {
+        if !is_safe_image_name(image) {
             return Err(UpdateError::InvalidImageName);
         }
         let version = Version::parse(fields.require("version")?)?;
@@ -172,7 +208,7 @@ impl<'a> UpdateManifest<'a> {
         let mut writer = Writer::new(out);
         writer.field("format", "1")?;
         writer.field("image", self.image)?;
-        let mut version = [0u8; 16];
+        let mut version = [0u8; 24];
         let length = self.version.write(&mut version)?;
         writer.field("version", core::str::from_utf8(&version[..length]).ok()?)?;
         let mut counter = [0u8; 20];
@@ -220,6 +256,9 @@ pub fn verify_update<'a>(
     }
     if frame.body.len() > MAX_UPDATE_MANIFEST_BYTES {
         return Err(UpdateError::ManifestTooLarge);
+    }
+    if !frame.payload.is_empty() {
+        return Err(UpdateError::UnexpectedPayload);
     }
     let manifest = UpdateManifest::parse(frame.body)?;
     let publisher = trust

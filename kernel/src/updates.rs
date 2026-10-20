@@ -21,9 +21,11 @@ use aether_packaging::manifest::{Channel, Version};
 use aether_packaging::signed::{TrustStore, TrustedPublisher};
 use aether_packaging::text::Fields;
 use aether_update::{
-    InstalledState, PolicyError, PolicyOptions, UpdateError, check_policy, verify_update,
+    InstalledState, PolicyError, PolicyOptions, UpdateError, UpdateManifest, check_policy,
+    verify_update,
 };
 use core::cell::UnsafeCell;
+use core::fmt::{self, Write as _};
 
 struct Global<T>(UnsafeCell<T>);
 
@@ -147,11 +149,7 @@ pub fn init() -> Result<(), &'static str> {
         return Err("older update version was not rejected as a downgrade");
     }
 
-    fs::write_path(
-        SELECTED,
-        b"image-0.2.0.bin version=0.2.0 counter=2 channel=developer\n",
-    )
-    .map_err(|_| "cannot record the selected update")?;
+    record_selected(&current)?;
 
     // SAFETY: Interrupts are masked and this runs once during boot.
     unsafe {
@@ -172,6 +170,47 @@ pub fn init() -> Result<(), &'static str> {
         current.version.patch
     );
     Ok(())
+}
+
+/// Records the accepted manifest's actual image, version, counter, and
+/// channel. The selection record must describe the verified artifact rather
+/// than a hard-coded fixture value.
+fn record_selected(manifest: &UpdateManifest<'_>) -> Result<(), &'static str> {
+    let mut buffer = [0u8; 160];
+    let length = {
+        let mut writer = SliceWriter {
+            out: &mut buffer,
+            written: 0,
+        };
+        writeln!(
+            writer,
+            "{} version={}.{}.{} counter={} channel={}",
+            manifest.image,
+            manifest.version.major,
+            manifest.version.minor,
+            manifest.version.patch,
+            manifest.counter,
+            manifest.channel.name()
+        )
+        .map_err(|_| "selected update record is too long")?;
+        writer.written
+    };
+    fs::write_path(SELECTED, &buffer[..length]).map_err(|_| "cannot record the selected update")
+}
+
+struct SliceWriter<'a> {
+    out: &'a mut [u8],
+    written: usize,
+}
+
+impl fmt::Write for SliceWriter<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self.written.checked_add(text.len()).ok_or(fmt::Error)?;
+        let target = self.out.get_mut(self.written..end).ok_or(fmt::Error)?;
+        target.copy_from_slice(text.as_bytes());
+        self.written = end;
+        Ok(())
+    }
 }
 
 fn read_installed() -> Result<InstalledState, &'static str> {
@@ -227,7 +266,7 @@ pub fn print_status() {
                 status.channel.name()
             );
             serial_line!("updates: accepted=1 rejected=3 rollback_protected=true");
-            let mut buffer = [0u8; 96];
+            let mut buffer = [0u8; 192];
             match fs::read_path(SELECTED, &mut buffer) {
                 Ok(length) => {
                     serial_line!(

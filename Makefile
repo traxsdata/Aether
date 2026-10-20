@@ -94,7 +94,7 @@ license-check:
 
 lint: kernel
 	$(CARGO) fmt --all --check
-	$(CARGO) clippy --locked -- -D warnings
+	$(CARGO) clippy --locked --all-targets -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings

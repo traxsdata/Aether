@@ -86,9 +86,10 @@ kernel identity-map entry, and maps a private physical frame at
 virtual address backed by a different frame. The scheduler switches CR3 on
 context switches, so a write by one task is invisible to another.
 
-The kernel remains identity-mapped in every address space. This is enough for
-kernel-task isolation but is not yet a user/kernel split; see
-[scheduler.md](scheduler.md).
+The kernel remains identity-mapped and supervisor-only in every address space.
+The ring-3 application additionally receives user mappings only inside
+`USER_BASE..USER_LIMIT`; the kernel identity map is never marked user-accessible.
+See [scheduler.md](scheduler.md).
 
 ## Failure handling
 
@@ -112,11 +113,10 @@ the test requires the IDT handler to report the breakpoint and emit
 
 ## Next steps
 
-1. Higher-half kernel mapping and a per-address-space user region.
-2. User/supervisor page permissions and user-mode entry.
-3. Guard pages and stack overflow detection with an IST.
-4. Dynamic bitmap sizing and identity mapping for memory above 16 GiB.
-5. Locking/per-CPU allocator state.
-6. Per-task kernel stacks allocated from frames.
-7. A fault-injection test proving writes to kernel text and instruction fetches
+1. Higher-half kernel mapping and a smaller per-address-space user window.
+2. Guard pages and stack overflow detection with an IST.
+3. Dynamic bitmap sizing and identity mapping for memory above 16 GiB.
+4. Locking/per-CPU allocator state.
+5. Per-task kernel stacks allocated from frames rather than static arrays.
+6. A fault-injection test proving writes to kernel text and instruction fetches
    from data are rejected with NX and WP enabled.

@@ -404,9 +404,17 @@ impl BootInfo {
         if self.memory_region_count > MAX_MEMORY_REGIONS as u64 {
             return Err(BootInfoError::TooManyRegions(self.memory_region_count));
         }
-        self.memory_region_count
+        let map_bytes = self
+            .memory_region_count
             .checked_mul(size_of::<MemoryRegion>() as u64)
             .ok_or(BootInfoError::MemoryMapOverflow)?;
+        let map_end = self
+            .memory_regions
+            .checked_add(map_bytes)
+            .ok_or(BootInfoError::MemoryMapOverflow)?;
+        if self.memory_regions >= (1u64 << 52) || map_end > (1u64 << 52) {
+            return Err(BootInfoError::MemoryMapOverflow);
+        }
         if self.kernel_end <= self.kernel_start {
             return Err(BootInfoError::InvalidKernelRange);
         }
@@ -532,6 +540,14 @@ mod tests {
         let mut info = header();
         info.reserved[2] = 1;
         assert_eq!(info.validate(), Err(BootInfoError::ReservedNotZero));
+    }
+
+    #[test]
+    fn rejects_memory_map_address_overflow() {
+        let mut info = header();
+        info.memory_regions = !7u64;
+        info.memory_region_count = 2;
+        assert_eq!(info.validate(), Err(BootInfoError::MemoryMapOverflow));
     }
 
     #[test]

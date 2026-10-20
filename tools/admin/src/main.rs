@@ -16,11 +16,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use aether_crypto::{ed25519, from_hex, sha256, to_hex};
-use aether_packaging::manifest::{Channel, ManifestFields, Version, is_safe_relative_path};
+use aether_packaging::manifest::{Channel, ManifestFields, Version};
 use aether_packaging::payload::encode_payload;
 use aether_packaging::signed::{TrustStore, TrustedPublisher, encode_frame};
 use aether_packaging::{MAX_MANIFEST_BYTES, PACKAGE_FORMAT, PACKAGE_MAGIC};
-use aether_update::{UPDATE_FORMAT, UPDATE_MAGIC, UpdateManifest, check_policy, verify_update};
+use aether_update::{
+    UPDATE_FORMAT, UPDATE_MAGIC, UpdateManifest, check_policy, is_safe_image_name, verify_update,
+};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -150,7 +152,7 @@ fn update_sign(args: &[String]) -> Result<()> {
     let output = flag(args, "--out")?;
 
     let image_name = name.to_str().ok_or("image name is not valid UTF-8")?;
-    if !is_safe_relative_path(image_name) {
+    if !is_safe_image_name(image_name) {
         return Err(format!(
             "image name {image_name:?} is not a safe relative path"
         ));
@@ -281,7 +283,7 @@ fn release_build(args: &[String]) -> Result<()> {
     let seed = read_seed(&flag(args, "--seed")?)?;
 
     let image_name = name.to_str().ok_or("image name is not valid UTF-8")?;
-    if !is_safe_relative_path(image_name) {
+    if !is_safe_image_name(image_name) {
         return Err(format!(
             "image name {image_name:?} is not a safe relative path"
         ));
@@ -391,6 +393,10 @@ fn release_verify(args: &[String]) -> Result<()> {
         .map_err(|error| format!("cannot read release-info.txt: {error}"))?;
     let mut image_name = None;
     let mut declared_digest = None;
+    let mut declared_version = None;
+    let mut declared_counter = None;
+    let mut declared_channel = None;
+    let mut declared_publisher = None;
     for line in info.lines() {
         if let Some(value) = line.strip_prefix("image=") {
             image_name = Some(value.to_string());
@@ -402,9 +408,32 @@ fn release_verify(args: &[String]) -> Result<()> {
             }
             declared_digest = Some(digest);
         }
+        if let Some(value) = line.strip_prefix("version=") {
+            declared_version = Some(Version::parse(value).map_err(|error| format!("{error:?}"))?);
+        }
+        if let Some(value) = line.strip_prefix("counter=") {
+            declared_counter = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "release-info.txt has an invalid counter")?,
+            );
+        }
+        if let Some(value) = line.strip_prefix("channel=") {
+            declared_channel = Some(Channel::parse(value).map_err(|error| format!("{error:?}"))?);
+        }
+        if let Some(value) = line.strip_prefix("publisher=") {
+            declared_publisher = Some(value.to_string());
+        }
     }
     let image_name = image_name.ok_or("release-info.txt has no image name")?;
+    if !is_safe_image_name(&image_name) {
+        return Err("release-info.txt has an unsafe image name".into());
+    }
     let declared_digest = declared_digest.ok_or("release-info.txt has no image digest")?;
+    let declared_version = declared_version.ok_or("release-info.txt has no version")?;
+    let declared_counter = declared_counter.ok_or("release-info.txt has no counter")?;
+    let declared_channel = declared_channel.ok_or("release-info.txt has no channel")?;
+    let declared_publisher = declared_publisher.ok_or("release-info.txt has no publisher")?;
 
     let checksums = fs::read_to_string(directory.join("SHA256SUMS"))
         .map_err(|error| format!("cannot read SHA256SUMS: {error}"))?;
@@ -433,6 +462,13 @@ fn release_verify(args: &[String]) -> Result<()> {
         verify_update(&manifest, &image, &store).map_err(|error| format!("{error:?}"))?;
     if verified.image != image_name {
         return Err("manifest names a different image".into());
+    }
+    if verified.version != declared_version
+        || verified.counter != declared_counter
+        || verified.channel != declared_channel
+        || verified.publisher != declared_publisher
+    {
+        return Err("release-info.txt disagrees with the signed manifest".into());
     }
     println!(
         "release verified image={} version={} counter={} channel={} publisher={}",

@@ -83,5 +83,7 @@ scheduler test:
 
 The endpoint operations are still a kernel-internal interface. File operations
 cross the user boundary and are validated against the current task's table.
-Revocation of endpoint capabilities and complete object destruction are not
-implemented yet; the generation counters prepare the table for them.
+Portal grants can be revoked, which blocks future `portal_open` calls; general
+capability revocation, endpoint revocation, complete object destruction, and
+invalidating already-open file capabilities are not implemented yet. The
+generation counters prepare the table for them.

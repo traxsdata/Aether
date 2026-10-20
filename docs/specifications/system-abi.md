@@ -21,7 +21,7 @@ Defined in [`abi/src/lib.rs`](../../abi/src/lib.rs).
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | `u64` | `0x4145_5448_4552_4f53` (`AETHEROS`) |
-| `version` | `u32` | Current value: `1` |
+| `version` | `u32` | Current value: `2` |
 | `struct_size` | `u32` | Size of this structure in bytes |
 | `memory_regions` | `u64` | Physical address of the region array |
 | `memory_region_count` | `u64` | Number of regions, at most 256 |
@@ -98,7 +98,7 @@ Implemented calls:
 
 | Number | Call | Arguments | Result |
 |---|---|---|---|
-| 0 | `yield` | — | 0 |
+| 0 | `yield` | — | 0 after another task runs or the next tick |
 | 1 | `exit` | status | does not return |
 | 2 | `write` | fd, buffer, length | bytes written |
 | 3 | `getpid` | — | task id |
@@ -108,7 +108,7 @@ Implemented calls:
 | 7 | `close` | handle | 0 |
 | 8 | `list` | path, path length, buffer, length | bytes written |
 | 9 | `stat` | path, path length | file size |
-| 10 | `sleep` | — | 0 |
+| 10 | `sleep` | — | 0 after yielding to the scheduler (no sleep queue yet) |
 | 11 | `uptime` | — | timer ticks |
 | 12 | `portal_open` | path, path length, rights | file handle |
 | 13 | `create_window` | reserved | reserved |
@@ -127,9 +127,10 @@ Rules for this implementation:
 - Portal access requires an exact process-root, path, and right grant.
 - A ring-3 fault retires the task; the kernel remains alive.
 
-Still planned: process creation/wait, capability derivation and revocation,
-blocking IPC with timeouts, memory-object mapping, window rendering syscalls,
-and a versioned SDK release process.
+Still planned: process creation/wait, general capability derivation and
+revocation, blocking IPC with timeouts, memory-object mapping, window rendering
+syscalls, delete/rename/execute/list rights, and a versioned SDK release
+process.
 
 ## Loader-to-kernel calling convention
 

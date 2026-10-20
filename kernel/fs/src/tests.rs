@@ -114,20 +114,15 @@ fn file_size_is_bounded_and_disk_exhaustion_is_reported() {
         Err(FsError::FileTooLarge)
     );
 
-    let mut created = 0usize;
-    for index in 0..(MAX_INODES * 2) {
-        let mut name = [b'f', b'0' + (index / 10) as u8, b'0' + (index % 10) as u8];
-        let path = core::str::from_utf8(&mut name).expect("name");
-        match fs.write_file("/", path, &[0u8; MAX_FILE_BYTES]) {
-            Ok(()) => created += 1,
-            Err(FsError::NoSpace) => break,
-            Err(error) => panic!("unexpected error: {error:?}"),
-        }
+    // Exhaust the block bitmap directly so the test does not depend on how
+    // many inodes remain. A create may still leave an empty inode, but it must
+    // report NoSpace instead of writing partial data.
+    for block in DATA_START_BLOCK..BLOCK_COUNT as u16 {
+        fs.set_block_used(block, true).expect("mark block used");
     }
-    assert!(created > 0);
-    assert!(
-        fs.write_file("/", "/system/too-many", &[0u8; 16]).is_err(),
-        "the inode or block table must eventually fill"
+    assert_eq!(
+        fs.write_file("/", "/system/too-many", &[0u8; 16]),
+        Err(FsError::NoSpace)
     );
 }
 
@@ -204,4 +199,119 @@ fn duplicate_names_are_rejected() {
         .read_file("/", "apps/demo/file", &mut buffer)
         .expect("read");
     assert_eq!(&buffer[..length], b"y");
+}
+
+#[test]
+fn unformatted_or_wrong_version_devices_are_rejected() {
+    let mut empty = AetherFs::new(RamDisk::new());
+    let mut buffer = [0u8; 8];
+    assert_eq!(
+        empty.read_file("/", "missing", &mut buffer),
+        Err(FsError::NotFormatted)
+    );
+
+    let mut fs = filesystem();
+    fs.device.write_block(0, &[0u8; BLOCK_SIZE]).expect("wipe");
+    assert_eq!(
+        fs.read_file("/", "missing", &mut buffer),
+        Err(FsError::NotFormatted)
+    );
+
+    let mut fs = filesystem();
+    let mut superblock = [0u8; BLOCK_SIZE];
+    fs.device
+        .read_block(0, &mut superblock)
+        .expect("read superblock");
+    superblock[4..6].copy_from_slice(&(VERSION + 1).to_le_bytes());
+    fs.device
+        .write_block(0, &superblock)
+        .expect("write superblock");
+    assert_eq!(
+        fs.read_file("/", "missing", &mut buffer),
+        Err(FsError::Corrupt)
+    );
+}
+
+#[test]
+fn open_files_cannot_be_unlinked_until_closed() {
+    let mut fs = filesystem();
+    fs.write_file("/", "/apps/demo/private/held.txt", b"held")
+        .expect("write");
+    let handle = fs
+        .open("/apps/demo", "private/held.txt", Access::READ)
+        .expect("open");
+    assert_eq!(
+        fs.unlink("/apps/demo", "private/held.txt"),
+        Err(FsError::Access)
+    );
+    fs.close(handle).expect("close");
+    fs.unlink("/apps/demo", "private/held.txt")
+        .expect("unlink after close");
+}
+
+#[test]
+fn failed_replacement_preserves_the_previous_file() {
+    let mut fs = filesystem();
+    fs.write_file("/", "/apps/demo/private/keep.txt", b"keep")
+        .expect("original");
+
+    // Mark every data block used. The old implementation freed the target's
+    // block before allocating the replacement, so it reused that block and
+    // then failed halfway through, corrupting the file.
+    for block in DATA_START_BLOCK..BLOCK_COUNT as u16 {
+        fs.set_block_used(block, true).expect("mark block used");
+    }
+
+    assert_eq!(
+        fs.write_file("/", "/apps/demo/private/keep.txt", &[0u8; MAX_FILE_BYTES]),
+        Err(FsError::NoSpace)
+    );
+
+    let mut buffer = [0u8; 16];
+    let length = fs
+        .read_file("/apps/demo", "private/keep.txt", &mut buffer)
+        .expect("old content still readable");
+    assert_eq!(&buffer[..length], b"keep");
+}
+
+#[test]
+fn corrupt_inode_metadata_is_rejected_without_panicking() {
+    let mut fs = filesystem();
+
+    // A size larger than the maximum file forces a block-table overrun unless
+    // the inode is validated first.
+    fs.write_inode(
+        5,
+        Inode {
+            mode: MODE_FILE,
+            size: (MAX_FILE_BYTES + 1) as u16,
+            ..Inode::EMPTY
+        },
+    )
+    .expect("write raw inode");
+    assert!(matches!(fs.read_inode(5), Err(FsError::Corrupt)));
+
+    // A block number outside the device must not reach the block layer.
+    fs.write_inode(
+        6,
+        Inode {
+            mode: MODE_FILE,
+            size: BLOCK_SIZE as u16,
+            blocks: [BLOCK_COUNT as u16, 0, 0, 0, 0, 0, 0, 0],
+        },
+    )
+    .expect("write raw inode");
+    assert!(matches!(fs.read_inode(6), Err(FsError::Corrupt)));
+
+    // A directory size that is not a whole number of entries is corrupt.
+    fs.write_inode(
+        7,
+        Inode {
+            mode: MODE_DIR,
+            size: 1,
+            blocks: [DATA_START_BLOCK, 0, 0, 0, 0, 0, 0, 0],
+        },
+    )
+    .expect("write raw inode");
+    assert!(matches!(fs.read_inode(7), Err(FsError::Corrupt)));
 }

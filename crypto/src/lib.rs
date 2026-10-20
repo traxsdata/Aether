@@ -14,10 +14,12 @@
 //!   public keys, signatures, manifests, and artifact digests. Secret-key
 //!   signing helpers are host tooling and must never run on a machine whose
 //!   timing is observable to an attacker.
-//! - Verification enforces canonical point and scalar encodings and rejects
-//!   `S >= L`. Small-order public keys and signatures are not rejected
-//!   separately; Aether never derives key agreement from these primitives, so
-//!   the RFC 8032 verification equation is sufficient for integrity.
+//! - Verification enforces canonical scalar encoding, rejects `S >= L`, and
+//!   rejects small-order public keys. Signature `R` is not decompressed
+//!   separately; the verifier compares the compressed verification result to
+//!   the encoded `R` exactly. Aether never derives key agreement from these
+//!   primitives, so the RFC 8032 verification equation is sufficient for
+//!   integrity.
 //! - This is not a general-purpose cryptography library. Adding algorithms or
 //!   changing encoding rules requires a security review.
 
