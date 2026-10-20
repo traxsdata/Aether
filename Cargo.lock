@@ -54,6 +54,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-input"
+version = "0.1.0"
+
+[[package]]
 name = "aether-ipc"
 version = "0.1.0"
 
@@ -65,11 +69,13 @@ dependencies = [
  "aether-boot-common",
  "aether-crypto",
  "aether-fs",
+ "aether-input",
  "aether-ipc",
  "aether-memory",
  "aether-packaging",
  "aether-services",
  "aether-update",
+ "aether-wm",
 ]
 
 [[package]]
@@ -84,6 +90,13 @@ name = "aether-packaging"
 version = "0.1.0"
 dependencies = [
  "aether-crypto",
+]
+
+[[package]]
+name = "aether-render-tests"
+version = "0.1.0"
+dependencies = [
+ "aether-abi",
 ]
 
 [[package]]
@@ -106,4 +119,11 @@ version = "0.1.0"
 dependencies = [
  "aether-crypto",
  "aether-packaging",
+]
+
+[[package]]
+name = "aether-wm"
+version = "0.1.0"
+dependencies = [
+ "aether-input",
 ]

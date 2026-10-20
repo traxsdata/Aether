@@ -3,7 +3,7 @@
 ## Host requirements
 
 - Linux x86-64 (primary and CI platform)
-- `git`, GNU Make, Python 3
+- `git`, GNU Make, Python 3.11 or later
 - Rust via rustup (pinned by `rust-toolchain.toml`)
 - `mtools` (`mformat`, `mmd`, `mcopy`)
 - `qemu-system-x86_64` and OVMF firmware for the boot tests
@@ -23,9 +23,10 @@ The first Cargo invocation downloads Rust 1.99.1 and the
 ## Common commands
 
 ```sh
-make unittest      # host tests for abi/, fs, services, memory, IPC, boot common,
-                   # crypto, packaging, updates, compatibility
+make unittest      # Rust host tests (including input/browser/actual renderer)
+                   # and Python build-tooling tests
 make test          # build the image and boot it under QEMU/OVMF
+make iso-test      # UEFI ISO, VGA/SVGA, actual PS/2 windows and Files workflows
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # boot a kernel that executes int3 after paging is enabled
 make negative-test # prove the boot harness rejects a deliberately failing kernel
@@ -35,6 +36,7 @@ make docs-check    # check relative links in Markdown files
 make license-check # check workspace and dependency licence metadata
 make lint          # rustfmt + clippy (host, kernel, user, loader)
 make iso           # timestamped UEFI El Torito ISO under build/ISOs
+make vmware-vmx    # write build/aether-vmware.vmx for the newest ISO
 make release       # signed release bundle (needs AETHER_SIGNING_KEY)
 make release-check # verify a release bundle (needs AETHER_TRUST)
 make release-demo  # signed bundle with the test key, then verify
@@ -44,20 +46,25 @@ make               # build build/aether.img
 make clean
 ```
 
-`make test` requires the markers from `tools/test-boot.py`, including
+`make test` requires the markers from `tools/boot_support.py`, including
 `AETHER_USER_OK`, `AETHER_FS_OK`, `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`,
 `AETHER_RECOVERY_OK`, `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`,
 `AETHER_RUNTIME_OK`, `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`,
-`AETHER_DESKTOP_OK`,
-`AETHER_INPUT_OK`, `AETHER_PORTAL_OK`, and `AETHER_BOOT_OK`, and fails on any
-failure marker. `make fault-test` requires the exception handler to report
+`AETHER_DESKTOP_OK`, `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`, `AETHER_INPUT_OK`,
+`AETHER_PORTAL_OK`, and `AETHER_BOOT_OK`, and fails on any failure marker.
+`make iso-test` boots the same distribution ISO through OVMF on VGA and QEMU's
+VMware SVGA adapter and requires the full boot/security marker set. It then
+drives real PS/2 arrows, dragging/resizing, Files folders/previews, denied vault
+access, menus/search, cursor-only painting, RGB colors, and partial/full
+screenshot equality. `make fault-test` requires the exception handler to report
 `breakpoint (3)` and `AETHER_BOOT_FAILED`. All use TCG and need no KVM or root
 access.
 
 The graphics marker requires a display device for OVMF to expose GOP. The test
-harnesses start a headless VNC server and an emulated VGA adapter. A completely
-headless run prints `AETHER_GRAPHICS_SKIP` and does not satisfy the desktop
-markers.
+FAT-image harness starts a headless VNC server and a VGA adapter; the ISO harness
+uses `-display none` with an explicit VGA/SVGA device and QMP screenshots. No
+graphical host session is needed. A run with no graphics **device** cannot
+satisfy the desktop markers.
 
 ## Toolchain pinning
 
@@ -92,6 +99,10 @@ build/BOOTX64.EFI         UEFI loader with the kernel embedded
 build/aether.img          64 MiB FAT image with /EFI/BOOT/BOOTX64.EFI
 build/efiboot.img         8 MiB FAT image used as the ISO's El Torito entry
 build/ISOs/*.iso          timestamped UEFI ISO images
+build/aether-vmware.vmx   VMware Workstation definition for the newest ISO
+build/aether-vmware-serial.log  Workstation COM1 capture after a manual boot
+build/iso-test/<adapter>/ serial/QMP interaction logs, PPM screenshots, timings
+build/iso-test/artifact.json  tested ISO path, SHA-256 and result
 build/serial.log          last QEMU serial capture
 ```
 
@@ -111,6 +122,13 @@ qemu-system-x86_64 -machine q35,accel=tcg -cpu max -m 1024M
 
 Set `OVMF_CODE` / `OVMF_VARS` to override firmware paths and
 `AETHER_BOOT_TIMEOUT` to change the timeout.
+
+`make iso-test` uses `AETHER_ISO_TIMEOUT` for boot and accepts `AETHER_ISO` for
+an explicit artifact. To re-test an existing ISO without rebuilding, run
+`AETHER_ISO=/absolute/path/aether.iso python3 tools/test-iso.py`. The VMX generator
+also accepts `AETHER_ISO`; `make vmware-vmx` does not rebuild a previously tested
+ISO. The kernel banner marks modified tracked sources with `-dirty`; a PR still
+needs a committed, exact tested SHA before publishing its evidence.
 
 ## Debugging
 
@@ -173,25 +191,31 @@ a pull request:
    self-test configuration.
 2. `make docs-check` — relative Markdown links.
 3. `make license-check` — workspace and dependency licence metadata.
-4. `make unittest` — host unit tests.
+4. `make unittest` — Rust host tests, actual renderer surface checks, and Python tooling tests.
 5. `make compat-test` and `make update-test` — compatibility classification and
    package/update policy.
 6. `make test` — real QEMU boot with the full marker set, including the ring-3,
    filesystem, sandbox, supervisor, recovery, package, runtime, update,
-   graphics, desktop, input, portal, and shell markers.
-7. `make shell-test` — drive `help`, `ls`, `cat`, `apps`, `security`, `mem`,
+   graphics, desktop, window manager, pointer, input, portal, and shell markers.
+7. `make iso-test` — boot the same ISO through UEFI El Torito on VGA and VMware
+   SVGA emulation; exercise real window/Files input and compare screenshots.
+   `make vmware-vmx` then generates the Workstation definition for that ISO.
+8. `make shell-test` — drive `help`, `ls`, `cat`, `apps`, `security`, `mem`,
    `services`, `portal`/`portal revoke`, `recovery`, `packages`, `runtime`,
    `updates`, `desktop`, `input`, and `uptime` over a serial socket.
-8. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
+9. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
    and failure marker.
-9. `make rollback-test` — discard the current image marker and require the
+10. `make rollback-test` — discard the current image marker and require the
    previous image with its user data, printing
    `AETHER_RECOVERY_ROLLBACK_OK`.
-10. `make negative-test` — a deliberately failing kernel must be rejected by
+11. `make negative-test` — a deliberately failing kernel must be rejected by
     the same harness used for the normal boot test.
 
-`make qualify` adds `make release-demo` and writes a report; run it before a
-release, not on every pull request.
+12. `make release-demo` — signed bundle verification and both tamper rejections.
+
+`make qualify` runs the same gates, including rollback and the signed-release
+demo, and writes a report; run it before a release. Neither gate qualifies
+VMware Workstation or replaces an external security/accessibility review.
 
 The gate does not require KVM, root access, or secrets. A GitHub Actions
 workflow will install `qemu-system-x86`, `ovmf`, and `mtools` and run the same

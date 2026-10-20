@@ -1,0 +1,9 @@
+[package]
+name = "aether-input"
+description = "Bounded, host-testable input queues and PS/2 decoders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true

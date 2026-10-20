@@ -1,0 +1,13 @@
+[package]
+name = "aether-render-tests"
+description = "Host regression harness for the actual kernel software renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+aether-abi = { path = "../../abi" }

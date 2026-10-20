@@ -472,6 +472,59 @@ pub fn read_path(path: &str, out: &mut [u8]) -> Result<usize, FsError> {
     with_fs(|filesystem| filesystem.read_file("/", path, out))
 }
 
+/// Read-only Files service adapter. Application vaults are deliberately not a
+/// browseable location; a window or a path supplied by UI is not a grant.
+pub struct BrowserFiles;
+
+fn browser_scope(path: &str) -> Result<(&'static str, &str), FsError> {
+    for root in ["/home", "/system", "/portal"] {
+        if let Some(relative) = path.strip_prefix(root)
+            && (relative.is_empty() || relative.starts_with('/'))
+        {
+            return Ok((root, if relative.is_empty() { "/" } else { relative }));
+        }
+    }
+    Err(FsError::Access)
+}
+
+impl aether_wm::browser::BrowserSource for BrowserFiles {
+    fn list(
+        &mut self,
+        path: &str,
+        out: &mut [u8],
+    ) -> Result<usize, aether_wm::browser::BrowserError> {
+        let result = if path == "/" {
+            list_path(path, out) // directory names only; entering /apps is denied
+        } else {
+            browser_scope(path).and_then(|(root, relative)| {
+                with_fs(|filesystem| filesystem.list(root, relative, out))
+            })
+        };
+        result.map_err(browser_error)
+    }
+
+    fn read(
+        &mut self,
+        path: &str,
+        out: &mut [u8],
+    ) -> Result<usize, aether_wm::browser::BrowserError> {
+        browser_scope(path)
+            .and_then(|(root, relative)| {
+                with_fs(|filesystem| filesystem.read_file(root, relative, out))
+            })
+            .map_err(browser_error)
+    }
+}
+
+fn browser_error(error: FsError) -> aether_wm::browser::BrowserError {
+    use aether_wm::browser::BrowserError;
+    match error {
+        FsError::Access | FsError::Escape => BrowserError::Access,
+        FsError::PathTooLong | FsError::NameTooLong | FsError::Corrupt => BrowserError::InvalidData,
+        _ => BrowserError::Unavailable,
+    }
+}
+
 /// Replaces a file for the kernel console.
 pub fn write_path(path: &str, data: &[u8]) -> Result<(), FsError> {
     with_fs(|filesystem| filesystem.write_file("/", path, data))

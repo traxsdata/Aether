@@ -13,6 +13,8 @@ make unittest
 make compat-test
 make update-test
 make test
+make iso-test
+make vmware-vmx
 make shell-test
 make fault-test
 make rollback-test

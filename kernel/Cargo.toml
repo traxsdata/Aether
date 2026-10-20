@@ -14,7 +14,9 @@ aether-boot-common = { path = "../boot/common" }
 aether-fs = { path = "fs" }
 aether-memory = { path = "memory" }
 aether-ipc = { path = "ipc" }
+aether-input = { path = "input" }
 aether-services = { path = "services" }
+aether-wm = { path = "wm" }
 aether-crypto = { path = "../crypto" }
 aether-packaging = { path = "../packaging" }
 aether-update = { path = "../updates" }

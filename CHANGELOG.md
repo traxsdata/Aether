@@ -7,6 +7,37 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- `aether-wm`, a `no_std`, `unsafe`-free, allocation-free window-manager crate:
+  geometry, responsive layout, window and workspace state, focus and z-order,
+  menus, dock targeting, Spotlight-style search, settings, hit testing, and
+  fixed-point animation, with host tests across 640×480 through 1920×1080.
+- A clean-room Golden Gate-inspired desktop: top menu bar with working menus,
+  floating magnifying dock, rounded windows with traffic-light controls,
+  drag/resize/zoom/minimize, four Spaces, a workspace overview, a global
+  Clear/Balanced/Tinted Liquid Glass setting, high-contrast mode, reduced
+  motion, and an original procedural wallpaper and vector icon set.
+- A bounded software compositor with a 1920×1200 back buffer and wallpaper
+  cache, damage-tracked repaint/presentation, rounded content clipping, batched
+  input, elapsed-tick animation, and a small cursor-only path. GOP copies are
+  not atomic/vblank-synchronized and do not guarantee tear-free scanout.
+- Working read-only Files folder navigation, selection, keyboard scrolling,
+  refresh, and bounded text previews, with denied application-vault access and
+  `AETHER_FILES_OK` service-path evidence.
+- `aether-input`: host-tested set-1/E0 keyboard decoding, independent modifiers,
+  nine-bit mouse decoding, and bounded FIFO event queues.
+- A host test harness for the actual kernel graphics module, checking RGB/BGR
+  output, padded strides/guards, clipping, wallpaper/cursor restoration, and
+  partial presentation; Python tooling regression tests.
+- A bounded PS/2 mouse driver on IRQ12 with controller initialization, 9-bit
+  packet decoding, pointer clamping, and a deterministic pointer self-test.
+- `AETHER_WM_OK` and `AETHER_POINTER_OK` boot markers, plus a live window-state
+  view in the `desktop` shell command.
+- `make iso-test`, which boots the generated El Torito ISO through UEFI and
+  requires the desktop markers, and `make vmware-vmx`, which writes a VMware
+  Workstation VM definition for the newest ISO.
+- `docs/reference/vmware-workstation.md` and ADR-015.
+- ADR-016: responsive desktop, functional Files MVP, correct GOP layout/format
+  semantics, and explicit specification/Workstation qualification gaps.
 - `aether-memory`: host-testable bitmap frame allocator and x86-64 page-table
   encoding, with tests for reservations, exhaustion, double free, and layout.
 - Kernel physical frame allocator over the validated boot memory map, with
@@ -61,6 +92,10 @@ versioning scheme until the kernel ABI stabilises.
 - `make shell-test` socket-driven console acceptance test.
 - BootInfo version 2 with a validated `FramebufferInfo` descriptor and loader
   GOP query.
+- BootInfo version **3**, correcting GOP format semantics to `0 = RGBX`,
+  `1 = BGRX`. Loader/kernel must be rebuilt together. The GOP binding now has
+  one pixel mask and the correct stride offset; short information/apertures are
+  rejected rather than guessed, and dimensions/aperture size are bounded.
 - Framebuffer mapping (cache-disabled, non-executable) and a linear graphics
   service with a 5x7 font and pixel checksum.
 - Software compositor with Files, Security Center, File Portal, Settings,
@@ -142,6 +177,16 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Changed
 
+- The desktop paints through a bounded back buffer where possible and presents
+  damaged regions. The graphics service honors both UEFI RGBX/BGRX layouts;
+  assuming BGRX for both codes hid an incorrect ABI enum instead of fixing it.
+- The boot test requires `AETHER_WM_OK` and `AETHER_POINTER_OK` in addition to
+  the existing graphics, desktop, and input markers.
+- The `desktop` shell command reports the active Space, window count, focus,
+  mode, pointer position, checksum, and display size, followed by per-window
+  state.
+- `make ci` and `make qualify` boot the distribution ISO through UEFI El Torito
+  in addition to the FAT-image boot test.
 - The loader keeps `BootInfo` and memory-map metadata below 4 GiB.
 - The identity map is built from mappable regions only; reserved holes and
   device MMIO stay unmapped, and a machine with more than 16 GiB still boots
@@ -152,7 +197,7 @@ versioning scheme until the kernel ABI stabilises.
 - `make ci` runs documentation and licence checks, the shell test, the
   exception-path test, and the negative boot test in addition to the normal
   boot test.
-- The loader now queries GOP and writes BootInfo version 2 (136 bytes).
+- The loader queries GOP and writes BootInfo version 3 (136 bytes).
 - QEMU test harnesses start a headless VNC display and emulated VGA adapter so
   OVMF exposes a linear framebuffer.
 - `make ci` also runs the compatibility suite and the package/update policy
@@ -184,6 +229,29 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Fixed
 
+- ISO pointer assertions wait for the guest's workspace slide to finish instead
+  of treating logical workspace selection as completed on-screen movement.
+- The release-tamper harness reads the first checksum record only, ensuring a
+  zero-prefixed image digest is actually changed. A regression exercises all
+  16 hexadecimal prefixes with a multiline `SHA256SUMS`; verification policy is
+  unchanged and both real bundle mutations must still be rejected.
+- Full-screen redraw on every pointer/key event no longer stalls the normal
+  interaction path; rendering caches, clipping, damage and event batching have
+  regression coverage and live timings.
+- Dedicated E0 arrows, right Alt/Super and independent modifier releases are
+  decoded correctly. Mouse output is source/status checked; queued button
+  edges and overflow reconciliation avoid lost clicks and stuck drags.
+- Minimize immediately transfers focus, reverse cycling reaches every eligible
+  window, restore preserves zoom, closing windows remain painted during their
+  transition, and wrapped window IDs cannot alias live windows.
+- Search-field/menu-padding clicks no longer execute unrelated actions; Tinted
+  menu alpha cannot overflow. F10/Left/Right reach all menus and Shift+arrows
+  resize without a pointer.
+- `make iso-test` requires all boot/security markers and rejects any subsystem
+  failure, including Files/input failures followed by a global success marker.
+- The Workstation VMX generator safely handles quoted/space-containing paths,
+  accepts an explicit ISO, keeps the tested artifact instead of rebuilding it,
+  and captures serial diagnostics. Qualification now includes the rollback gate.
 - The idle loop now drains IRQ1 scancodes into the desktop after boot. Physical
   PS/2 keyboard input previously filled the queue without moving focus or
   windows because only the synthetic boot self-test consumed keys. The `input`
@@ -233,12 +301,12 @@ versioning scheme until the kernel ABI stabilises.
 - Services and the desktop still execute as kernel modules; only the native
   application runs at CPL3. Moving service bodies into supervised user
   processes is follow-up work.
-- The desktop is keyboard-only. There is no mouse, touchpad, or USB HID input
-  driver; PS/2 IRQ12 is not handled.
+- There is no USB HID, touchpad, multi-touch, screen reader, or IME support;
+  keyboard and standard PS/2 mouse input are supported.
 - The serial console shell is a ring-0 diagnostic surface with full filesystem
   authority. It is not the ordinary-user terminal or an elevation boundary.
 - Storage is a volatile RAM disk. There is no persistent block device,
-  networking, audio, GPU acceleration, or package manager.
+  networking, audio, GPU acceleration, or general graphical package manager.
 - The filesystem is a bring-up format: 32 inodes, 4 KiB per file, one
   directory block per directory, and no crash-consistency protocol.
 - Portal grants are seeded at boot and can be revoked from the console; there
@@ -270,7 +338,8 @@ versioning scheme until the kernel ABI stabilises.
   records Windows applications as unsupported and the package verifier rejects
   `runtime=windows`.
 - No external security review has been completed.
-- The ISO is generated but automated CD/ISO boot is not part of `make ci`.
+- The ISO is boot/interaction-tested under OVMF on VGA/SVGA emulation; VMware
+  Workstation itself still needs a recorded smoke test before qualification.
 
 ## [0.1.0] - 2026-10-19
 

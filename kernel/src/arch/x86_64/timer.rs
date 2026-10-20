@@ -65,10 +65,11 @@ pub fn init() {
         outb(PIC2_DATA, 0x01);
         io_wait();
 
-        // Mask everything except IRQ0 (timer) and IRQ1 (keyboard) on the
-        // master, all on the slave.
-        outb(PIC1_DATA, 0xfc);
-        outb(PIC2_DATA, 0xff);
+        // Mask everything except IRQ0 (timer), IRQ1 (keyboard), and the IRQ2
+        // cascade on the master. Unmask IRQ12 (auxiliary PS/2 mouse) on the
+        // slave.
+        outb(PIC1_DATA, 0xf8);
+        outb(PIC2_DATA, 0xef);
 
         // PIT channel 0, mode 2 (rate generator), binary.
         outb(PIT_COMMAND, 0x34);
@@ -78,10 +79,18 @@ pub fn init() {
     }
 }
 
-/// Acknowledges the timer interrupt on the master PIC.
-pub fn acknowledge() {
-    // SAFETY: Non-specific EOI to the master PIC is correct for IRQ0.
-    unsafe { outb(PIC1_COMMAND, 0x20) };
+/// Acknowledges an IRQ by its remapped vector.
+///
+/// IRQ8-15 arrive through the slave controller, which must be acknowledged
+/// before the master cascade line.
+pub fn acknowledge_vector(vector: u64) {
+    // SAFETY: Non-specific EOIs are correct for the PIC in this configuration.
+    unsafe {
+        if vector >= 40 {
+            outb(PIC2_COMMAND, 0x20);
+        }
+        outb(PIC1_COMMAND, 0x20);
+    }
 }
 
 /// Enables interrupts on the current CPU.

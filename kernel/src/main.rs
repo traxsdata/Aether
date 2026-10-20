@@ -15,6 +15,7 @@ mod arch;
 mod desktop;
 mod fs;
 mod graphics;
+mod icons;
 mod input;
 mod ipc;
 mod memory;

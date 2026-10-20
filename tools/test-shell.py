@@ -9,48 +9,19 @@ and that the service and application views are reachable without a user task.
 
 from __future__ import annotations
 
-import os
 import shutil
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+from boot_support import find_firmware, has_failure
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 IMAGE = BUILD / "aether.img"
 SOCKET = BUILD / "shell.sock"
 VARS = BUILD / "OVMF_VARS.fd"
-
-CODE_CANDIDATES = (
-    Path("/usr/share/OVMF/OVMF_CODE_4M.fd"),
-    Path("/usr/share/OVMF/OVMF_CODE.fd"),
-    Path("/usr/share/edk2/ovmf/OVMF_CODE.fd"),
-    Path("/usr/share/edk2/ovmf/OVMF_CODE_4M.fd"),
-    Path("/usr/share/qemu/OVMF.fd"),
-)
-VARS_CANDIDATES = (
-    Path("/usr/share/OVMF/OVMF_VARS_4M.fd"),
-    Path("/usr/share/OVMF/OVMF_VARS.fd"),
-    Path("/usr/share/edk2/ovmf/OVMF_VARS.fd"),
-    Path("/usr/share/edk2/ovmf/OVMF_VARS_4M.fd"),
-)
-
-
-def find_firmware() -> tuple[Path, Path | None]:
-    code_env = os.environ.get("OVMF_CODE")
-    vars_env = os.environ.get("OVMF_VARS")
-    if code_env:
-        code = Path(code_env)
-        variables = Path(vars_env) if vars_env else None
-        return code, variables
-    code = next((path for path in CODE_CANDIDATES if path.exists()), None)
-    if code is None:
-        raise SystemExit("error: OVMF firmware not found; set OVMF_CODE and OVMF_VARS")
-    variables = next((path for path in VARS_CANDIDATES if path.exists()), None)
-    return code, variables
-
 
 def qemu_command(code: Path, variables: Path | None) -> list[str]:
     command = [
@@ -138,7 +109,7 @@ def main() -> int:
     try:
         client = connect(20.0)
         transcript += read_until(client, b"AETHER_BOOT_OK", 90.0)
-        if "AETHER_BOOT_OK" not in transcript:
+        if has_failure(transcript) or "AETHER_BOOT_OK" not in transcript:
             print(transcript)
             print("FAIL: boot markers not reached before shell test", file=sys.stderr)
             return 1
@@ -160,7 +131,7 @@ def main() -> int:
             ("packages", "package org.aether.demo"),
             ("runtime", "runtime org.aether.demo"),
             ("updates", "updates: installed=0.1.0"),
-            ("desktop", "desktop: focus="),
+            ("desktop", "desktop: space="),
             ("input", "input: dropped="),
             ("uptime", "uptime:"),
         ):

@@ -14,11 +14,15 @@ cd Aether
 . "$HOME/.cargo/env"
 make            # build/aether.img (64 MiB FAT)
 make iso        # build/ISOs/aether-<UTC>.iso
+make iso-test   # boot that ISO through UEFI El Torito
+make vmware-vmx # write build/aether-vmware.vmx for the newest ISO
 make test       # boot under QEMU/OVMF and require every marker
 ```
 
-Booting the ISO or FAT image on the supported QEMU platform is the only
-installation procedure. There is no disk partitioner or system-image writer.
+Booting the ISO or FAT image is the only installation procedure. The ISO can be
+attached to a UEFI VMware Workstation VM using
+[`vmware-workstation.md`](vmware-workstation.md). There is no disk partitioner
+or system-image writer.
 
 ## Release bundle
 

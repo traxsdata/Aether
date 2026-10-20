@@ -14,7 +14,7 @@ IMAGE := $(BUILD)/aether.img
 KERNEL_TARGET := x86_64-unknown-none
 LOADER_TARGET := x86_64-unknown-uefi
 
-AETHER_GIT_COMMIT := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+AETHER_GIT_COMMIT := $(shell git describe --always --dirty --abbrev=12 --exclude='*' 2>/dev/null || echo unknown)
 export AETHER_GIT_COMMIT
 
 KERNEL_FEATURES ?=
@@ -25,7 +25,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-test vmware-vmx test shell-test fault-test rollback-test \
 	negative-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	release-check qualify ci clean
 
@@ -61,8 +61,16 @@ test: image
 shell-test: image
 	$(PYTHON) tools/test-shell.py
 
-iso: image
+iso:
 	sh tools/make-iso.sh
+
+# Prove the distribution ISO follows the El Torito UEFI path used by VMware.
+iso-test: iso
+	$(PYTHON) tools/test-iso.py
+
+# Generate a VMware Workstation VM definition for the newest ISO.
+vmware-vmx:
+	sh tools/make-vmware-vmx.sh
 
 fault-test:
 	$(MAKE) KERNEL_FEATURES=fault-selftest image
@@ -83,6 +91,7 @@ negative-test:
 
 unittest:
 	$(CARGO) test --locked
+	$(PYTHON) -m unittest discover -s tools -p 'test_tooling.py'
 
 compat-test:
 	$(CARGO) test --locked -p aether-compat

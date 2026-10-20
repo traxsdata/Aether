@@ -265,6 +265,7 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
             loop {
                 crate::shell::poll();
                 crate::input::poll();
+                crate::desktop::tick();
                 timer::halt_until_interrupt();
             }
         }
@@ -354,8 +355,9 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     serial_line!("AETHER_REVOCATION_OK checks={revocation_checks}");
     crate::apps::init();
     crate::desktop::init();
-    crate::input::init();
+    crate::input::init(crate::graphics::width(), crate::graphics::height());
     crate::input::self_test();
+    crate::desktop::self_test();
     crate::shell::init();
 
     // Load the native user program into its own PML4. The kernel identity map

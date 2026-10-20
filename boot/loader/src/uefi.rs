@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+pub use aether_boot_common::graphics::GraphicsOutputModeInformation;
 use core::ffi::c_void;
 
 /// Opaque firmware handle.
@@ -54,28 +55,6 @@ pub const GRAPHICS_OUTPUT_GUID: Guid = Guid {
     data3: 0x4a38,
     data4: [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a],
 };
-
-/// UEFI pixel bit mask.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PixelBitmask {
-    pub red_mask: u32,
-    pub green_mask: u32,
-    pub blue_mask: u32,
-    pub reserved_mask: u32,
-}
-
-/// `EFI_GRAPHICS_OUTPUT_MODE_INFORMATION`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct GraphicsOutputModeInformation {
-    pub version: u32,
-    pub horizontal_resolution: u32,
-    pub vertical_resolution: u32,
-    pub pixel_format: u32,
-    pub pixel_information: [PixelBitmask; 4],
-    pub pixels_per_scan_line: u32,
-}
 
 /// `EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE`.
 #[repr(C)]

@@ -68,16 +68,28 @@ It is a planning model, not a delivery promise.
 
 ## Phase 4 — Native desktop prototype
 
-- [x] Graphics and input services over a linear GOP framebuffer and PS/2 IRQ1.
-- [x] Basic software compositor with bounded windows and focus handling.
+- [x] Graphics and input services over a linear GOP framebuffer, PS/2 keyboard
+  (IRQ1), and mouse (IRQ12).
+- [x] Double-buffered software compositor with a host-tested window manager,
+  bounded windows, focus/z-order, Spaces, menus, dock, and search.
 - [x] Desktop shell, file manager, settings, and Security Center views.
+- [x] Read-only Files folder navigation, selection, keyboard scrolling, refresh,
+  and bounded text previews; no implicit application-vault access.
+- [x] Cached wallpaper, damage-tracked scene rendering/presentation, cursor-only
+  updates, elapsed-tick animation, and real-input ISO regression tests.
 - [x] File portal with per-process, per-file grant records; revocation blocks
   future portal opens (`AETHER_REVOCATION_OK`).
 - [x] Initial native application SDK (`sdk/`) and user syscall ABI.
 - [x] System image and recovery prototype with current/previous selection and
   preserved user data.
 - [x] Timestamped UEFI El Torito ISO build (`make iso`).
+- [x] UEFI El Torito ISO boot test under OVMF (`make iso-test`) and VMware
+  Workstation VMX generation (`make vmware-vmx`). A VMware Workstation smoke
+  test remains pending; see [the VMware notes](reference/vmware-workstation.md).
 - [ ] Interactive portal consent UI and persistent grant storage.
+- [ ] Ring-3 compositor/application views with capability-scoped surface/input
+  IPC; current ring-0 adapters are trusted, not compromise-contained.
+- [ ] Files copy/move/rename/delete, tabs/split panes, and safe import/export.
 - [ ] GPU acceleration, audio, networking, and multi-window application
   rendering.
 
@@ -126,9 +138,11 @@ loader, enforces a ring-3 user/kernel boundary, runs a native application in a
 private storage root, reports denied cross-application access, verifies and
 installs a signed package, derives an isolated runtime profile, verifies a
 signed update while rejecting replay, downgrade, and an unknown publisher,
-starts supervised services, paints a composited desktop, accepts keyboard
-input, grants one file through the portal, and verifies the current/previous
-image records without touching user data.
+starts supervised services, paints a double-buffered desktop with a tested
+window manager, accepts keyboard and PS/2 mouse input, grants one file through
+the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
+image records without touching user data. VMware Workstation itself has not yet
+been smoke-tested.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
 persistent store, network/audio services, an installer, and external review.
