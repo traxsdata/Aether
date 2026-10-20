@@ -874,6 +874,53 @@ fn glyph(character: char) -> [u8; 7] {
     }
 }
 
+/// Blits a tightly packed guest surface into a destination rectangle.
+///
+/// Sampling is nearest-neighbour and clipped by the framebuffer. `src` is
+/// kernel-owned copied pixels, never a guest pointer. `format` is 0 for
+/// XRGB8888 and 1 for ARGB8888, matching the display endpoint ABI.
+#[allow(clippy::too_many_arguments)]
+pub fn blit_surface_scaled(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    source: &[u32],
+    source_width: u32,
+    source_height: u32,
+    format: u32,
+) {
+    if width <= 0 || height <= 0 || source_width == 0 || source_height == 0 {
+        return;
+    }
+    if source.len() < source_width as usize * source_height as usize {
+        return;
+    }
+    let _ = with_framebuffer(|fb| {
+        for row in 0..height {
+            let source_y = (row as u32 * source_height / height as u32) as usize;
+            for column in 0..width {
+                let source_x = (column as u32 * source_width / width as u32) as usize;
+                let pixel = source[source_y * source_width as usize + source_x];
+                let rgb = pixel & 0x00ff_ffff;
+                if format == 1 {
+                    let alpha = ((pixel >> 24) & 0xff) as u8;
+                    if alpha == 0 {
+                        continue;
+                    }
+                    if alpha < 255 {
+                        fb.pixel_blend(x + column, y + row, rgb, alpha);
+                    } else {
+                        fb.pixel(x + column, y + row, rgb);
+                    }
+                } else {
+                    fb.pixel(x + column, y + row, rgb);
+                }
+            }
+        }
+    });
+}
+
 /// Draws one character and returns the horizontal advance.
 pub fn draw_char(x: i32, y: i32, character: char, rgb: u32, scale: i32) -> i32 {
     let uppercase = character.to_ascii_uppercase();

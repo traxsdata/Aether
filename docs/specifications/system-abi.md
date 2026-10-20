@@ -205,6 +205,78 @@ consent requests are implemented. A portal request is display state only: it
 creates no capability, and the desktop approval installs a persisted exact-file
 record that `portal_open` still checks.
 
+## Linux display endpoint (Gate 4 prototype)
+
+This is a separate Linux-ABI surface, not a native syscall. A Linux task opens
+the exact path `/dev/aether-display`; a second open in the same task returns
+`EBUSY`. A short or oversized write returns `EINVAL`. The endpoint is
+default-deny and only the kernel boot display fixture and the signed
+`ai.storyteller.gridcraft` AppImage identity may open it.
+
+`write` carries one 48-byte little-endian request header followed by an optional
+bounded title:
+
+```text
+offset size field
+0      4    magic = 0x41445450 ("ADTP")
+4      2    version = 1
+6      2    kind: 1=create, 2=present, 3=destroy, 4=set_title
+8      4    length: bytes after the header (title, <=64; otherwise 0)
+12     4    width (1..=1920)
+16     4    height (1..=1200)
+20     4    stride (>= width*4, multiple of 4, stride*height <= 16 MiB)
+24     4    format: 0=XRGB8888, 1=ARGB8888 (little-endian u32 pixels)
+28     4    padding (must be zero; C alignment before buffer)
+32     8    buffer: guest pointer, present only
+40     4    flags (must be 0)
+44     4    reserved (must be 0)
+```
+
+`present` validates the whole `buffer..buffer+stride*height` range as readable
+user memory before copying it into a kernel-owned surface. A faulting range
+returns `EFAULT`; a bad stride or geometry returns `EINVAL`. The kernel never
+retains the guest pointer. Successful writes return 48.
+
+`read` drains fixed 32-byte records (a short buffer returns `EINVAL`, an empty
+nonblocking endpoint returns `EAGAIN`, and `poll` reports `POLLIN` when data is
+queued). Overflow drops the oldest record:
+
+```text
+offset size field
+0      4    kind: 1=configure, 2=key, 3=pointer_motion, 4=pointer_button,
+            5=pointer_axis, 6=enter, 7=leave, 8=close, 9=frame
+4      4    code (key/button/axis, or width for configure)
+8      4    x (surface pixel; width for configure)
+12     4    y (surface pixel; height for configure)
+16     4    state (1=pressed, 0=released; height for configure)
+20     4    serial (monotonic per endpoint)
+24     4    modifiers (1=shift, 2=ctrl, 4=alt, 8=super; zero otherwise)
+28     4    reserved (zero)
+```
+
+The specified record is 32 bytes, so the proposal's `reserved[3]` is replaced
+by a 4-byte modifiers field plus one reserved word (the proposal's arithmetic
+would make the record 36 bytes). Pointer `x`/`y` are already converted from the
+compositor's scaled window content into the created surface's pixel space and
+clamped to its bounds. Key events are queued as a press immediately followed by
+a release because the PS/2 decoder reports make events only; the bridge maps
+the pair to `wl_keyboard.key` transitions. Focus gain queues configure, enter,
+and a pointer sample even when the pointer is stationary. `frame` is queued
+after a presented buffer is accepted and copied.
+
+Linux `memfd_create` (319), `ftruncate` (77), and `fstat` operate on bounded
+anonymous shared objects: 16 MiB per object, four per task, and a 64 MiB global
+page budget. `mmap(MAP_SHARED)` aliases the object's pages through the shared
+frame registry; `mmap(MAP_PRIVATE)` copies. A shared mapping may not extend past
+the object's current length. Descriptor references are retained by `dup` and
+`fork`, and released by `close`, task exit, and fault. `read`/`write` on the
+memfd are supported and bounded by its current length.
+
+Kernel-owned markers are emitted only after validated operations:
+`AETHER_GATE4_DISPLAY_CREATE_OK pid=<n> size=<w>x<h>`,
+`AETHER_GATE4_PRESENT_OK frames=<n> checksum=<0x...> source=linux`, and
+`AETHER_GATE4_INPUT_OK keys=<n> pointer=<n> focus=<n>`.
+
 ## Loader-to-kernel calling convention
 
 - The system is in 64-bit long mode, ring 0, interrupts disabled.

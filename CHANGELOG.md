@@ -7,6 +7,15 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Gate 4 kernel display slice: `/dev/aether-display` request/event records, a
+  `WindowKind::Linux` compositor window with a kernel-owned presented surface,
+  focus-scoped keyboard/pointer routing with window-relative coordinates, and
+  `memfd_create`/`ftruncate`/`fstat`/`mmap(MAP_SHARED)` bounded shared
+  buffers. `make gate4-display-test` requires the kernel-owned create, present
+  (with checksum), and input markers after a static Linux fixture presents a
+  deterministic pattern and reads a synthetic event routed through the real
+  PS/2/desktop path. This is the display endpoint only; the Wayland bridge,
+  Mesa, and the real GUI remain future work.
 - Per-object capability revocation: `revoke_object` invalidates every alias in
   a table and advances slot generations. Endpoints now have explicit close and
   destroy semantics, task exit/fault releases endpoint aliases and destroys

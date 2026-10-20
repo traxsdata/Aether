@@ -46,6 +46,7 @@ pub fn app_icon(kind: WindowKind, rect: aether_wm::Rect, palette: Palette) {
             WindowKind::Recovery => (0x754049, 0xffe1e6),
             WindowKind::Log => (0x3d4775, 0xe2e6ff),
             WindowKind::Welcome => (0x7a5b2b, 0xfff0c9),
+            WindowKind::Linux => (0x333d54, 0xdce7ff),
         }
     };
     let radius = (rect.width / 5).max(6);
@@ -121,6 +122,19 @@ fn draw_glyph(kind: WindowKind, rect: aether_wm::Rect, color: u32) {
             }
         }
         WindowKind::Welcome => aether_mark(cx, cy, size / 2, color),
+        WindowKind::Linux => {
+            // A small framed surface: compositor window with presented pixels.
+            graphics::outline_round_rect(
+                rect.x + size / 10,
+                rect.y + size / 8,
+                size - size / 5,
+                size - size / 4,
+                3,
+                color,
+            );
+            graphics::fill_rect(rect.x + size / 4, rect.y + size / 2 - 1, size / 2, 2, color);
+            graphics::fill_circle(rect.x + size / 2, rect.y + size / 2, size / 10, color);
+        }
     }
 }
 

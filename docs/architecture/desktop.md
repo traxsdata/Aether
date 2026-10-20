@@ -196,6 +196,32 @@ QEMU and VMware expose legacy PS/2 through the same i8042 interface. If the
 controller probe fails, the desktop remains keyboard-only and the boot log says
 so; keyboard input is not disabled by the mouse probe.
 
+## Linux surface windows (Gate 4 kernel slice)
+
+`kernel/src/display.rs` owns the synthetic `/dev/aether-display` endpoint, and
+`WindowKind::Linux` gives it one compositor window. `CREATE` opens or resizes
+that window with a client-supplied title; `PRESENT` validates the guest stride
+and range, copies the pixels into a kernel-owned 1920×1200 surface, updates a
+deterministic checksum, damages the window, and queues a frame record. The
+painter samples that surface with nearest-neighbour scaling into the window's
+client rectangle, clipped by the existing window and damage clips. A present
+never exposes a guest pointer to the renderer.
+
+Input is routed only while the Linux window owns focus. `desktop::on_key`
+translates decoded keys into endpoint records instead of native WM shortcuts;
+`desktop::tick` scales pointer positions from window-content pixels into
+surface pixels, sends motion and button edges, and emits configure/enter plus a
+pointer sample on focus gain and leave/configure on focus loss. Key records
+carry modifier bits and a press/release pair. The endpoint
+queue holds 32 records and drops oldest-first. A close or task exit retires the
+window and surface; references are not left behind.
+
+The compositor still runs in ring 0. The Linux window is application-provided
+pixels, not an isolated renderer: a compositor bug or a kernel bug in the copy
+path is still kernel compromise. The endpoint is not Wayland, has no protocol
+object graph, socket, GPU, DMA, or keymap, and should not be described as a
+completed GUI stack.
+
 ## Authority and limitations
 
 The desktop still runs at ring 0 in this prototype. It is not a security domain
@@ -210,9 +236,11 @@ desktop. See [ADR-016](../decisions/ADR-016-desktop-review-and-uefi-correctness.
 Not implemented: GPU acceleration, real background blur, HDR, screen capture,
 per-application GPU surfaces, a user-space compositor protocol, multiple
 displays, persistent preferences, screen readers, IME/text input, window
-snapping, and application-provided window content. The current application
-views are trusted kernel-drawn views over live service state. Moving the
-compositor and application views to ring 3 is follow-up work.
+snapping, and the Wayland/GUI application stack. Native application views are
+trusted kernel-drawn views over live service state; the Linux window displays a
+validated pixel surface but has no Wayland protocol, keymap, or software
+renderer behind it. Moving the compositor and application views to ring 3 is
+follow-up work.
 
 ## Validation
 

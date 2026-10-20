@@ -192,6 +192,17 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Gate 4 — windowed GridCraft: run `usr/bin/gridcraft` with Wayland,
   software rendering, keyboard/pointer input, and workbook open/save through
   the portal.
+  - [x] Kernel display endpoint slice: `/dev/aether-display` with bounded
+    `CREATE`/`PRESENT`/`DESTROY`, a Linux window in the ring-0 compositor,
+    input routing to the focused window, and kernel-owned evidence
+    (`AETHER_GATE4_DISPLAY_CREATE_OK`, `AETHER_GATE4_PRESENT_OK`,
+    `AETHER_GATE4_INPUT_OK`). Boot test: `make gate4-display-test`.
+  - [x] `memfd_create`, `ftruncate`, `fstat`, and `mmap(MAP_SHARED)` for
+    bounded anonymous shared buffers (16 MiB per object, four per task,
+    reference-counted and released on task exit).
+  - [ ] Wayland bridge (`libwayland-client.so.0`), Mesa/lavapipe, xdg-shell,
+    keymap, frame callbacks, and the real GridCraft GUI. The endpoint is not a
+    Wayland wire server and this slice does not claim GUI completion.
 - [x] Moved the GridCraft record from `unsupported` to `limited` after the
   Gate 3 run, with the exact digest, runtime profile, named tests, platform,
   and date.

@@ -13,6 +13,7 @@
 #![no_std]
 
 pub mod frame;
+pub mod memfd;
 pub mod paging;
 pub mod vma;
 

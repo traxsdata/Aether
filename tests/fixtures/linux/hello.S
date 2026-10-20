@@ -3354,6 +3354,10 @@ g2_block_joined:
     syscall
     add $512, %rsp
 
+    /* Display endpoint test runs before the VMA table is deliberately
+     * exhausted by the quota test below. */
+    call display_test
+
     /* Quotas: overlay bytes, descriptor count, then VMA count. */
     sub $1024, %rsp
     mov $257, %rax
@@ -3628,6 +3632,202 @@ g2_extras_done:
     syscall
 1:
     jmp 1b
+
+display_test:
+    /* ---- Gate 4 display endpoint + memfd shared buffer ---- */
+    sub $256, %rsp
+    movb $0, 240(%rsp)          /* key seen */
+    movb $0, 241(%rsp)          /* pointer seen */
+    movb $0, 242(%rsp)          /* focus record seen */
+    /* memfd_create("aether-shm", 0) */
+    mov $1, %r12d
+    mov $319, %rax
+    lea memfd_name(%rip), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    js fail_display
+    mov %rax, %r13
+    /* ftruncate(fd, 64*64*4) */
+    mov $2, %r12d
+    mov $77, %rax
+    mov %r13, %rdi
+    mov $16384, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_display
+    /* mmap(NULL, 16384, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0) */
+    mov $3, %r12d
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $16384, %rsi
+    mov $3, %rdx
+    mov $1, %r10
+    mov %r13, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_display
+    mov %rax, %r14
+    /* Deterministic 64x64 pattern: 0x00102030 + i * 0x00010101. */
+    xor %ecx, %ecx
+display_fill:
+    mov %ecx, %eax
+    imul $0x00010101, %eax, %eax
+    add $0x00102030, %eax
+    mov %eax, (%r14,%rcx,4)
+    inc %ecx
+    cmp $4096, %ecx
+    jb display_fill
+
+    /* openat(AT_FDCWD, "/dev/aether-display", O_RDWR, 0) */
+    mov $4, %r12d
+    mov $257, %rax
+    mov $-100, %rdi
+    lea display_path(%rip), %rsi
+    mov $2, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_display
+    mov %rax, %r15
+
+    /* Zero the 48-byte request header at 0(%rsp). */
+    xor %rax, %rax
+    mov %rax, 0(%rsp)
+    mov %rax, 8(%rsp)
+    mov %rax, 16(%rsp)
+    mov %rax, 24(%rsp)
+    mov %rax, 32(%rsp)
+    mov %rax, 40(%rsp)
+    /* CREATE: magic, version 1, kind 1, length 0, 64x64, stride 256. */
+    mov $5, %r12d
+    movl $0x41445450, 0(%rsp)
+    movw $1, 4(%rsp)
+    movw $1, 6(%rsp)
+    movl $64, 12(%rsp)
+    movl $64, 16(%rsp)
+    movl $256, 20(%rsp)
+    mov $1, %rax
+    mov %r15, %rdi
+    mov %rsp, %rsi
+    mov $48, %rdx
+    syscall
+    cmp $48, %rax
+    jne fail_display
+
+    /* PRESENT: kind 2, same geometry, buffer = mapped memfd. */
+    mov $6, %r12d
+    movw $2, 6(%rsp)
+    movq %r14, 32(%rsp)
+    mov $1, %rax
+    mov %r15, %rdi
+    mov %rsp, %rsi
+    mov $48, %rdx
+    syscall
+    cmp $48, %rax
+    jne fail_display
+
+    /* poll(display, POLLIN, 2000 ms). The kernel routes a synthetic PS/2 key
+     * and pointer packet after the first present, so this must become ready.
+     * The first read may only see the frame/configure records; loop until the
+     * routed key and pointer records have also been drained. */
+display_wait:
+    mov $7, %r12d
+    movl %r15d, 64(%rsp)
+    movw $1, 68(%rsp)
+    movw $0, 70(%rsp)
+    mov $7, %rax
+    lea 64(%rsp), %rdi
+    mov $1, %rsi
+    mov $2000, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_display
+
+    /* read(fd, events, 160): at least configure/enter, key, and motion. */
+    mov $8, %r12d
+    mov $0, %rax
+    mov %r15, %rdi
+    lea 96(%rsp), %rsi
+    mov $160, %rdx
+    syscall
+    test %rax, %rax
+    jle display_wait
+    mov %rax, %rdx
+    shr $5, %rdx                /* record count */
+    lea 96(%rsp), %rsi
+display_scan:
+    test %rdx, %rdx
+    jz display_scan_done
+    movl (%rsi), %eax
+    cmp $2, %eax
+    jne display_scan_not_key
+    movb $1, 240(%rsp)
+display_scan_not_key:
+    cmp $3, %eax
+    jne display_scan_not_pointer
+    movb $1, 241(%rsp)
+display_scan_not_pointer:
+    cmp $1, %eax
+    je display_scan_focus
+    cmp $6, %eax
+    jne display_scan_next
+display_scan_focus:
+    movb $1, 242(%rsp)
+display_scan_next:
+    add $32, %rsi
+    dec %rdx
+    jmp display_scan
+display_scan_done:
+    cmpb $0, 240(%rsp)
+    je display_wait
+    cmpb $0, 241(%rsp)
+    je display_wait
+    cmpb $0, 242(%rsp)
+    je display_wait
+
+display_read_ok:
+    mov $3, %rax
+    mov %r15, %rdi
+    syscall
+    mov $11, %rax
+    mov %r14, %rdi
+    mov $16384, %rsi
+    syscall
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    add $256, %rsp
+    mov $1, %rax
+    mov $1, %rdi
+    lea display_guest_message(%rip), %rsi
+    mov $display_guest_message_len, %rdx
+    syscall
+    ret
+
+fail_display:
+    mov %r12d, %eax
+    add $48, %al
+    mov %al, 72(%rsp)
+    mov $1, %rax
+    mov $1, %rdi
+    lea display_failure(%rip), %rsi
+    mov $display_failure_len, %rdx
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea 72(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea failure_newline(%rip), %rsi
+    mov $1, %rdx
+    syscall
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
 
 fail_mmap:
     lea mmap_failure(%rip), %rsi
@@ -4634,5 +4834,15 @@ overlay_failure:
 overlay_content:
     .ascii "AETHER_LINUX_OVERLAY_OK source=/tmp/out\n"
     .set overlay_content_len, . - overlay_content
+memfd_name:
+    .asciz "aether-shm"
+display_path:
+    .asciz "/dev/aether-display"
+display_failure:
+    .ascii "AETHER_GATE4_DISPLAY_FAIL stage="
+    .set display_failure_len, . - display_failure
+display_guest_message:
+    .ascii "AETHER_GATE4_GUEST_DISPLAY_OK memfd=shared present=64x64 input=delivered\n"
+    .set display_guest_message_len, . - display_guest_message
 
     .section .note.GNU-stack,"",@progbits

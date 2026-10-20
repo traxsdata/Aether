@@ -99,14 +99,32 @@ pub enum TaskAbi {
 enum LinuxFileSource {
     Root(usize),
     Overlay(usize),
-    Directory { path: [u8; 64], len: usize },
-    Pipe { index: usize, write: bool },
-    EventFd { index: usize },
-    Epoll { index: usize },
-    TimerFd { index: usize },
+    Directory {
+        path: [u8; 64],
+        len: usize,
+    },
+    Pipe {
+        index: usize,
+        write: bool,
+    },
+    EventFd {
+        index: usize,
+    },
+    Epoll {
+        index: usize,
+    },
+    TimerFd {
+        index: usize,
+    },
     Inotify,
     Pseudo(PseudoFile),
     PseudoDir(PseudoDir),
+    /// Anonymous shared-memory object page owner.
+    MemFd {
+        index: usize,
+    },
+    /// The task's one synthetic display endpoint.
+    Display,
 }
 
 const PIPE_BYTES: usize = 512;
@@ -527,6 +545,9 @@ struct Task {
     wait_status_pointer: u64,
     /// Boot reserved this slot for a task that is created after an approval.
     reserved: bool,
+    /// Narrow display-endpoint grant. Set only for the boot display fixture and
+    /// a verified GridCraft AppImage; never inherited through `fork`.
+    display: bool,
 }
 
 impl Task {
@@ -586,6 +607,7 @@ impl Task {
             wait_pid: 0,
             wait_status_pointer: 0,
             reserved: false,
+            display: false,
         }
     }
 }
@@ -897,6 +919,11 @@ pub fn run() -> ! {
             }
         }
         crate::shell::poll();
+        // The display boot test injects a real PS/2 key and pointer packet
+        // while the Linux task waits in `poll`. Route them through the normal
+        // input/desktop path before parking for the next interrupt.
+        crate::input::poll();
+        crate::desktop::tick();
         timer::halt_until_interrupt();
     }
 }
@@ -1071,6 +1098,9 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     linux.tgid = LINUX_TASK;
     linux.pgid = LINUX_TASK;
     linux.sid = LINUX_TASK;
+    // Kernel-owned boot fixture grant. This is the only static Linux task, and
+    // its display test is part of the boot gate.
+    linux.display = true;
     tasks[LINUX_TASK] = linux;
 
     // Load a position-independent image through its interpreter. This proves
@@ -1264,6 +1294,10 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     app_task.tgid = APPIMAGE_TASK;
     app_task.pgid = APPIMAGE_TASK;
     app_task.sid = APPIMAGE_TASK;
+    // Narrow display grant tied to the verified GridCraft identity. The guest
+    // cannot choose this: `app_identity` comes from the signed import record.
+    app_task.display =
+        crate::linux::app_identity().is_some_and(|(id, _, _)| id == "ai.storyteller.gridcraft");
     if let Some((_, main_image, interpreter_image)) = dynamic {
         seed_linux_vmas(&mut app_task, &main_image, crate::linux_loader::MAIN_BASE);
         seed_linux_vmas(
@@ -1671,6 +1705,18 @@ pub fn current_is_service() -> bool {
     tasks[CURRENT.load(Ordering::Relaxed)].kind == TaskKind::Service
 }
 
+/// Returns `true` when the running task may own the display endpoint.
+///
+/// This is a narrow kernel policy, not a general device grant: only a Linux
+/// task explicitly marked at creation (the boot display fixture) or the
+/// verified GridCraft AppImage identity is allowed.
+#[must_use]
+pub fn current_display_granted() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    task.abi == TaskAbi::Linux && task.display
+}
+
 /// Creates a Linux thread sharing the caller's address space.
 ///
 /// The child resumes at the instruction after `clone` with `RAX=0`, the
@@ -1774,6 +1820,7 @@ pub fn linux_clone(
     thread.rseq = 0;
     thread.rseq_len = 0;
     thread.linux_fds = parent_fds;
+    retain_memfd_fds(&thread.linux_fds);
     thread.overlay_app = parent_overlay_app;
     thread.linux_eventfds = parent_eventfds;
     thread.linux_epolls = parent_epolls;
@@ -1887,6 +1934,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.sid = tasks[current].sid;
     child.parent = current;
     child.linux_fds = fds;
+    retain_memfd_fds(&child.linux_fds);
     child.overlay_app = overlay_app;
     child.linux_eventfds = eventfds;
     // fork gets a process-private snapshot; threads continue to address the
@@ -2902,6 +2950,7 @@ fn terminate_thread_group(index: usize, signum: u64) {
         task.futex_address = 0;
         task.futex_deadline = 0;
         task.state = TaskState::Done;
+        release_linux_task_resources(task);
         task.linux_fds = [None; crate::linux::MAX_FDS];
         task.linux_eventfds = [None; MAX_EVENTFDS];
         task.linux_epolls = [None; MAX_EPOLLS];
@@ -3345,6 +3394,100 @@ pub fn linux_open_pseudo(path: &str, writable: bool) -> Result<u64, i64> {
         }
     }
     Err(LINUX_EMFILE)
+}
+
+/// Opens the synthetic display endpoint for the current Linux task.
+///
+/// The endpoint is a single descriptor per task; a second open returns
+/// `EBUSY`. Policy is checked in the display service against the kernel task
+/// grant before a descriptor is consumed.
+pub fn linux_open_display() -> Result<u64, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(LINUX_EBADF);
+    }
+    if task
+        .linux_fds
+        .iter()
+        .flatten()
+        .any(|file| matches!(file.source, LinuxFileSource::Display))
+    {
+        return Err(-16); // EBUSY
+    }
+    let Some(descriptor) = (3..crate::linux::MAX_FDS).find(|slot| task.linux_fds[*slot].is_none())
+    else {
+        return Err(LINUX_EMFILE);
+    };
+    crate::display::open()?;
+    task.linux_fds[descriptor] = Some(LinuxFile {
+        source: LinuxFileSource::Display,
+        offset: 0,
+        writable: true,
+    });
+    Ok(descriptor as u64)
+}
+
+/// Creates a bounded anonymous shared-memory object and a descriptor for it.
+pub fn linux_memfd_create() -> Result<u64, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(LINUX_EBADF);
+    }
+    if task
+        .linux_fds
+        .iter()
+        .flatten()
+        .filter(|file| matches!(file.source, LinuxFileSource::MemFd { .. }))
+        .count()
+        >= crate::memfd::MAX_MEMFDS
+    {
+        return Err(LINUX_EMFILE);
+    }
+    let Some(descriptor) = (3..crate::linux::MAX_FDS).find(|slot| task.linux_fds[*slot].is_none())
+    else {
+        return Err(LINUX_EMFILE);
+    };
+    let index = crate::memfd::create()?;
+    task.linux_fds[descriptor] = Some(LinuxFile {
+        source: LinuxFileSource::MemFd { index },
+        offset: 0,
+        writable: true,
+    });
+    Ok(descriptor as u64)
+}
+
+/// Returns `true` when `fd` names the current task's display endpoint.
+#[must_use]
+pub fn linux_display_fd(fd: u64) -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)]
+        .linux_fds
+        .get(fd as usize)
+        .and_then(Option::as_ref)
+        .is_some_and(|file| matches!(file.source, LinuxFileSource::Display))
+}
+
+/// Resizes the memfd behind `fd`.
+pub fn linux_ftruncate(fd: u64, length: i64) -> i64 {
+    if !crate::memfd::valid_length(length) {
+        return LINUX_EINVAL;
+    }
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(source) = task
+        .linux_fds
+        .get(fd as usize)
+        .and_then(Option::as_ref)
+        .map(|file| file.source)
+    else {
+        return LINUX_EBADF;
+    };
+    let LinuxFileSource::MemFd { index } = source else {
+        return LINUX_EINVAL;
+    };
+    crate::memfd::ftruncate(index, length as usize).map_or_else(|error| error, |()| 0)
 }
 
 /// Returns `true` for a path mapped to the per-application writable store.
@@ -4230,6 +4373,14 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
         | LinuxFileSource::Directory { .. } => {
             ready = events & (POLL_IN | POLL_OUT);
         }
+        LinuxFileSource::MemFd { .. } => {
+            ready = events & (POLL_IN | POLL_OUT);
+        }
+        LinuxFileSource::Display => {
+            if events & POLL_IN != 0 && crate::display::readable() {
+                ready |= POLL_IN;
+            }
+        }
         LinuxFileSource::EventFd { index } => {
             let counter = if task.tgid < MAX_TASKS {
                 unsafe { (*EVENTFD_COUNTERS.0.get())[task.tgid][index].unwrap_or(0) }
@@ -4448,6 +4599,14 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
                 Ok(length)
             }
             LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
+            LinuxFileSource::MemFd { index } => {
+                let count = crate::memfd::read(index, slot.offset, out)?;
+                slot.offset = slot.offset.saturating_add(count);
+                Ok(count)
+            }
+            // The syscall layer drains the endpoint before it borrows the task
+            // table, because queueing a wakeup touches the scheduler too.
+            LinuxFileSource::Display => Err(LINUX_EINVAL),
             LinuxFileSource::Pipe {
                 index,
                 write: false,
@@ -4593,6 +4752,12 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
                 linux_inotify_emit(path, IN_MODIFY, false);
                 Ok(data.len())
             }
+            LinuxFileSource::MemFd { index } => {
+                let count = crate::memfd::write(index, slot.offset, data)?;
+                slot.offset = slot.offset.saturating_add(count);
+                Ok(count)
+            }
+            LinuxFileSource::Display => Err(LINUX_EINVAL),
             LinuxFileSource::Pipe { index, write: true } => {
                 let Some(pipe) = (unsafe { &mut (*PIPES.0.get())[index] }).as_mut() else {
                     return Err(LINUX_EBADF);
@@ -4995,6 +5160,8 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
             out[..length].copy_from_slice(&entry.data[offset..offset + length]);
             Ok(length)
         }
+        LinuxFileSource::MemFd { index } => crate::memfd::read(index, offset, out),
+        LinuxFileSource::Display => Err(LINUX_EINVAL),
         LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
@@ -5088,6 +5255,10 @@ pub fn linux_close(fd: u64) -> i64 {
                     }
                 }
             }
+            Some(LinuxFileSource::MemFd { index }) => {
+                let _ = crate::memfd::release(index);
+            }
+            Some(LinuxFileSource::Display) => crate::display::close(),
             _ => {}
         }
         pipe
@@ -5126,6 +5297,43 @@ fn linux_release_task_pipes() {
     linux_wake_pollers();
 }
 
+/// Adds an object reference for every copied memfd descriptor.
+///
+/// Used by `fork` and `clone` after copying the parent's descriptor table.
+fn retain_memfd_fds(fds: &[Option<LinuxFile>; crate::linux::MAX_FDS]) {
+    for file in fds.iter().flatten() {
+        if let LinuxFileSource::MemFd { index } = file.source {
+            let _ = crate::memfd::retain(index);
+        }
+    }
+}
+
+/// Drops every memfd object reference held by a retiring descriptor table.
+fn release_memfd_fds(fds: &[Option<LinuxFile>; crate::linux::MAX_FDS]) {
+    for file in fds.iter().flatten() {
+        if let LinuxFileSource::MemFd { index } = file.source {
+            let _ = crate::memfd::release(index);
+        }
+    }
+}
+
+/// Releases endpoint-owned resources before a task's descriptors are cleared.
+///
+/// Called on exit, signal exit, and fault. It is idempotent: a stale memfd
+/// index is ignored and `display::close` returns immediately when the endpoint
+/// was never opened.
+fn release_linux_task_resources(task: &mut Task) {
+    release_memfd_fds(&task.linux_fds);
+    if task
+        .linux_fds
+        .iter()
+        .flatten()
+        .any(|file| matches!(file.source, LinuxFileSource::Display))
+    {
+        crate::display::close();
+    }
+}
+
 /// Repositions a Linux file descriptor.
 pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -5139,6 +5347,8 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
             .get(index)
             .and_then(Option::as_ref)
             .map_or(0, |entry| entry.len),
+        LinuxFileSource::MemFd { index } => crate::memfd::len(index).unwrap_or(0),
+        LinuxFileSource::Display => 0,
         LinuxFileSource::Directory { .. }
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
@@ -5517,6 +5727,11 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
                 .ok_or(LINUX_EBADF)?;
             Ok((entry.len as u64, index as u64 + 1, 0o100644))
         }
+        LinuxFileSource::MemFd { index } => {
+            let length = crate::memfd::len(index).ok_or(LINUX_EBADF)?;
+            Ok((length as u64, crate::memfd::file_key(index), 0o100666))
+        }
+        LinuxFileSource::Display => Ok((0, 7, 0o020600)),
         LinuxFileSource::Directory { .. } | LinuxFileSource::PseudoDir(_) => Ok((0, 2, 0o040755)),
         LinuxFileSource::Pseudo(kind) => Ok(pseudo_stat(kind)),
         LinuxFileSource::Pipe { .. }
@@ -5537,6 +5752,9 @@ pub fn linux_dup(fd: u64) -> Result<u64, i64> {
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
         if slot.is_none() {
             *slot = Some(source);
+            if let LinuxFileSource::MemFd { index } = source.source {
+                let _ = crate::memfd::retain(index);
+            }
             return Ok(descriptor as u64);
         }
     }
@@ -5560,7 +5778,15 @@ pub fn linux_dup2(old: u64, new: u64) -> Result<u64, i64> {
     let Some(slot) = task.linux_fds.get_mut(new as usize) else {
         return Err(LINUX_EBADF);
     };
+    if let Some(previous) = slot.as_ref()
+        && let LinuxFileSource::MemFd { index } = previous.source
+    {
+        let _ = crate::memfd::release(index);
+    }
     *slot = Some(source);
+    if let LinuxFileSource::MemFd { index } = source.source {
+        let _ = crate::memfd::retain(index);
+    }
     Ok(new)
 }
 
@@ -5580,6 +5806,10 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
             .and_then(Option::as_ref)
             .map(|entry| entry.len as u64)
             .ok_or(LINUX_EBADF),
+        LinuxFileSource::MemFd { index } => crate::memfd::len(index)
+            .map(|length| length as u64)
+            .ok_or(LINUX_EBADF),
+        LinuxFileSource::Display => Ok(0),
         LinuxFileSource::Directory { .. }
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
@@ -5616,6 +5846,10 @@ pub fn linux_file_identity(fd: u64) -> Result<(u64, u64), i64> {
                 .ok_or(LINUX_EBADF)?;
             Ok(((1u64 << 32) | index as u64, entry.len as u64))
         }
+        LinuxFileSource::MemFd { index } => Ok((
+            crate::memfd::file_key(index),
+            crate::memfd::len(index).ok_or(LINUX_EBADF)? as u64,
+        )),
         _ => Err(LINUX_EINVAL),
     }
 }
@@ -5761,6 +5995,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = ((status & 0xff) << 8) as i64;
+        release_linux_task_resources(&mut tasks[current]);
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -5778,6 +6013,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].futex_address = 0;
         tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
+        release_linux_task_resources(&mut tasks[current]);
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -5804,6 +6040,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].futex_address = 0;
     tasks[current].futex_deadline = 0;
     tasks[current].state = TaskState::Done;
+    release_linux_task_resources(&mut tasks[current]);
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
     tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -5920,6 +6157,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = 128 + vector as i64;
+        release_linux_task_resources(&mut tasks[current]);
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -5936,6 +6174,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].state = TaskState::Faulted;
         tasks[current].saved_rsp = frame as u64;
+        release_linux_task_resources(&mut tasks[current]);
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -5965,6 +6204,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
     // tasks and the kernel continue.
     let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
     if linux {
+        release_linux_task_resources(&mut tasks[current]);
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];

@@ -73,9 +73,9 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | Files | `openat`, `statx`, `readlink`, `rename`, `unlink`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root, per-application `/tmp`, `/settings`, and `/logs` overlays with bounded `rename`/`unlink` confined to the current application, and inotify with blocking or nonblocking instances, four watches, file and directory events (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`, `IN_IGNORED`), bounded-queue `IN_Q_OVERFLOW`, and thread wakeups. Recursive watches, move/delete/unmount events, `renameat`/`unlinkat`, cross-process watch sharing, and deferred deletion for open descriptors are unsupported |
 | Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Blocking/finite `poll`/`epoll_wait`, same-tgid thread-shared eventfd, blocking pipes, and blocking/nonblocking inotify | Partial: `poll` and `epoll_wait` support finite and infinite timeouts with scheduler parking and deadlines; `epoll` is level-triggered by default with a bounded `EPOLLET` transition slice and honest `EPOLLONESHOT` re-arm via `EPOLL_CTL_MOD`; pipes block on empty read/full write across `fork`-inherited descriptors; inotify is bounded to one instance, four watches, and eight queued events per process. Full inotify, nested epoll watches, and cross-process eventfd sharing remain unsupported |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/proc/self/status`, `/proc/self/fd`, `/dev/urandom`, `/dev/zero`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | **Implemented** in the kernel prototype through open/read/stat/readdir, plus a read-only `/proc/aether/syscalls` audit view. `/sys`, tty, input, and GPU nodes are absent. `/dev/random` and `/dev/urandom` return the same deterministic boot PRNG stream as `getrandom`, not host entropy |
-| Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
+| Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented as a Wayland wire protocol. A narrower synthetic display endpoint (`/dev/aether-display`), memfd shared buffers, and a Linux compositor window are implemented for the kernel Gate 4 slice |
 | Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Not implemented; no GPU service |
-| Input | Pointer, keyboard, focus, cursor, keymap | Compositor input protocol | Partial: PS/2 keyboard and mouse in the desktop |
+| Input | Pointer, keyboard, focus, cursor, keymap | Compositor input protocol | Partial: PS/2 keyboard and mouse in the desktop; focused Linux windows receive kernel-encoded key, pointer, enter/leave, and configure records. Keymap data and Wayland input objects are absent |
 | D-Bus / XDG portal | Session bus, file chooser portal | IPC bridge and portal integration | Not implemented |
 | Audio | ALSA/PipeWire | Audio service | Not implemented; not required for first milestone |
 | Network | Sockets, DNS | Network service and capability policy | Not implemented; denied by default |
@@ -344,6 +344,36 @@ open/save a workbook through the portal.
 
 **Evidence:** screenshot or pixel checksum, input trace, portal grant and
 revocation tests, and a compatibility record no better than the suite supports.
+
+**Implemented kernel slice (Gate 4.1 prototype).** A granted Linux task can
+`open("/dev/aether-display")`, issue fixed `CREATE`/`PRESENT`/`SET_TITLE`/
+`DESTROY` records, and read fixed 32-byte input records. `PRESENT` validates the
+guest range and stride, copies pixels into a kernel-owned surface, and the
+ring-0 compositor paints that surface clipped and scaled into a Linux window.
+Keyboard, pointer, enter/leave, configure, and frame events are queued while the
+window is focused; pointer coordinates are converted to surface pixel space
+(scaled and clamped), and key records carry a modifiers bitmask plus a
+press/release pair. The queue is
+bounded and drops oldest records on overflow. `memfd_create` (319), `ftruncate`
+(77), `fstat`, and `mmap(MAP_SHARED)` provide bounded shared pools: 16 MiB per
+object, four objects per task, reference-counted across `dup`/`fork` and
+released on exit or fault. Access is default-deny: only the kernel boot display
+fixture and the signed `ai.storyteller.gridcraft` AppImage identity are granted;
+native tasks, services, and other Linux applications receive `EACCES`.
+
+Boot evidence is produced by `make gate4-display-test`:
+`AETHER_GATE4_DISPLAY_CREATE_OK`, `AETHER_GATE4_PRESENT_OK frames=1
+checksum=... source=linux`, and `AETHER_GATE4_INPUT_OK keys=... pointer=...
+focus=...`, followed by the guest's `AETHER_GATE4_GUEST_DISPLAY_OK`. The test
+injects a real PS/2 key and mouse packet through the input queue after the first
+present; the kernel only emits `INPUT_OK` after the guest has read key, pointer,
+and focus records.
+
+**Still missing:** the in-app `libwayland-client.so.0` bridge, xdg-shell and
+seat/keyboard/pointer protocol objects, keymap delivery, frame-callback timing,
+Mesa/lavapipe content, the real GridCraft GUI run, and the workbook open/save
+portal path. The endpoint is deliberately narrower than a Wayland wire server
+and is not evidence of Wayland or GUI compatibility.
 
 ## Security acceptance criteria
 

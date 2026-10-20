@@ -165,7 +165,8 @@ fn mark_files_dirty() {
     }
 }
 
-fn mark_live_dirty() {
+/// Marks the live diagnostic/Linux-surface regions for the next frame.
+pub fn mark_live_dirty() {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
     unsafe {
@@ -367,6 +368,17 @@ pub fn tick() {
     for event in events.into_iter().flatten().chain(core::iter::once(mouse)) {
         route_pointer(&mut wm, &mut last_buttons, event, now);
     }
+    // Feed the Linux endpoint only while its window owns focus. Coordinates
+    // are translated to the window's client area here, not by the guest.
+    let linux = wm
+        .focused_window()
+        .filter(|window| window.kind == WindowKind::Linux)
+        .map(|window| window.id);
+    let content = linux
+        .and_then(|id| wm.window_frame(id))
+        .map(layout::content_rect);
+    let cursor = wm.cursor();
+    crate::display::sync_input(linux, content, cursor.x, cursor.y, mouse.buttons);
 
     let second = now / 100;
     let clock_changed = second != last_second;
@@ -396,7 +408,12 @@ pub fn tick() {
     }
     if live_dirty {
         include(layout::menu_bar(wm.screen()));
-        for kind in [WindowKind::Security, WindowKind::Portal, WindowKind::Log] {
+        for kind in [
+            WindowKind::Security,
+            WindowKind::Portal,
+            WindowKind::Log,
+            WindowKind::Linux,
+        ] {
             if let Some(id) = wm.window_id(kind)
                 && let Some(frame) = wm.window_frame(id)
             {
@@ -481,6 +498,18 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
     let Some(mut wm) = current() else {
         return;
     };
+    // While the Linux surface owns focus, keys go to its endpoint instead of
+    // the native window manager. Overlays and menus keep native focus.
+    let linux_focused = wm
+        .focused_window()
+        .is_some_and(|window| window.kind == WindowKind::Linux)
+        && !wm.overview_open()
+        && !wm.spotlight_open()
+        && wm.menu_state().is_none();
+    if linux_focused {
+        crate::display::key(key, modifiers);
+        return;
+    }
     let translated = match key {
         Key::Char(byte) => WmKey::Char(byte),
         Key::Enter => WmKey::Enter,
@@ -570,6 +599,48 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
             serial_line!("desktop: action={label}");
         }
     }
+}
+
+/// Opens or resizes the single Linux surface window.
+///
+/// The frame is sized so its client area matches the requested surface within
+/// the compositor's work area. The surface is scaled by the painter when the
+/// frame is clamped smaller. Returns `None` when no desktop exists.
+pub fn open_linux_window(width: u32, height: u32, title: &str) -> Option<u8> {
+    let _ = title;
+    let mut wm = current()?;
+    let id = wm.open(WindowKind::Linux)?;
+    let area = layout::work_area(wm.screen());
+    let frame_width =
+        (i32::try_from(width).ok()?.saturating_add(2)).clamp(layout::MIN_WINDOW_WIDTH, area.width);
+    let frame_height = (i32::try_from(height)
+        .ok()?
+        .saturating_add(layout::TITLE_BAR_HEIGHT + 1))
+    .clamp(layout::MIN_WINDOW_HEIGHT, area.height);
+    let x = area.x + (area.width - frame_width) / 2;
+    let y = area.y + (area.height - frame_height) / 2;
+    wm.set_window_frame(id, Rect::new(x, y, frame_width, frame_height));
+    let now = scheduler::ticks();
+    store(wm, now, now / 100, input::mouse().buttons);
+    mark_live_dirty();
+    Some(id)
+}
+
+/// Retires the Linux window when the endpoint closes or the task exits.
+pub fn close_linux_window(id: u8) {
+    let Some(mut wm) = current() else {
+        return;
+    };
+    if wm
+        .window(id)
+        .is_none_or(|window| window.kind != WindowKind::Linux)
+    {
+        return;
+    }
+    wm.close_window(id);
+    let now = scheduler::ticks();
+    store(wm, now, now / 100, input::mouse().buttons);
+    mark_live_dirty();
 }
 
 /// Restores the welcome window as the focused, frontmost window.
@@ -1049,11 +1120,21 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
 
     let lights = layout::traffic_lights(frame);
     paint_traffic_lights(wm, &lights, focused, palette);
+    let title = if window.kind == WindowKind::Linux {
+        let requested = crate::display::title();
+        if requested.is_empty() {
+            window.kind.title()
+        } else {
+            requested
+        }
+    } else {
+        window.kind.title()
+    };
     draw_text_centered(
         frame.x + 72,
         frame.right() - 12,
         frame.y + 13,
-        window.kind.title(),
+        title,
         if focused { palette.text } else { palette.muted },
         1,
     );
@@ -1133,6 +1214,7 @@ fn paint_content(
         WindowKind::Recovery => paint_recovery(wm, content, palette),
         WindowKind::Log => paint_log(wm, content, palette),
         WindowKind::Welcome => paint_welcome(wm, content, focused, palette),
+        WindowKind::Linux => crate::display::paint_content(content),
     }
 }
 

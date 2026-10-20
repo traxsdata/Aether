@@ -247,6 +247,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         286 => linux_timerfd_settime(pml4, first, second, third, unsafe { (*frame).r10 }),
         287 => linux_timerfd_gettime(pml4, first, second),
         5 => linux_fstat(pml4, first, second),
+        77 => scheduler::linux_ftruncate(first, second as i64),
         13 => linux_rt_sigaction(pml4, first, second, third),
         14 => linux_rt_sigprocmask(pml4, first, second, third),
         15 => return linux_sigreturn(frame),
@@ -347,6 +348,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         228 => linux_clock_gettime(pml4, second),
         318 => linux_getrandom(pml4, first, second),
         257 => linux_openat(pml4, first, second, third),
+        319 => scheduler::linux_memfd_create().map_or_else(|error| error, |fd| fd as i64),
         60 | 231 => return scheduler::linux_exit(first),
         _ => LINUX_ENOSYS,
     };
@@ -394,6 +396,17 @@ fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i6
     };
     if path.as_bytes().first() != Some(&b'/') {
         return LINUX_ENOENT;
+    }
+    // The display endpoint is a synthetic, policy-gated node. It is checked
+    // before the generic `/dev` denial so no other device path can slip in.
+    if path == "/dev/aether-display" {
+        const O_CREAT: u64 = 0x40;
+        const O_EXCL: u64 = 0x80;
+        const O_TRUNC: u64 = 0x200;
+        if flags & (O_CREAT | O_EXCL | O_TRUNC) != 0 {
+            return LINUX_EINVAL;
+        }
+        return scheduler::linux_open_display().map_or_else(|error| error, |fd| fd as i64);
     }
     // Device paths are denied unless they are one of the four synthetic nodes.
     if let Some(rest) = path.strip_prefix("/dev/")
@@ -467,6 +480,13 @@ fn linux_read(
     let Some(buffer) = (unsafe { user_bytes_mut(pml4, pointer, length) }) else {
         return linux_result(frame, LINUX_EFAULT);
     };
+    if scheduler::linux_display_fd(descriptor) {
+        return match crate::display::read_events(buffer) {
+            Ok(count) => linux_result(frame, count as i64),
+            Err(LINUX_EAGAIN) => linux_result(frame, LINUX_EAGAIN),
+            Err(error) => linux_result(frame, error),
+        };
+    }
     match scheduler::linux_read(descriptor, buffer) {
         Ok(count) => linux_result(frame, count as i64),
         Err(LINUX_EAGAIN) => {
@@ -644,10 +664,21 @@ fn linux_mmap(
                 )
             })
         } else {
-            let Some((key, _file_length)) = file_identity else {
+            let Some((key, file_length)) = file_identity else {
                 let _ = scheduler::linux_vma_remove(start, length);
                 return LINUX_EINVAL;
             };
+            // A memfd mapping may not extend past the object's current size.
+            // Accessing a sparse tail would otherwise expose zero pages that
+            // are not backed by the object.
+            if crate::memfd::is_key(key)
+                && offset
+                    .checked_add(length)
+                    .is_none_or(|end| end > file_length)
+            {
+                let _ = scheduler::linux_vma_remove(start, length);
+                return LINUX_EINVAL;
+            }
             crate::memory::with_frame_allocator(|allocator| {
                 map_shared_file_pages(
                     allocator, pml4, start, length, page_flags, fd, offset, key, domain,
@@ -2363,6 +2394,9 @@ fn linux_write(
     if descriptor == 1 || descriptor == 2 {
         serial::write_bytes(bytes);
         return linux_result(frame, length as i64);
+    }
+    if scheduler::linux_display_fd(descriptor) {
+        return linux_result(frame, crate::display::write_request(pml4, bytes));
     }
     match scheduler::linux_write_file(descriptor, bytes) {
         Ok(count) => linux_result(frame, count as i64),

@@ -58,7 +58,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-display-test shell-test fault-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -184,6 +184,13 @@ gate3-test:
 	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK,AETHER_GATE3_DENIAL_OK \
 	AETHER_REQUIRE_TEXT='AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=19024376|AETHER_GATE3_APP_OK|AETHER_GATE3_DENIAL_OK|wrote /tmp/gate3-out.csv|item,value|alpha,1|beta,2|total,3|{"command":"formulas.evaluate","result":2.0}|{"command":"cell.set","result":{"cell":"B4","value":"3"}}' \
+	$(PYTHON) tools/test-boot.py
+
+# Gate 4 display endpoint slice: the static Linux fixture opens
+# /dev/aether-display, presents a memfd-backed pattern, and receives a
+# synthetic input event routed through the real PS/2/desktop path. This is the
+# display endpoint only; it does not run the real GUI or Mesa.
+gate4-display-test: image
 	$(PYTHON) tools/test-boot.py
 
 shell-test: image
