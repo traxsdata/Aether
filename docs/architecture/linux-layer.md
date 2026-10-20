@@ -187,8 +187,8 @@ exact AppImage digest, and the runtime version.
   allowlist: only `user.*` is retained, while `security.capability`, other
   `security.*`, `trusted.*`, `system.*`, and unknown namespaces are dropped and
   counted. The host extractor does not apply retained attributes. Embedded signed-rootfs in-OS import is
-  implemented; user-supplied AppImage import/opening and persistent overlay
-  storage remain missing.
+  implemented; user-supplied AppImage import/opening and power-cycle-persistent
+  overlay storage remain missing.
 - `linuxd`: a bounded kernel-side supervisor service prototype owns runtime
   profile selection, verified AppImage identity, and launch policy
   (`AETHER_LINUXD_OK`). It is registered with the supervisor and exposes
