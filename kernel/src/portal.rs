@@ -10,6 +10,7 @@ use crate::arch::x86_64::timer::InterruptGuard;
 use crate::serial_line;
 use aether_abi::user::FileRights;
 use core::cell::UnsafeCell;
+use core::fmt::{self, Write as _};
 
 struct Global<T>(UnsafeCell<T>);
 
@@ -77,6 +78,88 @@ pub fn check(root: &str, path: &str, rights: u64) -> Result<(), PortalError> {
     Err(PortalError::NotGranted)
 }
 
+/// Revokes the grant matching `root` and `path`.
+///
+/// Revocation is checked when a new portal open is attempted. A file
+/// capability that was already issued remains valid until it is closed:
+/// revoking a grant cannot undo bytes the application has already read, and
+/// the first implementation chooses not to invalidate an in-flight handle.
+pub fn revoke(root: &str, path: &str) -> Result<(), PortalError> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and this is the only writer.
+    let grants = unsafe { &mut *GRANTS.0.get() };
+    for grant in grants {
+        if !grant.revoked && !grant.root.is_empty() && grant.root == root && grant.path == path {
+            grant.revoked = true;
+            return Ok(());
+        }
+    }
+    Err(PortalError::NotGranted)
+}
+
+/// Revokes a grant by its displayed table index.
+pub fn revoke_index(index: usize) -> Result<(), PortalError> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and this is the only writer.
+    let grants = unsafe { &mut *GRANTS.0.get() };
+    let Some(grant) = grants.get_mut(index) else {
+        return Err(PortalError::NotGranted);
+    };
+    if grant.revoked || grant.root.is_empty() {
+        return Err(PortalError::NotGranted);
+    }
+    grant.revoked = true;
+    Ok(())
+}
+
+/// Exercises grant creation, exact matching, and revocation at boot.
+///
+/// The temporary grant uses a real portal path and is removed afterwards, so
+/// the application's seeded grant is unaffected. Returns the number of checks
+/// performed.
+pub fn self_test() -> Result<usize, PortalError> {
+    const PATH: &str = "/portal/README.txt";
+    let index = MAX_GRANTS - 1;
+    {
+        let _guard = InterruptGuard::enter();
+        // SAFETY: Interrupts are masked and the slot is empty at boot.
+        let grants = unsafe { &mut *GRANTS.0.get() };
+        grants[index] = Grant {
+            root: crate::fs::DEMO_ROOT,
+            path: PATH,
+            rights: FileRights::READ,
+            revoked: false,
+        };
+    }
+
+    let result = (|| {
+        let mut checks = 0usize;
+        if check(crate::fs::DEMO_ROOT, PATH, FileRights::READ).is_err() {
+            return Err(PortalError::NotGranted);
+        }
+        checks += 1;
+        if check(crate::fs::DEMO_ROOT, PATH, FileRights::WRITE).is_ok() {
+            return Err(PortalError::NotGranted);
+        }
+        checks += 1;
+        revoke(crate::fs::DEMO_ROOT, PATH)?;
+        checks += 1;
+        if check(crate::fs::DEMO_ROOT, PATH, FileRights::READ).is_ok() {
+            return Err(PortalError::NotGranted);
+        }
+        checks += 1;
+        Ok(checks)
+    })();
+
+    {
+        let _guard = InterruptGuard::enter();
+        // SAFETY: Interrupts are masked and this is the temporary slot.
+        let grants = unsafe { &mut *GRANTS.0.get() };
+        grants[index] = Grant::EMPTY;
+    }
+    result
+}
+
 /// Returns the number of active grants.
 #[must_use]
 pub fn grant_count() -> usize {
@@ -91,6 +174,7 @@ pub fn grant_count() -> usize {
 
 /// Prints the grant table for the shell.
 pub fn print_grants() {
+    serial_line!("portal: grants={}", grant_count());
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the read.
     let grants = unsafe { &*GRANTS.0.get() };
@@ -109,23 +193,58 @@ pub fn print_grants() {
     }
 }
 
-/// Writes a one-line portal summary for the desktop.
-pub fn summary(out: &mut [u8]) -> usize {
-    let mut written = 0usize;
-    for line in [
-        "DEMO -> /HOME/WELCOME.TXT",
-        "ACCESS: READ",
-        "SCOPE: SINGLE FILE",
-        "REVOCABLE: YES",
-    ] {
-        let bytes = line.as_bytes();
-        if written + bytes.len() + 1 > out.len() {
-            break;
-        }
-        out[written..written + bytes.len()].copy_from_slice(bytes);
-        written += bytes.len();
-        out[written] = b'\n';
-        written += 1;
+struct SummaryWriter<'a> {
+    out: &'a mut [u8],
+    written: usize,
+}
+
+impl fmt::Write for SummaryWriter<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self.written.checked_add(text.len()).ok_or(fmt::Error)?;
+        let target = self.out.get_mut(self.written..end).ok_or(fmt::Error)?;
+        target.copy_from_slice(text.as_bytes());
+        self.written = end;
+        Ok(())
     }
-    written
+}
+
+fn rights_name(rights: u64) -> &'static str {
+    match (
+        rights & FileRights::READ != 0,
+        rights & FileRights::WRITE != 0,
+    ) {
+        (true, true) => "READ|WRITE",
+        (true, false) => "READ",
+        (false, true) => "WRITE",
+        (false, false) => "NONE",
+    }
+}
+
+/// Writes the portal state for the desktop.
+///
+/// The display is derived from the live grant table, not from a hard-coded
+/// description, so a revoked grant disappears from the Security Center view.
+pub fn summary(out: &mut [u8]) -> usize {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the read.
+    let grants = unsafe { &*GRANTS.0.get() };
+    let mut writer = SummaryWriter { out, written: 0 };
+    let mut active = 0usize;
+    for grant in grants {
+        if grant.revoked || grant.root.is_empty() {
+            continue;
+        }
+        active += 1;
+        let _ = writeln!(
+            writer,
+            "ROOT: {}\nPATH: {}\nACCESS: {}\nSCOPE: SINGLE FILE\nREVOCABLE: YES\n",
+            grant.root,
+            grant.path,
+            rights_name(grant.rights)
+        );
+    }
+    if active == 0 {
+        let _ = writer.write_str("NO ACTIVE GRANTS\n");
+    }
+    writer.written
 }

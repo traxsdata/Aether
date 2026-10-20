@@ -56,12 +56,51 @@ fn restart_budget_quarantines_a_failing_service() {
     supervisor.start(probe).expect("start");
     supervisor.fail(probe).expect("fail");
     assert_eq!(supervisor.state(probe), ServiceState::Failed);
+    assert_eq!(
+        supervisor.start(probe),
+        Err(ServiceError::RestartRequired),
+        "a failed service must use the bounded restart path"
+    );
     supervisor.restart(probe).expect("first restart");
     assert_eq!(supervisor.state(probe), ServiceState::Running);
     supervisor.fail(probe).expect("second fail");
     assert_eq!(supervisor.restart(probe), Err(ServiceError::RestartLimit));
     assert_eq!(supervisor.state(probe), ServiceState::Quarantined);
+    assert_eq!(supervisor.start(probe), Err(ServiceError::Quarantined));
     assert_eq!(supervisor.count(ServiceState::Quarantined), 1);
+}
+
+#[test]
+fn restart_waits_for_dependencies() {
+    let mut supervisor = Supervisor::new();
+    let storage = supervisor
+        .register(ServiceSpec {
+            name: "storaged",
+            profile: FILESYSTEM,
+            dependencies: &[],
+            restart_limit: 1,
+        })
+        .expect("storage");
+    let fsd = supervisor
+        .register(ServiceSpec {
+            name: "fsd",
+            profile: FILESYSTEM,
+            dependencies: &FSD_DEPS,
+            restart_limit: 1,
+        })
+        .expect("fsd");
+    supervisor.start(storage).expect("storage start");
+    supervisor.start(fsd).expect("fsd start");
+    supervisor.fail(fsd).expect("fsd fail");
+    supervisor.fail(storage).expect("storage fail");
+    assert_eq!(
+        supervisor.restart(fsd),
+        Err(ServiceError::DependencyNotRunning(storage))
+    );
+    assert_eq!(supervisor.state(fsd), ServiceState::Failed);
+
+    supervisor.restart(storage).expect("storage restart");
+    supervisor.restart(fsd).expect("fsd restart");
 }
 
 #[test]

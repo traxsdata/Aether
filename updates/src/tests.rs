@@ -4,7 +4,7 @@
 extern crate std;
 
 use std::format;
-use std::string::{String, ToString};
+use std::string::String;
 use std::vec;
 use std::vec::Vec;
 
@@ -26,7 +26,7 @@ fn hex(data: &[u8]) -> String {
     String::from_utf8(out[..length].to_vec()).unwrap()
 }
 
-fn publisher(seed: &[u8; 32]) -> TrustedPublisher {
+fn publisher(seed: &[u8; 32]) -> TrustedPublisher<'_> {
     TrustedPublisher {
         name: PUBLISHER,
         key: ed25519::public_key_from_seed(seed),
@@ -43,7 +43,7 @@ fn manifest_text(
     let key = ed25519::public_key_from_seed(seed);
     format!(
         "format=1\n\
-         image=aether-0.2.0.iso\n\
+         image=aether-{version}.iso\n\
          version={version}\n\
          counter={counter}\n\
          channel={channel}\n\
@@ -99,6 +99,15 @@ fn valid_update_verifies() {
 }
 
 #[test]
+fn image_names_may_exceed_the_payload_component_limit() {
+    let (manifest, image) = update("0.10.0", 10, "developer");
+    let trusted = publisher(&SEED);
+    let store = TrustStore::new(std::slice::from_ref(&trusted));
+    let verified = verify_update(&manifest, &image, &store).expect("verify");
+    assert_eq!(verified.image, "aether-0.10.0.iso");
+}
+
+#[test]
 fn manifest_round_trips_through_canonical_rendering() {
     let (manifest, _image) = update("0.2.0", 7, "beta");
     let frame = decode_frame(&manifest, &UPDATE_MAGIC).expect("frame");
@@ -106,6 +115,30 @@ fn manifest_round_trips_through_canonical_rendering() {
     let mut rendered = [0u8; crate::MAX_UPDATE_MANIFEST_BYTES];
     let length = parsed.render(&mut rendered).expect("render");
     assert_eq!(&rendered[..length], frame.body);
+}
+
+#[test]
+fn update_manifest_must_not_carry_a_payload() {
+    let image = b"aether-0.2.0.iso".to_vec();
+    let body = manifest_text(&SEED, &image, "0.2.0", 2, "developer");
+    let signature = ed25519::sign(&SEED, &body);
+    let mut record = vec![0u8; 4096];
+    let length = encode_frame(
+        &UPDATE_MAGIC,
+        UPDATE_FORMAT,
+        &body,
+        b"unsigned bytes",
+        &signature,
+        &mut record,
+    )
+    .expect("frame");
+    record.truncate(length);
+    let trusted = publisher(&SEED);
+    let store = TrustStore::new(std::slice::from_ref(&trusted));
+    assert_eq!(
+        verify_update(&record, &image, &store).unwrap_err(),
+        UpdateError::UnexpectedPayload
+    );
 }
 
 #[test]

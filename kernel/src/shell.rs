@@ -94,6 +94,7 @@ fn execute_line() {
         "rm" => remove(argument),
         "apps" => apps::print_table(),
         "services" => supervisor::print_security(),
+        "portal" => portal_command(argument),
         "security" => security(),
         "input" => serial_line!("input: dropped={}", crate::input::dropped()),
         "uptime" => serial_line!("uptime: {} ticks", scheduler::ticks()),
@@ -115,6 +116,8 @@ fn print_help() {
     serial_line!("  rm <path>        delete a file");
     serial_line!("  apps             application lifecycle table");
     serial_line!("  services         service profiles and states");
+    serial_line!("  portal           list file portal grants");
+    serial_line!("  portal revoke N  revoke grant N (open handles stay valid)");
     serial_line!("  security         permission and sandbox status");
     serial_line!("  input            keyboard queue status");
     serial_line!("  uptime           timer ticks");
@@ -170,6 +173,28 @@ fn remove(path: &str) {
     match fs::remove_path(path) {
         Ok(()) => serial_line!("rm: ok path={path}"),
         Err(error) => serial_line!("rm: {error:?}"),
+    }
+}
+
+fn portal_command(arguments: &str) {
+    let mut parts = arguments.split_whitespace();
+    match parts.next() {
+        None => crate::portal::print_grants(),
+        Some("revoke") => {
+            let Some(index) = parts.next().and_then(|value| value.parse::<usize>().ok()) else {
+                serial_line!("portal: usage: portal [revoke <index>]");
+                return;
+            };
+            if parts.next().is_some() {
+                serial_line!("portal: usage: portal [revoke <index>]");
+                return;
+            }
+            match crate::portal::revoke_index(index) {
+                Ok(()) => serial_line!("portal: revoked grant {index}"),
+                Err(_) => serial_line!("portal: no active grant {index}"),
+            }
+        }
+        Some(_) => serial_line!("portal: usage: portal [revoke <index>]"),
     }
 }
 

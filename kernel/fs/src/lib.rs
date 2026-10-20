@@ -225,6 +225,57 @@ impl Inode {
     const fn block_count(self) -> usize {
         (self.size as usize).div_ceil(BLOCK_SIZE)
     }
+
+    /// Validates on-disk metadata before it is used to index block tables.
+    ///
+    /// The block device is untrusted input: a corrupt or hostile image must be
+    /// rejected with an error rather than panic the kernel through an
+    /// out-of-bounds block number or an oversized size field.
+    fn validate(self) -> Result<(), FsError> {
+        match self.mode {
+            MODE_FREE => {
+                if self.size != 0 || self.blocks.iter().any(|block| *block != 0) {
+                    return Err(FsError::Corrupt);
+                }
+            }
+            MODE_FILE => {
+                if self.size as usize > MAX_FILE_BYTES {
+                    return Err(FsError::Corrupt);
+                }
+                let blocks = self.block_count();
+                if blocks > MAX_FILE_BLOCKS {
+                    return Err(FsError::Corrupt);
+                }
+                for (index, block) in self.blocks.iter().enumerate() {
+                    if index < blocks {
+                        if *block == 0 || usize::from(*block) >= BLOCK_COUNT {
+                            return Err(FsError::Corrupt);
+                        }
+                    } else if *block != 0 {
+                        return Err(FsError::Corrupt);
+                    }
+                }
+            }
+            MODE_DIR => {
+                if self.size as usize > BLOCK_SIZE
+                    || !(self.size as usize).is_multiple_of(ENTRY_BYTES)
+                {
+                    return Err(FsError::Corrupt);
+                }
+                if self.size != 0 && self.blocks[0] == 0 {
+                    return Err(FsError::Corrupt);
+                }
+                if self.blocks[0] != 0 && usize::from(self.blocks[0]) >= BLOCK_COUNT {
+                    return Err(FsError::Corrupt);
+                }
+                if self.blocks[1..].iter().any(|block| *block != 0) {
+                    return Err(FsError::Corrupt);
+                }
+            }
+            _ => return Err(FsError::Corrupt),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -295,6 +346,8 @@ impl<D: BlockDevice> AetherFs<D> {
 
     /// Formats the device and creates the root directory.
     pub fn format(&mut self) -> Result<(), FsError> {
+        self.open = [OpenSlot::EMPTY; MAX_OPEN];
+        self.next_generation = 1;
         let zero = [0u8; BLOCK_SIZE];
         for block in 0..BLOCK_COUNT {
             self.device.write_block(block as u16, &zero)?;
@@ -335,15 +388,25 @@ impl<D: BlockDevice> AetherFs<D> {
         }
         let inode_number = self.allocate_inode()?;
         let block = self.allocate_block()?;
-        self.write_inode(
+        if let Err(error) = self.write_inode(
             inode_number,
             Inode {
                 mode: MODE_DIR,
                 size: 0,
                 blocks: [block, 0, 0, 0, 0, 0, 0, 0],
             },
-        )?;
-        self.dir_add(parent, name.as_bytes(), inode_number, true)
+        ) {
+            let _ = self.free_block(block);
+            return Err(error);
+        }
+        match self.dir_add(parent, name.as_bytes(), inode_number, true) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = self.free_inode(inode_number);
+                let _ = self.free_block(block);
+                Err(error)
+            }
+        }
     }
 
     /// Creates or replaces a file below `scope`.
@@ -361,14 +424,20 @@ impl<D: BlockDevice> AetherFs<D> {
                     return Err(FsError::NotDirectory);
                 }
                 let inode = self.allocate_inode()?;
-                self.write_inode(
+                if let Err(error) = self.write_inode(
                     inode,
                     Inode {
                         mode: MODE_FILE,
                         ..Inode::EMPTY
                     },
-                )?;
-                self.dir_add(parent, name.as_bytes(), inode, false)?;
+                ) {
+                    let _ = self.free_inode(inode);
+                    return Err(error);
+                }
+                if let Err(error) = self.dir_add(parent, name.as_bytes(), inode, false) {
+                    let _ = self.free_inode(inode);
+                    return Err(error);
+                }
                 inode
             }
             Err(error) => return Err(error),
@@ -377,8 +446,7 @@ impl<D: BlockDevice> AetherFs<D> {
         if !inode.is_file() {
             return Err(FsError::IsDirectory);
         }
-        self.write_inode_blocks(&mut inode, data)?;
-        self.write_inode(inode_number, inode)
+        self.write_inode_blocks(inode_number, &mut inode, data)
     }
 
     /// Reads a whole file below `scope`.
@@ -439,14 +507,20 @@ impl<D: BlockDevice> AetherFs<D> {
                     return Err(FsError::NotDirectory);
                 }
                 let inode = self.allocate_inode()?;
-                self.write_inode(
+                if let Err(error) = self.write_inode(
                     inode,
                     Inode {
                         mode: MODE_FILE,
                         ..Inode::EMPTY
                     },
-                )?;
-                self.dir_add(parent, name.as_bytes(), inode, false)?;
+                ) {
+                    let _ = self.free_inode(inode);
+                    return Err(error);
+                }
+                if let Err(error) = self.dir_add(parent, name.as_bytes(), inode, false) {
+                    let _ = self.free_inode(inode);
+                    return Err(error);
+                }
                 inode
             }
             Err(error) => return Err(error),
@@ -514,8 +588,7 @@ impl<D: BlockDevice> AetherFs<D> {
         buffer[position..end].copy_from_slice(data);
         let size = end.max(usize::from(inode.size));
         inode.size = size as u16;
-        self.write_inode_blocks(&mut inode, &buffer[..size])?;
-        self.write_inode(slot.inode, inode)?;
+        self.write_inode_blocks(slot.inode, &mut inode, &buffer[..size])?;
         let slot = self.slot_mut(id)?;
         slot.position = end as u16;
         Ok(data.len())
@@ -538,6 +611,15 @@ impl<D: BlockDevice> AetherFs<D> {
             .ok_or(FsError::NotFound)?;
         if is_dir {
             return Err(FsError::IsDirectory);
+        }
+        // An open handle must not outlive the inode or point at blocks that a
+        // later create can reuse. Refuse deletion until the owner closes it.
+        if self
+            .open
+            .iter()
+            .any(|slot| slot.alive && slot.inode == inode_number)
+        {
+            return Err(FsError::Access);
         }
         self.dir_remove(parent, name.as_bytes())?;
         let mut inode = self.read_inode(inode_number)?;
@@ -582,10 +664,26 @@ impl<D: BlockDevice> AetherFs<D> {
         Ok(current)
     }
 
+    fn read_superblock(&mut self) -> Result<[u8; BLOCK_SIZE], FsError> {
+        let mut data = [0u8; BLOCK_SIZE];
+        self.device.read_block(0, &mut data)?;
+        if data[0..4] != MAGIC.to_le_bytes() {
+            return Err(FsError::NotFormatted);
+        }
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        let inode_count = u16::from_le_bytes([data[6], data[7]]);
+        let root = u16::from_le_bytes([data[8], data[9]]);
+        if version != VERSION || inode_count != MAX_INODES as u16 || root != ROOT_INODE {
+            return Err(FsError::Corrupt);
+        }
+        Ok(data)
+    }
+
     fn read_inode(&mut self, index: u16) -> Result<Inode, FsError> {
         if index == 0 || usize::from(index) >= MAX_INODES {
             return Err(FsError::Corrupt);
         }
+        self.read_superblock()?;
         let offset = usize::from(index) * INODE_BYTES;
         let block = INODE_TABLE_BLOCK + (offset / BLOCK_SIZE) as u16;
         let start = offset % BLOCK_SIZE;
@@ -594,9 +692,7 @@ impl<D: BlockDevice> AetherFs<D> {
         let mut bytes = [0u8; INODE_BYTES];
         bytes.copy_from_slice(&data[start..start + INODE_BYTES]);
         let inode = Inode::decode(&bytes);
-        if inode.mode != MODE_FREE && inode.mode != MODE_FILE && inode.mode != MODE_DIR {
-            return Err(FsError::Corrupt);
-        }
+        inode.validate()?;
         Ok(inode)
     }
 
@@ -604,6 +700,7 @@ impl<D: BlockDevice> AetherFs<D> {
         if index == 0 || usize::from(index) >= MAX_INODES {
             return Err(FsError::Corrupt);
         }
+        self.read_superblock()?;
         let offset = usize::from(index) * INODE_BYTES;
         let block = INODE_TABLE_BLOCK + (offset / BLOCK_SIZE) as u16;
         let start = offset % BLOCK_SIZE;
@@ -645,19 +742,20 @@ impl<D: BlockDevice> AetherFs<D> {
     }
 
     fn block_used(&mut self, block: u16) -> Result<bool, FsError> {
-        let mut data = [0u8; BLOCK_SIZE];
-        self.device.read_block(0, &mut data)?;
-        if data[0..4] != MAGIC.to_le_bytes() {
-            return Err(FsError::NotFormatted);
+        if usize::from(block) >= BLOCK_COUNT {
+            return Err(FsError::Corrupt);
         }
+        let data = self.read_superblock()?;
         let byte = FREE_BITMAP_OFFSET + usize::from(block) / 8;
         let bit = 1u8 << (block % 8);
         Ok(data[byte] & bit != 0)
     }
 
     fn set_block_used(&mut self, block: u16, used: bool) -> Result<(), FsError> {
-        let mut data = [0u8; BLOCK_SIZE];
-        self.device.read_block(0, &mut data)?;
+        if usize::from(block) >= BLOCK_COUNT {
+            return Err(FsError::Corrupt);
+        }
+        let mut data = self.read_superblock()?;
         let byte = FREE_BITMAP_OFFSET + usize::from(block) / 8;
         let bit = 1u8 << (block % 8);
         if used {
@@ -671,38 +769,81 @@ impl<D: BlockDevice> AetherFs<D> {
     fn read_inode_data(&mut self, inode: Inode, out: &mut [u8]) -> Result<(), FsError> {
         let mut block = [0u8; BLOCK_SIZE];
         let mut copied = 0usize;
-        for index in 0..inode.block_count() {
-            let number = inode.blocks[index];
-            if number == 0 {
-                return Err(FsError::Corrupt);
-            }
-            self.device.read_block(number, &mut block)?;
-            let length = (out.len() - copied).min(BLOCK_SIZE);
-            out[copied..copied + length].copy_from_slice(&block[..length]);
-            copied += length;
+        for number in inode.blocks.iter().take(inode.block_count()) {
             if copied == out.len() {
                 break;
             }
+            if *number == 0 || usize::from(*number) >= BLOCK_COUNT {
+                return Err(FsError::Corrupt);
+            }
+            self.device.read_block(*number, &mut block)?;
+            let length = (out.len() - copied).min(BLOCK_SIZE);
+            out[copied..copied + length].copy_from_slice(&block[..length]);
+            copied += length;
         }
         Ok(())
     }
 
-    fn write_inode_blocks(&mut self, inode: &mut Inode, data: &[u8]) -> Result<(), FsError> {
+    /// Replaces a file's contents and commits the inode before releasing the
+    /// old blocks.
+    ///
+    /// New blocks are allocated and filled while the old mapping is still
+    /// valid. If anything fails, the old blocks and the on-disk inode are left
+    /// untouched; a failed write must not make an existing file point at
+    /// freed or partially overwritten storage.
+    fn write_inode_blocks(
+        &mut self,
+        inode_number: u16,
+        inode: &mut Inode,
+        data: &[u8],
+    ) -> Result<(), FsError> {
         if data.len() > MAX_FILE_BYTES {
             return Err(FsError::FileTooLarge);
         }
-        self.free_inode_blocks(inode)?;
         let needed = data.len().div_ceil(BLOCK_SIZE);
-        for index in 0..needed {
-            let block = self.allocate_block()?;
-            inode.blocks[index] = block;
-            let mut buffer = [0u8; BLOCK_SIZE];
+        let mut new_blocks = [0u16; MAX_FILE_BLOCKS];
+        for slot in new_blocks.iter_mut().take(needed) {
+            match self.allocate_block() {
+                Ok(block) => *slot = block,
+                Err(error) => {
+                    let _ = self.release_blocks(new_blocks);
+                    return Err(error);
+                }
+            }
+        }
+        for (index, block) in new_blocks.iter().take(needed).enumerate() {
             let start = index * BLOCK_SIZE;
             let end = (start + BLOCK_SIZE).min(data.len());
+            let mut buffer = [0u8; BLOCK_SIZE];
             buffer[..end - start].copy_from_slice(&data[start..end]);
-            self.device.write_block(block, &buffer)?;
+            if let Err(error) = self.device.write_block(*block, &buffer) {
+                let _ = self.release_blocks(new_blocks);
+                return Err(error);
+            }
         }
+
+        let old_blocks = inode.blocks;
+        let old_size = inode.size;
+        inode.blocks = new_blocks;
         inode.size = data.len() as u16;
+        if let Err(error) = self.write_inode(inode_number, *inode) {
+            inode.blocks = old_blocks;
+            inode.size = old_size;
+            let _ = self.release_blocks(new_blocks);
+            return Err(error);
+        }
+        // The inode now names only the new blocks. Releasing the old blocks
+        // after the commit means a failure here leaks space but cannot corrupt
+        // the file.
+        self.release_blocks(old_blocks)
+    }
+
+    fn release_blocks(&mut self, blocks: [u16; MAX_FILE_BLOCKS]) -> Result<(), FsError> {
+        for block in blocks {
+            if block != 0 {
+                self.free_block(block)?;
+            }
+        }
         Ok(())
     }
 
@@ -726,6 +867,9 @@ impl<D: BlockDevice> AetherFs<D> {
             let mut data = [0u8; BLOCK_SIZE];
             self.device.read_block(inode.blocks[0], &mut data)?;
             let count = usize::from(inode.size) / ENTRY_BYTES;
+            if count > MAX_ENTRIES {
+                return Err(FsError::Corrupt);
+            }
             for (index, entry) in entries.iter_mut().enumerate() {
                 if index >= count {
                     break;

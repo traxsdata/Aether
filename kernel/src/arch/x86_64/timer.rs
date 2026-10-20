@@ -88,7 +88,7 @@ pub fn acknowledge() {
 pub fn enable_interrupts() {
     // SAFETY: The caller must have installed a complete IDT and initialized
     // the scheduler state that the timer handler uses.
-    unsafe { asm!("sti", options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("sti", options(nomem, nostack)) };
 }
 
 /// Disables interrupts on the current CPU.
@@ -123,7 +123,6 @@ impl InterruptGuard {
                 "pop {flags}",
                 "cli",
                 flags = out(reg) flags,
-                options(nomem, nostack)
             );
         }
         Self { flags }

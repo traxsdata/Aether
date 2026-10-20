@@ -597,7 +597,7 @@ impl<'a> Manifest<'a> {
         let mut writer = Writer::new(out);
         writer.field("format", "1")?;
         writer.field("id", self.id)?;
-        let mut version = [0u8; 16];
+        let mut version = [0u8; 24];
         let length = self.version.write(&mut version)?;
         writer.field("version", core::str::from_utf8(&version[..length]).ok()?)?;
         writer.field("arch", self.architecture.name())?;

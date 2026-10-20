@@ -303,9 +303,14 @@ unsafe fn read_memory_map(
     let mut count = 0usize;
     for index in 0..entries {
         // SAFETY: GetMemoryMap reported `size` bytes of valid descriptors at
-        // `map_page`, and this index is within that range.
-        let descriptor =
-            unsafe { &*((map_page as usize + index * descriptor_size) as *const MemoryDescriptor) };
+        // `map_page`, and this index is within that range. The descriptor is
+        // copied with an unaligned read because firmware is not trusted to
+        // return a descriptor stride that satisfies Rust's alignment rule.
+        let descriptor = unsafe {
+            ptr::read_unaligned(
+                (map_page as usize + index * descriptor_size) as *const MemoryDescriptor,
+            )
+        };
         let Some(len) = descriptor.len() else {
             continue;
         };
@@ -345,6 +350,7 @@ unsafe fn read_memory_map(
 
 fn check_map_status(status: Status, size: usize) -> Result<(), LoadError> {
     match status {
+        SUCCESS if size > MEMORY_MAP_BYTES => Err(LoadError::MemoryMapTooLarge),
         SUCCESS => Ok(()),
         BUFFER_TOO_SMALL => Err(if size > MEMORY_MAP_BYTES {
             LoadError::MemoryMapTooLarge

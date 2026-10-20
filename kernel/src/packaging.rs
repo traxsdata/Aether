@@ -106,7 +106,10 @@ pub fn init() -> Result<(), &'static str> {
     }
     tampered[..DEMO_PACKAGE.len()].copy_from_slice(DEMO_PACKAGE);
     // The last payload byte precedes the 64-byte signature.
-    let payload_index = DEMO_PACKAGE.len() - 65;
+    let payload_index = DEMO_PACKAGE
+        .len()
+        .checked_sub(65)
+        .ok_or("package fixture is too short")?;
     tampered[payload_index] ^= 0x01;
     match verify_package(&tampered[..DEMO_PACKAGE.len()], &store) {
         Err(PackageError::DigestMismatch) => rejected += 1,
@@ -209,8 +212,8 @@ fn install(package: &VerifiedPackage<'_>, root: &str) -> Result<(), &'static str
     Ok(())
 }
 
-fn version_text(version: Version) -> ([u8; 16], usize) {
-    let mut buffer = [0u8; 16];
+fn version_text(version: Version) -> ([u8; 24], usize) {
+    let mut buffer = [0u8; 24];
     let mut written = 0usize;
     let mut digits = [0u8; 5];
     for (index, part) in [version.major, version.minor, version.patch]

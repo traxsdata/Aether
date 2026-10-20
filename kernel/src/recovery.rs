@@ -9,6 +9,7 @@
 use crate::fs;
 use crate::serial_line;
 use aether_fs::FsError;
+use core::fmt::{self, Write as _};
 
 /// Recovery status shown by the shell and desktop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,38 +76,60 @@ fn read_marker(path: &str) -> Option<&'static str> {
         "aether-0.1.0" => Some("aether-0.1.0"),
         "aether-0.0.9" => Some("aether-0.0.9"),
         "welcome to aether" => Some("present"),
+        "current" => Some("current"),
+        "previous" => Some("previous"),
         _ => Some("unknown"),
     }
 }
 
 /// Prints the recovery status for the shell.
 pub fn print_status() {
-    let mut buffer = [0u8; 128];
+    let mut buffer = [0u8; 256];
     let length = status_text(&mut buffer);
     crate::arch::x86_64::serial::write_bytes(&buffer[..length]);
 }
 
 /// Writes the recovery status for the desktop.
+///
+/// Values come from the current marker files, so a missing image or a previous
+/// selection is visible instead of being hidden behind a fixed slogan.
 pub fn status_text(out: &mut [u8]) -> usize {
     let current = read_marker(CURRENT).unwrap_or("missing");
     let previous = read_marker(PREVIOUS).unwrap_or("missing");
     let selected = read_marker(SELECTED).unwrap_or("missing");
-    let lines = [
-        "IMAGES: CURRENT + PREVIOUS",
-        "USER DATA: PRESERVED",
-        "ROLLBACK: AVAILABLE",
-    ];
-    let mut written = 0usize;
-    for line in lines {
-        let bytes = line.as_bytes();
-        if written + bytes.len() + 1 > out.len() {
-            break;
+    let user_data = read_marker(USER_DATA).unwrap_or("missing");
+    let rollback = selected == "previous";
+
+    let mut writer = StatusWriter { out, written: 0 };
+    let _ = writeln!(
+        writer,
+        "IMAGES: CURRENT + PREVIOUS\n\
+         CURRENT: {current}\n\
+         PREVIOUS: {previous}\n\
+         SELECTED: {selected}\n\
+         ROLLBACK: {}\n\
+         USER DATA: {}",
+        if rollback { "ACTIVE" } else { "AVAILABLE" },
+        if user_data == "present" {
+            "PRESERVED"
+        } else {
+            "MISSING"
         }
-        out[written..written + bytes.len()].copy_from_slice(bytes);
-        written += bytes.len();
-        out[written] = b'\n';
-        written += 1;
+    );
+    writer.written
+}
+
+struct StatusWriter<'a> {
+    out: &'a mut [u8],
+    written: usize,
+}
+
+impl fmt::Write for StatusWriter<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self.written.checked_add(text.len()).ok_or(fmt::Error)?;
+        let target = self.out.get_mut(self.written..end).ok_or(fmt::Error)?;
+        target.copy_from_slice(text.as_bytes());
+        self.written = end;
+        Ok(())
     }
-    let _ = (current, previous, selected);
-    written
 }

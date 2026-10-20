@@ -73,11 +73,19 @@ pub enum ServiceError {
     /// A dependency is not running.
     DependencyNotRunning(ServiceId),
     /// A dependency cycle would result (rejected during registration).
+    ///
+    /// Registration requires every dependency to exist already, so a cycle
+    /// cannot be expressed through this API. Kept for a future dynamic
+    /// dependency graph.
     DependencyCycle,
     /// The service is already running.
     AlreadyRunning,
     /// The restart budget is exhausted.
     RestartLimit,
+    /// The service is quarantined and cannot be started or restarted.
+    Quarantined,
+    /// A failed service must go through the bounded restart path.
+    RestartRequired,
 }
 
 /// Service supervisor.
@@ -106,9 +114,6 @@ impl Supervisor {
             if *dependency >= MAX_SERVICES || self.specs[*dependency].is_none() {
                 return Err(ServiceError::UnknownService);
             }
-            if *dependency == MAX_SERVICES {
-                return Err(ServiceError::DependencyCycle);
-            }
         }
         let slot = self
             .specs
@@ -125,6 +130,12 @@ impl Supervisor {
         let spec = self.spec(id)?;
         if self.states[id] == ServiceState::Running {
             return Err(ServiceError::AlreadyRunning);
+        }
+        if self.states[id] == ServiceState::Quarantined {
+            return Err(ServiceError::Quarantined);
+        }
+        if self.states[id] == ServiceState::Failed {
+            return Err(ServiceError::RestartRequired);
         }
         for dependency in spec.dependencies {
             if self.states[*dependency] != ServiceState::Running {
@@ -146,12 +157,21 @@ impl Supervisor {
     }
 
     /// Restarts a failed service within its restart budget.
+    ///
+    /// A restart must obey the same dependency rule as a first start. A
+    /// service is not allowed to come back while something it depends on is
+    /// still failed or quarantined.
     pub fn restart(&mut self, id: ServiceId) -> Result<(), ServiceError> {
-        let limit = self.spec(id)?.restart_limit;
+        let spec = self.spec(id)?;
         if self.states[id] != ServiceState::Failed {
             return Err(ServiceError::UnknownService);
         }
-        if self.restarts[id] >= limit {
+        for dependency in spec.dependencies {
+            if self.states[*dependency] != ServiceState::Running {
+                return Err(ServiceError::DependencyNotRunning(*dependency));
+            }
+        }
+        if self.restarts[id] >= spec.restart_limit {
             self.states[id] = ServiceState::Quarantined;
             return Err(ServiceError::RestartLimit);
         }
