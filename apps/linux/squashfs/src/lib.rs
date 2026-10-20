@@ -4,8 +4,8 @@
 //! The reader validates every offset and length before reading, decompresses
 //! only the metadata and data blocks it needs, and rejects unsupported inode
 //! types instead of guessing. It supports zstd (the GridCraft AppImage), gzip,
-//! lz4, and xz (host `std` feature). lzma and lzo are rejected explicitly and
-//! remain tracked in the roadmap.
+//! lz4, lzo, and xz/lzma (host `std` feature). No_std xz/lzma decoders remain
+//! tracked in the roadmap.
 //!
 //! The API is deliberately small: parse a raw SquashFS image or an AppImage,
 //! walk the tree, read regular files, and extract into memory with limits.
@@ -242,8 +242,8 @@ impl<'a> Image<'a> {
         {
             return Err(Error::BadSuperblock);
         }
-        let supported =
-            matches!(compression, 1 | 5 | 6) || (cfg!(feature = "std") && compression == 4);
+        let supported = matches!(compression, 1 | 3 | 5 | 6)
+            || (cfg!(feature = "std") && matches!(compression, 2 | 4));
         if !supported {
             return Err(Error::UnsupportedCompression);
         }
@@ -728,6 +728,26 @@ impl<'a> Image<'a> {
         let out = match self.compression {
             1 => miniz_oxide::inflate::decompress_to_vec_zlib(input)
                 .map_err(|_| Error::Decompress)?,
+            2 => {
+                #[cfg(feature = "std")]
+                {
+                    let mut out = Vec::new();
+                    lzma_rs::lzma_decompress(&mut &input[..], &mut out)
+                        .map_err(|_| Error::Decompress)?;
+                    out
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    return Err(Error::UnsupportedCompression);
+                }
+            }
+            3 => {
+                let mut out = vec![0u8; maximum];
+                let length = lzokay::decompress::decompress(input, &mut out)
+                    .map_err(|_| Error::Decompress)?;
+                out.truncate(length);
+                out
+            }
             4 => {
                 #[cfg(feature = "std")]
                 {

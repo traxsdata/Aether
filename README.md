@@ -117,8 +117,8 @@ grants, and the desktop is not a security authority.
 - Signed AppImage import records (`appimage-manifest`) binding identity,
   version, runtime, digest, and publisher with Ed25519, verified against a trust
   store.
-- A bounded SquashFS 4 reader (`aether-squashfs`) with zstd, gzip, lz4, and
-  host xz decompression, symlink/hardlink policy, and a host extractor. It
+- A bounded SquashFS 4 reader (`aether-squashfs`) with zstd, gzip, lz4, lzo,
+  and host xz/lzma decompression, symlink/hardlink policy, and a host extractor. It
   extracts the real GridCraft AppImage tree; no_std xz/lzma/lzo and in-OS
   mounting remain pending.
 - A first Linux ABI slice: a static freestanding x86-64 Linux ELF is loaded

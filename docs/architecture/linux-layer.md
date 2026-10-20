@@ -114,9 +114,9 @@ exact AppImage digest, and the runtime version.
   boot-reserved arena; there is no runtime frame allocator or VMA table yet.
   The root is embedded and read-only; it is not yet an AppImage import.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
-  zstd, gzip, lz4, and host xz (metadata, file data, fragments, directories,
-  symlinks, hardlink marking, xattr dropping, extraction limits, host
-  extractor). No_std xz/lzma/lzo, in-OS integration, and the writable overlay
+  zstd, gzip, lz4, lzo, and host xz/lzma (metadata, file data, fragments,
+  directories, symlinks, hardlink marking, xattr dropping, extraction limits,
+  host extractor). No_std xz/lzma, in-OS integration, and the writable overlay
   remain missing.
 - Dynamic glibc libraries, threads, real futex waiting, signals, file-backed
   mappings, and memory reclaim: not implemented.

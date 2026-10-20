@@ -127,15 +127,14 @@ user space. It is not a VM. The target and security gates are in
 
 - [x] Validate AppImage type 2, ELF runtime, SquashFS bounds, and table offsets.
 - [x] Pin and verify the artifact SHA-256 before parsing.
-- [x] Bounded SquashFS 4 reader with zstd, gzip, lz4, and host xz
+- [x] Bounded SquashFS 4 reader with zstd, gzip, lz4, lzo, and host xz/lzma
   metadata/data/fragment decompression, inode and directory parsing, extraction
   limits, and a real-AppImage host extractor (`aether-squashfs`). Unsupported
-  inode types and lzma/lzo are rejected.
+  inode types are rejected.
 - [x] Import policy: relative symlinks only, duplicate-path rejection, hardlinks
   marked and copied per path, setuid/setgid/sticky stripped, xattrs counted and
   dropped, extraction limits.
-- [ ] Add no_std xz/lzma and lzo decompression and explicit xattr policy
-  controls.
+- [ ] Add no_std xz/lzma decompression and explicit xattr policy controls.
 - [ ] Import into a private read-only root; reject symlink escapes, hardlinks
   outside the root, duplicate paths, and oversized files.
 - [ ] Add a per-application writable overlay for settings, logs, and temporary

@@ -8,6 +8,8 @@ const UNSAFE: &[u8] = include_bytes!("../tests/fixtures/unsafe-symlink.sqfs");
 const GZIP: &[u8] = include_bytes!("../tests/fixtures/root-gzip.sqfs");
 const LZ4: &[u8] = include_bytes!("../tests/fixtures/root-lz4.sqfs");
 const XZ: &[u8] = include_bytes!("../tests/fixtures/root-xz.sqfs");
+const LZO: &[u8] = include_bytes!("../tests/fixtures/root-lzo.sqfs");
+const LZMA: &[u8] = include_bytes!("../tests/fixtures/root-lzma.sqfs");
 
 fn entry_names(image: &Image, path: &str) -> Vec<String> {
     let inode = find(image, path).expect("inode");
@@ -155,8 +157,8 @@ fn reads_an_appimage_with_a_container_offset() {
 }
 
 #[test]
-fn reads_gzip_lz4_and_xz_images() {
-    for image in [GZIP, LZ4, XZ] {
+fn reads_gzip_lz4_xz_lzo_and_lzma_images() {
+    for image in [GZIP, LZ4, XZ, LZO, LZMA] {
         let image = Image::from_squashfs(image).expect("parse");
         let hello = image.lookup("hello.txt").expect("hello");
         assert_eq!(image.read_file(&hello).unwrap(), b"hello from squashfs\n");
