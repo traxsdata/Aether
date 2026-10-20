@@ -552,6 +552,12 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
     );
 
     if is_user {
+        if saved_vector == 14
+            && crate::scheduler::resolve_linux_demand_fault(frame, cr2, saved_error)
+        {
+            serial_line!("user: demand page mapped address={:#018x}", cr2);
+            return frame;
+        }
         serial_line!(
             "user: fault terminated task vector={} rip={:#018x} cr2={:#018x}",
             saved_vector,

@@ -7,6 +7,12 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Added a narrow Linux inotify prototype: one nonblocking instance per task and
+  one exact existing `/tmp` watch for `IN_MODIFY`. `inotify_init1` accepts only
+  `IN_NONBLOCK`; default blocking mode and blocking reads are unsupported. The
+  boot fixture checks rejection of flags 0, `EAGAIN` with no pending event, and
+  the 16-byte event record (`AETHER_LINUX_INOTIFY_OK`). Directory/rootfs watches,
+  other masks, event overflow, and shared-thread identity remain unsupported.
 - `aether-appimage`: a `no_std`, `unsafe`-free, allocation-free AppImage type 2
   container inspector. It validates the ELF runtime, locates a structurally
   valid SquashFS 4 superblock (rejecting false magic in runtime code), and

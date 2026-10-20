@@ -69,6 +69,8 @@ pub fn load(
     main: &[u8],
     interpreter: &[u8],
     executable_path: &str,
+    arguments: &[&str],
+    environment: &[&str],
 ) -> Result<Loaded, LoadError> {
     if executable_path.len() + 1 > 256 {
         return Err(LoadError::Stack);
@@ -102,6 +104,8 @@ pub fn load(
         &interp,
         interp_bias,
         executable_path,
+        arguments,
+        environment,
     );
     paging::activate(old_pml4);
     let stack_pointer = result?;
@@ -167,6 +171,7 @@ fn map_segment(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_images_and_stack(
     pml4: PhysFrame,
     main: &Image<'_>,
@@ -174,6 +179,8 @@ fn write_images_and_stack(
     interp: &Image<'_>,
     interp_bias: u64,
     executable_path: &str,
+    arguments: &[&str],
+    environment: &[&str],
 ) -> Result<u64, LoadError> {
     copy_image(main, main_bias)?;
     copy_image(interp, interp_bias)?;
@@ -183,7 +190,14 @@ fn write_images_and_stack(
     for segment in interp.segments() {
         protect(pml4, interp_bias, *segment)?;
     }
-    build_stack(main, main_bias, interp_bias, executable_path)
+    build_stack(
+        main,
+        main_bias,
+        interp_bias,
+        executable_path,
+        arguments,
+        environment,
+    )
 }
 
 fn copy_image(image: &Image<'_>, bias: u64) -> Result<(), LoadError> {
@@ -240,43 +254,67 @@ fn build_stack(
     main_bias: u64,
     interp_bias: u64,
     executable_path: &str,
+    arguments: &[&str],
+    environment: &[&str],
 ) -> Result<u64, LoadError> {
     const STACK_PAGE_BASE: u64 = USER_STACK_TOP - PAGE_SIZE;
     let mut page = [0u8; PAGE_SIZE as usize];
 
-    let path = executable_path.as_bytes();
-    if path.len() + 1 > 256 {
+    if arguments.is_empty() || arguments.len() > 16 || environment.len() > 16 {
         return Err(LoadError::Stack);
     }
-    page[..path.len()].copy_from_slice(path);
-    let path_pointer = STACK_PAGE_BASE;
-
-    let platform = b"x86_64\0";
-    page[256..256 + platform.len()].copy_from_slice(platform);
-    let platform_pointer = STACK_PAGE_BASE + 256;
-
-    for (index, byte) in page[272..288].iter_mut().enumerate() {
+    let mut string_cursor = 0usize;
+    let mut put_string = |value: &str| -> Result<u64, LoadError> {
+        let length = value.len().checked_add(1).ok_or(LoadError::Stack)?;
+        let end = string_cursor.checked_add(length).ok_or(LoadError::Stack)?;
+        if end > 1024 {
+            return Err(LoadError::Stack);
+        }
+        let pointer = STACK_PAGE_BASE + string_cursor as u64;
+        page[string_cursor..string_cursor + value.len()].copy_from_slice(value.as_bytes());
+        page[string_cursor + value.len()] = 0;
+        string_cursor = end;
+        Ok(pointer)
+    };
+    let mut argv = [0u64; 16];
+    for (slot, value) in argv.iter_mut().zip(arguments) {
+        *slot = put_string(value)?;
+    }
+    let mut envp = [0u64; 16];
+    for (slot, value) in envp.iter_mut().zip(environment) {
+        *slot = put_string(value)?;
+    }
+    let path_pointer = put_string(executable_path)?;
+    let platform_pointer = put_string("x86_64")?;
+    string_cursor = string_cursor.checked_add(16).ok_or(LoadError::Stack)?;
+    let random_pointer = STACK_PAGE_BASE + string_cursor as u64;
+    for (index, byte) in page[string_cursor..string_cursor + 16]
+        .iter_mut()
+        .enumerate()
+    {
         *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
     }
-    let random_pointer = STACK_PAGE_BASE + 272;
 
-    let environment = b"LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64\0";
-    page[320..320 + environment.len()].copy_from_slice(environment);
-    let environment_pointer = STACK_PAGE_BASE + 320;
-
+    // Keep the vector/auxv area below the strings and align the entry stack.
     let mut offset = 1024usize;
     let mut push = |value: u64| -> Result<(), LoadError> {
         let end = offset.checked_add(8).ok_or(LoadError::Stack)?;
-        let slot = page.get_mut(offset..end).ok_or(LoadError::Stack)?;
-        slot.copy_from_slice(&value.to_le_bytes());
+        if end > page.len() {
+            return Err(LoadError::Stack);
+        }
+        page[offset..end].copy_from_slice(&value.to_le_bytes());
         offset = end;
         Ok(())
     };
 
-    push(1)?; // argc
-    push(path_pointer)?; // argv[0]
+    push(arguments.len() as u64)?; // argc
+    for pointer in argv.iter().take(arguments.len()) {
+        push(*pointer)?;
+    }
     push(0)?; // argv terminator
-    push(environment_pointer)?; // envp[0]
+    for pointer in envp.iter().take(environment.len()) {
+        push(*pointer)?;
+    }
     push(0)?; // envp terminator
     let auxv = [
         (3u64, main.program_header_address(main_bias)), // AT_PHDR
@@ -302,8 +340,8 @@ fn build_stack(
         push(value)?;
     }
 
-    // SAFETY: The stack pages were mapped writable in the active address
-    // space. The cursor is bounded by the page slice above.
+    // SAFETY: The stack page was mapped writable in the active address space;
+    // all strings and vectors are within the copied prefix.
     unsafe {
         ptr::copy_nonoverlapping(page.as_ptr(), STACK_PAGE_BASE as *mut u8, offset);
     }

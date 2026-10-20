@@ -109,27 +109,28 @@ exact AppImage digest, and the runtime version.
   builds the initial stack with auxv, and enters the interpreter, which hands
   off to the main entry. Relocations and shared-library loading are not part of
   this slice; the test interpreter only validates auxv and transfers control.
-- Linux `syscall` entry: implemented, with `write`, `exit`/`exit_group`,
-  `mmap`, `munmap`, `mprotect`, `brk`, `arch_prctl` FS base, single-task futex,
-  `clock_gettime`, `getrandom`, `uname`, `getpid`/`gettid`, and
-  `set_tid_address`, and a read-only root with `openat`, `read`, `pread64`,
-  `close`, `lseek`, `access`, `stat`/`fstat`/`newfstatat`/`statx`,
-  `readlink`, `fcntl`, `dup`, `dup2`, `getdents64`, `pipe2`, non-blocking
-  `poll`, `eventfd2`, basic epoll, `clone` threads, `fork`/`wait4`/static `execve`, futex
-  wait/wake/join, `mremap`, and basic signal delivery with `rt_sigreturn`. The static fixture
-  `tests/fixtures/linux/hello.S` runs at CPL3, allocates and writes anonymous
-  memory, maps `/etc/motd` through file-backed `mmap`, releases it with
-  `munmap`, reuses the address with `MAP_FIXED`, grows the break, sets FS-based
-  TLS, opens and reads `/etc/motd`, writes through a validated user pointer,
-  exits cleanly, and gates the boot with `AETHER_LINUX_ROOT_OK`,
-  `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, and `AETHER_LINUX_OK`.
-  A fixed per-task VMA table tracks ranges and rejects writable+executable
-  mappings. A runtime frame allocator backs `mmap` and `brk`; `munmap`, task
-  exit, and faults unmap the pages and return their frames. `mremap`, page-fault
-  handling, and shared mappings remain missing. The root is embedded and
-  read-only; `/tmp` writes go to a bounded per-task overlay that is cleared on
-  exit/fault. This is not yet an AppImage import or a persistent
-  per-application store.
+- Linux `syscall` entry: implemented for the tested ABI slices, including
+  `mmap`/`munmap`/`mprotect`/`brk`, bounded private-anonymous demand paging,
+  file-backed mappings, `mremap`, `clone` threads/futex join, `fork` and blocking
+  `wait4` (with nonchild/selector checks), static and dynamic `execve` with
+  bounded argv/envp, bounded same-session process groups, and self/cross-process
+  SIGUSR1 fixtures. Descriptor/filesystem calls include `openat`, read/write,
+  stat/statx, `readlink`, `fcntl`, dup, `getdents64`, pipes, nonblocking poll,
+  eventfd/basic epoll, and narrow inotify. Eventfd counters are shared by
+  threads in one tgid; futex timeouts are implemented. The inotify prototype
+  requires
+  `IN_NONBLOCK` and supports `IN_MODIFY` on one exact existing overlay file;
+  default blocking init and blocking reads are unsupported. Named fixture
+  markers are enumerated in the roadmap and host-interface inventory. Shared
+  mappings, blocking/finite poll and epoll waits (`-EOPNOTSUPP`), pipe and
+  cross-process waits, full inotify, and
+  complete siginfo/ucontext remain missing.
+- A fixed per-task VMA table tracks ranges and rejects writable+executable
+  mappings. Anonymous private pages are faulted in on demand with bounded
+  allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.
+  The root is embedded and read-only; `/tmp` writes go to a bounded per-task
+  overlay cleared on exit/fault. This remains a boot fixture, not a persistent
+  per-application store or user-supplied AppImage runtime.
 - Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
   a zstd SquashFS image and signs it as a `linux-rootfs` record. The build now
   stages a runtime rootfs, imports it at boot, and resolves `PT_INTERP` from
@@ -145,11 +146,11 @@ exact AppImage digest, and the runtime version.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
   fragments, directories, symlinks, hardlink marking, xattr dropping,
-  extraction limits, host extractor). In-OS integration and persistent overlay
+  extraction limits, host extractor). Embedded signed-rootfs in-OS import is
+  implemented; user-supplied AppImage import/opening and persistent overlay
   storage remain missing.
-- Dynamic glibc libraries, threads, real futex waiting, signals, file-backed
-  mappings, and memory reclaim: not implemented.
-- Wayland bridge and software renderer: not implemented.
+- `linuxd`, pinned production glibc/Mesa/Wayland rootfs, Wayland bridge, and
+  software renderer: not implemented.
 
 The compatibility database records GridCraft 0.8.0 as `unsupported` until these
 gates pass. A static test program is not an ArtCraft application.

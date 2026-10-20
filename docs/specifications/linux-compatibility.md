@@ -1,8 +1,7 @@
 # Linux application compatibility
 
 **Document ID:** AETHER-LINUX-001
-**Status:** Import and static Linux ELF execution stages only; no dynamic
-runtime and no compatibility claim
+**Status:** Gate 2 prototype is partial; no application compatibility claim
 **Related:** [ADR-017](../decisions/ADR-017-linux-app-runtime.md), technical
 specification §7 (compatibility)
 
@@ -63,14 +62,15 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
 | AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, and embedded signed-rootfs in-OS import implemented**; the populated glibc/Mesa rootfs and user-supplied AppImage import are missing |
-| ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static `PT_LOAD` execution works; interpreter and shared libraries missing |
-| Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: one fixed boot process, no creation |
-| Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `arch_prctl` FS base and context-switched TLS pointer; no threads |
-| Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: runtime frame allocation, per-task VMA table, file-backed `mmap`, `munmap` reclaim, `mprotect`, and growing `brk`; no `mremap`, page-fault handling, or shared memory |
-| Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: single-task `FUTEX_WAIT`/`WAKE` no-ops; no wait queue |
-| Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Not implemented |
+| ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static and dynamic exec fixtures propagate bounded argv/envp; a `PT_INTERP` fixture and opt-in host-glibc hello run; pinned production libraries/runtime remain missing |
+| Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: eager-copy fork, blocking `wait4` with nonchild/selector checks, bounded same-session process groups, static/dynamic exec; broader process semantics remain missing |
+| Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `clone` threads, per-thread stacks/TLS and clear-child-tid join; detach/affinity/rseq details and broader stress remain |
+| Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: bounded demand paging for anonymous mappings; `MAP_SHARED|MAP_ANONYMOUS` is supported only among threads sharing one `CLONE_VM` address space, with thread-group VMA metadata kept in sync. File-backed shared mappings remain unsupported. `fork()` returns `ENOSYS` while such a mapping exists because cross-process shared-frame ownership is not implemented. |
+| Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: futex wait/wake queues, timeout (`ETIMEDOUT`), clear-child-tid join, and eventfd counters shared by threads in one tgid; robust lists, condition variables, and semaphores remain |
+| Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Partial: self/group and cross-process SIGUSR1 fixture coverage; siginfo/ucontext and complete alt-stack/restart semantics remain missing |
 | Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; no sleeps/timers |
-| Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root plus a bounded per-task `/tmp` overlay; `openat`/`read`/`pread64`/`write`/`close`/`lseek`/`access`; no stat, directories, persistence, or portal |
+| Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root plus bounded `/tmp` overlay and one exact existing overlay-file `IN_MODIFY` watch; requires `IN_NONBLOCK`. Default blocking init/reads, rootfs/directory watches, other events, overflow, and persistent/shared-thread watch identity are unsupported |
+| Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Timeout-zero `poll`/`epoll_wait`, same-tgid thread-shared eventfd, and narrow nonblocking inotify | Partial: blocking/finite poll and epoll waits, pipe/cross-process waits, and full inotify remain unsupported |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/dev/urandom`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | Not implemented |
 | Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
 | Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Not implemented; no GPU service |
@@ -78,6 +78,13 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | D-Bus / XDG portal | Session bus, file chooser portal | IPC bridge and portal integration | Not implemented |
 | Audio | ALSA/PipeWire | Audio service | Not implemented; not required for first milestone |
 | Network | Sockets, DNS | Network service and capability policy | Not implemented; denied by default |
+
+`poll` and `epoll_wait` are timeout-zero only. Finite and infinite/blocking
+timeouts return `-EOPNOTSUPP`; pipe and cross-process waits are unsupported.
+Eventfd counters are shared between threads with the same tgid; fork creates a
+process-private counter snapshot. Futex timed waits are implemented and the
+fixture verifies `ETIMEDOUT` (`AETHER_LINUX_FUTEX_TIMEOUT_OK`); this does not
+provide blocking poll/epoll waits or their wakeup/deadline integration.
 
 ## Runtime architecture
 
@@ -159,36 +166,48 @@ syscall and pointer is validated; unsupported calls fail with `ENOSYS`, never
 with ambient authority.
 
 **Evidence:** boot transcript, syscall coverage tests, denial tests. **Partial:**
-a dynamically linked test image is mapped through `PT_INTERP` into an `ET_DYN`
-address space, receives argc/argv/envp/auxv, and hands control from a test
-interpreter to the main entry (`AETHER_LINUX_DYN_INTERP_OK`,
-`AETHER_LINUX_DYN_MAIN_OK`, `AETHER_LINUX_DYN_OK`). The opt-in `make
-glibc-test` target builds a runtime rootfs from the host glibc, resolves the
-real `PT_INTERP` path through that rootfs, and runs a dynamically linked C
-hello through `ld.so`, relocations, and shared `libc` (`AETHER_GLIBC_OK`). This
-is a host-ABI smoke test, not the pinned production runtime. File metadata,
-`readlink`, `fcntl`, descriptor duplication, directory enumeration, and a
-bounded pipe with non-blocking `poll` are also exercised
-(`AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
-`AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). A thread is created with
+bounded demand paging for private anonymous mappings is exercised for zero-fill
+and write/read (`AETHER_LINUX_DEMAND_PAGING_OK`). Static and dynamic `execve`
+fixtures verify bounded argv/envp propagation (`AETHER_LINUX_EXECVE_OK`,
+`AETHER_LINUX_EXECVE_DYN_OK`). A dynamic test image is mapped through
+`PT_INTERP` into an `ET_DYN` address space, receives argc/argv/envp/auxv, and
+hands control from the test interpreter to the main entry
+(`AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
+`AETHER_LINUX_DYN_OK`). The opt-in `make glibc-test` target builds a runtime
+rootfs from host glibc, resolves the real `PT_INTERP` path through that rootfs,
+and runs a dynamically linked C hello through `ld.so`, relocations, and shared
+`libc` (`AETHER_GLIBC_OK`). This is a host-ABI smoke test, not the pinned
+production runtime. File metadata, `readlink`, `fcntl`, descriptor duplication,
+directory enumeration, and a bounded pipe with non-blocking `poll` are also
+exercised (`AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
+`AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). The inotify fixture requires
+`IN_NONBLOCK` and watches one exact overlay file for `IN_MODIFY`
+(`AETHER_LINUX_INOTIFY_OK`); blocking mode/reads and full inotify are missing.
+A thread is created with
 `clone(CLONE_VM|CLONE_THREAD)`, synchronizes through `FUTEX_WAIT`/`FUTEX_WAKE`,
 and joins through `CLONE_CHILD_CLEARTID` (`AETHER_LINUX_THREAD_OK`). `mremap`
 grows and moves a mapping while preserving contents (`AETHER_LINUX_MREMAP_OK`).
 A SIGUSR1 handler is installed, raised, run, and returned from through
-`rt_sigreturn` (`AETHER_LINUX_SIGNAL_OK`). A child process is forked and its
-exit status is reaped through `wait4` (`AETHER_LINUX_FORK_OK`), then the
-process replaces itself with `/usr/bin/exec` through `execve`
-(`AETHER_LINUX_EXECVE_OK`). A static freestanding Linux ELF runs at CPL3,
+`rt_sigreturn` (`AETHER_LINUX_SIGNAL_OK`); a separate child receives
+cross-process SIGUSR1 (`AETHER_LINUX_CROSS_PROCESS_SIGNAL_OK`). A child process
+is forked and reaped through blocking `wait4`, with nonchild/selector checks
+(`AETHER_LINUX_FORK_OK`), and bounded same-session process groups are exercised
+(`AETHER_LINUX_PROCESS_GROUP_OK`). Futex timeout behavior is tested
+(`AETHER_LINUX_FUTEX_TIMEOUT_OK`). Eventfd counters are shared across threads
+in one tgid (and remain process-private across fork); `poll`/`epoll_wait` support
+timeout zero only, with finite and blocking waits returning `-EOPNOTSUPP`.
+Pipe and cross-process waits remain unsupported. A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only
 root, create/write/read through the `/tmp` overlay, `write`, and `exit`. It
 produces `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 `AETHER_LINUX_VMA_OK`, plus `AETHER_LINUX_OK`; a writable+executable mapping
-and a W+X `mprotect` are denied. Frames are allocated at `mmap`/`brk` time and
-returned on `munmap` and task exit. The dynamic loader, threads, real futex
-waiting, signals, `mremap`, page-fault handling, and the user-space `linuxd`
-protocol remain missing.
+and a W+X `mprotect` are denied. Private anonymous pages are allocated on demand
+and reclaimed on `munmap` and task exit. Shared mappings and per-domain mapping
+quotas, blocking poll/epoll waits, pipe/cross-process waits, full inotify,
+siginfo/ucontext, and the user-space `linuxd` protocol remain missing. Gate 2
+remains partial.
 
 ### Gate 3 — Headless GridCraft
 
@@ -225,14 +244,20 @@ revocation tests, and a compatibility record no better than the suite supports.
 
 1. No pinned production glibc/Mesa/Wayland runtime rootfs; the current dynamic
    proof packages the host glibc and runs a hello, not GridCraft.
-2. No user-space process creation, threads, real futex queues, or signals.
-3. No `mremap`, page-fault handling, or shared mappings; every mapping is
-   eager and private.
-4. No populated and pinned glibc/Mesa/Wayland runtime rootfs.
-5. No `linuxd` service, Wayland service, or software renderer.
+2. No user-space `linuxd`; kernel fixtures do not constitute the planned
+   user-space process/runtime service.
+3. Shared mappings are limited to `MAP_SHARED|MAP_ANONYMOUS` within one
+   `CLONE_VM` thread group. File-backed shared mappings are unsupported, and
+   `fork()` returns `ENOSYS` while a shared mapping exists. There are no
+   per-domain mapping quotas.
+4. Blocking/finite poll and epoll waits (including pipe/cross-process waits),
+   full inotify, and complete
+   siginfo/ucontext semantics remain absent.
+5. No populated and pinned glibc/Mesa/Wayland runtime rootfs, Wayland service,
+   or software renderer.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.
 7. No persistent storage; the current RAM disk is volatile.
-8. No user-supplied AppImage import or Linux runtime package channel.
+8. No user-supplied AppImage opening or Linux runtime package channel.
 
 These are ordered dependencies, not independent bugs. Gate 3 does not require
 graphics; Gate 4 does. Owners and test IDs are in the

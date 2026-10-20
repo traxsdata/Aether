@@ -13,7 +13,7 @@ _start:
      *      -1, 0) */
     mov $9, %rax
     xor %rdi, %rdi
-    mov $4096, %rsi
+    mov $8192, %rsi
     mov $3, %rdx
     mov $0x22, %r10
     mov $-1, %r8
@@ -23,6 +23,28 @@ _start:
     js fail_mmap
     mov %rax, %r12
 
+    /* The syscall wrapper must page in a valid untouched buffer before it
+     * checks the descriptor. The invalid fd then returns EBADF without
+     * exposing the zero byte on the serial output. */
+    mov $0, %rax
+    mov $999, %rdi
+    lea 4096(%r12), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $-9, %rax                /* -EBADF */
+    jne fail_mmap
+    /* The page was untouched until read's validated buffer access. */
+    cmpq $0, 4096(%r12)
+    jne fail_mmap
+    movabs $0x706167656661756c, %rax
+    mov %rax, 4096(%r12)
+    cmp %rax, 4096(%r12)
+    jne fail_mmap
+    mov $1, %rax
+    mov $1, %rdi
+    lea demand_message(%rip), %rsi
+    mov $demand_message_len, %rdx
+    syscall
     /* The arena is writable anonymous memory. */
     movabs $0x1122334455667788, %rax
     mov %rax, (%r12)
@@ -86,6 +108,37 @@ _start:
     js fail_overlay
     mov %rax, %r13
 
+    /* init1(flags=0) requests blocking mode and must be rejected. */
+    mov $294, %rax
+    xor %rdi, %rdi
+    syscall
+    cmp $-22, %rax
+    jne fail_inotify_flags
+
+    /* Only IN_NONBLOCK is supported; watch the overlay file for IN_MODIFY. */
+    mov $294, %rax
+    mov $0x800, %rdi              /* IN_NONBLOCK */
+    syscall
+    test %rax, %rax
+    js fail_inotify_init
+    mov %rax, %r15
+    mov $254, %rax
+    mov %r15, %rdi
+    lea overlay_path(%rip), %rsi
+    mov $2, %rdx                 /* IN_MODIFY */
+    syscall
+    cmp $1, %rax
+    jne fail_inotify_add
+
+    /* No event is pending yet, so a nonblocking read must return EAGAIN. */
+    mov $0, %rax
+    mov %r15, %rdi
+    mov %r12, %rsi
+    mov $16, %rdx
+    syscall
+    cmp $-11, %rax
+    jne fail_inotify_empty
+
     /* write the overlay content */
     mov $1, %rax
     mov %r13, %rdi
@@ -96,6 +149,22 @@ _start:
     js fail_overlay
     cmp $overlay_content_len, %rax
     jne fail_overlay
+
+    /* read one fixed-size struct inotify_event; wd=1, mask=IN_MODIFY. */
+    mov $0, %rax
+    mov %r15, %rdi
+    mov %r12, %rsi
+    mov $16, %rdx
+    syscall
+    cmp $16, %rax
+    jne fail_inotify_event_length
+    cmpl $1, 0(%r12)
+    jne fail_inotify_event_watch
+    cmpl $2, 4(%r12)
+    jne fail_inotify_event_mask
+    mov $3, %rax
+    mov %r15, %rdi
+    syscall
 
     /* close and reopen read-only */
     mov $3, %rax
@@ -562,27 +631,127 @@ _start:
     mov $signal_message_len, %rdx
     syscall
 
+    /* Cross-process SIGUSR1: child installs a handler and waits; parent sends. */
+    push %r14
+    push %r15
+    mov $57, %rax               /* fork */
+    syscall
+    test %rax, %rax
+    js fail_signal
+    jz cross_signal_child
+    mov %rax, %r14              /* child PID */
+    /* Give the child a scheduling interval to install its handler. */
+    mov $10000000, %r15d
+cross_signal_delay:
+    dec %r15d
+    jne cross_signal_delay
+    mov %r14, %rdi
+    mov $10, %rsi               /* SIGUSR1 */
+    mov $62, %rax               /* kill(child_pid, SIGUSR1) */
+    syscall
+    test %rax, %rax
+    jne fail_signal
+    sub $16, %rsp
+    mov $61, %rax               /* wait4(child_pid, &status, 0, NULL) */
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_signal
+    cmpl $0x2b00, (%rsp)        /* handler-observed child exits 43 */
+    jne fail_signal
+    add $16, %rsp
+    mov $1, %rax
+    mov $1, %rdi
+    lea cross_signal_message(%rip), %rsi
+    mov $cross_signal_message_len, %rdx
+    syscall
+    pop %r15
+    pop %r14
+    jmp cross_signal_done
+
+cross_signal_child:
+    sub $16, %rsp
+    movl $0, (%rsp)
+    mov %rsp, %r12              /* handler writes this child's private flag */
+    sub $64, %rsp
+    lea signal_handler(%rip), %rax
+    mov %rax, 0(%rsp)
+    movq $0x04000000, 8(%rsp)   /* SA_RESTORER */
+    lea signal_restorer(%rip), %rax
+    mov %rax, 16(%rsp)
+    movq $0, 24(%rsp)
+    mov $13, %rax               /* rt_sigaction(SIGUSR1, ...) */
+    mov $10, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_signal
+    add $64, %rsp
+cross_signal_wait:
+    cmpl $1, (%r12)
+    jne cross_signal_wait
+    mov $60, %rax
+    mov $43, %rdi
+    syscall
+    jmp cross_signal_wait
+
+cross_signal_done:
     /* Fork + wait4: the child exits 42 and the parent reaps the status. */
+    /* kill(0, 0) is an existence check on the caller's process group. */
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    mov $62, %rax
+    syscall
+    test %rax, %rax
+    jne fail_fork
+    mov $39, %rax               /* Preserve the inherited group's leader PID. */
+    syscall
+    mov %rax, %r13
+    neg %r13
+    mov %r13, %rdi
+    xor %rsi, %rsi
+    mov $62, %rax               /* kill(-pgid, 0): group existence check */
+    syscall
+    test %rax, %rax
+    jne fail_fork
+    neg %r13
     sub $16, %rsp
     mov $57, %rax               /* fork */
     syscall
     test %rax, %rax
     js fail_fork
     jz child_process
+    mov %rax, %r12
+    /* A non-child PID must fail immediately, despite a live child. */
+    mov $61, %rax
+    lea 100(%r12), %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $-10, %rax              /* -ECHILD */
+    jne fail_fork
+    /* Unsupported process-group selectors must be rejected. */
+    mov $61, %rax
+    mov $-2, %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $-22, %rax              /* -EINVAL */
+    jne fail_fork
 parent_wait:
-    mov $61, %rax               /* wait4(-1, &status, WNOHANG) */
-    mov $-1, %rdi
+    mov $61, %rax               /* blocking wait4(child, &status, 0) */
+    mov %r12, %rdi
     mov %rsp, %rsi
-    mov $1, %rdx
+    xor %rdx, %rdx
     xor %r10, %r10
     syscall
     test %rax, %rax
     js fail_fork
-    jnz reaped_child
-    mov $24, %rax               /* sched_yield */
-    syscall
-    jmp parent_wait
-reaped_child:
     cmpl $0x2a00, (%rsp)        /* exit 42 << 8 */
     jne fail_fork
     add $16, %rsp
@@ -594,6 +763,30 @@ reaped_child:
     jmp after_fork
 
 child_process:
+    /* Join the parent's group, then setsid is legal because we are not leader. */
+    mov $109, %rax               /* setpgid(0, parent_pgid) */
+    xor %rdi, %rdi
+    mov %r13, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_fork
+    mov $121, %rax               /* getpgid(0) */
+    xor %rdi, %rdi
+    syscall
+    cmp %r13, %rax
+    jne fail_fork
+    mov $112, %rax               /* setsid */
+    syscall
+    mov %rax, %r12                /* setsid returns the new SID (child PID). */
+    mov $39, %rax
+    syscall
+    cmp %r12, %rax
+    jne fail_fork
+    mov $121, %rax               /* setsid also makes the caller its PGID. */
+    xor %rdi, %rdi
+    syscall
+    cmp %r12, %rax
+    jne fail_fork
     mov $60, %rax
     mov $42, %rdi
     syscall
@@ -601,11 +794,20 @@ child_process:
 
 after_fork:
     /* Thread + futex: map a shared page, clone, wait for the child. */
+    sub $16, %rsp
+    movq $0, 0(%rsp)
+    mov $290, %rax              /* eventfd2 */
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    js fail_thread
+    mov %rax, %r14
     mov $9, %rax
     xor %rdi, %rdi
     mov $4096, %rsi
     mov $3, %rdx
-    mov $0x22, %r10
+    mov $0x21, %r10
     mov $-1, %r8
     xor %r9, %r9
     syscall
@@ -642,6 +844,22 @@ wait_child:
     syscall
     jmp wait_child
 thread_done:
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    mov $8, %rdx
+    xor %rax, %rax
+    syscall
+    cmp $8, %rax
+    jne fail_thread
+    cmpq $1, 0(%rsp)
+    jne fail_thread
+    cmpl $1, 16(%r12)
+    jne fail_thread
+    mov $57, %rax               /* fork is explicitly unsupported here */
+    syscall
+    cmp $-38, %rax
+    jne fail_thread
+    add $16, %rsp
     mov %r12, %rdi
     mov $4096, %rsi
     mov $11, %rax
@@ -651,9 +869,22 @@ thread_done:
     lea thread_message(%rip), %rsi
     mov $thread_message_len, %rdx
     syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea shared_mmap_message(%rip), %rsi
+    mov $shared_mmap_message_len, %rdx
+    syscall
     jmp after_thread
 
 child_thread:
+    movq $1, 16(%r12)
+    mov %r14, %rdi
+    lea 16(%r12), %rsi
+    mov $8, %rdx
+    mov $1, %rax
+    syscall
+    cmp $8, %rax
+    jne fail_thread
     movl $1, (%r12)
     mov $202, %rax              /* futex wake flag */
     mov %r12, %rdi
@@ -666,10 +897,53 @@ child_thread:
     jmp child_thread
 
 after_thread:
+    /* A 30 ms relative FUTEX_WAIT timeout rounds up to three 100 Hz ticks. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_thread
+    mov %rax, %r12
+    movl $0, (%r12)
+    sub $16, %rsp
+    movq $0, 0(%rsp)
+    movq $30000000, 8(%rsp)
+    mov $202, %rax
+    mov %r12, %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    mov %rsp, %r10
+    syscall
+    add $16, %rsp
+    cmp $-110, %rax
+    jne fail_thread
+    mov $11, %rax
+    mov %r12, %rdi
+    mov $4096, %rsi
+    syscall
+    test %rax, %rax
+    js fail_thread
+    mov $1, %rax
+    mov $1, %rdi
+    lea futex_timeout_message(%rip), %rsi
+    mov $futex_timeout_message_len, %rdx
+    syscall
+
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea event_message(%rip), %rsi
     mov $event_message_len, %rdx
+    syscall
+
+    mov $1, %rax
+    mov $1, %rdi
+    lea inotify_message(%rip), %rsi
+    mov $inotify_message_len, %rdx
     syscall
 
     mov $1, %rax                /* write */
@@ -705,8 +979,8 @@ after_thread:
     /* execve replaces this process; success never returns here. */
     mov $59, %rax
     lea exec_path(%rip), %rdi
-    xor %rsi, %rsi
-    xor %rdx, %rdx
+    lea exec_argv(%rip), %rsi
+    lea exec_envp(%rip), %rdx
     syscall
     lea exec_failure(%rip), %rsi
     mov $exec_failure_len, %rdx
@@ -754,6 +1028,38 @@ fail_event:
     lea event_failure(%rip), %rsi
     mov $event_failure_len, %rdx
     jmp report_failure
+fail_inotify:
+    lea inotify_failure(%rip), %rsi
+    mov $inotify_failure_len, %rdx
+    jmp report_failure
+fail_inotify_flags:
+    lea inotify_flags_failure(%rip), %rsi
+    mov $inotify_flags_failure_len, %rdx
+    jmp report_failure
+fail_inotify_init:
+    lea inotify_init_failure(%rip), %rsi
+    mov $inotify_init_failure_len, %rdx
+    jmp report_failure
+fail_inotify_add:
+    lea inotify_add_failure(%rip), %rsi
+    mov $inotify_add_failure_len, %rdx
+    jmp report_failure
+fail_inotify_empty:
+    lea inotify_empty_failure(%rip), %rsi
+    mov $inotify_empty_failure_len, %rdx
+    jmp report_failure
+fail_inotify_event_length:
+    lea inotify_event_length_failure(%rip), %rsi
+    mov $inotify_event_length_failure_len, %rdx
+    jmp report_failure
+fail_inotify_event_watch:
+    lea inotify_event_watch_failure(%rip), %rsi
+    mov $inotify_event_watch_failure_len, %rdx
+    jmp report_failure
+fail_inotify_event_mask:
+    lea inotify_event_mask_failure(%rip), %rsi
+    mov $inotify_event_mask_failure_len, %rdx
+    jmp report_failure
 fail_thread:
     lea thread_failure(%rip), %rsi
     mov $thread_failure_len, %rdx
@@ -783,8 +1089,22 @@ report_failure:
 message:
     .ascii "AETHER_LINUX_EXEC_OK source=static-linux-elf mmap=ok fs=ok overlay=ok\n"
     .set message_len, . - message
+demand_message:
+    .ascii "AETHER_LINUX_DEMAND_PAGING_OK zero=ok write=ok\n"
+    .set demand_message_len, . - demand_message
 exec_path:
     .asciz "/usr/bin/exec"
+exec_arg0:
+    .asciz "/usr/bin/exec"
+exec_arg1:
+    .asciz "arg-one"
+exec_env:
+    .asciz "AETHER_EXEC_ENV=present"
+    .align 8
+exec_argv:
+    .quad exec_arg0, exec_arg1, 0
+exec_envp:
+    .quad exec_env, 0
 exec_failure:
     .ascii "AETHER_LINUX_EXECVE_FAIL\n"
     .set exec_failure_len, . - exec_failure
@@ -820,12 +1140,45 @@ event_message:
 event_failure:
     .ascii "AETHER_LINUX_EVENT_FAIL\n"
     .set event_failure_len, . - event_failure
+inotify_message:
+    .ascii "AETHER_LINUX_INOTIFY_OK modify=ok bounded=ok\n"
+    .set inotify_message_len, . - inotify_message
+inotify_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL\n"
+    .set inotify_failure_len, . - inotify_failure
+inotify_flags_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=flags\n"
+    .set inotify_flags_failure_len, . - inotify_flags_failure
+inotify_init_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=init_nonblock\n"
+    .set inotify_init_failure_len, . - inotify_init_failure
+inotify_add_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=add_watch\n"
+    .set inotify_add_failure_len, . - inotify_add_failure
+inotify_empty_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=empty_read\n"
+    .set inotify_empty_failure_len, . - inotify_empty_failure
+inotify_event_length_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=event_length\n"
+    .set inotify_event_length_failure_len, . - inotify_event_length_failure
+inotify_event_watch_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=event_watch\n"
+    .set inotify_event_watch_failure_len, . - inotify_event_watch_failure
+inotify_event_mask_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=event_mask\n"
+    .set inotify_event_mask_failure_len, . - inotify_event_mask_failure
 thread_message:
     .ascii "AETHER_LINUX_THREAD_OK clone=ok futex=ok join=ok\n"
     .set thread_message_len, . - thread_message
+shared_mmap_message:
+    .ascii "AETHER_LINUX_SHARED_MMAP_OK thread=visible fork=blocked\n"
+    .set shared_mmap_message_len, . - shared_mmap_message
 thread_failure:
     .ascii "AETHER_LINUX_THREAD_FAIL\n"
     .set thread_failure_len, . - thread_failure
+futex_timeout_message:
+    .ascii "AETHER_LINUX_FUTEX_TIMEOUT_OK etimedout=ok\n"
+    .set futex_timeout_message_len, . - futex_timeout_message
 mremap_message:
     .ascii "AETHER_LINUX_MREMAP_OK grow=ok data=ok\n"
     .set mremap_message_len, . - mremap_message
@@ -835,11 +1188,14 @@ mremap_failure:
 signal_message:
     .ascii "AETHER_LINUX_SIGNAL_OK handler=ok return=ok\n"
     .set signal_message_len, . - signal_message
+cross_signal_message:
+    .ascii "AETHER_LINUX_CROSS_PROCESS_SIGNAL_OK fork=ok kill=ok handler=received\n"
+    .set cross_signal_message_len, . - cross_signal_message
 signal_failure:
     .ascii "AETHER_LINUX_SIGNAL_FAIL\n"
     .set signal_failure_len, . - signal_failure
 fork_message:
-    .ascii "AETHER_LINUX_FORK_OK fork=ok wait4=ok status=ok\n"
+    .ascii "AETHER_LINUX_FORK_OK fork=ok wait4=ok status=ok\nAETHER_LINUX_PROCESS_GROUP_OK setpgid=ok getpgid=ok setsid=ok kill_group=ok\n"
     .set fork_message_len, . - fork_message
 fork_failure:
     .ascii "AETHER_LINUX_FORK_FAIL\n"

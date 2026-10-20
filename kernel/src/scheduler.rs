@@ -92,6 +92,7 @@ enum LinuxFileSource {
     Pipe { index: usize, write: bool },
     EventFd { index: usize },
     Epoll { index: usize },
+    Inotify,
 }
 
 const PIPE_BYTES: usize = 512;
@@ -155,6 +156,23 @@ struct LinuxOverlay {
     len: usize,
 }
 
+#[derive(Clone, Copy)]
+struct LinuxInotify {
+    path: [u8; OVERLAY_PATH],
+    path_len: usize,
+    watched: bool,
+    pending_modify: bool,
+}
+
+impl LinuxInotify {
+    const EMPTY: Self = Self {
+        path: [0; OVERLAY_PATH],
+        path_len: 0,
+        watched: false,
+        pending_modify: false,
+    };
+}
+
 impl LinuxOverlay {
     const EMPTY: Self = Self {
         path: [0; OVERLAY_PATH],
@@ -209,15 +227,23 @@ struct Task {
     caps: CapTable,
     handles: TaskHandles,
     vmas: VmaTable,
+    anonymous_vmas: VmaTable,
+    shared_vmas: VmaTable,
     brk: u64,
     fs_base: u64,
     tgid: usize,
+    pgid: usize,
+    sid: usize,
     futex_address: u64,
+    futex_deadline: u64,
     clear_child_tid: u64,
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
     linux_overlay: [Option<LinuxOverlay>; OVERLAY_FILES],
+    linux_inotify: Option<LinuxInotify>,
     linux_pipes: [Option<LinuxPipe>; MAX_PIPES],
-    linux_eventfds: [Option<u64>; MAX_EVENTFDS],
+    // Descriptor-local allocation map; counters live in EVENTFD_COUNTERS and
+    // are addressed by (tgid, slot), so cloned threads share them.
+    linux_eventfds: [Option<()>; MAX_EVENTFDS],
     linux_epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
     sigactions: [Option<SigAction>; MAX_SIGNALS],
     sigblocked: u64,
@@ -225,6 +251,8 @@ struct Task {
     sigaltstack: Option<(u64, u64)>,
     parent: usize,
     exit_status: i64,
+    wait_pid: i64,
+    wait_status_pointer: u64,
 }
 
 impl Task {
@@ -245,13 +273,19 @@ impl Task {
                 ep_b_recv: None,
             },
             vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
+            anonymous_vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
+            shared_vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
             brk: 0,
             fs_base: 0,
             tgid: 0,
+            pgid: 0,
+            sid: 0,
             futex_address: 0,
+            futex_deadline: 0,
             clear_child_tid: 0,
             linux_fds: [None; crate::linux::MAX_FDS],
             linux_overlay: [None; OVERLAY_FILES],
+            linux_inotify: None,
             linux_pipes: [None; MAX_PIPES],
             linux_eventfds: [None; MAX_EVENTFDS],
             linux_epolls: [None; MAX_EPOLLS],
@@ -261,6 +295,8 @@ impl Task {
             sigaltstack: None,
             parent: 0,
             exit_status: 0,
+            wait_pid: 0,
+            wait_status_pointer: 0,
         }
     }
 }
@@ -275,6 +311,8 @@ unsafe impl<T> Sync for Global<T> {}
 
 static TASKS: Global<[Task; MAX_TASKS]> =
     Global(UnsafeCell::new([const { Task::new() }; MAX_TASKS]));
+static EVENTFD_COUNTERS: Global<[[Option<u64>; MAX_EVENTFDS]; MAX_TASKS]> =
+    Global(UnsafeCell::new([[None; MAX_EVENTFDS]; MAX_TASKS]));
 #[repr(align(16))]
 struct WorkerStacks([[u8; STACK_SIZE]; WORKER_COUNT]);
 
@@ -624,6 +662,8 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     linux.root = crate::fs::DEMO_ROOT;
     linux.brk = paging::LINUX_ARENA_BASE;
     linux.tgid = LINUX_TASK;
+    linux.pgid = LINUX_TASK;
+    linux.sid = LINUX_TASK;
     tasks[LINUX_TASK] = linux;
 
     // Load a position-independent image through its interpreter. This proves
@@ -638,9 +678,15 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         .ok_or(SchedulerError::LinuxImage)?;
     let dynamic_interp =
         crate::linux::file_data(interpreter_path).ok_or(SchedulerError::LinuxImage)?;
-    let dynamic =
-        crate::linux_loader::load(allocator, dynamic_main, dynamic_interp, LINUX_DYN_PATH)
-            .map_err(|_| SchedulerError::LinuxImage)?;
+    let dynamic = crate::linux_loader::load(
+        allocator,
+        dynamic_main,
+        dynamic_interp,
+        LINUX_DYN_PATH,
+        &[LINUX_DYN_PATH],
+        &["LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64"],
+    )
+    .map_err(|_| SchedulerError::LinuxImage)?;
     let dynamic_kernel_top = stack_top(&kernel_stacks.0[LINUX_DYN_TASK]);
     let dynamic_saved_rsp =
         prepare_user_stack(dynamic_kernel_top, dynamic.entry, dynamic.stack_pointer);
@@ -654,6 +700,8 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     dynamic_task.root = crate::fs::DEMO_ROOT;
     dynamic_task.brk = paging::LINUX_ARENA_BASE;
     dynamic_task.tgid = LINUX_DYN_TASK;
+    dynamic_task.pgid = LINUX_DYN_TASK;
+    dynamic_task.sid = LINUX_DYN_TASK;
     let dynamic_interpreter =
         aether_linux_elf::parse(dynamic_interp).map_err(|_| SchedulerError::LinuxImage)?;
     seed_linux_vmas(
@@ -1107,11 +1155,14 @@ pub fn linux_clone(
         parent_pml4,
         parent_root,
         parent_vmas,
+        parent_anonymous_vmas,
+        parent_shared_vmas,
         parent_brk,
         parent_fs_base,
         parent_tgid,
         parent_fds,
         parent_overlay,
+        parent_inotify,
         parent_pipes,
         parent_eventfds,
         parent_epolls,
@@ -1123,11 +1174,14 @@ pub fn linux_clone(
             parent.pml4,
             parent.root,
             parent.vmas,
+            parent.anonymous_vmas,
+            parent.shared_vmas,
             parent.brk,
             parent.fs_base,
             parent.tgid,
             parent.linux_fds,
             parent.linux_overlay,
+            parent.linux_inotify,
             parent.linux_pipes,
             parent.linux_eventfds,
             parent.linux_epolls,
@@ -1149,6 +1203,8 @@ pub fn linux_clone(
     thread.kernel_stack_top = kernel_top;
     thread.root = parent_root;
     thread.vmas = parent_vmas;
+    thread.anonymous_vmas = parent_anonymous_vmas;
+    thread.shared_vmas = parent_shared_vmas;
     thread.brk = parent_brk;
     thread.fs_base = if flags & CLONE_SETTLS != 0 {
         tls
@@ -1156,10 +1212,14 @@ pub fn linux_clone(
         parent_fs_base
     };
     thread.tgid = parent_tgid;
+    thread.pgid = tasks[current].pgid;
+    thread.sid = tasks[current].sid;
     thread.futex_address = 0;
+    thread.futex_deadline = 0;
     thread.clear_child_tid = child_tid;
     thread.linux_fds = parent_fds;
     thread.linux_overlay = parent_overlay;
+    thread.linux_inotify = parent_inotify;
     thread.linux_pipes = parent_pipes;
     thread.linux_eventfds = parent_eventfds;
     thread.linux_epolls = parent_epolls;
@@ -1190,6 +1250,14 @@ pub fn linux_clone(
 pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
+    if tasks.iter().any(|task| {
+        task.state != TaskState::Empty
+            && task.state != TaskState::Done
+            && task.tgid == tasks[current].tgid
+            && !task.shared_vmas.is_empty()
+    }) {
+        return Err(LINUX_ENOSYS);
+    }
     let parent_pml4 = tasks[current].pml4;
     let Some(slot) = tasks.iter().position(|task| task.state == TaskState::Empty) else {
         return Err(LINUX_EAGAIN);
@@ -1208,12 +1276,16 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         abi,
         root,
         vmas,
+        anonymous_vmas,
+        shared_vmas,
         brk,
         fs_base,
         fds,
         overlay,
+        inotify,
         pipes,
         eventfds,
+        parent_tgid,
         epolls,
         sigactions,
         sigblocked,
@@ -1224,12 +1296,16 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
             parent.abi,
             parent.root,
             parent.vmas,
+            parent.anonymous_vmas,
+            parent.shared_vmas,
             parent.brk,
             parent.fs_base,
             parent.linux_fds,
             parent.linux_overlay,
+            parent.linux_inotify,
             parent.linux_pipes,
             parent.linux_eventfds,
+            parent.tgid,
             parent.linux_epolls,
             parent.sigactions,
             parent.sigblocked,
@@ -1247,14 +1323,25 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.kernel_stack_top = kernel_top;
     child.root = root;
     child.vmas = vmas;
+    child.anonymous_vmas = anonymous_vmas;
+    child.shared_vmas = shared_vmas;
     child.brk = brk;
     child.fs_base = fs_base;
     child.tgid = slot;
+    child.pgid = tasks[current].pgid;
+    child.sid = tasks[current].sid;
     child.parent = current;
     child.linux_fds = fds;
     child.linux_overlay = overlay;
+    child.linux_inotify = inotify;
     child.linux_pipes = pipes;
     child.linux_eventfds = eventfds;
+    // fork gets a process-private snapshot; threads continue to address the
+    // parent's counters via their shared tgid.
+    if parent_tgid < MAX_TASKS {
+        let counters = unsafe { &mut *EVENTFD_COUNTERS.0.get() };
+        counters[slot] = counters[parent_tgid];
+    }
     child.linux_epolls = epolls;
     child.sigactions = sigactions;
     child.sigblocked = sigblocked;
@@ -1282,8 +1369,19 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
 pub fn linux_replace_image(pml4: PhysFrame) {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let old_pml4 = PhysFrame::from_address(task.pml4);
+    if let Some(old_pml4) = old_pml4.filter(|old| *old != pml4) {
+        // The replacement is already active when this is called. Release all
+        // user leaf frames from the obsolete image, including ELF/stack pages
+        // that are not represented by the mmap VMA table.
+        let _ = crate::memory::with_frame_allocator(|allocator| {
+            let _ =
+                paging::unmap_user_range(allocator, old_pml4, USER_BASE, USER_LIMIT - USER_BASE);
+        });
+    }
     task.pml4 = pml4.start_address();
     task.vmas.reset();
+    task.anonymous_vmas.reset();
     task.brk = paging::LINUX_ARENA_BASE;
     task.fs_base = 0;
 }
@@ -1291,8 +1389,12 @@ pub fn linux_replace_image(pml4: PhysFrame) {
 /// Reaps an exited child of the current process.
 ///
 /// Returns `None` when the child has not exited yet and [`LINUX_ECHILD`] when
-/// there is no matching child. `pid <= 0` matches any child.
+/// there is no matching child. `pid == -1` matches any child; positive PIDs
+/// match exactly. Process-group selectors are unsupported.
 pub fn linux_wait4(pid: i64) -> Result<Option<(usize, i64)>, i64> {
+    if pid < -1 || pid == 0 {
+        return Err(LINUX_EINVAL);
+    }
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     let mut has_child = false;
@@ -1300,8 +1402,9 @@ pub fn linux_wait4(pid: i64) -> Result<Option<(usize, i64)>, i64> {
         if task.parent != current || index == current {
             continue;
         }
-        has_child = true;
-        if task.state == TaskState::Done && (pid <= 0 || pid as usize == index) {
+        let matches = pid == -1 || pid as usize == index;
+        has_child |= matches;
+        if task.state == TaskState::Done && matches {
             let status = task.exit_status;
             *task = Task::new();
             return Ok(Some((index, status)));
@@ -1314,11 +1417,88 @@ pub fn linux_wait4(pid: i64) -> Result<Option<(usize, i64)>, i64> {
     }
 }
 
+/// Blocks the current process until a matching child exits.
+pub fn linux_wait4_block(
+    frame: *mut InterruptFrame,
+    pid: i64,
+    status_pointer: u64,
+) -> *mut InterruptFrame {
+    match linux_wait4(pid) {
+        Err(error) => {
+            unsafe { (*frame).rax = error as u64 };
+            return frame;
+        }
+        Ok(Some((child, status))) => {
+            // A child may have exited between the caller's first check and
+            // entering this helper. Complete the wait instead of sleeping.
+            if status_pointer != 0 {
+                let status_bytes = (status as u32).to_ne_bytes();
+                if !current_pml4().is_some_and(|pml4| {
+                    paging::write_user_bytes(pml4, status_pointer, &status_bytes)
+                }) {
+                    unsafe { (*frame).rax = (-14i64) as u64 };
+                    return frame;
+                }
+            }
+            unsafe { (*frame).rax = child as u64 };
+            return frame;
+        }
+        Ok(None) => {}
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    tasks[current].wait_pid = pid;
+    tasks[current].wait_status_pointer = status_pointer;
+    tasks[current].state = TaskState::Blocked;
+    yield_current(frame)
+}
+
+fn wake_waiting_parent(child: usize) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let parent = tasks[child].parent;
+    if parent >= tasks.len() || parent == child {
+        return;
+    }
+    let wait_pid = tasks[parent].wait_pid;
+    if tasks[parent].state == TaskState::Blocked && (wait_pid == -1 || wait_pid as usize == child) {
+        if let Some(frame) = PhysFrame::from_address(tasks[parent].pml4)
+            .map(|_| tasks[parent].saved_rsp as *mut InterruptFrame)
+        {
+            let status_pointer = tasks[parent].wait_status_pointer;
+            let status = (tasks[child].exit_status as u32).to_ne_bytes();
+            let status_ok = status_pointer == 0
+                || PhysFrame::from_address(tasks[parent].pml4)
+                    .is_some_and(|pml4| paging::write_user_bytes(pml4, status_pointer, &status));
+            // SAFETY: saved_rsp is the syscall frame saved when the task
+            // blocked in wait4; it remains on the parent's private kernel stack.
+            unsafe {
+                (*frame).rax = if status_ok {
+                    child as u64
+                } else {
+                    (-14i64) as u64
+                };
+            }
+        }
+        tasks[parent].wait_pid = 0;
+        tasks[parent].wait_status_pointer = 0;
+        tasks[parent].state = TaskState::Ready;
+        // The blocking wait has now consumed the child's exit status.
+        tasks[child] = Task::new();
+    }
+}
+
 /// Blocks the current Linux task on a futex word.
-pub fn linux_futex_wait(frame: *mut InterruptFrame, address: u64) -> *mut InterruptFrame {
+pub fn linux_futex_wait(
+    frame: *mut InterruptFrame,
+    address: u64,
+    timeout_ticks: Option<u64>,
+) -> *mut InterruptFrame {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     tasks[current].futex_address = address;
+    tasks[current].futex_deadline = timeout_ticks
+        .and_then(|ticks| TICKS.load(Ordering::Relaxed).checked_add(ticks))
+        .unwrap_or(0);
     tasks[current].state = TaskState::Blocked;
     yield_current(frame)
 }
@@ -1334,6 +1514,7 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
         if task.state == TaskState::Blocked && task.futex_address == address {
             task.state = TaskState::Ready;
             task.futex_address = 0;
+            task.futex_deadline = 0;
             woken += 1;
         }
     }
@@ -1400,6 +1581,52 @@ pub fn linux_send_signal(signum: u64) -> i64 {
     for task in tasks.iter_mut() {
         if task.tgid == tgid && task.abi == TaskAbi::Linux {
             task.sigpending |= 1u64 << (signum - 1);
+        }
+    }
+    0
+}
+
+/// Sends a signal to one process or a specific thread in that process.
+/// Signal zero performs only the existence check.
+pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64 {
+    if signum > MAX_SIGNALS as u64 {
+        return LINUX_EINVAL;
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let session = tasks[current].sid;
+    let targets: [bool; MAX_TASKS] = core::array::from_fn(|index| {
+        let task = &tasks[index];
+        task.state != TaskState::Empty
+            && task.state != TaskState::Done
+            && task.abi == TaskAbi::Linux
+            && task.sid == session
+            && task.tgid == tgid
+            && tid.is_none_or(|tid| tid == index)
+    });
+    if !targets.iter().any(|target| *target) {
+        return LINUX_ESRCH;
+    }
+    if signum == 0 {
+        return 0;
+    }
+    for (index, target) in targets.into_iter().enumerate() {
+        if !target {
+            continue;
+        }
+        let task = &mut tasks[index];
+        task.sigpending |= 1u64 << (signum - 1);
+        if task.state == TaskState::Blocked {
+            if task.wait_pid != 0 {
+                task.wait_pid = 0;
+                task.wait_status_pointer = 0;
+            }
+            // A queued signal interrupts blocking syscall waits. The handler
+            // is delivered from the normal timer path.
+            unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64 };
+            task.futex_address = 0;
+            task.futex_deadline = 0;
+            task.state = TaskState::Ready;
         }
     }
     0
@@ -1498,6 +1725,137 @@ pub fn linux_deliver_fault(frame: *mut InterruptFrame, signum: u64) -> bool {
 pub fn linux_getpid() -> usize {
     let tasks = unsafe { &*TASKS.0.get() };
     tasks[CURRENT.load(Ordering::Relaxed)].tgid
+}
+
+/// Current process group/session IDs. IDs are process leaders' task slots.
+pub fn linux_getpgid(pid: usize) -> Result<usize, i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let target = if pid == 0 { tasks[current].tgid } else { pid };
+    let Some(task) = tasks.iter().find(|task| {
+        task.state != TaskState::Empty
+            && task.state != TaskState::Done
+            && task.abi == TaskAbi::Linux
+            && task.tgid == target
+            && task.kind != TaskKind::Thread
+    }) else {
+        return Err(LINUX_ESRCH);
+    };
+    if task.sid != tasks[current].sid {
+        return Err(LINUX_EPERM);
+    }
+    Ok(task.pgid)
+}
+
+/// Restricted Linux setpgid: current process or its direct child, same session,
+/// and only the caller's existing group or a new group led by the target.
+pub fn linux_setpgid(pid: usize, pgid: usize) -> i64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let self_tgid = tasks[current].tgid;
+    let target = if pid == 0 { self_tgid } else { pid };
+    let Some(index) = tasks.iter().position(|task| {
+        task.state != TaskState::Empty
+            && task.state != TaskState::Done
+            && task.abi == TaskAbi::Linux
+            && task.tgid == target
+            && task.kind != TaskKind::Thread
+    }) else {
+        return LINUX_ESRCH;
+    };
+    if target != self_tgid && tasks[index].parent != current {
+        return LINUX_EPERM;
+    }
+    if tasks[index].sid != tasks[current].sid || tasks[index].sid == target {
+        return LINUX_EPERM;
+    }
+    let group = if pgid == 0 { target } else { pgid };
+    if group != target
+        && !tasks.iter().any(|task| {
+            task.state != TaskState::Empty
+                && task.state != TaskState::Done
+                && task.abi == TaskAbi::Linux
+                && task.pgid == group
+                && task.sid == tasks[current].sid
+        })
+    {
+        return LINUX_EPERM;
+    }
+    for task in tasks
+        .iter_mut()
+        .filter(|task| task.state != TaskState::Empty && task.tgid == target)
+    {
+        task.pgid = group;
+    }
+    0
+}
+
+/// Starts a new session for the caller, unless it is already a process-group leader.
+pub fn linux_setsid() -> i64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let tgid = tasks[current].tgid;
+    if tasks[current].pgid == tgid {
+        return LINUX_EPERM;
+    }
+    for task in tasks
+        .iter_mut()
+        .filter(|task| task.state != TaskState::Empty && task.tgid == tgid)
+    {
+        task.sid = tgid;
+        task.pgid = tgid;
+    }
+    tgid as i64
+}
+
+/// Signal members of a process group, preserving per-process thread-group delivery.
+pub fn linux_send_signal_group(pgid: usize, signal: u64) -> i64 {
+    if signal > MAX_SIGNALS as u64 {
+        return LINUX_EINVAL;
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let session = tasks[current].sid;
+    let targets: [bool; MAX_TASKS] = core::array::from_fn(|index| {
+        let task = &tasks[index];
+        task.state != TaskState::Empty
+            && task.state != TaskState::Done
+            && task.abi == TaskAbi::Linux
+            && task.sid == session
+            && task.pgid == pgid
+            && task.kind != TaskKind::Thread
+    });
+    if !targets.iter().any(|target| *target) {
+        return LINUX_ESRCH;
+    }
+    let tgids: [usize; MAX_TASKS] =
+        core::array::from_fn(|index| if targets[index] { tasks[index].tgid } else { 0 });
+    for task in tasks.iter_mut() {
+        if task.state == TaskState::Empty
+            || task.state == TaskState::Done
+            || !tgids.contains(&task.tgid)
+            || task.tgid == 0
+        {
+            continue;
+        }
+        if signal == 0 {
+            continue;
+        }
+        task.sigpending |= 1u64 << (signal - 1);
+        if task.state == TaskState::Blocked {
+            if task.wait_pid != 0 {
+                task.wait_pid = 0;
+                task.wait_status_pointer = 0;
+            }
+            unsafe {
+                (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64;
+            }
+            task.futex_address = 0;
+            task.futex_deadline = 0;
+            task.state = TaskState::Ready;
+        }
+    }
+    0
 }
 
 /// Clears a thread's `CLONE_CHILD_CLEARTID` word and wakes a joiner.
@@ -1599,6 +1957,8 @@ const LINUX_EISDIR: i64 = -21;
 const LINUX_EINVAL: i64 = -22;
 const LINUX_EMFILE: i64 = -24;
 const LINUX_ENOENT: i64 = -2;
+const LINUX_ESRCH: i64 = -3;
+const LINUX_EPERM: i64 = -1;
 const LINUX_EROFS: i64 = -30;
 const LINUX_ENAMETOOLONG: i64 = -36;
 const LINUX_ESPIPE: i64 = -29;
@@ -1813,7 +2173,13 @@ pub fn linux_eventfd(initial: u64) -> Result<u64, i64> {
     else {
         return Err(LINUX_EMFILE);
     };
-    task.linux_eventfds[index] = Some(initial);
+    task.linux_eventfds[index] = Some(());
+    let tgid = task.tgid;
+    if tgid >= MAX_TASKS {
+        task.linux_eventfds[index] = None;
+        return Err(LINUX_EMFILE);
+    }
+    unsafe { (*EVENTFD_COUNTERS.0.get())[tgid][index] = Some(initial) };
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
         if slot.is_none() {
             *slot = Some(LinuxFile {
@@ -1824,6 +2190,7 @@ pub fn linux_eventfd(initial: u64) -> Result<u64, i64> {
         }
     }
     task.linux_eventfds[index] = None;
+    unsafe { (*EVENTFD_COUNTERS.0.get())[tgid][index] = None };
     Err(LINUX_EMFILE)
 }
 
@@ -1970,11 +2337,11 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
             ready = events & (POLLIN | POLLOUT);
         }
         LinuxFileSource::EventFd { index } => {
-            let counter = task
-                .linux_eventfds
-                .get(index)
-                .and_then(|value| *value)
-                .unwrap_or(0);
+            let counter = if task.tgid < MAX_TASKS {
+                unsafe { (*EVENTFD_COUNTERS.0.get())[task.tgid][index].unwrap_or(0) }
+            } else {
+                0
+            };
             if events & POLLIN != 0 && counter > 0 {
                 ready |= POLLIN;
             }
@@ -1984,6 +2351,12 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
         }
         LinuxFileSource::Epoll { .. } => {
             ready = events & POLLIN;
+        }
+        LinuxFileSource::Inotify => {
+            if events & POLLIN != 0 && task.linux_inotify.is_some_and(|watch| watch.pending_modify)
+            {
+                ready |= POLLIN;
+            }
         }
     }
     ready
@@ -2038,7 +2411,14 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
         }
         LinuxFileSource::Pipe { write: true, .. } => Err(LINUX_EBADF),
         LinuxFileSource::EventFd { index } => {
-            let Some(counter) = task.linux_eventfds.get_mut(index).and_then(Option::as_mut) else {
+            if !task.linux_eventfds.get(index).is_some_and(Option::is_some)
+                || task.tgid >= MAX_TASKS
+            {
+                return Err(LINUX_EBADF);
+            }
+            let Some(counter) =
+                (unsafe { &mut (*EVENTFD_COUNTERS.0.get())[task.tgid][index] }).as_mut()
+            else {
                 return Err(LINUX_EBADF);
             };
             if *counter == 0 {
@@ -2053,6 +2433,20 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
             Ok(8)
         }
         LinuxFileSource::Epoll { .. } => Err(LINUX_EINVAL),
+        LinuxFileSource::Inotify => {
+            let watch = task.linux_inotify.as_mut().ok_or(LINUX_EBADF)?;
+            if !watch.pending_modify {
+                return Err(LINUX_EAGAIN);
+            }
+            if out.len() < 16 {
+                return Err(LINUX_EINVAL);
+            }
+            out[..16].fill(0);
+            out[..4].copy_from_slice(&1i32.to_ne_bytes());
+            out[4..8].copy_from_slice(&2u32.to_ne_bytes());
+            watch.pending_modify = false;
+            Ok(16)
+        }
     }
 }
 
@@ -2075,6 +2469,13 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
             entry.data[slot.offset..end].copy_from_slice(data);
             entry.len = entry.len.max(end);
             slot.offset = end;
+            let path = entry.path();
+            if let Some(watch) = task.linux_inotify.as_mut()
+                && watch.watched
+                && &watch.path[..watch.path_len] == path.as_bytes()
+            {
+                watch.pending_modify = true;
+            }
             Ok(data.len())
         }
         LinuxFileSource::Pipe { index, write: true } => {
@@ -2097,7 +2498,14 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
                 return Err(LINUX_EINVAL);
             }
             let value = u64::from_le_bytes(data[..8].try_into().unwrap_or([0; 8]));
-            let Some(counter) = task.linux_eventfds.get_mut(index).and_then(Option::as_mut) else {
+            if !task.linux_eventfds.get(index).is_some_and(Option::is_some)
+                || task.tgid >= MAX_TASKS
+            {
+                return Err(LINUX_EBADF);
+            }
+            let Some(counter) =
+                (unsafe { &mut (*EVENTFD_COUNTERS.0.get())[task.tgid][index] }).as_mut()
+            else {
                 return Err(LINUX_EBADF);
             };
             *counter = counter.saturating_add(value);
@@ -2105,6 +2513,96 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
         }
         _ => Err(LINUX_EROFS),
     }
+}
+
+/// Creates one inotify descriptor per task. Only `IN_NONBLOCK` is supported;
+/// flags 0 would request Linux's blocking behavior, which this prototype lacks.
+pub fn linux_inotify_init(flags: u64) -> Result<u64, i64> {
+    const IN_NONBLOCK: u64 = 0x800;
+    if flags != IN_NONBLOCK {
+        return Err(LINUX_EINVAL);
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.linux_inotify.is_some() {
+        return Err(LINUX_EMFILE);
+    }
+    let Some((fd, _)) = task
+        .linux_fds
+        .iter()
+        .enumerate()
+        .skip(3)
+        .find(|(_, slot)| slot.is_none())
+    else {
+        return Err(LINUX_EMFILE);
+    };
+    task.linux_inotify = Some(LinuxInotify::EMPTY);
+    task.linux_fds[fd] = Some(LinuxFile {
+        source: LinuxFileSource::Inotify,
+        offset: 0,
+    });
+    Ok(fd as u64)
+}
+
+/// Installs one exact-path `/tmp` watch for IN_MODIFY only (mask 0x2).
+pub fn linux_inotify_add(fd: u64, path: &str, mask: u32) -> Result<i32, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if !matches!(
+        task.linux_fds.get(fd as usize).and_then(Option::as_ref),
+        Some(LinuxFile {
+            source: LinuxFileSource::Inotify,
+            ..
+        })
+    ) {
+        return Err(LINUX_EBADF);
+    }
+    if mask != 2
+        || !path.starts_with("/tmp/")
+        || !crate::linux::valid_path(path)
+        || path.len() > OVERLAY_PATH
+    {
+        return Err(LINUX_EINVAL);
+    }
+    if !task
+        .linux_overlay
+        .iter()
+        .flatten()
+        .any(|entry| entry.path() == path)
+    {
+        return Err(LINUX_ENOENT);
+    }
+    let watch = task.linux_inotify.as_mut().ok_or(LINUX_EBADF)?;
+    watch.path.fill(0);
+    watch.path[..path.len()].copy_from_slice(path.as_bytes());
+    watch.path_len = path.len();
+    watch.watched = true;
+    watch.pending_modify = false;
+    Ok(1)
+}
+
+pub fn linux_inotify_remove(fd: u64, wd: u64) -> Result<(), i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if !matches!(
+        task.linux_fds.get(fd as usize).and_then(Option::as_ref),
+        Some(LinuxFile {
+            source: LinuxFileSource::Inotify,
+            ..
+        })
+    ) {
+        return Err(LINUX_EBADF);
+    }
+    if wd != 1 {
+        return Err(LINUX_EINVAL);
+    }
+    let watch = task.linux_inotify.as_mut().ok_or(LINUX_EBADF)?;
+    if !watch.watched {
+        return Err(LINUX_EINVAL);
+    }
+    watch.watched = false;
+    watch.pending_modify = false;
+    Ok(())
 }
 
 /// Reads from a Linux file descriptor without changing its offset.
@@ -2142,6 +2640,7 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. } => Err(LINUX_ESPIPE),
+        LinuxFileSource::Inotify => Err(LINUX_ESPIPE),
     }
 }
 
@@ -2152,7 +2651,19 @@ pub fn linux_close(fd: u64) -> i64 {
     let Some(slot) = task.linux_fds.get_mut(fd as usize) else {
         return LINUX_EBADF;
     };
+    let was_inotify = slot
+        .as_ref()
+        .is_some_and(|file| matches!(file.source, LinuxFileSource::Inotify));
     if slot.take().is_some() {
+        if was_inotify
+            && !task
+                .linux_fds
+                .iter()
+                .flatten()
+                .any(|file| matches!(file.source, LinuxFileSource::Inotify))
+        {
+            task.linux_inotify = None;
+        }
         0
     } else {
         LINUX_EBADF
@@ -2177,6 +2688,7 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. } => 0,
+        LinuxFileSource::Inotify => 0,
     };
     let base = match whence {
         0 => 0i64,
@@ -2211,22 +2723,91 @@ pub fn linux_vma_insert(
     hint: u64,
     fixed: bool,
     no_replace: bool,
+    anonymous: bool,
+    shared: bool,
 ) -> Result<u64, VmaError> {
     let tasks = unsafe { &mut *TASKS.0.get() };
-    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &tasks[current];
     if task.abi != TaskAbi::Linux {
         return Err(VmaError::InvalidRange);
     }
-    if hint != 0 && hint.is_multiple_of(PAGE_SIZE) {
-        match task.vmas.insert_at(hint, length, prot) {
-            Ok(()) => return Ok(hint),
-            Err(VmaError::Overlap) if !fixed && !no_replace => {}
+    let tgid = task.tgid;
+    let pml4 = task.pml4;
+    let mut current_vmas = task.vmas;
+    let mut current_anonymous = task.anonymous_vmas;
+    let mut current_shared = task.shared_vmas;
+    let start = if hint != 0 && hint.is_multiple_of(PAGE_SIZE) {
+        match current_vmas.insert_at(hint, length, prot) {
+            Ok(()) => hint,
+            Err(VmaError::Overlap) if !fixed && !no_replace => current_vmas.insert(length, prot)?,
             Err(error) => return Err(error),
         }
     } else if fixed {
         return Err(VmaError::InvalidRange);
+    } else {
+        current_vmas.insert(length, prot)?
+    };
+    if anonymous {
+        current_anonymous.insert_at(start, length, prot)?;
     }
-    task.vmas.insert(length, prot)
+    if shared {
+        current_shared.insert_at(start, length, prot)?;
+    }
+
+    // Validate all peers before changing any record, so a full or inconsistent
+    // table cannot leave partially inserted metadata in the address-space group.
+    for (index, peer) in tasks.iter().enumerate() {
+        if index == current
+            || peer.state == TaskState::Empty
+            || peer.state == TaskState::Done
+            || peer.abi != TaskAbi::Linux
+            || peer.tgid != tgid
+            || peer.pml4 != pml4
+        {
+            continue;
+        }
+        let mut vmas = peer.vmas;
+        let mut anonymous_vmas = peer.anonymous_vmas;
+        let mut shared_vmas = peer.shared_vmas;
+        vmas.insert_at(start, length, prot)?;
+        if anonymous {
+            anonymous_vmas.insert_at(start, length, prot)?;
+        }
+        if shared {
+            shared_vmas.insert_at(start, length, prot)?;
+        }
+    }
+
+    let task = &mut tasks[current];
+    task.vmas = current_vmas;
+    task.anonymous_vmas = current_anonymous;
+    task.shared_vmas = current_shared;
+    for (index, peer) in tasks.iter_mut().enumerate() {
+        if index == current
+            || peer.state == TaskState::Empty
+            || peer.state == TaskState::Done
+            || peer.abi != TaskAbi::Linux
+            || peer.tgid != tgid
+            || peer.pml4 != pml4
+        {
+            continue;
+        }
+        peer.vmas
+            .insert_at(start, length, prot)
+            .expect("VMA preflight changed");
+        if anonymous {
+            peer.anonymous_vmas
+                .insert_at(start, length, prot)
+                .expect("VMA preflight changed");
+        }
+        if shared {
+            peer.shared_vmas
+                .insert_at(start, length, prot)
+                .expect("VMA preflight changed");
+        }
+    }
+    Ok(start)
 }
 
 /// Returns `true` when every page in a Linux range is mapped.
@@ -2236,16 +2817,100 @@ pub fn linux_vma_covers(address: u64, length: u64) -> bool {
     task.abi == TaskAbi::Linux && task.vmas.covers(address, length)
 }
 
+/// Pages in a private-anonymous Linux VMA may be materialized while validating
+/// a syscall buffer. This is deliberately limited to the current task and to
+/// ranges covered by both VMA tables; ordinary eager mappings retain the
+/// existing page-table validation path.
+pub fn linux_page_in_user_range(pml4: PhysFrame, address: u64, length: u64, write: bool) -> bool {
+    if length == 0 {
+        return true;
+    }
+    let Some(end) = address.checked_add(length) else {
+        return false;
+    };
+    let current = CURRENT.load(Ordering::Relaxed);
+    if current >= MAX_TASKS {
+        return false;
+    }
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[current];
+    if task.abi != TaskAbi::Linux || task.pml4 != pml4.start_address() {
+        return false;
+    }
+    if !task.vmas.covers(address, length) || !task.anonymous_vmas.covers(address, length) {
+        return false;
+    }
+    let Some(vma) = task.anonymous_vmas.get(address) else {
+        return false;
+    };
+    if write && vma.prot & aether_memory::vma::PROT_WRITE == 0
+        || !write && vma.prot & aether_memory::vma::PROT_READ == 0
+    {
+        return false;
+    }
+    let mut page = address & !(PAGE_SIZE - 1);
+    while page < end {
+        if !paging::user_range_valid(pml4, page, 1, write)
+            && !resolve_linux_demand_fault(
+                core::ptr::null_mut(),
+                page,
+                4 | if write { 2 } else { 0 },
+            )
+        {
+            return false;
+        }
+        page = page.saturating_add(PAGE_SIZE);
+    }
+    true
+}
+
 /// Releases a range from the Linux task's VMA table.
 ///
 /// Returns `true` when at least one tracked area overlapped the range.
 pub fn linux_vma_remove(address: u64, length: u64) -> Result<bool, VmaError> {
     let tasks = unsafe { &mut *TASKS.0.get() };
-    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    if task.abi != TaskAbi::Linux {
+    let current = CURRENT.load(Ordering::Relaxed);
+    if tasks[current].abi != TaskAbi::Linux {
         return Err(VmaError::NotFound);
     }
-    task.vmas.remove(address, length)
+    let tgid = tasks[current].tgid;
+    let pml4 = tasks[current].pml4;
+    let removed = tasks[current].vmas.remove(address, length)?;
+    for (index, task) in tasks.iter_mut().enumerate().filter(|(_, task)| {
+        task.state != TaskState::Empty && task.tgid == tgid && task.pml4 == pml4
+    }) {
+        if index != current && task.vmas.covers(address, length) {
+            let _ = task.vmas.remove(address, length);
+        }
+        let _ = task.anonymous_vmas.remove(address, length);
+        let _ = task.shared_vmas.remove(address, length);
+    }
+    Ok(removed)
+}
+
+pub fn linux_vma_insert_shared(
+    length: u64,
+    prot: u32,
+    hint: u64,
+    fixed: bool,
+    no_replace: bool,
+) -> Result<u64, VmaError> {
+    linux_vma_insert(length, prot, hint, fixed, no_replace, true, true)
+}
+
+pub fn linux_shared_vma(address: u64) -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)]
+        .shared_vmas
+        .get(address)
+        .is_some()
+}
+
+/// Returns anonymous mapping protections for a faulting address.
+pub fn linux_anonymous_vma_prot(address: u64) -> Option<u32> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    task.anonymous_vmas.get(address).map(|vma| vma.prot)
 }
 
 /// Returns the protection bits for the VMA containing `address`.
@@ -2259,11 +2924,38 @@ pub fn linux_vma_prot(address: u64) -> Option<u32> {
 /// Changes protections for a mapped Linux range.
 pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), VmaError> {
     let tasks = unsafe { &mut *TASKS.0.get() };
-    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    if task.abi != TaskAbi::Linux {
+    let current = CURRENT.load(Ordering::Relaxed);
+    if tasks[current].abi != TaskAbi::Linux {
         return Err(VmaError::NotFound);
     }
-    task.vmas.protect(address, length, prot)
+    let tgid = tasks[current].tgid;
+    let pml4 = tasks[current].pml4;
+    tasks[current].vmas.protect(address, length, prot)?;
+    for (index, task) in tasks.iter_mut().enumerate().filter(|(index, task)| {
+        *index != current
+            && task.state != TaskState::Empty
+            && task.state != TaskState::Done
+            && task.tgid == tgid
+            && task.pml4 == pml4
+    }) {
+        let _ = index;
+        if task.vmas.covers(address, length) {
+            let _ = task.vmas.protect(address, length, prot);
+        }
+        if task.anonymous_vmas.covers(address, length) {
+            let _ = task.anonymous_vmas.protect(address, length, prot);
+        }
+        if task.shared_vmas.covers(address, length) {
+            let _ = task.shared_vmas.protect(address, length, prot);
+        }
+    }
+    if tasks[current].anonymous_vmas.covers(address, length) {
+        let _ = tasks[current].anonymous_vmas.protect(address, length, prot);
+    }
+    if tasks[current].shared_vmas.covers(address, length) {
+        let _ = tasks[current].shared_vmas.protect(address, length, prot);
+    }
+    Ok(())
 }
 
 /// Returns metadata for a Linux path: `(size, inode, mode)`.
@@ -2303,6 +2995,7 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. } => Ok((0, 0, 0o010600)),
+        LinuxFileSource::Inotify => Ok((0, 0, 0o010600)),
     }
 }
 
@@ -2364,6 +3057,7 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. } => Ok(0),
+        LinuxFileSource::Inotify => Ok(0),
     }
 }
 
@@ -2498,6 +3192,8 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     if kind == TaskKind::Process {
         release_linux_mappings(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].futex_address = 0;
+        tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = ((status & 0xff) << 8) as i64;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
@@ -2506,11 +3202,14 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
         serial_line!("linux: process exit pid={current} status={status}");
+        wake_waiting_parent(current);
         return schedule_next(current);
     }
     if kind == TaskKind::Thread {
         clear_child_tid(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].futex_address = 0;
+        tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
@@ -2527,6 +3226,8 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
 
     release_linux_mappings(current);
     let tasks = unsafe { &mut *TASKS.0.get() };
+    tasks[current].futex_address = 0;
+    tasks[current].futex_deadline = 0;
     tasks[current].state = TaskState::Done;
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     tasks[current].linux_overlay = [None; OVERLAY_FILES];
@@ -2534,6 +3235,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
     tasks[current].linux_epolls = [None; MAX_EPOLLS];
     tasks[current].vmas.reset();
+    tasks[current].anonymous_vmas.reset();
     let result = if status == 0 {
         UserTestResult::Passed
     } else {
@@ -2548,6 +3250,8 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     }
     for task in tasks.iter_mut().skip(1) {
         if task.kind == TaskKind::Thread && task.tgid == current {
+            task.futex_address = 0;
+            task.futex_deadline = 0;
             task.state = TaskState::Done;
         }
     }
@@ -2557,6 +3261,56 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
 
 /// Handles a fault raised by a ring-3 task. The task is retired and the kernel
 /// continues with the next runnable task.
+/// Resolves a not-present user fault inside a private anonymous Linux VMA.
+/// The exception gate has IF clear, serializing allocator use on this CPU.
+pub fn resolve_linux_demand_fault(_frame: *mut InterruptFrame, address: u64, error: u64) -> bool {
+    const PRESENT: u64 = 1;
+    const WRITE: u64 = 2;
+    const USER: u64 = 4;
+    const RESERVED: u64 = 8;
+    const INSTRUCTION: u64 = 16;
+    if CURRENT.load(Ordering::Relaxed) >= MAX_TASKS
+        || error & (PRESENT | RESERVED) != 0
+        || error & USER == 0
+    {
+        return false;
+    }
+    let current = CURRENT.load(Ordering::Relaxed);
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[current];
+    if task.abi != TaskAbi::Linux
+        || task.kind != TaskKind::Linux
+            && task.kind != TaskKind::Process
+            && task.kind != TaskKind::Thread
+    {
+        return false;
+    }
+    let page = address & !(PAGE_SIZE - 1);
+    let Some(prot) = task.anonymous_vmas.get(address).map(|vma| vma.prot) else {
+        return false;
+    };
+    if error & WRITE != 0 && prot & aether_memory::vma::PROT_WRITE == 0
+        || error & INSTRUCTION != 0 && prot & aether_memory::vma::PROT_EXEC == 0
+    {
+        return false;
+    }
+    let Some(pml4) = PhysFrame::from_address(task.pml4) else {
+        return false;
+    };
+    let mut flags =
+        aether_memory::paging::PageFlags::PRESENT | aether_memory::paging::PageFlags::USER;
+    if prot & aether_memory::vma::PROT_WRITE != 0 {
+        flags = flags | aether_memory::paging::PageFlags::WRITABLE;
+    }
+    if prot & aether_memory::vma::PROT_EXEC == 0 {
+        flags = flags | aether_memory::paging::PageFlags::NO_EXECUTE;
+    }
+    crate::memory::with_frame_allocator(|allocator| {
+        paging::map_allocated_user_page(allocator, pml4, page, flags).is_ok()
+    })
+    .unwrap_or(false)
+}
+
 pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptFrame {
     let current = CURRENT.load(Ordering::Relaxed);
     let (linux, thread, process, kind) = {
@@ -2583,6 +3337,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
         serial_line!("linux: process fault pid={current} vector={vector}");
+        wake_waiting_parent(current);
         return schedule_next(current);
     }
     if thread {
@@ -2622,6 +3377,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
         tasks[current].vmas.reset();
+        tasks[current].anonymous_vmas.reset();
         if current == LINUX_DYN_TASK {
             LINUX_DYN_FAULTS.fetch_add(1, Ordering::Release);
             LINUX_DYN_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
@@ -2684,12 +3440,27 @@ pub fn yield_current(frame: *mut InterruptFrame) -> *mut InterruptFrame {
 
 /// Called from the timer interrupt before returning to a task.
 pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let now = TICKS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
     let current = CURRENT.load(Ordering::Relaxed);
     // Deliver a pending signal to the interrupted Linux task before it is
     // saved and possibly scheduled out.
     let _ = linux_deliver_signal(frame);
     let tasks = unsafe { &mut *TASKS.0.get() };
+
+    for task in tasks.iter_mut() {
+        if task.state == TaskState::Blocked
+            && task.futex_address != 0
+            && task.futex_deadline != 0
+            && now >= task.futex_deadline
+        {
+            // SAFETY: saved_rsp is the syscall frame retained when this task
+            // blocked in FUTEX_WAIT.
+            unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-110i64) as u64 };
+            task.futex_address = 0;
+            task.futex_deadline = 0;
+            task.state = TaskState::Ready;
+        }
+    }
 
     tasks[current].saved_rsp = frame as u64;
     if tasks[current].state == TaskState::Running {

@@ -86,6 +86,7 @@ class ToolingTests(unittest.TestCase):
         self.assertFalse(has_failure("AETHER_INPUT_OK\nAETHER_BOOT_OK\n"))
         self.assertIn("AETHER_FILES_OK", BASE_MARKERS)
         self.assertIn("AETHER_INPUT_OK", BASE_MARKERS)
+        self.assertIn("AETHER_LINUX_PROCESS_GROUP_OK", BASE_MARKERS)
 
     def test_iso_selection_and_explicit_override(self):
         with tempfile.TemporaryDirectory() as directory:

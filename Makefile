@@ -15,6 +15,7 @@ LINUX_ELF := $(BUILD)/linux-hello.elf
 LINUX_DYN_ELF := $(BUILD)/linux-dynamic.elf
 LINUX_INTERP_ELF := $(BUILD)/linux-interp.elf
 LINUX_EXEC_ELF := $(BUILD)/linux-exec.elf
+LINUX_DYN_EXEC_ELF := $(BUILD)/linux-dynamic-exec.elf
 LINUX_RUNTIME_DIR := $(BUILD)/linux-runtime
 LINUX_ROOTFS := $(BUILD)/linux-runtime.sqfs
 LINUX_ROOTFS_RECORD := $(BUILD)/linux-runtime.import
@@ -62,6 +63,9 @@ linux-fixture:
 	$(AS) --64 tests/fixtures/linux/exec.S -o $(BUILD)/linux-exec.o
 	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
 		$(BUILD)/linux-exec.o -o $(LINUX_EXEC_ELF)
+	$(AS) --64 tests/fixtures/linux/dynamic-exec.S -o $(BUILD)/linux-dynamic-exec.o
+	$(LD) -pie -e _start --dynamic-linker /lib/ld-aether.so \
+		$(BUILD)/linux-dynamic-exec.o -o $(LINUX_DYN_EXEC_ELF)
 	if [ "$(LINUX_RUNTIME_PREBUILT)" = "0" ]; then \
 		rm -rf $(LINUX_RUNTIME_DIR); \
 		mkdir -p $(LINUX_RUNTIME_DIR)/etc $(LINUX_RUNTIME_DIR)/lib $(LINUX_RUNTIME_DIR)/usr/bin; \
@@ -69,6 +73,7 @@ linux-fixture:
 		cp $(LINUX_INTERP_ELF) $(LINUX_RUNTIME_DIR)/lib/ld-aether.so; \
 		cp $(LINUX_DYN_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/dynamic; \
 		cp $(LINUX_EXEC_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/exec; \
+		cp $(LINUX_DYN_EXEC_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/dynamic-exec; \
 		sh tools/build-runtime-rootfs.sh $(LINUX_RUNTIME_DIR) $(LINUX_ROOTFS) \
 			$(LINUX_RUNTIME_SEED) org.aether.linux-runtime 0.1.0 \
 			"Aether Test Publisher" $(LINUX_ROOTFS_RECORD); \

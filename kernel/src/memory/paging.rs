@@ -345,6 +345,21 @@ pub fn map_user_page(
     Ok(())
 }
 
+/// Allocates, zeroes, and maps one user page with the supplied permissions.
+pub fn map_allocated_user_page(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    virtual_address: u64,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    let frame = allocate_table(allocator)?;
+    if let Err(error) = map_user_page(pml4, allocator, virtual_address, frame, flags) {
+        let _ = allocator.deallocate(frame);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Copies every present user page into a fresh address space.
 ///
 /// This is an eager fork copy, not copy-on-write. The caller owns the returned
@@ -609,6 +624,36 @@ pub fn user_range_valid(pml4: PhysFrame, address: u64, len: u64, write: bool) ->
             return false;
         }
         page = page.saturating_add(PAGE_SIZE);
+    }
+    true
+}
+
+/// Writes a short kernel-owned byte slice into a task's validated user mapping
+/// without changing CR3. This is used when completing a blocked syscall for a
+/// process other than the currently scheduled one.
+pub fn write_user_bytes(pml4: PhysFrame, address: u64, bytes: &[u8]) -> bool {
+    if !user_range_valid(pml4, address, bytes.len() as u64, true) {
+        return false;
+    }
+    let mut copied = 0usize;
+    while copied < bytes.len() {
+        let virtual_address = address + copied as u64;
+        let Some(entry) = user_leaf_entry(pml4, virtual_address) else {
+            return false;
+        };
+        let page_offset = (virtual_address & (PAGE_SIZE - 1)) as usize;
+        let length = (PAGE_SIZE as usize - page_offset).min(bytes.len() - copied);
+        let physical = entry.address() + page_offset as u64;
+        // SAFETY: The page-table walk validated this task's user writable
+        // mapping, and the identity map covers allocated physical frames.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes[copied..copied + length].as_ptr(),
+                physical as *mut u8,
+                length,
+            );
+        }
+        copied += length;
     }
     true
 }

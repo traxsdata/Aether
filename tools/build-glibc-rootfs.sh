@@ -46,6 +46,13 @@ cc -O2 -o "$ROOT/usr/bin/hello" tests/fixtures/linux/glibc-hello.c
 if [ -f build/linux-exec.elf ]; then
     cp build/linux-exec.elf "$ROOT/usr/bin/exec"
 fi
+# The static boot fixture chains through a dynamic exec proof. Keep the
+# freestanding test interpreter and target beside the host-glibc files; this
+# does not replace the host PT_INTERP used by /usr/bin/hello.
+if [ -f build/linux-dynamic-exec.elf ] && [ -f build/linux-interp.elf ]; then
+    cp build/linux-dynamic-exec.elf "$ROOT/usr/bin/dynamic-exec"
+    cp build/linux-interp.elf "$ROOT/lib/ld-aether.so"
+fi
 
 mksquashfs "$ROOT" "$OUT" \
     -comp zstd -noappend -all-root -no-xattrs -no-progress >/dev/null

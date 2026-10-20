@@ -138,14 +138,18 @@ user space. It is not a VM. The target and security gates are in
   [the Linux host-interface inventory](specifications/linux-host-interface-inventory.md)
   maps 32 facilities from the pinned GUI and CLI to owners and test IDs, with
   decisions for X11, D-Bus, process spawning, clipboard, paths, locale, GPU, and
-  network. Gate 1 is not an implementation gate: the missing ELF loader,
+  network. Gate 1 is not an implementation gate: remaining ELF/runtime,
   process/thread, signal, Wayland, and Vulkan interfaces remain Gate 2 work.
-- [ ] Gate 2 — interface mapping and prototype: **partial**. A static Linux ELF
-  runs at CPL3 with a per-task VMA table, runtime frame allocation and reclaim,
-  file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, W^X denial,
-  and a dynamic `ET_DYN`/`PT_INTERP` loader with auxv, runtime-rootfs
-  interpreter resolution, and a host-glibc hello through `ld.so`, but a pinned
-  runtime rootfs, user-space `linuxd`, threads, and signals remain missing.
+- [ ] Gate 2 — interface mapping and prototype: **partial**. Evidence includes
+  bounded demand paging for private anonymous mappings, file-backed `mmap`,
+  `munmap` reclaim, `mprotect`, growing `brk`, W^X denial, static and dynamic
+   `execve` with bounded argv/envp, blocking `wait4` with nonchild/selector
+   checks, bounded same-session process groups, and cross-process SIGUSR1. The
+   dynamic `ET_DYN`/`PT_INTERP` path has a fixture and an opt-in host-glibc hello
+   through `ld.so`. `MAP_SHARED|MAP_ANONYMOUS` is tested within one `CLONE_VM`
+   thread group; `fork()` is rejected while such a mapping exists. Cross-process
+   shared-frame ownership is still missing. A pinned production runtime rootfs
+   and user-space `linuxd` remain missing; Gate 2 is not complete.
 - [ ] Gate 3 — headless GridCraft: import
   `gridcraft-0.8.0-linux-x86_64.AppImage` and run its `gridcraft-cli`
   (`eval`, CSV import/export) with a read-only root and private overlay.
@@ -198,16 +202,21 @@ user space. It is not a VM. The target and security gates are in
   Linux tasks are denied the native `int 0x80` ABI.
 - [x] Anonymous memory and TLS: reserved virtual window, `mmap`, `mprotect`,
   `brk`, `arch_prctl` FS base with context switching, `clock_gettime`,
-  `getrandom`, `uname`, `getpid`/`gettid`, `set_tid_address`, and a single-task
-  futex.
+  `getrandom`, `uname`, `getpid`/`gettid`, `set_tid_address`, and futex
+  wait/wake across threads.
 - [x] Read-only root file syscalls: validated absolute paths,
   `openat`/`read`/`pread64`/`close`/`lseek`/`access`, and a per-task descriptor
   table cleared on exit and fault.
-- [x] Runtime frame allocator, per-task VMA table, file-backed `mmap`, `munmap`
-  reclaim, `mprotect`, and growing `brk`; pages are allocated on demand and
-  returned on unmap or task exit.
+- [x] Runtime frame allocator, per-task VMA table, eager file-backed `mmap`,
+  `munmap` reclaim, `mprotect`, and growing `brk`; anonymous private pages are
+  demand-allocated and zero-filled, then reclaimed on unmap or task exit.
 - [x] `mremap` grow-in-place and may-move with content preservation.
-- [ ] Page-fault handling, shared mappings, and per-domain mapping quotas.
+- [x] Bounded demand paging for private anonymous mappings, with zero-fill and
+  write/read fixture coverage (`AETHER_LINUX_DEMAND_PAGING_OK`), plus
+  `MAP_SHARED|MAP_ANONYMOUS` visibility between `CLONE_VM` threads
+  (`AETHER_LINUX_SHARED_MMAP_OK`). Cross-process shared mappings and per-domain
+  mapping quotas remain missing; `fork()` returns `ENOSYS` while a shared VMA
+  exists rather than silently copy it.
 - [x] Dynamic ELF slice: `ET_DYN` and `PT_INTERP` parsing, image mapping,
   auxv construction, runtime-rootfs interpreter resolution, and
   interpreter-to-main handoff (`AETHER_LINUX_DYN_*`).
@@ -222,22 +231,36 @@ user space. It is not a VM. The target and security gates are in
   `poll`, and descriptor table cleanup.
 - [x] Notification calls: non-blocking `poll`, `eventfd2`, and basic
   `epoll_create1`/`epoll_ctl`/`epoll_wait`.
-- [ ] Blocking waits, edge-triggered epoll semantics, and bounded `inotify`.
+- [x] Futex timed wait: the fixture verifies timeout with `ETIMEDOUT`
+  (`AETHER_LINUX_FUTEX_TIMEOUT_OK`). Robust lists, condition variables, and
+  semaphores remain missing.
+- [ ] Blocking or finite `poll`/`epoll_wait` (both are timeout-zero only;
+  nonzero timeouts return `-EOPNOTSUPP`), pipe/cross-process waits, and
+  edge-triggered epoll semantics remain unsupported. Eventfd counters are shared
+  across threads in one tgid; fork retains a process-private counter snapshot.
+- [x] Narrow inotify: `IN_NONBLOCK` is required and one exact existing overlay
+  file can be watched for `IN_MODIFY` (`AETHER_LINUX_INOTIFY_OK`).
+- [ ] Default blocking `inotify_init1(0)`, blocking reads, directory/rootfs
+  watches, other events, overflow, and full inotify remain unsupported.
 - [x] Thread creation: `clone` with `CLONE_VM|CLONE_THREAD`, per-thread
   kernel stacks, TLS, tgid/tid, and clear-child-tid join.
-- [x] Process creation: eager-copy `fork`, child status/reap through `wait4`
-  (non-blocking with `sched_yield`), and descriptor inheritance.
+- [x] Process creation: eager-copy `fork`, blocking `wait4` with nonchild and
+  selector checks, and descriptor inheritance.
 - [x] Static `execve`: resolve a rootfs ELF, build a new address space, and
   enter its entry point.
-- [ ] Dynamic `execve` with argv/envp, blocking `wait4`, `clone3`, process
-  groups, `set_robust_list`, and `rseq` details.
+- [x] Dynamic `execve` with bounded argv/envp propagation through a `PT_INTERP`
+  fixture; bounded process groups within the same session.
+- [ ] `clone3`, cross-session/process-group edge cases, `set_robust_list`, and
+  `rseq` details.
 - [x] Synchronization: futex wait/wake queues and clear-child-tid join; thread
   wake ordering.
-- [ ] Futex timeouts, robust lists, condition variables, and semaphores.
+- [ ] Robust lists, condition variables, and semaphores; futex timeout is
+  implemented and boot-tested (`AETHER_LINUX_FUTEX_TIMEOUT_OK`).
 - [x] Signals: `rt_sigaction`/`rt_sigprocmask`/`sigaltstack`, self/group
   `kill`/`tgkill`, handler frames, `rt_sigreturn`, and fault-to-signal delivery.
-- [ ] siginfo/ucontext completeness, alt-stack delivery, cross-process signals,
-  and signal-safe restart semantics.
+- [ ] siginfo/ucontext completeness, alt-stack delivery, and signal-safe restart
+  semantics. A cross-process SIGUSR1 fixture passes; broader signal semantics
+  remain incomplete.
 - [ ] Time and scheduling: `nanosleep`, `clock_nanosleep`, `timerfd`,
   `sched_getaffinity`, `prlimit64`, and bounded CPU/memory quotas.
 - [ ] Pseudo-files: `/proc/self/{exe,maps,status,fd}`, `/dev/{null,zero,random}`,
@@ -308,21 +331,28 @@ the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
 image records without touching user data. VMware Workstation itself has not yet
 been smoke-tested.
 
-The Linux track has completed the Gate 1 inventory and has partial Gate 2
-evidence: the kernel verifies and imports an embedded signed rootfs, a static
-Linux ELF runs at CPL3 through the Linux `syscall` path with a per-task VMA
-table, file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, FS-based
-TLS, read-only root files, a bounded `/tmp` overlay, stat/statx/readlink and
-descriptor duplication, and a dynamic `ET_DYN`/`PT_INTERP` loader with auxv
-(`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
-`AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
-`AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_DYN_INTERP_OK`,
-`AETHER_LINUX_DYN_MAIN_OK`,
-`AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`), and the opt-in `make glibc-test`
-runs a host-glibc hello through `ld.so` (`AETHER_GLIBC_OK`). The native ABI is
-denied to Linux tasks. This is a test
-fixture, not an AppImage: the dynamic loader, glibc/`ld.so`, threads, signals,
-Wayland, software Vulkan, and a user-supplied import path are still missing.
+The Linux track has completed the Gate 1 inventory and has **partial Gate 2**
+evidence only. Markers cover embedded signed-rootfs import, bounded
+private-anonymous demand paging, VMA/filesystem tests, nonblocking exact-file
+inotify, thread and futex join/timeout, self and cross-process signals, process
+groups, blocking `wait4`, static/dynamic exec argv/envp, a thread-group-only
+`MAP_SHARED|MAP_ANONYMOUS` proof (fork is rejected while shared mappings exist),
+and the `PT_INTERP` loader (`AETHER_LINUX_IMPORT_OK`,
+`AETHER_LINUX_DEMAND_PAGING_OK`,
+`AETHER_LINUX_INOTIFY_OK`, `AETHER_LINUX_CROSS_PROCESS_SIGNAL_OK`,
+`AETHER_LINUX_PROCESS_GROUP_OK`, `AETHER_LINUX_FUTEX_TIMEOUT_OK`,
+`AETHER_LINUX_SHARED_MMAP_OK`, `AETHER_LINUX_EXECVE_OK`,
+`AETHER_LINUX_EXECVE_DYN_OK`, plus the existing VMA/file/dynamic-loader markers).
+The opt-in `make glibc-test` is a separate host-glibc smoke test and is not the
+pinned production runtime. `make ci` and `make glibc-test` pass on the current
+uncommitted local candidate; those results must be tied to an exact commit and
+revalidated on the eventual PR head. The native ABI remains denied to Linux
+tasks. Cross-process shared mappings; blocking/finite `poll` and `epoll_wait`
+(nonzero timeouts return
+`-EOPNOTSUPP`); pipe/cross-process waits; full inotify; robust futex lists,
+siginfo/ucontext, `linuxd`, a pinned production rootfs, and user-supplied
+AppImage opening remain incomplete; this is not an AppImage compatibility
+claim and Gate 2 is not complete.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
 persistent store, network/audio services, an installer, the Linux runtime

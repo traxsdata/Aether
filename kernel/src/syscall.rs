@@ -155,7 +155,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         3 => scheduler::linux_close(first),
         8 => scheduler::linux_lseek(first, second as i64, third),
         4 | 6 => linux_stat(pml4, first, second),
-        7 => linux_poll(pml4, first, second),
+        7 => linux_poll(pml4, first, second, third),
         5 => linux_fstat(pml4, first, second),
         13 => linux_rt_sigaction(pml4, first, second, third),
         14 => linux_rt_sigprocmask(pml4, first, second, third),
@@ -181,9 +181,12 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
         33 => scheduler::linux_dup2(first, second).map_or_else(|error| error, |fd| fd as i64),
         39 => scheduler::linux_getpid() as i64,
+        109 => linux_setpgid(first, second),
+        112 => scheduler::linux_setsid(),
+        121 => linux_getpgid(first),
         57 => scheduler::linux_fork(frame).map_or_else(|error| error, |pid| pid as i64),
         59 => return linux_execve(frame, pml4, first, second, third),
-        61 => linux_wait4(pml4, first, second, third),
+        61 => return linux_wait4(frame, pml4, first, second, third),
         56 => linux_clone(
             frame,
             pml4,
@@ -205,6 +208,15 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         293 => linux_pipe2(pml4, first, second),
         267 => linux_readlink(pml4, second, third, unsafe { (*frame).r10 }, first),
         302 => linux_prlimit(pml4, first, second, unsafe { (*frame).r10 }),
+        294 => scheduler::linux_inotify_init(first).map_or_else(|error| error, |fd| fd as i64),
+        254 => {
+            let Some(path) = user_cstr(pml4, second, 256) else {
+                return linux_result(frame, LINUX_EFAULT);
+            };
+            scheduler::linux_inotify_add(first, path, third as u32)
+                .map_or_else(|error| error, i64::from)
+        }
+        255 => scheduler::linux_inotify_remove(first, second).map_or_else(|error| error, |_| 0),
         332 => linux_statx(
             pml4,
             first,
@@ -245,17 +257,25 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     frame
 }
 
+fn linux_result(frame: *mut InterruptFrame, result: i64) -> *mut InterruptFrame {
+    unsafe { (*frame).rax = result as u64 };
+    scheduler::linux_deliver_signal(frame);
+    frame
+}
+
 const LINUX_EFAULT: i64 = -14;
 const LINUX_EINVAL: i64 = -22;
 const LINUX_ENOSYS: i64 = -38;
+const LINUX_ESRCH: i64 = -3;
 
 const LINUX_ENOMEM: i64 = -12;
-const LINUX_EPERM: i64 = -1;
 const LINUX_ENOENT: i64 = -2;
 const LINUX_EACCES: i64 = -13;
 const LINUX_EAGAIN: i64 = -11;
 const LINUX_EBADF: i64 = -9;
 const LINUX_EEXIST: i64 = -17;
+const LINUX_E2BIG: i64 = -7;
+const LINUX_ENAMETOOLONG: i64 = -36;
 
 fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i64 {
     let Some(path) = user_cstr(pml4, pointer, 256) else {
@@ -356,13 +376,17 @@ fn linux_mmap(
     let Some(length) = length.checked_add(0xfff).map(|value| value & !0xfff) else {
         return LINUX_EINVAL;
     };
-    if flags & LINUX_MAP_SHARED != 0 || flags & LINUX_MAP_PRIVATE == 0 {
+    let anonymous = flags & LINUX_MAP_ANONYMOUS != 0;
+    let shared = flags & LINUX_MAP_SHARED != 0;
+    if flags & LINUX_MAP_PRIVATE != 0 && shared
+        || flags & (LINUX_MAP_PRIVATE | LINUX_MAP_SHARED) == 0
+        || shared && !anonymous
+    {
         return LINUX_ENOSYS;
     }
     if protections & !7 != 0 || protections & 6 == 6 {
         return LINUX_EINVAL;
     }
-    let anonymous = flags & LINUX_MAP_ANONYMOUS != 0;
     if anonymous {
         // The fd argument is ignored for MAP_ANONYMOUS. glibc passes -1 as a
         // 32-bit value, so do not require the full 64-bit all-ones pattern.
@@ -391,20 +415,36 @@ fn linux_mmap(
             });
         }
     }
-    let start = match scheduler::linux_vma_insert(
-        length,
-        protections as u32,
-        address,
-        fixed || no_replace,
-        no_replace,
-    ) {
+    let inserted = if shared {
+        scheduler::linux_vma_insert_shared(
+            length,
+            protections as u32,
+            address,
+            fixed || no_replace,
+            no_replace,
+        )
+    } else {
+        scheduler::linux_vma_insert(
+            length,
+            protections as u32,
+            address,
+            fixed || no_replace,
+            no_replace,
+            anonymous,
+            false,
+        )
+    };
+    let start = match inserted {
         Ok(start) => start,
         Err(aether_memory::vma::VmaError::Overlap) if no_replace => return LINUX_EEXIST,
         Err(error) => {
             return vma_errno(error);
         }
     };
-    // Map fresh zeroed frames writable while the kernel copies file data.
+    if anonymous {
+        return start as i64;
+    }
+    // File-backed mappings remain eagerly populated while the kernel copies data.
     let writable = aether_memory::paging::PageFlags::PRESENT
         | aether_memory::paging::PageFlags::USER
         | aether_memory::paging::PageFlags::WRITABLE
@@ -474,7 +514,17 @@ fn linux_mremap(
     let delta = new_size - old_size;
     if flags & MREMAP_FIXED == 0 {
         // Try to grow in place first.
-        if scheduler::linux_vma_insert(delta, prot, old_address + old_size, true, true).is_ok() {
+        if scheduler::linux_vma_insert(
+            delta,
+            prot,
+            old_address + old_size,
+            true,
+            true,
+            scheduler::linux_anonymous_vma_prot(old_address).is_some(),
+            scheduler::linux_shared_vma(old_address),
+        )
+        .is_ok()
+        {
             let writable = aether_memory::paging::PageFlags::PRESENT
                 | aether_memory::paging::PageFlags::USER
                 | aether_memory::paging::PageFlags::WRITABLE
@@ -517,7 +567,15 @@ fn linux_mremap(
             paging::unmap_user_range(allocator, pml4, target, new_size)
         });
     }
-    let Ok(new_start) = scheduler::linux_vma_insert(new_size, prot, target, fixed, false) else {
+    let Ok(new_start) = scheduler::linux_vma_insert(
+        new_size,
+        prot,
+        target,
+        fixed,
+        false,
+        scheduler::linux_anonymous_vma_prot(old_address).is_some(),
+        scheduler::linux_shared_vma(old_address),
+    ) else {
         return LINUX_ENOMEM;
     };
     let writable = aether_memory::paging::PageFlags::PRESENT
@@ -761,8 +819,13 @@ fn linux_epoll_wait(
     epoll_fd: u64,
     events_pointer: u64,
     max_events: u64,
-    _timeout: u64,
+    timeout: u64,
 ) -> i64 {
+    // Only timeout-zero probing is supported; blocking waits need a scheduler
+    // wait queue to handle readiness, deadlines, and signal interruption.
+    if timeout != 0 {
+        return -95;
+    }
     if max_events == 0 || max_events > 16 {
         return LINUX_EINVAL;
     }
@@ -791,7 +854,11 @@ fn linux_pipe2(pml4: PhysFrame, fds_pointer: u64, _flags: u64) -> i64 {
     write_user_bytes(pml4, fds_pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
 }
 
-fn linux_poll(pml4: PhysFrame, fds_pointer: u64, count: u64) -> i64 {
+fn linux_poll(pml4: PhysFrame, fds_pointer: u64, count: u64, timeout: u64) -> i64 {
+    // poll's timeout is signed: nonzero includes both finite and infinite waits.
+    if timeout != 0 {
+        return -95;
+    }
     if count > 16 {
         return LINUX_EINVAL;
     }
@@ -1016,27 +1083,47 @@ fn linux_sigaltstack(pml4: PhysFrame, stack_pointer: u64, old_pointer: u64) -> i
 
 fn linux_kill(pml4: PhysFrame, pid: u64, signal: u64) -> i64 {
     let current = scheduler::linux_getpid() as u64;
-    if pid != 0 && pid != current && pid != u64::from(u32::MAX) {
-        return LINUX_EPERM;
-    }
     let _ = pml4;
-    if signal == 0 {
-        return 0;
+    if pid == 0 {
+        return scheduler::linux_send_signal_group(
+            scheduler::linux_getpgid(0).unwrap_or(current as usize),
+            signal,
+        );
     }
-    scheduler::linux_send_signal(signal)
+    let pid = pid as i64;
+    if pid == -1 {
+        // Broadcast kill crosses process/application boundaries; unsupported.
+        return LINUX_ENOSYS;
+    }
+    if pid < -1 {
+        let Some(group) = pid.checked_abs() else {
+            return LINUX_EINVAL;
+        };
+        return scheduler::linux_send_signal_group(group as usize, signal);
+    }
+    scheduler::linux_send_signal_to(pid as usize, None, signal)
+}
+
+fn linux_setpgid(pid: u64, pgid: u64) -> i64 {
+    if pid > usize::MAX as u64 || pgid > usize::MAX as u64 {
+        return LINUX_EINVAL;
+    }
+    scheduler::linux_setpgid(pid as usize, pgid as usize)
+}
+
+fn linux_getpgid(pid: u64) -> i64 {
+    if pid > usize::MAX as u64 {
+        return LINUX_ESRCH;
+    }
+    scheduler::linux_getpgid(pid as usize).map_or_else(|error| error, |pgid| pgid as i64)
 }
 
 fn linux_tgkill(pml4: PhysFrame, tgid: u64, tid: u64, signal: u64) -> i64 {
-    let current = scheduler::linux_getpid() as u64;
-    if tgid != current {
-        return LINUX_EPERM;
-    }
-    let _ = tid;
     let _ = pml4;
-    if signal == 0 {
-        return 0;
+    if tgid == 0 || tid == 0 || tgid > usize::MAX as u64 || tid > usize::MAX as u64 {
+        return LINUX_EINVAL;
     }
-    scheduler::linux_send_signal(signal)
+    scheduler::linux_send_signal_to(tgid as usize, Some(tid as usize), signal)
 }
 
 fn linux_sigreturn(frame: *mut InterruptFrame) -> *mut InterruptFrame {
@@ -1052,17 +1139,120 @@ fn linux_execve(
     frame: *mut InterruptFrame,
     pml4: PhysFrame,
     path_pointer: u64,
-    _argv: u64,
-    _envp: u64,
+    argv_pointer: u64,
+    envp_pointer: u64,
 ) -> *mut InterruptFrame {
-    let Some(path) = user_cstr(pml4, path_pointer, 256) else {
+    let Some(user_path) = user_cstr(pml4, path_pointer, 256) else {
         unsafe { (*frame).rax = LINUX_EFAULT as u64 };
         return frame;
     };
+    let mut path_storage = [0u8; 256];
+    if user_path.is_empty() || user_path.len() >= path_storage.len() {
+        unsafe { (*frame).rax = LINUX_ENAMETOOLONG as u64 };
+        return frame;
+    }
+    path_storage[..user_path.len()].copy_from_slice(user_path.as_bytes());
+    let path = core::str::from_utf8(&path_storage[..user_path.len()]).unwrap_or("");
     let Some(bytes) = crate::linux::file_data(path) else {
         unsafe { (*frame).rax = LINUX_ENOENT as u64 };
         return frame;
     };
+
+    let mut argument_storage = [[0u8; 256]; 16];
+    let mut argument_lengths = [0usize; 16];
+    let mut argument_count = 1usize;
+    let mut environment_storage = [[0u8; 256]; 16];
+    let mut environment_lengths = [0usize; 16];
+    let mut environment_count = 0usize;
+    if argv_pointer != 0 {
+        match read_exec_vector(
+            pml4,
+            argv_pointer,
+            &mut argument_storage,
+            &mut argument_lengths,
+        ) {
+            Some(count) => argument_count = count,
+            None => {
+                unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+                return frame;
+            }
+        }
+        if argument_count == 0 {
+            argument_storage[0][..path.len()].copy_from_slice(path.as_bytes());
+            argument_lengths[0] = path.len();
+            argument_count = 1;
+        }
+    } else {
+        argument_storage[0][..path.len()].copy_from_slice(path.as_bytes());
+        argument_lengths[0] = path.len();
+    }
+    if envp_pointer != 0 {
+        match read_exec_vector(
+            pml4,
+            envp_pointer,
+            &mut environment_storage,
+            &mut environment_lengths,
+        ) {
+            Some(count) => environment_count = count,
+            None => {
+                unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+                return frame;
+            }
+        }
+    }
+    let mut arguments = [""; 16];
+    let mut environment = [""; 16];
+    for index in 0..argument_count {
+        let Ok(value) = core::str::from_utf8(&argument_storage[index][..argument_lengths[index]])
+        else {
+            unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+            return frame;
+        };
+        arguments[index] = value;
+    }
+    for index in 0..environment_count {
+        let Ok(value) =
+            core::str::from_utf8(&environment_storage[index][..environment_lengths[index]])
+        else {
+            unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+            return frame;
+        };
+        environment[index] = value;
+    }
+
+    // A PT_INTERP image uses the Linux ELF loader and the interpreter named by
+    // that image, resolved only from the authenticated read-only root.
+    if let Ok(parsed) = aether_linux_elf::parse(bytes)
+        && let Some(interpreter_path) = parsed.interpreter()
+    {
+        let Some(interpreter) = crate::linux::file_data(interpreter_path) else {
+            unsafe { (*frame).rax = LINUX_ENOENT as u64 };
+            return frame;
+        };
+        let loaded = crate::memory::with_frame_allocator(|allocator| {
+            crate::linux_loader::load(
+                allocator,
+                bytes,
+                interpreter,
+                path,
+                &arguments[..argument_count],
+                &environment[..environment_count],
+            )
+        });
+        let Some(Ok(loaded)) = loaded else {
+            unsafe { (*frame).rax = LINUX_ENOMEM as u64 };
+            return frame;
+        };
+        paging::activate(loaded.pml4);
+        unsafe {
+            (*frame).rax = 0;
+            (*frame).rip = loaded.entry;
+            (*frame).rsp = loaded.stack_pointer;
+        }
+        scheduler::linux_replace_image(loaded.pml4);
+        return frame;
+    }
+
     let Ok(image) = aether_boot_common::elf::parse(bytes) else {
         unsafe { (*frame).rax = LINUX_EINVAL as u64 };
         return frame;
@@ -1079,52 +1269,151 @@ fn linux_execve(
     };
 
     let stack_page = USER_STACK_TOP - aether_memory::PAGE_SIZE;
-    let mut page = [0u8; aether_memory::PAGE_SIZE as usize];
-    let path_bytes = path.as_bytes();
-    page[..path_bytes.len()].copy_from_slice(path_bytes);
-    let mut offset = 1024usize;
-    let mut push = |value: u64| {
-        page[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-        offset += 8;
+    let Some((page, stack_pointer)) = build_static_exec_stack(
+        stack_page,
+        &arguments[..argument_count],
+        &environment[..environment_count],
+    ) else {
+        unsafe { (*frame).rax = LINUX_E2BIG as u64 };
+        return frame;
     };
-    push(1); // argc
-    push(stack_page); // argv[0]
-    push(0); // argv
-    push(0); // envp
-    push(0); // AT_NULL
-    push(0);
 
     paging::activate(new_pml4);
     // SAFETY: The new address space maps the stack page writable, and the
     // syscall path has interrupts masked.
     unsafe {
-        core::ptr::copy_nonoverlapping(page.as_ptr(), stack_page as *mut u8, offset);
+        core::ptr::copy_nonoverlapping(page.as_ptr(), stack_page as *mut u8, page.len());
         (*frame).rax = 0;
         (*frame).rip = image.entry();
-        (*frame).rsp = stack_page + 1024;
+        (*frame).rsp = stack_pointer;
     }
     scheduler::linux_replace_image(new_pml4);
     frame
 }
 
-fn linux_wait4(pml4: PhysFrame, pid: u64, status_pointer: u64, _options: u64) -> i64 {
-    if status_pointer != 0 && !paging::user_range_valid(pml4, status_pointer, 4, true) {
-        return LINUX_EFAULT;
+fn build_static_exec_stack(
+    stack_page: u64,
+    arguments: &[&str],
+    environment: &[&str],
+) -> Option<([u8; aether_memory::PAGE_SIZE as usize], u64)> {
+    if arguments.is_empty() || arguments.len() > 16 || environment.len() > 16 {
+        return None;
     }
-    match scheduler::linux_wait4(pid as i64) {
+    let mut page = [0u8; aether_memory::PAGE_SIZE as usize];
+    let mut string_cursor = 0usize;
+    let mut put_string = |value: &str| -> Option<u64> {
+        let end = string_cursor.checked_add(value.len())?.checked_add(1)?;
+        if end > 1024 {
+            return None;
+        }
+        let pointer = stack_page.checked_add(string_cursor as u64)?;
+        page[string_cursor..string_cursor + value.len()].copy_from_slice(value.as_bytes());
+        page[string_cursor + value.len()] = 0;
+        string_cursor = end;
+        Some(pointer)
+    };
+    let mut argv = [0u64; 16];
+    for (slot, value) in argv.iter_mut().zip(arguments) {
+        *slot = put_string(value)?;
+    }
+    let mut envp = [0u64; 16];
+    for (slot, value) in envp.iter_mut().zip(environment) {
+        *slot = put_string(value)?;
+    }
+
+    let mut offset = 1024usize;
+    let mut push = |value: u64| -> Option<()> {
+        let end = offset.checked_add(8)?;
+        let slot = page.get_mut(offset..end)?;
+        slot.copy_from_slice(&value.to_le_bytes());
+        offset = end;
+        Some(())
+    };
+    push(arguments.len() as u64)?;
+    for value in argv.iter().take(arguments.len()) {
+        push(*value)?;
+    }
+    push(0)?;
+    for value in envp.iter().take(environment.len()) {
+        push(*value)?;
+    }
+    push(0)?;
+    push(0)?; // AT_NULL
+    push(0)?;
+    Some((page, stack_page.checked_add(1024)?))
+}
+
+/// Copies a bounded, NULL-terminated Linux string vector from user memory.
+/// The returned strings borrow only validated user ranges and are consumed
+/// before replacing the caller's address space.
+fn read_exec_vector(
+    pml4: PhysFrame,
+    pointer: u64,
+    output: &mut [[u8; 256]],
+    lengths: &mut [usize],
+) -> Option<usize> {
+    if output.len() != lengths.len() {
+        return None;
+    }
+    for index in 0..output.len() {
+        let slot = pointer.checked_add((index as u64).checked_mul(8)?)?;
+        let bytes = user_bytes(pml4, slot, 8, false)?;
+        let value = u64::from_ne_bytes(bytes.try_into().ok()?);
+        if value == 0 {
+            return Some(index);
+        }
+        let string = user_cstr(pml4, value, 256)?;
+        if string.len() >= output[index].len() {
+            return None;
+        }
+        output[index][..string.len()].copy_from_slice(string.as_bytes());
+        lengths[index] = string.len();
+    }
+    // Reaching the fixed vector limit without a terminator is treated as an
+    // invalid argument list rather than reading unbounded user memory.
+    None
+}
+
+fn linux_wait4(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    pid: u64,
+    status_pointer: u64,
+    options: u64,
+) -> *mut InterruptFrame {
+    const WNOHANG: u64 = 1;
+    let pid = pid as i64;
+    if pid < -1 {
+        unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+        return frame;
+    }
+    if options & !WNOHANG != 0 {
+        unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+        return frame;
+    }
+    if status_pointer != 0 && !linux_user_range_valid(pml4, status_pointer, 4, true) {
+        unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+        return frame;
+    }
+    let result = scheduler::linux_wait4(pid);
+    if matches!(result, Ok(None)) && options & WNOHANG == 0 {
+        return scheduler::linux_wait4_block(frame, pid, status_pointer);
+    }
+    let value = match result {
         Ok(Some((child, status))) => {
             if status_pointer != 0
                 && write_user_bytes(pml4, status_pointer, &(status as u32).to_ne_bytes()).is_none()
             {
-                return LINUX_EFAULT;
+                unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+                return frame;
             }
             child as i64
         }
-        // The prototype reports "not exited yet" instead of blocking; callers
-        // that need blocking use WNOHANG plus sched_yield.
         Ok(None) => 0,
         Err(error) => error,
-    }
+    };
+    unsafe { (*frame).rax = value as u64 };
+    frame
 }
 
 fn linux_clone(
@@ -1140,12 +1429,12 @@ fn linux_clone(
     const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
     const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
     if flags & CLONE_PARENT_SETTID != 0
-        && (parent_tid == 0 || !paging::user_range_valid(pml4, parent_tid, 4, true))
+        && (parent_tid == 0 || !linux_user_range_valid(pml4, parent_tid, 4, true))
     {
         return LINUX_EFAULT;
     }
     if flags & (CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID) != 0
-        && (child_tid == 0 || !paging::user_range_valid(pml4, child_tid, 4, true))
+        && (child_tid == 0 || !linux_user_range_valid(pml4, child_tid, 4, true))
     {
         return LINUX_EFAULT;
     }
@@ -1171,7 +1460,7 @@ fn linux_futex(
 ) -> *mut InterruptFrame {
     match operation & 0x7f {
         0 => {
-            if !address.is_multiple_of(4) || !paging::user_range_valid(pml4, address, 4, true) {
+            if !address.is_multiple_of(4) || !linux_user_range_valid(pml4, address, 4, true) {
                 // SAFETY: The frame is live on the current kernel stack.
                 unsafe { (*frame).rax = LINUX_EFAULT as u64 };
                 return frame;
@@ -1182,7 +1471,40 @@ fn linux_futex(
                 unsafe { (*frame).rax = LINUX_EAGAIN as u64 };
                 return frame;
             }
-            scheduler::linux_futex_wait(frame, address)
+            let timeout_pointer = unsafe { (*frame).r10 };
+            let timeout_ticks = if timeout_pointer == 0 {
+                None
+            } else {
+                if !linux_user_range_valid(pml4, timeout_pointer, 16, false) {
+                    unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+                    return frame;
+                }
+                // SAFETY: The complete timespec was validated as readable.
+                let raw = unsafe { core::slice::from_raw_parts(timeout_pointer as *const u8, 16) };
+                let seconds = i64::from_ne_bytes(raw[..8].try_into().unwrap_or([0; 8]));
+                let nanoseconds = i64::from_ne_bytes(raw[8..].try_into().unwrap_or([0; 8]));
+                if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+                    unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+                    return frame;
+                }
+                let Some(ticks) = (seconds as u64)
+                    .checked_mul(100)
+                    .and_then(|whole| whole.checked_add((nanoseconds as u64).div_ceil(10_000_000)))
+                else {
+                    unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+                    return frame;
+                };
+                if ticks == 0 {
+                    unsafe { (*frame).rax = (-110i64) as u64 };
+                    return frame;
+                }
+                if scheduler::ticks().checked_add(ticks).is_none() {
+                    unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+                    return frame;
+                }
+                Some(ticks)
+            };
+            scheduler::linux_futex_wait(frame, address, timeout_ticks)
         }
         1 => {
             let woken = scheduler::linux_futex_wake(address, value);
@@ -1397,7 +1719,7 @@ fn endpoint_receive(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, out
     if (length as usize) < MAX_MESSAGE_BYTES {
         return ipc_denied_usage();
     }
-    if out == 0 || out >= USER_LIMIT || !paging::user_range_valid(pml4, out, 4, true) {
+    if out == 0 || out >= USER_LIMIT || !linux_user_range_valid(pml4, out, 4, true) {
         return ipc_denied_usage();
     }
     if ranges_overlap(pointer, length, out, 4) {
@@ -1457,7 +1779,10 @@ pub fn user_bytes<'a>(pml4: PhysFrame, pointer: u64, length: u64, write: bool) -
     if length as usize > MAX_SYSCALL_IO {
         return None;
     }
-    if pointer >= USER_LIMIT || !paging::user_range_valid(pml4, pointer, length, write) {
+    if pointer >= USER_LIMIT {
+        return None;
+    }
+    if !linux_user_range_valid(pml4, pointer, length, write) {
         return None;
     }
     if length == 0 {
@@ -1484,7 +1809,10 @@ pub unsafe fn user_bytes_mut<'a>(
     if length as usize > MAX_SYSCALL_IO {
         return None;
     }
-    if pointer >= USER_LIMIT || !paging::user_range_valid(pml4, pointer, length, true) {
+    if pointer >= USER_LIMIT {
+        return None;
+    }
+    if !linux_user_range_valid(pml4, pointer, length, true) {
         return None;
     }
     if length == 0 {
@@ -1493,6 +1821,11 @@ pub unsafe fn user_bytes_mut<'a>(
     // SAFETY: The range is inside the user window and every page is present
     // and writable. The caller supplies the aliasing guarantee.
     Some(unsafe { core::slice::from_raw_parts_mut(pointer as *mut u8, length as usize) })
+}
+
+fn linux_user_range_valid(pml4: PhysFrame, pointer: u64, length: u64, write: bool) -> bool {
+    paging::user_range_valid(pml4, pointer, length, write)
+        || scheduler::linux_page_in_user_range(pml4, pointer, length, write)
 }
 
 /// Copies a bounded user string after validating its range.
