@@ -48,9 +48,14 @@ counter, and a nonzero exit or user fault fails the boot before
 
 `kernel/src/input.rs` owns IRQ1. The PIC unmasks IRQ0 and IRQ1 after scheduler
 setup; the IDT installs vector 33. The handler reads one set-1 make scancode and
-pushes a decoded key into a 32-entry queue. The desktop consumes Tab, arrows,
-Enter, Escape, and printable keys. A boot self-test injects a deterministic key
-sequence and verifies the queue and focus changes.
+pushes a decoded key into a 32-entry queue. After boot the idle loop drains that
+queue into the desktop, which consumes Tab, arrows, Enter, Escape, and printable
+keys. A boot self-test injects a deterministic key sequence and verifies the
+queue and focus changes. The `input` shell command reports received and dropped
+counts.
+
+There is no mouse or other pointing-device driver. IRQ12 and USB HID input are
+not initialized, so the desktop is keyboard-only.
 
 ## Authority
 

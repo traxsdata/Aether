@@ -14,7 +14,7 @@ mod uefi;
 
 use aether_abi::{BootInfo, FramebufferInfo, MAX_MEMORY_REGIONS, MemoryKind, MemoryRegion};
 use aether_boot_common::elf;
-use aether_boot_common::{PAGE_SIZE, pages_for};
+use aether_boot_common::{PAGE_SIZE, memory, pages_for};
 use core::ffi::c_void;
 use core::fmt;
 use core::panic::PanicInfo;
@@ -71,7 +71,7 @@ impl fmt::Display for LoadError {
             Self::TooManyRegions(count) => {
                 write!(
                     f,
-                    "memory map has {count} regions after merging, limit is {MAX_MEMORY_REGIONS}"
+                    "firmware memory map has {count} descriptors, limit is {MAX_MEMORY_REGIONS}"
                 )
             }
             Self::ExitBootServices(status) => {
@@ -317,22 +317,6 @@ unsafe fn read_memory_map(
         if len == 0 {
             continue;
         }
-        let kind = memory_kind(descriptor.memory_type);
-        if count > 0 {
-            // SAFETY: `regions` has room for MAX_MEMORY_REGIONS entries and
-            // `count` is always below that.
-            let previous = unsafe { &mut *regions.add(count - 1) };
-            if previous.kind == kind as u32
-                && let Some(end) = previous.end()
-                && end == descriptor.physical_start
-            {
-                let Some(total) = previous.len.checked_add(len) else {
-                    return Err(LoadError::TooManyRegions(entries));
-                };
-                previous.len = total;
-                continue;
-            }
-        }
         if count == MAX_MEMORY_REGIONS {
             return Err(LoadError::TooManyRegions(entries));
         }
@@ -340,12 +324,22 @@ unsafe fn read_memory_map(
         unsafe {
             ptr::write(
                 regions.add(count),
-                MemoryRegion::new(descriptor.physical_start, len, kind),
+                MemoryRegion::new(
+                    descriptor.physical_start,
+                    len,
+                    memory_kind(descriptor.memory_type),
+                ),
             );
         }
         count += 1;
     }
-    Ok(count)
+    // Some UEFI implementations return an unsorted map even though the
+    // specification requires ascending addresses. Sort before merging so the
+    // hand-off contract is met without trusting firmware ordering.
+    // SAFETY: `regions` points to an allocation of MAX_MEMORY_REGIONS entries
+    // and `count` is at most that limit.
+    let regions = unsafe { core::slice::from_raw_parts_mut(regions, count) };
+    Ok(memory::normalize_regions(regions))
 }
 
 fn check_map_status(status: Status, size: usize) -> Result<(), LoadError> {

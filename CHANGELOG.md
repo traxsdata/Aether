@@ -184,6 +184,13 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Fixed
 
+- The idle loop now drains IRQ1 scancodes into the desktop after boot. Physical
+  PS/2 keyboard input previously filled the queue without moving focus or
+  windows because only the synthetic boot self-test consumed keys. The `input`
+  shell command now reports received and dropped counts.
+- The loader sorts the firmware memory map before merging regions. VMware's
+  UEFI returns an unsorted map, which previously failed the hand-off contract
+  with `memory regions are not sorted` even though the map itself was valid.
 - Filesystem inode metadata is validated before use. An oversized size, an
   out-of-device block number, or a malformed directory size is rejected with
   `Corrupt` instead of panicking the kernel. Unformatted devices and unknown
@@ -226,6 +233,8 @@ versioning scheme until the kernel ABI stabilises.
 - Services and the desktop still execute as kernel modules; only the native
   application runs at CPL3. Moving service bodies into supervised user
   processes is follow-up work.
+- The desktop is keyboard-only. There is no mouse, touchpad, or USB HID input
+  driver; PS/2 IRQ12 is not handled.
 - The serial console shell is a ring-0 diagnostic surface with full filesystem
   authority. It is not the ordinary-user terminal or an elevation boundary.
 - Storage is a volatile RAM disk. There is no persistent block device,

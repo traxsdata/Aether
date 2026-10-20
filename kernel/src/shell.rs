@@ -103,7 +103,11 @@ fn execute_line() {
         "services" => supervisor::print_security(),
         "portal" => portal_command(argument),
         "security" => security(),
-        "input" => serial_line!("input: dropped={}", crate::input::dropped()),
+        "input" => serial_line!(
+            "input: dropped={} received={}",
+            crate::input::dropped(),
+            crate::input::received()
+        ),
         "mem" => memory(),
         "uptime" => serial_line!("uptime: {} ticks", scheduler::ticks()),
         "recovery" => recovery(),

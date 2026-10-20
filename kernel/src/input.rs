@@ -45,6 +45,7 @@ struct Queue {
     head: usize,
     tail: usize,
     len: usize,
+    received: u32,
     dropped: u32,
 }
 
@@ -55,11 +56,13 @@ impl Queue {
             head: 0,
             tail: 0,
             len: 0,
+            received: 0,
             dropped: 0,
         }
     }
 
     fn push(&mut self, key: Key) {
+        self.received = self.received.saturating_add(1);
         if self.len == QUEUE_LEN {
             self.dropped = self.dropped.saturating_add(1);
             return;
@@ -119,6 +122,27 @@ pub fn next_key() -> Option<Key> {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the queue update.
     unsafe { (*QUEUE.0.get()).pop() }
+}
+
+/// Drains queued keys into the desktop service.
+///
+/// The idle loop calls this after boot so physical IRQ1 input reaches the
+/// compositor; otherwise scancodes would only fill the queue and be dropped.
+pub fn poll() {
+    for _ in 0..QUEUE_LEN {
+        let Some(key) = next_key() else {
+            return;
+        };
+        crate::desktop::on_key(key);
+    }
+}
+
+/// Returns the number of decoded keys received.
+#[must_use]
+pub fn received() -> u32 {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the read.
+    unsafe { (*QUEUE.0.get()).received }
 }
 
 /// Returns the number of dropped keys.

@@ -8,6 +8,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod elf;
+pub mod memory;
 
 /// Size of an x86-64 page.
 pub const PAGE_SIZE: u64 = 4096;
