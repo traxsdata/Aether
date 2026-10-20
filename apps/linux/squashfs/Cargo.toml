@@ -11,6 +11,8 @@ authors.workspace = true
 [dependencies]
 aether-appimage = { path = "../appimage" }
 ruzstd = { version = "0.9.1", default-features = false }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-decode"] }
 
 [[bin]]
 name = "squashfs-extract"

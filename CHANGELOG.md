@@ -30,12 +30,14 @@ versioning scheme until the kernel ABI stabilises.
   cleared on exit and fault. The static fixture now reads `/etc/motd` and the
   boot gate requires `AETHER_LINUX_ROOT_OK`. No writable root, directories,
   `stat`, or portal integration yet.
-- `aether-squashfs`: a bounded, `unsafe`-free SquashFS 4 reader with zstd
-  metadata/data/fragment decompression, basic and extended file/directory
-  inodes, symlinks, directory validation, extraction limits, and a host
-  `squashfs-extract` tool. It extracts the 16 files (48,350,419 bytes) from the
-  tested GridCraft AppImage. gzip/xz/lz4, xattrs, hardlink policy, and in-OS
-  integration remain missing.
+- `aether-squashfs`: a bounded, `unsafe`-free SquashFS 4 reader with zstd,
+  gzip, and lz4 metadata/data/fragment decompression, basic and extended
+  file/directory inodes, symlinks, directory validation, extraction limits, and
+  a host `squashfs-extract` tool. Import rejects duplicate paths and escaping
+  symlinks, marks hardlinks and copies their data per path, strips
+  setuid/setgid/sticky bits, and counts/drops xattrs. It extracts 16 files
+  (48,350,419 bytes) and two symlinks from the tested GridCraft AppImage.
+  xz/lzma/lzo and in-OS integration remain missing.
 - Pinned SHA-256 verification for AppImage import (`Digest`,
   `parse_verified`) and an optional digest argument to `appimage-inspect`.
   A mismatch is rejected before the container is parsed. Publisher signatures

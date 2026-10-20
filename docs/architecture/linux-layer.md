@@ -111,10 +111,10 @@ exact AppImage digest, and the runtime version.
   `AETHER_LINUX_ROOT_OK` and `AETHER_LINUX_OK`. Anonymous memory comes from a
   boot-reserved arena; there is no runtime frame allocator or VMA table yet.
   The root is embedded and read-only; it is not yet an AppImage import.
-- SquashFS/zstd reader and extraction: implemented in `apps/linux/squashfs`
-  (metadata, file data, fragments, directories, symlinks, extraction limits,
-  host extractor). gzip/xz/lz4, xattrs, hardlink policy, in-OS integration, and
-  the writable overlay remain missing.
+- SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
+  zstd, gzip, and lz4 (metadata, file data, fragments, directories, symlinks,
+  hardlink marking, xattr dropping, extraction limits, host extractor).
+  xz/lzma/lzo, in-OS integration, and the writable overlay remain missing.
 - Dynamic glibc libraries, threads, real futex waiting, signals, file-backed
   mappings, and memory reclaim: not implemented.
 - Wayland bridge and software renderer: not implemented.

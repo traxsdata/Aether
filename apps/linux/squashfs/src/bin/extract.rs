@@ -6,10 +6,11 @@
 
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
-use aether_squashfs::{Image, Limits};
+use aether_squashfs::{Image, Limits, TreeKind};
 
 fn main() -> ExitCode {
     let Some(input) = env::args().nth(1) else {
@@ -39,41 +40,86 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let files = match image.extract(Limits::default()) {
-        Ok(files) => files,
+    let tree = match image.import(Limits::default()) {
+        Ok(tree) => tree,
         Err(error) => {
-            eprintln!("squashfs-extract: extract: {error:?}");
+            eprintln!("squashfs-extract: import: {error:?}");
             return ExitCode::FAILURE;
         }
     };
     let root = PathBuf::from(output);
-    let mut written = 0usize;
-    for file in &files {
-        let relative = Path::new(&file.path);
+    for entry in &tree.entries {
+        let relative = Path::new(&entry.path);
         if relative
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
         {
-            eprintln!("squashfs-extract: unsafe path {}", file.path);
+            eprintln!("squashfs-extract: unsafe path {}", entry.path);
             return ExitCode::FAILURE;
         }
-        let destination = root.join(relative);
-        if let Some(parent) = destination.parent()
-            && let Err(error) = fs::create_dir_all(parent)
-        {
-            eprintln!("squashfs-extract: {}: {error}", parent.display());
-            return ExitCode::FAILURE;
+        if let TreeKind::Directory = entry.kind {
+            let destination = root.join(relative);
+            if let Err(error) = fs::create_dir_all(&destination) {
+                eprintln!("squashfs-extract: {}: {error}", destination.display());
+                return ExitCode::FAILURE;
+            }
+            let _ = fs::set_permissions(&destination, fs::Permissions::from_mode(0o755));
         }
-        if let Err(error) = fs::write(&destination, &file.data) {
-            eprintln!("squashfs-extract: {}: {error}", destination.display());
-            return ExitCode::FAILURE;
+    }
+    for entry in &tree.entries {
+        if let TreeKind::File(data) = &entry.kind {
+            let destination = root.join(Path::new(&entry.path));
+            if let Some(parent) = destination.parent()
+                && let Err(error) = fs::create_dir_all(parent)
+            {
+                eprintln!("squashfs-extract: {}: {error}", parent.display());
+                return ExitCode::FAILURE;
+            }
+            if let Err(error) = fs::write(&destination, data) {
+                eprintln!("squashfs-extract: {}: {error}", destination.display());
+                return ExitCode::FAILURE;
+            }
+            let mode = if entry.mode & 0o111 != 0 {
+                0o755
+            } else {
+                0o644
+            };
+            let _ = fs::set_permissions(&destination, fs::Permissions::from_mode(mode));
         }
-        written += 1;
+    }
+    for entry in &tree.entries {
+        if let TreeKind::Symlink(target) = &entry.kind {
+            let Some(target) = core::str::from_utf8(target).ok() else {
+                eprintln!("squashfs-extract: non-UTF-8 symlink {}", entry.path);
+                return ExitCode::FAILURE;
+            };
+            let destination = root.join(Path::new(&entry.path));
+            if let Some(parent) = destination.parent()
+                && let Err(error) = fs::create_dir_all(parent)
+            {
+                eprintln!("squashfs-extract: {}: {error}", parent.display());
+                return ExitCode::FAILURE;
+            }
+            if let Err(error) = std::os::unix::fs::symlink(target, &destination) {
+                eprintln!("squashfs-extract: {}: {error}", destination.display());
+                return ExitCode::FAILURE;
+            }
+        }
     }
     println!(
-        "extracted files={} bytes={} root={}",
-        written,
-        files.iter().map(|file| file.data.len()).sum::<usize>(),
+        "extracted files={} directories={} symlinks={} hardlinks={} xattrs={} bytes={} root={}",
+        tree.files,
+        tree.directories,
+        tree.symlinks,
+        tree.hardlinks,
+        tree.xattrs,
+        tree.entries
+            .iter()
+            .map(|entry| match &entry.kind {
+                TreeKind::File(data) => data.len(),
+                _ => 0,
+            })
+            .sum::<usize>(),
         root.display()
     );
     ExitCode::SUCCESS

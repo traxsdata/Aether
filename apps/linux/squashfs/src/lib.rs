@@ -3,9 +3,9 @@
 //!
 //! The reader validates every offset and length before reading, decompresses
 //! only the metadata and data blocks it needs, and rejects unsupported inode
-//! types instead of guessing. It currently supports zstd compression, which is
-//! what the GridCraft AppImage uses; other SquashFS compressors are rejected
-//! explicitly and remain tracked in the roadmap.
+//! types instead of guessing. It supports zstd (the GridCraft AppImage), gzip,
+//! and lz4. xz, lzma, and lzo are rejected explicitly and remain tracked in the
+//! roadmap.
 //!
 //! The API is deliberately small: parse a raw SquashFS image or an AppImage,
 //! walk the tree, read regular files, and extract into memory with limits.
@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -55,6 +56,8 @@ pub enum Error {
     InvalidName,
     /// A symlink target is absolute or escapes the root.
     UnsafeSymlink,
+    /// Two entries resolve to the same path.
+    DuplicatePath,
     /// A configured extraction limit was exceeded.
     Limit,
 }
@@ -97,6 +100,8 @@ pub struct Inode {
     pub mode: u16,
     /// Inode number.
     pub number: u32,
+    /// Extended-attribute index, or `u32::MAX` when absent.
+    pub xattr: u32,
 }
 
 /// One directory entry.
@@ -119,6 +124,49 @@ pub struct ExtractedFile {
     pub data: Vec<u8>,
     /// Unix mode bits.
     pub mode: u16,
+}
+
+/// One entry in an imported tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TreeKind {
+    /// Directory.
+    Directory,
+    /// Regular file contents.
+    File(Vec<u8>),
+    /// Symlink target.
+    Symlink(Vec<u8>),
+}
+
+/// One validated entry from an AppImage/SquashFS root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// Relative path below the root, without a leading slash.
+    pub path: String,
+    /// Entry type and payload.
+    pub kind: TreeKind,
+    /// Permission bits with setuid/setgid/sticky removed.
+    pub mode: u16,
+    /// Inode number; repeated numbers are hardlinks.
+    pub inode: u32,
+    /// Whether this entry shares its inode with an earlier path.
+    pub hardlink: bool,
+}
+
+/// Result of importing a tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedTree {
+    /// Validated entries in traversal order.
+    pub entries: Vec<TreeEntry>,
+    /// Number of regular files.
+    pub files: usize,
+    /// Number of directories below the root.
+    pub directories: usize,
+    /// Number of symlinks.
+    pub symlinks: usize,
+    /// Number of repeated inode numbers.
+    pub hardlinks: usize,
+    /// Number of inodes that carried xattr metadata (metadata is dropped).
+    pub xattrs: usize,
 }
 
 /// Extraction limits.
@@ -192,7 +240,7 @@ impl<'a> Image<'a> {
         {
             return Err(Error::BadSuperblock);
         }
-        if compression != 6 {
+        if !matches!(compression, 1 | 5 | 6) {
             return Err(Error::UnsupportedCompression);
         }
         let base = offset as u64;
@@ -319,10 +367,41 @@ impl<'a> Image<'a> {
 
     /// Walks the tree and returns every regular file with its relative path.
     pub fn extract(&self, limits: Limits) -> Result<Vec<ExtractedFile>, Error> {
+        Ok(self
+            .import(limits)?
+            .entries
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                TreeKind::File(data) => Some(ExtractedFile {
+                    path: entry.path,
+                    data,
+                    mode: entry.mode,
+                }),
+                TreeKind::Directory | TreeKind::Symlink(_) => None,
+            })
+            .collect())
+    }
+
+    /// Imports the complete tree with path, symlink, hardlink, and xattr policy.
+    ///
+    /// Symlinks must be relative and stay below the root. Duplicate paths are
+    /// rejected. Repeated inode numbers are marked as hardlinks and their data
+    /// is copied per path, so a host extraction never creates a link that could
+    /// cross the root. Setuid, setgid, and sticky bits are stripped. Xattr
+    /// metadata is counted and dropped; file capabilities never reach the
+    /// runtime root.
+    pub fn import(&self, limits: Limits) -> Result<ImportedTree, Error> {
         let root = self.root()?;
         let mut state = WalkState::default();
         self.walk(&root, "", 0, limits, &mut state)?;
-        Ok(state.files)
+        Ok(ImportedTree {
+            entries: state.tree,
+            files: state.files,
+            directories: state.directories,
+            symlinks: state.symlinks,
+            hardlinks: state.hardlinks,
+            xattrs: state.xattrs,
+        })
     }
 
     fn walk(
@@ -355,8 +434,22 @@ impl<'a> Image<'a> {
                     if path.len() > MAX_PATH_BYTES {
                         return Err(Error::Limit);
                     }
+                    if state.paths.insert(path.clone(), ()).is_some() {
+                        return Err(Error::DuplicatePath);
+                    }
+                    if child.xattr != u32::MAX {
+                        state.xattrs += 1;
+                    }
                     match child.kind {
                         Kind::Directory { .. } => {
+                            state.directories += 1;
+                            state.tree.push(TreeEntry {
+                                path: path.clone(),
+                                kind: TreeKind::Directory,
+                                mode: child.mode & 0o777,
+                                inode: child.number,
+                                hardlink: false,
+                            });
                             self.walk(&child, &path, depth + 1, limits, state)?;
                         }
                         Kind::File { .. } => {
@@ -366,13 +459,32 @@ impl<'a> Image<'a> {
                             if state.bytes > limits.max_bytes {
                                 return Err(Error::Limit);
                             }
-                            state.files.push(ExtractedFile {
+                            let hardlink = state.inodes.insert(child.number, ()).is_some();
+                            if hardlink {
+                                state.hardlinks += 1;
+                            }
+                            state.files += 1;
+                            state.tree.push(TreeEntry {
                                 path,
-                                data,
-                                mode: child.mode,
+                                kind: TreeKind::File(data),
+                                mode: child.mode & 0o777,
+                                inode: child.number,
+                                hardlink,
                             });
                         }
-                        Kind::Symlink(_) => {}
+                        Kind::Symlink(target) => {
+                            if !safe_symlink(&target) {
+                                return Err(Error::UnsafeSymlink);
+                            }
+                            state.symlinks += 1;
+                            state.tree.push(TreeEntry {
+                                path,
+                                kind: TreeKind::Symlink(target),
+                                mode: child.mode & 0o777,
+                                inode: child.number,
+                                hardlink: false,
+                            });
+                        }
                     }
                 }
             }
@@ -382,13 +494,28 @@ impl<'a> Image<'a> {
                 if state.bytes > limits.max_bytes {
                     return Err(Error::Limit);
                 }
-                state.files.push(ExtractedFile {
+                state.files += 1;
+                state.tree.push(TreeEntry {
                     path: prefix.to_string(),
-                    data,
-                    mode: inode.mode,
+                    kind: TreeKind::File(data),
+                    mode: inode.mode & 0o777,
+                    inode: inode.number,
+                    hardlink: false,
                 });
             }
-            Kind::Symlink(_) => {}
+            Kind::Symlink(target) => {
+                if !safe_symlink(target) {
+                    return Err(Error::UnsafeSymlink);
+                }
+                state.symlinks += 1;
+                state.tree.push(TreeEntry {
+                    path: prefix.to_string(),
+                    kind: TreeKind::Symlink(target.clone()),
+                    mode: inode.mode & 0o777,
+                    inode: inode.number,
+                    hardlink: false,
+                });
+            }
         }
         Ok(())
     }
@@ -404,6 +531,7 @@ impl<'a> Image<'a> {
         let kind = read_u16(start, 0).ok_or(Error::InvalidInode)?;
         let mode = read_u16(start, 2).ok_or(Error::InvalidInode)?;
         let number = read_u32(start, 12).ok_or(Error::InvalidInode)?;
+        let mut xattr = u32::MAX;
         let inode = match kind {
             1 => {
                 let start_block = read_u32(start, 16).ok_or(Error::InvalidInode)?;
@@ -419,6 +547,7 @@ impl<'a> Image<'a> {
                 let file_size = read_u32(start, 20).ok_or(Error::InvalidInode)?;
                 let start_block = read_u32(start, 24).ok_or(Error::InvalidInode)?;
                 let offset = read_u16(start, 34).ok_or(Error::InvalidInode)?;
+                xattr = read_u32(start, 36).ok_or(Error::InvalidInode)?;
                 Kind::Directory {
                     start_block,
                     file_size,
@@ -461,6 +590,10 @@ impl<'a> Image<'a> {
                     .get(24..24usize.checked_add(length).ok_or(Error::Truncated)?)
                     .ok_or(Error::InvalidInode)?;
                 let target = target.strip_suffix(&[0]).unwrap_or(target);
+                if kind == 10 {
+                    let end = 24usize.checked_add(length).ok_or(Error::Truncated)?;
+                    xattr = read_u32(start, end).ok_or(Error::InvalidInode)?;
+                }
                 Kind::Symlink(target.to_vec())
             }
             other => return Err(Error::UnsupportedInode(other)),
@@ -469,6 +602,7 @@ impl<'a> Image<'a> {
             kind: inode,
             mode,
             number,
+            xattr,
         })
     }
 
@@ -587,15 +721,21 @@ impl<'a> Image<'a> {
     }
 
     fn decompress(&self, input: &[u8], maximum: usize) -> Result<Vec<u8>, Error> {
-        if self.compression != 6 {
-            return Err(Error::UnsupportedCompression);
-        }
-        let mut decoder =
-            ruzstd::decoding::StreamingDecoder::new(input).map_err(|_| Error::Decompress)?;
-        let mut out = Vec::new();
-        decoder
-            .read_to_end(&mut out)
-            .map_err(|_| Error::Decompress)?;
+        let out = match self.compression {
+            1 => miniz_oxide::inflate::decompress_to_vec_zlib(input)
+                .map_err(|_| Error::Decompress)?,
+            5 => lz4_flex::block::decompress(input, maximum).map_err(|_| Error::Decompress)?,
+            6 => {
+                let mut decoder = ruzstd::decoding::StreamingDecoder::new(input)
+                    .map_err(|_| Error::Decompress)?;
+                let mut out = Vec::new();
+                decoder
+                    .read_to_end(&mut out)
+                    .map_err(|_| Error::Decompress)?;
+                out
+            }
+            _ => return Err(Error::UnsupportedCompression),
+        };
         if out.len() > maximum {
             return Err(Error::Decompress);
         }
@@ -613,7 +753,27 @@ impl<'a> Image<'a> {
 struct WalkState {
     entries: usize,
     bytes: usize,
-    files: Vec<ExtractedFile>,
+    files: usize,
+    directories: usize,
+    symlinks: usize,
+    hardlinks: usize,
+    xattrs: usize,
+    paths: BTreeMap<String, ()>,
+    inodes: BTreeMap<u32, ()>,
+    tree: Vec<TreeEntry>,
+}
+
+fn safe_symlink(target: &[u8]) -> bool {
+    if target.is_empty() || target.contains(&0) {
+        return false;
+    }
+    let Ok(target) = core::str::from_utf8(target) else {
+        return false;
+    };
+    !target.starts_with('/')
+        && target
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 fn parse_directory(data: &[u8]) -> Result<Vec<Entry>, Error> {

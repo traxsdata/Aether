@@ -4,6 +4,9 @@
 use crate::{Error, Image, Kind, Limits};
 
 const IMAGE: &[u8] = include_bytes!("../tests/fixtures/root.sqfs");
+const UNSAFE: &[u8] = include_bytes!("../tests/fixtures/unsafe-symlink.sqfs");
+const GZIP: &[u8] = include_bytes!("../tests/fixtures/root-gzip.sqfs");
+const LZ4: &[u8] = include_bytes!("../tests/fixtures/root-lz4.sqfs");
 
 fn entry_names(image: &Image, path: &str) -> Vec<String> {
     let inode = find(image, path).expect("inode");
@@ -24,7 +27,7 @@ fn reads_the_root_directory() {
     let image = Image::from_squashfs(IMAGE).expect("parse");
     let mut names = entry_names(&image, "");
     names.sort();
-    assert_eq!(names, ["etc", "hello.txt", "lib", "link"]);
+    assert_eq!(names, ["etc", "hard.txt", "hello.txt", "lib", "link"]);
 }
 
 #[test]
@@ -56,11 +59,60 @@ fn extracts_the_tree() {
     let files = image.extract(Limits::default()).expect("extract");
     let mut names: Vec<_> = files.iter().map(|file| file.path.as_str()).collect();
     names.sort();
-    assert_eq!(names, ["etc/motd", "hello.txt"]);
+    assert_eq!(names, ["etc/motd", "hard.txt", "hello.txt"]);
     assert!(
         files
             .iter()
             .any(|file| file.path == "hello.txt" && file.data == b"hello from squashfs\n")
+    );
+    assert!(
+        files
+            .iter()
+            .any(|file| file.path == "hard.txt" && file.data == b"hello from squashfs\n")
+    );
+}
+
+#[test]
+fn import_marks_symlinks_and_hardlinks_and_strips_modes() {
+    let image = Image::from_squashfs(IMAGE).expect("parse");
+    let tree = image.import(Limits::default()).expect("import");
+    assert_eq!(tree.files, 3);
+    assert_eq!(tree.directories, 2);
+    assert_eq!(tree.symlinks, 1);
+    assert_eq!(tree.hardlinks, 1);
+    assert_eq!(tree.xattrs, 0);
+    let link = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "link")
+        .unwrap();
+    assert_eq!(link.kind, crate::TreeKind::Symlink(b"etc/motd".to_vec()));
+    let hard = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "hard.txt")
+        .unwrap();
+    let hello = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "hello.txt")
+        .unwrap();
+    assert_eq!(hard.inode, hello.inode);
+    assert_eq!(
+        tree.entries.iter().filter(|entry| entry.hardlink).count(),
+        1
+    );
+    for entry in &tree.entries {
+        assert_eq!(entry.mode & 0o7000, 0, "setuid/setgid/sticky stripped");
+    }
+}
+
+#[test]
+fn rejects_an_escaping_symlink() {
+    let image = Image::from_squashfs(UNSAFE).expect("parse");
+    assert_eq!(
+        image.import(Limits::default()).unwrap_err(),
+        Error::UnsafeSymlink
     );
 }
 
@@ -99,6 +151,16 @@ fn reads_an_appimage_with_a_container_offset() {
             .unwrap(),
         b"hello from squashfs\n"
     );
+}
+
+#[test]
+fn reads_gzip_and_lz4_images() {
+    for image in [GZIP, LZ4] {
+        let image = Image::from_squashfs(image).expect("parse");
+        let hello = image.lookup("hello.txt").expect("hello");
+        assert_eq!(image.read_file(&hello).unwrap(), b"hello from squashfs\n");
+        assert_eq!(image.import(Limits::default()).unwrap().files, 3);
+    }
 }
 
 #[test]
