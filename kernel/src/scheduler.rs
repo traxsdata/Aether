@@ -37,6 +37,8 @@ pub const USER_TASK: usize = WORKER_COUNT + 1;
 pub const LINUX_TASK: usize = USER_TASK + 1;
 /// Task index of the dynamic Linux loader test.
 pub const LINUX_DYN_TASK: usize = LINUX_TASK + 1;
+/// Task index of the program launched from the imported user AppImage.
+pub const APPIMAGE_TASK: usize = LINUX_DYN_TASK + 1;
 
 const MAX_TASKS: usize = WORKER_COUNT + 12;
 const STACK_SIZE: usize = 16 * 1024;
@@ -144,12 +146,16 @@ struct LinuxFile {
     offset: usize,
 }
 
-const OVERLAY_FILES: usize = 4;
+const OVERLAY_FILES: usize = 12;
 const OVERLAY_BYTES: usize = 512;
 const OVERLAY_PATH: usize = 64;
+/// Total writable overlay bytes one application may hold at once.
+pub const OVERLAY_APP_BYTES: usize = 1024;
 
 #[derive(Clone, Copy)]
 struct LinuxOverlay {
+    /// Application store this entry belongs to.
+    app: u8,
     path: [u8; OVERLAY_PATH],
     path_len: usize,
     data: [u8; OVERLAY_BYTES],
@@ -175,6 +181,7 @@ impl LinuxInotify {
 
 impl LinuxOverlay {
     const EMPTY: Self = Self {
+        app: 0,
         path: [0; OVERLAY_PATH],
         path_len: 0,
         data: [0; OVERLAY_BYTES],
@@ -238,7 +245,8 @@ struct Task {
     futex_deadline: u64,
     clear_child_tid: u64,
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
-    linux_overlay: [Option<LinuxOverlay>; OVERLAY_FILES],
+    /// Per-application overlay store selected by the runtime manager.
+    overlay_app: u8,
     linux_inotify: Option<LinuxInotify>,
     linux_pipes: [Option<LinuxPipe>; MAX_PIPES],
     // Descriptor-local allocation map; counters live in EVENTFD_COUNTERS and
@@ -284,7 +292,7 @@ impl Task {
             futex_deadline: 0,
             clear_child_tid: 0,
             linux_fds: [None; crate::linux::MAX_FDS],
-            linux_overlay: [None; OVERLAY_FILES],
+            overlay_app: 0,
             linux_inotify: None,
             linux_pipes: [None; MAX_PIPES],
             linux_eventfds: [None; MAX_EVENTFDS],
@@ -311,6 +319,14 @@ unsafe impl<T> Sync for Global<T> {}
 
 static TASKS: Global<[Task; MAX_TASKS]> =
     Global(UnsafeCell::new([const { Task::new() }; MAX_TASKS]));
+/// Writable overlay entries, keyed by application store and path.
+///
+/// Entries intentionally outlive the task that created them. They are cleared
+/// only by the user-visible erasure path, so settings/logs survive a process
+/// exit within a boot. The store is RAM-backed and does not survive a power
+/// cycle because the filesystem service has no persistent block device.
+static OVERLAYS: Global<[Option<LinuxOverlay>; OVERLAY_FILES]> =
+    Global(UnsafeCell::new([None; OVERLAY_FILES]));
 static EVENTFD_COUNTERS: Global<[[Option<u64>; MAX_EVENTFDS]; MAX_TASKS]> =
     Global(UnsafeCell::new([[None; MAX_EVENTFDS]; MAX_TASKS]));
 #[repr(align(16))]
@@ -340,6 +356,8 @@ static LINUX_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static LINUX_DYN_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
 static LINUX_DYN_EXITS: AtomicUsize = AtomicUsize::new(0);
 static LINUX_DYN_FAULTS: AtomicUsize = AtomicUsize::new(0);
+static APPIMAGE_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
+static APPIMAGE_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static MEM_FREE_MIB: AtomicUsize = AtomicUsize::new(0);
 static MEM_TOTAL_MIB: AtomicUsize = AtomicUsize::new(0);
 
@@ -360,6 +378,8 @@ pub enum SchedulerError {
     LinuxImage,
     /// The embedded signed Linux runtime rootfs could not be imported.
     LinuxRoot,
+    /// The user AppImage could not be imported or launched.
+    Linuxd,
     /// The embedded user program is not a valid executable.
     UserImage(elf::ParseError),
     /// The virtual filesystem could not be formatted or seeded.
@@ -411,6 +431,7 @@ pub fn run() -> ! {
             && USER_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
             && LINUX_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
             && LINUX_DYN_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
+            && APPIMAGE_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
         {
             timer::disable_interrupts();
             let denied = DENIED.load(Ordering::Acquire);
@@ -446,11 +467,29 @@ pub fn run() -> ! {
                 );
                 halt()
             }
+            let app_result = APPIMAGE_RESULT.load(Ordering::Acquire);
+            if app_result != UserTestResult::Passed as usize {
+                serial_line!(
+                    "AETHER_BOOT_FAILED reason=linux-appimage-test result={} faults={}",
+                    app_result,
+                    APPIMAGE_FAULTS.load(Ordering::Acquire)
+                );
+                halt()
+            }
             serial_line!(
                 "AETHER_LINUX_OK abi=linux exits={} faults={}",
                 linux_exits(),
                 LINUX_FAULTS.load(Ordering::Acquire)
             );
+            if let Some((id, version, path)) = crate::linux::app_identity() {
+                serial_line!(
+                    "AETHER_LINUX_APPIMAGE_OK id={} version={} path={}",
+                    id,
+                    version,
+                    path
+                );
+            }
+            crate::linuxd::post_app_exit();
             serial_line!(
                 "AETHER_LINUX_DYN_OK abi=linux exits={} faults={}",
                 LINUX_DYN_EXITS.load(Ordering::Acquire),
@@ -640,6 +679,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // task can resolve any file.
     let (root_files, root_bytes) = crate::linux::init().map_err(|_| SchedulerError::LinuxRoot)?;
     serial_line!("AETHER_LINUX_IMPORT_OK files={root_files} bytes={root_bytes}");
+    crate::linuxd::init().map_err(|_| SchedulerError::Linuxd)?;
 
     // Load the static Linux test program. It is a boot gate for the Linux
     // syscall entry, not yet an application domain with its own root.
@@ -725,6 +765,39 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         LINUX_DYN_TASK,
         dynamic.pml4.start_address(),
         dynamic.entry
+    );
+
+    // Launch the program selected from the verified user AppImage. The
+    // identity is checked by linuxd; this task owns a separate overlay store.
+    let app_program = crate::linux::app_program().ok_or(SchedulerError::Linuxd)?;
+    let app_image = elf::parse(app_program).map_err(|_| SchedulerError::Linuxd)?;
+    let app_pml4 = paging::create_user_address_space(allocator, &app_image, app_program)
+        .map_err(|_| SchedulerError::Linuxd)?;
+    let app_kernel_top = stack_top(&kernel_stacks.0[APPIMAGE_TASK]);
+    let app_saved_rsp = prepare_user_stack(
+        app_kernel_top,
+        app_image.entry(),
+        (USER_STACK_TOP - 16) & !0xf,
+    );
+    let mut app_task = Task::new();
+    app_task.state = TaskState::Ready;
+    app_task.kind = TaskKind::Linux;
+    app_task.abi = TaskAbi::Linux;
+    app_task.saved_rsp = app_saved_rsp;
+    app_task.pml4 = app_pml4.start_address();
+    app_task.kernel_stack_top = app_kernel_top;
+    app_task.root = crate::fs::DEMO_ROOT;
+    app_task.brk = paging::LINUX_ARENA_BASE;
+    app_task.overlay_app = crate::linuxd::APP_OVERLAY_ID;
+    app_task.tgid = APPIMAGE_TASK;
+    app_task.pgid = APPIMAGE_TASK;
+    app_task.sid = APPIMAGE_TASK;
+    tasks[APPIMAGE_TASK] = app_task;
+    serial_line!(
+        "sched: linux appimage task ready pid={} pml4={:#018x} entry={:#018x}",
+        APPIMAGE_TASK,
+        app_pml4.start_address(),
+        app_image.entry()
     );
 
     // SAFETY: Interrupts are disabled during boot and the idle task is current.
@@ -1161,7 +1234,7 @@ pub fn linux_clone(
         parent_fs_base,
         parent_tgid,
         parent_fds,
-        parent_overlay,
+        parent_overlay_app,
         parent_inotify,
         parent_pipes,
         parent_eventfds,
@@ -1180,7 +1253,7 @@ pub fn linux_clone(
             parent.fs_base,
             parent.tgid,
             parent.linux_fds,
-            parent.linux_overlay,
+            parent.overlay_app,
             parent.linux_inotify,
             parent.linux_pipes,
             parent.linux_eventfds,
@@ -1218,7 +1291,7 @@ pub fn linux_clone(
     thread.futex_deadline = 0;
     thread.clear_child_tid = child_tid;
     thread.linux_fds = parent_fds;
-    thread.linux_overlay = parent_overlay;
+    thread.overlay_app = parent_overlay_app;
     thread.linux_inotify = parent_inotify;
     thread.linux_pipes = parent_pipes;
     thread.linux_eventfds = parent_eventfds;
@@ -1281,7 +1354,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         brk,
         fs_base,
         fds,
-        overlay,
+        overlay_app,
         inotify,
         pipes,
         eventfds,
@@ -1301,7 +1374,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
             parent.brk,
             parent.fs_base,
             parent.linux_fds,
-            parent.linux_overlay,
+            parent.overlay_app,
             parent.linux_inotify,
             parent.linux_pipes,
             parent.linux_eventfds,
@@ -1332,7 +1405,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.sid = tasks[current].sid;
     child.parent = current;
     child.linux_fds = fds;
-    child.linux_overlay = overlay;
+    child.overlay_app = overlay_app;
     child.linux_inotify = inotify;
     child.linux_pipes = pipes;
     child.linux_eventfds = eventfds;
@@ -1986,12 +2059,74 @@ pub fn linux_open(path: &str) -> Result<u64, i64> {
     Err(LINUX_EMFILE)
 }
 
+/// Returns `true` for a path mapped to the per-application writable store.
+#[must_use]
+pub fn is_overlay_path(path: &str) -> bool {
+    path.starts_with("/tmp/") || path.starts_with("/settings/") || path.starts_with("/logs/")
+}
+
+fn overlays() -> &'static mut [Option<LinuxOverlay>; OVERLAY_FILES] {
+    // SAFETY: Access is serialized by the single-CPU scheduler and interrupt
+    // masking, exactly like TASKS.
+    unsafe { &mut *OVERLAYS.0.get() }
+}
+
+fn overlay_index(app: u8, path: &str) -> Option<usize> {
+    let store = unsafe { &*OVERLAYS.0.get() };
+    store.iter().position(|entry| {
+        entry
+            .as_ref()
+            .is_some_and(|entry| entry.app == app && entry.path() == path)
+    })
+}
+
+/// Returns the bytes an application currently holds in its overlay quota.
+#[must_use]
+pub fn linux_overlay_used(app: u8) -> usize {
+    let store = unsafe { &*OVERLAYS.0.get() };
+    store
+        .iter()
+        .flatten()
+        .filter(|entry| entry.app == app)
+        .map(|entry| entry.len)
+        .sum()
+}
+
+/// Returns the persisted entry count and bytes for an application store.
+#[must_use]
+pub fn linux_overlay_stats(app: u8) -> (usize, usize) {
+    let store = unsafe { &*OVERLAYS.0.get() };
+    let mut entries = 0usize;
+    let mut bytes = 0usize;
+    for entry in store.iter().flatten().filter(|entry| entry.app == app) {
+        entries += 1;
+        bytes += entry.len;
+    }
+    (entries, bytes)
+}
+
+/// Erases every overlay entry for an application and returns the count.
+///
+/// This is the user-visible erasure operation behind `linux-erase`. Existing
+/// descriptors to erased entries fail closed with `EBADF` instead of exposing
+/// another application's data; the stored entries and their quota accounting
+/// are removed.
+pub fn linux_overlay_erase(app: u8) -> usize {
+    let store = overlays();
+    let mut erased = 0usize;
+    for entry in store.iter_mut() {
+        if entry.as_ref().is_some_and(|entry| entry.app == app) {
+            *entry = None;
+            erased += 1;
+        }
+    }
+    erased
+}
+
 /// Opens a read-only file, preferring an existing overlay entry.
 pub fn linux_open_read(path: &str) -> Result<u64, i64> {
-    if path.starts_with("/tmp/")
-        && let Ok(fd) = linux_overlay_open(path, false, false)
-    {
-        return Ok(fd);
+    if is_overlay_path(path) {
+        return linux_overlay_open(path, false, false);
     }
     if crate::linux::is_dir(path) {
         return linux_open_directory(path);
@@ -2059,47 +2194,42 @@ pub fn linux_getdents(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
     Ok(written)
 }
 
-/// Opens or creates a file in the task's private writable overlay.
+/// Opens or creates a file in the application's writable overlay.
 ///
-/// The overlay is deliberately separate from the read-only root. Only `/tmp`
-/// paths are accepted, entries are bounded, and the overlay disappears with the
-/// task. This is the prototype of the per-application writable layer.
+/// `/tmp`, `/settings`, and `/logs` are runtime path mappings, not host
+/// authority. Entries are bounded per file and per application, the store is
+/// shared by processes with the same application identity, and the store
+/// outlives a task until the erasure path is used. It is RAM-backed, so it does
+/// not survive a power cycle.
 pub fn linux_overlay_open(path: &str, create: bool, truncate: bool) -> Result<u64, i64> {
-    if !path.starts_with("/tmp/") || !crate::linux::valid_path(path) {
+    if !is_overlay_path(path) || !crate::linux::valid_path(path) {
         return Err(LINUX_EROFS);
+    }
+    if path.len() > OVERLAY_PATH {
+        return Err(LINUX_ENAMETOOLONG);
     }
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
     if task.abi != TaskAbi::Linux {
         return Err(LINUX_EBADF);
     }
-    let mut overlay_index = None;
-    for (index, entry) in task.linux_overlay.iter().enumerate() {
-        if entry.as_ref().is_some_and(|entry| entry.path() == path) {
-            overlay_index = Some(index);
-            break;
-        }
-    }
+    let app = task.overlay_app;
+    let mut overlay_index = overlay_index(app, path);
     if overlay_index.is_none() {
         if !create {
             return Err(LINUX_ENOENT);
         }
-        if path.len() > OVERLAY_PATH {
-            return Err(LINUX_ENAMETOOLONG);
-        }
-        let index = task
-            .linux_overlay
-            .iter()
-            .position(Option::is_none)
-            .ok_or(LINUX_ENOSPC)?;
+        let store = overlays();
+        let index = store.iter().position(Option::is_none).ok_or(LINUX_ENOSPC)?;
         let mut entry = LinuxOverlay::EMPTY;
+        entry.app = app;
         entry.path[..path.len()].copy_from_slice(path.as_bytes());
         entry.path_len = path.len();
-        task.linux_overlay[index] = Some(entry);
+        store[index] = Some(entry);
         overlay_index = Some(index);
     }
     let index = overlay_index.unwrap();
-    if truncate && let Some(entry) = task.linux_overlay[index].as_mut() {
+    if truncate && let Some(entry) = overlays()[index].as_mut() {
         entry.len = 0;
     }
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
@@ -2112,6 +2242,17 @@ pub fn linux_overlay_open(path: &str, create: bool, truncate: bool) -> Result<u6
         }
     }
     Err(LINUX_EMFILE)
+}
+
+/// User-visible erasure entry point used by `linux-erase`.
+pub fn erase_application_overlay(name: &str) -> Option<usize> {
+    if name == "appimage" || name == "1" {
+        Some(linux_overlay_erase(crate::linuxd::APP_OVERLAY_ID))
+    } else if name == "test" || name == "0" {
+        Some(linux_overlay_erase(0))
+    } else {
+        None
+    }
 }
 
 /// Creates a bounded pipe and returns its read and write descriptors.
@@ -2381,7 +2522,9 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
             Ok(length)
         }
         LinuxFileSource::Overlay(index) => {
-            let Some(entry) = task.linux_overlay.get(index).and_then(Option::as_ref) else {
+            // SAFETY: overlay access is serialized like the task table.
+            let store = unsafe { &*OVERLAYS.0.get() };
+            let Some(entry) = store.get(index).and_then(Option::as_ref) else {
                 return Err(LINUX_EBADF);
             };
             let remaining = entry.len.saturating_sub(slot.offset);
@@ -2459,11 +2602,19 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
     };
     match slot.source {
         LinuxFileSource::Overlay(index) => {
-            let Some(entry) = task.linux_overlay.get_mut(index).and_then(Option::as_mut) else {
+            let app = task.overlay_app;
+            let used = linux_overlay_used(app);
+            // SAFETY: overlay access is serialized like the task table.
+            let store = unsafe { &mut *OVERLAYS.0.get() };
+            let Some(entry) = store.get_mut(index).and_then(Option::as_mut) else {
                 return Err(LINUX_EBADF);
             };
             let end = slot.offset.checked_add(data.len()).ok_or(LINUX_ENOSPC)?;
             if end > OVERLAY_BYTES {
+                return Err(LINUX_ENOSPC);
+            }
+            let retained = used.saturating_sub(entry.len);
+            if retained + end > OVERLAY_APP_BYTES {
                 return Err(LINUX_ENOSPC);
             }
             entry.data[slot.offset..end].copy_from_slice(data);
@@ -2564,11 +2715,12 @@ pub fn linux_inotify_add(fd: u64, path: &str, mask: u32) -> Result<i32, i64> {
     {
         return Err(LINUX_EINVAL);
     }
-    if !task
-        .linux_overlay
+    let app = task.overlay_app;
+    let store = unsafe { &*OVERLAYS.0.get() };
+    if !store
         .iter()
         .flatten()
-        .any(|entry| entry.path() == path)
+        .any(|entry| entry.app == app && entry.path() == path)
     {
         return Err(LINUX_ENOENT);
     }
@@ -2626,7 +2778,8 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
             Ok(length)
         }
         LinuxFileSource::Overlay(index) => {
-            let Some(entry) = task.linux_overlay.get(index).and_then(Option::as_ref) else {
+            let store = unsafe { &*OVERLAYS.0.get() };
+            let Some(entry) = store.get(index).and_then(Option::as_ref) else {
                 return Err(LINUX_EBADF);
             };
             if offset > entry.len {
@@ -2679,8 +2832,7 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
     };
     let size = match slot.source {
         LinuxFileSource::Root(file) => crate::linux::file(file).map_or(0, |file| file.data.len()),
-        LinuxFileSource::Overlay(index) => task
-            .linux_overlay
+        LinuxFileSource::Overlay(index) => unsafe { &*OVERLAYS.0.get() }
             .get(index)
             .and_then(Option::as_ref)
             .map_or(0, |entry| entry.len),
@@ -2709,6 +2861,13 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
 /// Reports whether a path exists in the read-only root.
 #[must_use]
 pub fn linux_access(path: &str) -> bool {
+    if is_overlay_path(path) {
+        let tasks = unsafe { &*TASKS.0.get() };
+        let app = tasks[CURRENT.load(Ordering::Relaxed)].overlay_app;
+        if overlay_index(app, path).is_some() {
+            return true;
+        }
+    }
     crate::linux::lookup(path).is_some() || crate::linux::is_dir(path)
 }
 
@@ -2963,6 +3122,15 @@ pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), Vma
 /// The root is a flat imported tree, so regular files have a stable inode
 /// derived from their index and a synthetic mode.
 pub fn linux_stat_path(path: &str) -> Option<(u64, u64, u32)> {
+    if is_overlay_path(path) {
+        let tasks = unsafe { &*TASKS.0.get() };
+        let app = tasks[CURRENT.load(Ordering::Relaxed)].overlay_app;
+        let index = overlay_index(app, path)?;
+        // SAFETY: overlay access is serialized like the task table.
+        let store = unsafe { &*OVERLAYS.0.get() };
+        let entry = store.get(index).and_then(Option::as_ref)?;
+        return Some((entry.len as u64, index as u64 + 1, 0o100644));
+    }
     if crate::linux::is_dir(path) {
         return Some((0, 2, 0o040755));
     }
@@ -2984,8 +3152,8 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
             Ok((file.data.len() as u64, index as u64 + 1, 0o100644))
         }
         LinuxFileSource::Overlay(index) => {
-            let entry = task
-                .linux_overlay
+            let store = unsafe { &*OVERLAYS.0.get() };
+            let entry = store
                 .get(index)
                 .and_then(Option::as_ref)
                 .ok_or(LINUX_EBADF)?;
@@ -3047,8 +3215,7 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
         LinuxFileSource::Root(file) => crate::linux::file(file)
             .map(|file| file.data.len() as u64)
             .ok_or(LINUX_EBADF),
-        LinuxFileSource::Overlay(index) => task
-            .linux_overlay
+        LinuxFileSource::Overlay(index) => unsafe { &*OVERLAYS.0.get() }
             .get(index)
             .and_then(Option::as_ref)
             .map(|entry| entry.len as u64)
@@ -3197,7 +3364,6 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = ((status & 0xff) << 8) as i64;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_overlay = [None; OVERLAY_FILES];
         tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -3212,14 +3378,15 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_overlay = [None; OVERLAY_FILES];
         tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
         serial_line!("linux: thread exit tid={current} status={status}");
         return schedule_next(current);
     }
-    if (current != LINUX_TASK && current != LINUX_DYN_TASK) || kind != TaskKind::Linux {
+    if (current != LINUX_TASK && current != LINUX_DYN_TASK && current != APPIMAGE_TASK)
+        || kind != TaskKind::Linux
+    {
         serial_line!("AETHER_BOOT_FAILED reason=linux exit from wrong task");
         halt()
     }
@@ -3230,7 +3397,6 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].futex_deadline = 0;
     tasks[current].state = TaskState::Done;
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-    tasks[current].linux_overlay = [None; OVERLAY_FILES];
     tasks[current].linux_pipes = [None; MAX_PIPES];
     tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
     tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -3244,6 +3410,8 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     if current == LINUX_DYN_TASK {
         LINUX_DYN_EXITS.fetch_add(1, Ordering::Release);
         LINUX_DYN_RESULT.store(result as usize, Ordering::Release);
+    } else if current == APPIMAGE_TASK {
+        APPIMAGE_RESULT.store(result as usize, Ordering::Release);
     } else {
         LINUX_EXITS.fetch_add(1, Ordering::Release);
         LINUX_RESULT.store(result as usize, Ordering::Release);
@@ -3332,7 +3500,6 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = 128 + vector as i64;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_overlay = [None; OVERLAY_FILES];
         tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -3346,7 +3513,6 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].state = TaskState::Faulted;
         tasks[current].saved_rsp = frame as u64;
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_overlay = [None; OVERLAY_FILES];
         tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -3372,7 +3538,6 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
     if linux {
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_overlay = [None; OVERLAY_FILES];
         tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
@@ -3381,6 +3546,9 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         if current == LINUX_DYN_TASK {
             LINUX_DYN_FAULTS.fetch_add(1, Ordering::Release);
             LINUX_DYN_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+        } else if current == APPIMAGE_TASK {
+            APPIMAGE_FAULTS.fetch_add(1, Ordering::Release);
+            APPIMAGE_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
         } else {
             LINUX_FAULTS.fetch_add(1, Ordering::Release);
             LINUX_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);

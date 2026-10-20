@@ -16,9 +16,15 @@ LINUX_DYN_ELF := $(BUILD)/linux-dynamic.elf
 LINUX_INTERP_ELF := $(BUILD)/linux-interp.elf
 LINUX_EXEC_ELF := $(BUILD)/linux-exec.elf
 LINUX_DYN_EXEC_ELF := $(BUILD)/linux-dynamic-exec.elf
-LINUX_RUNTIME_DIR := $(BUILD)/linux-runtime
+LINUX_APP_ELF := $(BUILD)/linux-appimage-app.elf
+LINUX_RUNTIME_DIR := $(BUILD)/linux-runtime-pinned-root
 LINUX_ROOTFS := $(BUILD)/linux-runtime.sqfs
 LINUX_ROOTFS_RECORD := $(BUILD)/linux-runtime.import
+LINUX_RUNTIME_PIN := $(BUILD)/linux-runtime-pinned.pin
+LINUX_RUNTIME_MANIFEST := $(BUILD)/linux-runtime-pinned.manifest
+LINUX_APPIMAGE := $(BUILD)/linux-user.AppImage
+LINUX_APPIMAGE_RECORD := $(BUILD)/linux-user.import
+LINUX_APPIMAGE_PROGRAM ?= /usr/bin/app
 LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
 LINUX_DYN_PATH ?= /usr/bin/dynamic
 LINUX_RUNTIME_PREBUILT ?= 0
@@ -40,7 +46,7 @@ USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
 .PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test shell-test fault-test rollback-test \
 	negative-test unittest lint docs-check license-check compat-test update-test release release-demo \
-	release-check qualify ci clean
+	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
 all: image
 
@@ -66,18 +72,15 @@ linux-fixture:
 	$(AS) --64 tests/fixtures/linux/dynamic-exec.S -o $(BUILD)/linux-dynamic-exec.o
 	$(LD) -pie -e _start --dynamic-linker /lib/ld-aether.so \
 		$(BUILD)/linux-dynamic-exec.o -o $(LINUX_DYN_EXEC_ELF)
+	$(AS) --64 tests/fixtures/linux/appimage.S -o $(BUILD)/linux-appimage-app.o
+	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
+		$(BUILD)/linux-appimage-app.o -o $(LINUX_APP_ELF)
 	if [ "$(LINUX_RUNTIME_PREBUILT)" = "0" ]; then \
-		rm -rf $(LINUX_RUNTIME_DIR); \
-		mkdir -p $(LINUX_RUNTIME_DIR)/etc $(LINUX_RUNTIME_DIR)/lib $(LINUX_RUNTIME_DIR)/usr/bin; \
-		printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\n' > $(LINUX_RUNTIME_DIR)/etc/motd; \
-		cp $(LINUX_INTERP_ELF) $(LINUX_RUNTIME_DIR)/lib/ld-aether.so; \
-		cp $(LINUX_DYN_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/dynamic; \
-		cp $(LINUX_EXEC_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/exec; \
-		cp $(LINUX_DYN_EXEC_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/dynamic-exec; \
-		sh tools/build-runtime-rootfs.sh $(LINUX_RUNTIME_DIR) $(LINUX_ROOTFS) \
-			$(LINUX_RUNTIME_SEED) org.aether.linux-runtime 0.1.0 \
-			"Aether Test Publisher" $(LINUX_ROOTFS_RECORD); \
+		sh tools/build-pinned-runtime.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
+			$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED); \
 	fi
+	sh tools/build-appimage-fixture.sh $(LINUX_APPIMAGE) $(LINUX_APPIMAGE_RECORD) \
+		$(LINUX_RUNTIME_SEED) $(LINUX_APP_ELF)
 
 kernel: user linux-fixture
 	@mkdir -p $(BUILD)
@@ -85,6 +88,10 @@ kernel: user linux-fixture
 	AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 	AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 	AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
+	AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
+	AETHER_LINUX_APPIMAGE=$(abspath $(LINUX_APPIMAGE)) \
+	AETHER_LINUX_APPIMAGE_RECORD=$(abspath $(LINUX_APPIMAGE_RECORD)) \
+	AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
 	AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
@@ -102,7 +109,15 @@ image: loader
 	@echo "built $(IMAGE)"
 
 test: image
+	$(PYTHON) tools/test-runtime-packaging.py
 	$(PYTHON) tools/test-boot.py
+
+# Build and inspect the pinned runtime profile without booting.
+runtime-rootfs-pinned: linux-fixture
+	@cat $(LINUX_RUNTIME_MANIFEST)
+
+runtime-package-test: linux-fixture
+	$(PYTHON) tools/test-runtime-packaging.py
 
 # Opt-in host-ABI smoke test: package the host glibc and a dynamically linked
 # hello, then boot it through the same loader. This is not the pinned runtime
@@ -110,7 +125,7 @@ test: image
 glibc-test:
 	$(MAKE) LINUX_RUNTIME_PREBUILT=1 linux-fixture
 	sh tools/build-glibc-rootfs.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
-		$(LINUX_RUNTIME_SEED)
+		$(LINUX_RUNTIME_SEED) $(LINUX_RUNTIME_PIN)
 	$(MAKE) LINUX_RUNTIME_PREBUILT=1 LINUX_DYN_PATH=/usr/bin/hello image
 	AETHER_SKIP_MARKERS=AETHER_LINUX_DYN_INTERP_OK,AETHER_LINUX_DYN_MAIN_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GLIBC_OK $(PYTHON) tools/test-boot.py
@@ -178,6 +193,10 @@ lint: kernel
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
+		AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
+		AETHER_LINUX_APPIMAGE=$(abspath $(LINUX_APPIMAGE)) \
+		AETHER_LINUX_APPIMAGE_RECORD=$(abspath $(LINUX_APPIMAGE_RECORD)) \
+		AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
 		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
@@ -185,6 +204,10 @@ lint: kernel
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
+		AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
+		AETHER_LINUX_APPIMAGE=$(abspath $(LINUX_APPIMAGE)) \
+		AETHER_LINUX_APPIMAGE_RECORD=$(abspath $(LINUX_APPIMAGE_RECORD)) \
+		AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
 		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
 			--features fault-selftest --locked -- -D warnings

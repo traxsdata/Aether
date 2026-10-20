@@ -26,8 +26,13 @@ pub const MAX_FDS: usize = 8;
 
 const ROOTFS: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS"));
 const ROOTFS_RECORD: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS_RECORD"));
+const APPIMAGE: &[u8] = include_bytes!(env!("AETHER_LINUX_APPIMAGE"));
+const APPIMAGE_RECORD: &[u8] = include_bytes!(env!("AETHER_LINUX_APPIMAGE_RECORD"));
+const APPIMAGE_PROGRAM: &str = env!("AETHER_LINUX_APPIMAGE_PROGRAM");
 const TRUST_PUBLIC_KEY: &str = include_str!("../../tests/fixtures/keys/test.pub");
 const TRUST_PUBLISHER: &str = "Aether Test Publisher";
+/// Build-time pin of the runtime manifest's SHA-256.
+const RUNTIME_PIN: &str = env!("AETHER_LINUX_RUNTIME_PIN");
 
 pub struct RootFile {
     pub path: String,
@@ -46,20 +51,51 @@ unsafe impl<T> Sync for Global<T> {}
 
 static ROOT: Global<Option<Root>> = Global(UnsafeCell::new(None));
 
+/// Selected Linux runtime profile from the packaged rootfs.
+pub struct RuntimeProfile {
+    /// Profile name, for example `pinned-host-glibc`.
+    pub profile: String,
+    /// Exact glibc version recorded by the package.
+    pub glibc: String,
+}
+
+/// Imported user AppImage identity and entry program.
+pub struct ImportedApp {
+    /// Signed application identity.
+    pub id: String,
+    /// Signed application version.
+    pub version: String,
+    /// Program path selected by the launch policy.
+    pub path: String,
+    /// Program bytes copied out of the imported tree.
+    program: Vec<u8>,
+}
+
+static RUNTIME: Global<Option<RuntimeProfile>> = Global(UnsafeCell::new(None));
+static APP: Global<Option<ImportedApp>> = Global(UnsafeCell::new(None));
+
+fn trust() -> Option<TrustStore<'static>> {
+    let mut key = [0u8; 32];
+    if aether_crypto::from_hex(TRUST_PUBLIC_KEY.trim().as_bytes(), &mut key) != Some(32) {
+        return None;
+    }
+    // The publisher table is a fixed boot constant; leak it into static
+    // storage so the borrowed TrustStore lives for the boot.
+    let publishers: &'static [TrustedPublisher] = alloc::boxed::Box::leak(
+        alloc::vec![TrustedPublisher {
+            name: TRUST_PUBLISHER,
+            key,
+        }]
+        .into_boxed_slice(),
+    );
+    Some(TrustStore::new(publishers))
+}
+
 /// Imports the embedded signed runtime rootfs.
 ///
 /// Returns `(files, bytes)` on success. Diagnostics are printed by the caller.
 pub fn init() -> Result<(usize, usize), ()> {
-    let mut key = [0u8; 32];
-    if aether_crypto::from_hex(TRUST_PUBLIC_KEY.trim().as_bytes(), &mut key) != Some(32) {
-        serial_line!("linux: invalid built-in trust key");
-        return Err(());
-    }
-    let publishers = [TrustedPublisher {
-        name: TRUST_PUBLISHER,
-        key,
-    }];
-    let trust = TrustStore::new(&publishers);
+    let trust = trust().ok_or(())?;
     if manifest::verify_image(ROOTFS_RECORD, &trust, ROOTFS).is_err() {
         serial_line!("linux: rootfs signature or digest verification failed");
         return Err(());
@@ -88,7 +124,145 @@ pub fn init() -> Result<(usize, usize), ()> {
     let count = files.len();
     // SAFETY: Boot is single-threaded and this is the only write to ROOT.
     unsafe { *ROOT.0.get() = Some(Root { files }) };
+    install_runtime_profile()?;
     Ok((count, bytes))
+}
+
+/// Verifies the packaged runtime manifest against the build-time pin.
+///
+/// A missing manifest means the opt-in host-glibc smoke rootfs was packaged
+/// instead; it does not claim a pinned profile. When a manifest is present the
+/// digest must equal the pin or the boot fails, so a changed library cannot be
+/// silently accepted.
+fn install_runtime_profile() -> Result<(), ()> {
+    let Some(data) = file_data("/etc/aether-runtime.manifest") else {
+        if !RUNTIME_PIN.trim().is_empty() {
+            serial_line!("linux: runtime pin present but profile manifest is missing");
+            return Err(());
+        }
+        return Ok(());
+    };
+    let digest = aether_crypto::sha256(data);
+    let mut pin = [0u8; 32];
+    if RUNTIME_PIN.trim().is_empty()
+        || aether_crypto::from_hex(RUNTIME_PIN.trim().as_bytes(), &mut pin) != Some(32)
+        || pin != digest
+    {
+        serial_line!("linux: runtime manifest does not match the pinned digest");
+        return Err(());
+    }
+    let text = core::str::from_utf8(data).map_err(|_| ())?;
+    let mut profile = None;
+    let mut glibc = None;
+    let mut mesa = None;
+    let mut wayland = None;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "profile" => profile = Some(value),
+            "glibc" => glibc = Some(value),
+            "mesa" => mesa = Some(value),
+            "wayland" => wayland = Some(value),
+            _ => {}
+        }
+    }
+    let profile = profile.ok_or(())?;
+    let glibc = glibc.ok_or(())?;
+    if profile.is_empty() || glibc.is_empty() {
+        return Err(());
+    }
+    let mut hex = [0u8; 64];
+    let length = aether_crypto::to_hex(&digest, &mut hex).ok_or(())?;
+    let digest_hex = core::str::from_utf8(&hex[..length]).map_err(|_| ())?;
+    serial_line!(
+        "AETHER_RUNTIME_ROOT_OK profile={} glibc={} mesa={} wayland={} pin={}",
+        profile,
+        glibc,
+        mesa.unwrap_or("unknown"),
+        wayland.unwrap_or("unknown"),
+        digest_hex
+    );
+    // SAFETY: Boot is single-threaded and this is the only write to RUNTIME.
+    unsafe {
+        *RUNTIME.0.get() = Some(RuntimeProfile {
+            profile: String::from(profile),
+            glibc: String::from(glibc),
+        })
+    };
+    Ok(())
+}
+
+/// Returns the verified runtime profile selected from the packaged rootfs.
+#[must_use]
+pub fn runtime_profile() -> Option<&'static RuntimeProfile> {
+    // SAFETY: RUNTIME is written once during boot and immutable afterwards.
+    unsafe { (*RUNTIME.0.get()).as_ref() }
+}
+
+/// Verifies and imports the user-supplied AppImage fixture.
+///
+/// The identity, version, and digest come from the signed `linux-appimage`
+/// record, not from kernel constants. The record and image digest are checked
+/// before the container parser or SquashFS importer sees either one.
+pub fn import_appimage() -> Result<(), ()> {
+    let trust = trust().ok_or(())?;
+    let record = manifest::verify_image(APPIMAGE_RECORD, &trust, APPIMAGE).map_err(|error| {
+        serial_line!("linux: AppImage record rejected: {error:?}");
+    })?;
+    let info = aether_appimage::parse(APPIMAGE).map_err(|error| {
+        serial_line!("linux: AppImage container rejected: {error:?}");
+    })?;
+    let start = info.squashfs_offset;
+    let end = start
+        .checked_add(usize::try_from(info.squashfs_bytes).map_err(|_| ())?)
+        .ok_or(())?;
+    let image = Image::from_squashfs(APPIMAGE.get(start..end).ok_or(())?).map_err(|error| {
+        serial_line!("linux: AppImage SquashFS rejected: {error:?}");
+    })?;
+    let tree = image.import(Limits::default()).map_err(|error| {
+        serial_line!("linux: AppImage import failed: {error:?}");
+    })?;
+    let program_path = APPIMAGE_PROGRAM.trim_start_matches('/');
+    let mut program = None;
+    for entry in tree.entries {
+        if entry.path == program_path
+            && let aether_squashfs::TreeKind::File(data) = entry.kind
+        {
+            program = Some(data);
+            break;
+        }
+    }
+    let program = program.ok_or_else(|| {
+        serial_line!("linux: AppImage lacks the selected program");
+    })?;
+    // SAFETY: Boot is single-threaded and this is the only write to APP.
+    unsafe {
+        *APP.0.get() = Some(ImportedApp {
+            id: String::from(record.id),
+            version: String::from(record.version),
+            path: String::from(APPIMAGE_PROGRAM),
+            program,
+        })
+    };
+    Ok(())
+}
+
+/// Returns the imported AppImage identity, version, and launch path.
+#[must_use]
+pub fn app_identity() -> Option<(&'static str, &'static str, &'static str)> {
+    // SAFETY: APP is written once during boot and immutable afterwards.
+    let app = unsafe { (*APP.0.get()).as_ref() }?;
+    Some((app.id.as_str(), app.version.as_str(), app.path.as_str()))
+}
+
+/// Returns the program bytes selected from the imported AppImage.
+#[must_use]
+pub fn app_program() -> Option<&'static [u8]> {
+    // SAFETY: APP is written once during boot and immutable afterwards.
+    let app = unsafe { (*APP.0.get()).as_ref() }?;
+    Some(app.program.as_slice())
 }
 
 /// Returns the file index for an absolute, normalized path.

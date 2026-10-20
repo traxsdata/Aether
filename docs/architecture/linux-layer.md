@@ -128,29 +128,49 @@ exact AppImage digest, and the runtime version.
 - A fixed per-task VMA table tracks ranges and rejects writable+executable
   mappings. Anonymous private pages are faulted in on demand with bounded
   allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.
-  The root is embedded and read-only; `/tmp` writes go to a bounded per-task
-  overlay cleared on exit/fault. This remains a boot fixture, not a persistent
-  per-application store or user-supplied AppImage runtime.
+  The root is imported read-only. `/tmp`, `/settings`, and `/logs` map to a
+  per-application overlay store with a 1 KiB quota per application and a
+  512-byte per-file limit. The store is shared by processes of the same
+  application, survives task exit within a boot, and is erased through
+  `linux-erase <app>`; the boot test checks persistence and erasure. It is a
+  RAM-backed store: it does not survive a power cycle because no persistent
+  block device exists.
 - Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
-  a zstd SquashFS image and signs it as a `linux-rootfs` record. The build now
-  stages a runtime rootfs, imports it at boot, and resolves `PT_INTERP` from
-  it. `tools/build-glibc-rootfs.sh` plus `make glibc-test` package the host
-  glibc and run a dynamically linked hello through `ld.so`, relocations, and
-  shared `libc` (`AETHER_GLIBC_OK`). The pinned production glibc/Mesa/Wayland
-  rootfs remains missing.
+  a zstd SquashFS image and signs it as a `linux-rootfs` record.
+  `tools/build-pinned-runtime.sh` plus `make runtime-rootfs-pinned` now produce
+  the profile the boot test consumes. It is a **host-derived pin**: the host's
+  x86-64 glibc and loader are copied, their SHA-256 values and version are
+  recorded in `etc/aether-runtime.manifest`, and the manifest digest is written
+  to a build pin. The kernel recomputes the digest and refuses to boot on a
+  mismatch (`AETHER_RUNTIME_ROOT_OK`). Mesa and Wayland are recorded as absent;
+  no unpinned download is used. A different host produces a different pin.
+  `tools/build-glibc-rootfs.sh` plus `make glibc-test` remain the opt-in
+  host-glibc hello smoke test.
 - In-OS import: the kernel embeds a small signed `linux-rootfs` SquashFS image,
   verifies it against the test trust store, imports it with a 4 MiB bootstrap
   bump heap, and the Linux file syscalls read from the imported table
-  (`AETHER_LINUX_IMPORT_OK`). This is the embedded boot fixture, not yet a
-  user-supplied AppImage.
+  (`AETHER_LINUX_IMPORT_OK`). A second, differently identified AppImage is
+  staged by the harness: `tools/build-appimage-fixture.sh` creates a type-2
+  container with a signed `linux-appimage` record, the kernel verifies the
+  record and digest before parsing, imports the SquashFS payload, and launches
+  `/usr/bin/app` (`AETHER_LINUX_APPIMAGE_OK`,
+  `AETHER_LINUX_APPIMAGE_EXEC_OK`). The identity and version come from the
+  signed record, not kernel constants. This is a harness-staged artifact; there
+  is no persistent block device or user-facing file picker yet.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
   fragments, directories, symlinks, hardlink marking, xattr dropping,
   extraction limits, host extractor). Embedded signed-rootfs in-OS import is
   implemented; user-supplied AppImage import/opening and persistent overlay
   storage remain missing.
-- `linuxd`, pinned production glibc/Mesa/Wayland rootfs, Wayland bridge, and
-  software renderer: not implemented.
+- `linuxd`: a bounded kernel-side supervisor service prototype owns runtime
+  profile selection, verified AppImage identity, and launch policy
+  (`AETHER_LINUXD_OK`). It is registered with the supervisor and exposes
+  `linuxd` status. It is **not** yet a ring-3 process and Linux syscalls are
+  still dispatched by the kernel; the user-space service boundary and syscall
+  remoting remain Gate 2 work.
+- Wayland bridge, software renderer, and Mesa/Wayland runtime content: not
+  implemented.
 
 The compatibility database records GridCraft 0.8.0 as `unsupported` until these
 gates pass. A static test program is not an ArtCraft application.
