@@ -62,6 +62,10 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- `docs/specifications/linux-host-interface-inventory.md`: the Gate 1 mapping
+  from the pinned GridCraft GUI and CLI payloads to 31 Aether interfaces, with
+  an owner, test ID, implementation status, and open policy questions for each
+  facility.
 - `aether-wm`, a `no_std`, `unsafe`-free, allocation-free window-manager crate:
   geometry, responsive layout, window and workspace state, focus and z-order,
   menus, dock targeting, Spotlight-style search, settings, hit testing, and

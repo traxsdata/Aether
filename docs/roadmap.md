@@ -134,10 +134,13 @@ user space. It is not a VM. The target and security gates are in
 - [x] Gate 0 — AppImage import inspection: validate the container without
   executing it, with bounds, compression, table offsets, pinned SHA-256, and
   signed import records.
-- [ ] Gate 1 — host-interface inventory: documented in the compatibility plan,
-  but **not met** because the ELF loader, process/thread APIs, file-backed
-  mappings, real futex waiting, signals, Wayland, and Vulkan interfaces do not
-  yet exist.
+- [ ] Gate 1 — host-interface inventory: **drafted** in
+  [the Linux host-interface inventory](specifications/linux-host-interface-inventory.md).
+  It maps 31 facilities from the pinned GUI and CLI to owners and test IDs;
+  acceptance is open on the X11, D-Bus, process-spawn, clipboard, locale, GPU,
+  and network policy questions. Gate 1 is not an implementation gate: the
+  missing ELF loader, process/thread, signal, Wayland, and Vulkan interfaces
+  remain Gate 2 work.
 - [ ] Gate 2 — interface mapping and prototype: **partial**. A static Linux ELF
   runs at CPL3, but the dynamic loader, glibc, user-space `linuxd`, threads,
   signals, and file mappings remain missing.
@@ -280,8 +283,8 @@ the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
 image records without touching user data. VMware Workstation itself has not yet
 been smoke-tested.
 
-The Linux track has partial Gate 2 evidence while Gate 1 remains unmet: the
-kernel verifies and imports an embedded signed rootfs, a static Linux ELF runs
+The Linux track has partial Gate 2 evidence while Gate 1 is drafted but not
+accepted: the kernel verifies and imports an embedded signed rootfs, a static Linux ELF runs
 at CPL3 through the Linux `syscall` path with anonymous memory, FS-based TLS,
 read-only root files, and a bounded `/tmp` overlay
 (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,

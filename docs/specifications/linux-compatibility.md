@@ -57,6 +57,8 @@ manager's job.
 
 The status column follows the Windows plan's rule: an interface counts as
 implemented only when a tested Aether interface exists and the runtime uses it.
+The Gate 1 inventory expands this summary into per-facility owners and test
+cases in [the Linux host-interface inventory](linux-host-interface-inventory.md).
 
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
@@ -136,9 +138,17 @@ remaining follow-up work is runtime-rootfs signing/packaging and in-OS import.
 Map every facility the pinned application and runtime need to an Aether
 interface, with owners and test cases.
 
-**Evidence:** the table above. **Not met:** ELF loader, process/thread APIs,
-mmap, futex, signals, Wayland, and Vulkan have no implemented Aether interface.
-The blocking gaps are explicit. Do not claim compatibility.
+**Evidence:** [the Linux host-interface inventory](linux-host-interface-inventory.md)
+maps 31 facilities from the pinned GUI and CLI payloads to an interface, owner,
+and test ID. **Draft, not accepted:** 2 facilities are existing, 7 partial, 18
+missing, 2 deliberately denied, and 2 deferred. The inventory still has open
+policy questions (X11, D-Bus, process spawning, clipboard, locale, GPU, and
+network) and the acceptance checklist is incomplete. Do not claim compatibility.
+
+Gate 1 is an inventory gate, not an implementation gate: the missing interfaces
+are Gate 2 work, and their absence does not invalidate the mapping. Gate 1 closes
+when the owners, test cases, and policy questions are reviewed and the checklist
+is signed off.
 
 ### Gate 2 — Interface mapping and prototype
 

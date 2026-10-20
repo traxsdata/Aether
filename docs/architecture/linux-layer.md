@@ -9,7 +9,9 @@ filesystem, lifecycle, and compositor boundaries.
 The architectural decision is recorded in
 [ADR-015](../decisions/ADR-015-linux-app-runtime.md); the requirement inventory
 and gates are in
-[Linux application compatibility](../specifications/linux-compatibility.md).
+[Linux application compatibility](../specifications/linux-compatibility.md),
+with per-facility owners and test cases in
+[the host-interface inventory](../specifications/linux-host-interface-inventory.md).
 
 ## Layers
 
