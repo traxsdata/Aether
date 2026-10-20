@@ -692,6 +692,10 @@ static GATE4_DENIED_READS: AtomicUsize = AtomicUsize::new(0);
 static GATE4_DENIED_WRITES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "gate4-portal-test")]
 static GATE4_REVOKED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "gate4-gui-test")]
+static GATE4_GUI_READ_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "gate4-gui-test")]
+static GATE4_GUI_SAVE_MARKER: AtomicUsize = AtomicUsize::new(0);
 
 /// Scheduler initialization failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1273,7 +1277,14 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             "TMPDIR=/tmp",
             crate::fs::GATE4_ENVIRONMENT,
         ];
-        #[cfg(not(feature = "gate4-portal-test"))]
+        #[cfg(all(feature = "gate4-gui-test", not(feature = "gate4-portal-test")))]
+        let environment = [
+            "LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64",
+            "HOME=/tmp",
+            "TMPDIR=/tmp",
+            crate::fs::GATE4_GUI_ENVIRONMENT,
+        ];
+        #[cfg(all(not(feature = "gate4-portal-test"), not(feature = "gate4-gui-test")))]
         let environment = [
             "LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64",
             "HOME=/tmp",
@@ -3439,7 +3450,10 @@ pub fn linux_portal_rename(from: &str, to: &str) -> Result<(), i64> {
         let tasks = unsafe { &*TASKS.0.get() };
         tasks[CURRENT.load(Ordering::Relaxed)].root
     };
-    let (_, length) = crate::portal::commit_temp(root, from, to).map_err(portal_error_code)?;
+    let (grant, length) = crate::portal::commit_temp(root, from, to).map_err(portal_error_code)?;
+    #[cfg(feature = "gate4-gui-test")]
+    gate4_gui_emit_save(&grant);
+    let _ = &grant;
     #[cfg(feature = "gate4-portal-test")]
     {
         GATE4_RENAMES.fetch_add(1, Ordering::Release);
@@ -3448,6 +3462,35 @@ pub fn linux_portal_rename(from: &str, to: &str) -> Result<(), i64> {
     #[cfg(not(feature = "gate4-portal-test"))]
     let _ = length;
     Ok(())
+}
+
+/// Emits the GUI save marker immediately after a validated XLSX commit.
+///
+/// The real XLSX fixture is a ZIP container. A commit only counts when the
+/// kernel reads back more than 1 KiB and the local-file header magic. This is
+/// deliberately independent of guest output and of the post-exit path.
+#[cfg(feature = "gate4-gui-test")]
+fn gate4_gui_emit_save(grant: &aether_services::portal_store::PortalGrant) {
+    if grant.root() != crate::fs::DEMO_ROOT
+        || grant.path() != crate::fs::GATE4_GUI_WORKBOOK
+        || GATE4_GUI_SAVE_MARKER.load(Ordering::Acquire) != 0
+    {
+        return;
+    }
+    let mut data = [0u8; aether_fs::MAX_FILE_BYTES];
+    let Ok(length) = crate::fs::read_path(crate::fs::GATE4_GUI_WORKBOOK, &mut data) else {
+        serial_line!("AETHER_BOOT_FAILED reason=gate4-gui save readback");
+        return;
+    };
+    if length <= 1024 || data[..4] != [b'P', b'K', 3, 4] {
+        serial_line!("AETHER_BOOT_FAILED reason=gate4-gui committed bytes are not xlsx");
+        return;
+    }
+    GATE4_GUI_SAVE_MARKER.store(1, Ordering::Release);
+    serial_line!(
+        "AETHER_GATE4_SAVE_OK file={} bytes={length} staging=sctmp+rename source=kernel",
+        crate::fs::GATE4_GUI_WORKBOOK
+    );
 }
 
 /// Discards a staging namespace path without touching the granted file.
@@ -3541,6 +3584,67 @@ pub fn gate4_portal_post_exit() {
     serial_line!(
         "AETHER_GATE4_REVOKE_OK path={} read_denials={denied_reads} write_denials={denied_writes} source=kernel",
         crate::fs::GATE4_NAMESPACE
+    );
+}
+
+/// Emits kernel-owned Gate 4 GUI evidence after the application exits.
+///
+/// The harness closes the GUI after the immediate save marker. This path then
+/// revokes the GUI grant itself and proves that a fresh read, temp open, and
+/// rename all fail before claiming revocation success.
+#[cfg(feature = "gate4-gui-test")]
+pub fn gate4_gui_post_exit() {
+    use aether_abi::user::FileRights;
+    let read_bytes = GATE4_GUI_READ_BYTES.load(Ordering::Acquire);
+    if read_bytes == 0 {
+        serial_line!("AETHER_BOOT_FAILED reason=gate4-gui portal read not observed");
+        return;
+    }
+    serial_line!(
+        "AETHER_GATE4_PORTAL_OK path={} read_bytes={read_bytes} source=kernel",
+        crate::fs::GATE4_GUI_NAMESPACE
+    );
+    if GATE4_GUI_SAVE_MARKER.load(Ordering::Acquire) == 0 {
+        serial_line!("AETHER_BOOT_FAILED reason=gate4-gui save marker missing");
+        return;
+    }
+    if crate::portal::revoke(crate::fs::DEMO_ROOT, crate::fs::GATE4_GUI_WORKBOOK).is_err() {
+        serial_line!("AETHER_BOOT_FAILED reason=gate4-gui revoke");
+        return;
+    }
+    let read_denied = matches!(
+        crate::portal::check_namespace(
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_GUI_NAMESPACE,
+            FileRights::READ
+        ),
+        Err(crate::portal::PortalError::Revoked)
+    );
+    let write_denied = matches!(
+        crate::portal::open_temp(
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_GUI_TEMP_NAMESPACE,
+            true
+        ),
+        Err(crate::portal::PortalError::Revoked)
+    );
+    let rename_denied = matches!(
+        crate::portal::commit_temp(
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_GUI_TEMP_NAMESPACE,
+            crate::fs::GATE4_GUI_NAMESPACE
+        ),
+        Err(crate::portal::PortalError::Revoked)
+    );
+    if !read_denied || !write_denied || !rename_denied {
+        serial_line!(
+            "AETHER_BOOT_FAILED reason=gate4-gui revoke denials read={read_denied} write={write_denied} rename={rename_denied}"
+        );
+        return;
+    }
+    serial_line!(
+        "AETHER_GATE4_REVOKE_OK path={} read_denials=1 write_denials=1 source=kernel",
+        crate::fs::GATE4_GUI_NAMESPACE
     );
 }
 
@@ -4750,6 +4854,10 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
                 slot.offset = slot.offset.saturating_add(length);
                 #[cfg(feature = "gate4-portal-test")]
                 GATE4_PORTAL_READ_BYTES.fetch_add(length, Ordering::Release);
+                #[cfg(feature = "gate4-gui-test")]
+                if path == crate::fs::GATE4_GUI_WORKBOOK {
+                    GATE4_GUI_READ_BYTES.fetch_add(length, Ordering::Release);
+                }
                 Ok(length)
             }
             LinuxFileSource::PortalTemp {

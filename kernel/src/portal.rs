@@ -156,6 +156,8 @@ pub fn init() {
 
     #[cfg(feature = "gate4-portal-test")]
     let seeded_gate4 = seed_gate4_grant();
+    #[cfg(feature = "gate4-gui-test")]
+    let seeded_gate4_gui = seed_gate4_gui_grant();
 
     if corrupt {
         serial_line!("portal: grant store corrupt; no grants loaded");
@@ -172,6 +174,26 @@ pub fn init() {
             "portal: seeded Gate 4 workbook grant root={} path={}",
             crate::fs::DEMO_ROOT,
             crate::fs::GATE4_WORKBOOK
+        );
+    }
+    #[cfg(feature = "gate4-gui-test")]
+    if seeded_gate4_gui {
+        persist();
+        let mut id = [0u8; portal_store::GRANT_ID_BYTES];
+        let Some(grant) = PortalGrant::new(
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_GUI_WORKBOOK,
+            portal_store::READ | portal_store::WRITE,
+        ) else {
+            return;
+        };
+        let id = portal_store::write_grant_id(portal_store::grant_id(&grant), &mut id);
+        serial_line!(
+            "portal: seeded Gate 4 GUI workbook grant root={} path={} id={} namespace={}",
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_GUI_WORKBOOK,
+            id,
+            crate::fs::GATE4_GUI_NAMESPACE
         );
     }
 }
@@ -197,6 +219,39 @@ fn seed_gate4_grant() -> bool {
         !slot.grant.is_empty()
             && slot.grant.root() == crate::fs::DEMO_ROOT
             && slot.grant.path() == crate::fs::GATE4_WORKBOOK
+    }) {
+        return false;
+    }
+    let Some(free) = grants.iter().position(|slot| slot.grant.is_empty()) else {
+        return false;
+    };
+    grants[free] = Slot {
+        grant,
+        revoked: false,
+    };
+    true
+}
+
+/// Seeds the test-only Gate 4 GUI workbook grant.
+///
+/// The grant is exact-file and read+write. It exists only in the
+/// `gate4-gui-test` build; the static portal test never sees this path.
+#[cfg(feature = "gate4-gui-test")]
+fn seed_gate4_gui_grant() -> bool {
+    let Some(grant) = PortalGrant::new(
+        crate::fs::DEMO_ROOT,
+        crate::fs::GATE4_GUI_WORKBOOK,
+        portal_store::READ | portal_store::WRITE,
+    ) else {
+        return false;
+    };
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and this runs once during boot.
+    let grants = unsafe { &mut *GRANTS.0.get() };
+    if grants.iter().any(|slot| {
+        !slot.grant.is_empty()
+            && slot.grant.root() == crate::fs::DEMO_ROOT
+            && slot.grant.path() == crate::fs::GATE4_GUI_WORKBOOK
     }) {
         return false;
     }

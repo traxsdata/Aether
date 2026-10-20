@@ -360,11 +360,15 @@ fn failed(reason: &str) -> ! {
 /// `linux-erase` shell command uses. Nothing here survives a power cycle: the
 /// filesystem service is a RAM disk and there is no persistent block device.
 pub fn post_app_exit() {
-    #[cfg(feature = "gate4-portal-test")]
+    #[cfg(feature = "gate4-gui-test")]
+    {
+        crate::scheduler::gate4_gui_post_exit();
+    }
+    #[cfg(all(feature = "gate4-portal-test", not(feature = "gate4-gui-test")))]
     {
         crate::scheduler::gate4_portal_post_exit();
     }
-    #[cfg(not(feature = "gate4-portal-test"))]
+    #[cfg(all(not(feature = "gate4-portal-test"), not(feature = "gate4-gui-test")))]
     {
         // The static fixture writes three files to prove overlay persistence. A
         // real dynamically linked application is not required to write anything,
