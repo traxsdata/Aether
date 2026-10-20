@@ -2708,6 +2708,8 @@ clone3_done:
     js fail_robust
     jz robust_owner
 28:
+    mov $24, %rax               /* sched_yield: let the peer thread run */
+    syscall
     cmpl $1, 0x448(%r12)
     jne 28b
     movl $0, 0x218(%r12)
@@ -2722,6 +2724,8 @@ clone3_done:
     js fail_robust
     jz robust_waiter
 29:
+    mov $24, %rax               /* sched_yield: let the peer thread run */
+    syscall
     cmpl $1, 0x450(%r12)
     jne 29b
     mov $1000000, %ecx
@@ -2786,6 +2790,8 @@ robust_owner:
     mov $1, %rdx
     syscall
 32:
+    mov $24, %rax               /* sched_yield: let the peer thread run */
+    syscall
     cmpl $1, 0x44c(%r12)
     jne 32b
     mov $60, %rax
@@ -2796,6 +2802,8 @@ robust_owner:
 robust_waiter:
     movl $3, 0xe8(%r12)
 33:
+    mov $24, %rax               /* sched_yield: let the peer thread run */
+    syscall
     cmpl $1, 0x448(%r12)
     jne 33b
     movl $1, 0x450(%r12)
