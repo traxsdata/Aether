@@ -10,7 +10,8 @@ use crate::arch::x86_64::timer::InterruptGuard;
 use crate::graphics::{self, color};
 use crate::input::Key;
 use crate::serial_line;
-use crate::{portal, recovery, scheduler, supervisor};
+use crate::{fs, packaging, portal, recovery, scheduler, supervisor, syscall, updates};
+use aether_packaging::manifest::Version;
 use core::cell::UnsafeCell;
 
 struct Global<T>(UnsafeCell<T>);
@@ -221,7 +222,7 @@ fn draw_content(window: &Window) {
     let mut y = window.y + 38;
     let mut files = [0u8; 512];
     let files_length = match window.kind {
-        WindowKind::Files => crate::fs::list_path("/", &mut files).unwrap_or(0),
+        WindowKind::Files => fs::list_path("/", &mut files).unwrap_or(0),
         _ => 0,
     };
     let mut portal_text = [0u8; 256];
@@ -242,83 +243,66 @@ fn draw_content(window: &Window) {
     } else {
         0
     };
+    let mut security = [0u8; 256];
+    let security_length = if window.kind == WindowKind::Security {
+        format_security(&mut security)
+    } else {
+        0
+    };
+    let mut log = [0u8; 256];
+    let log_length = if window.kind == WindowKind::Log {
+        format_log(&mut log)
+    } else {
+        0
+    };
 
     let lines: &[u8] = match window.kind {
         WindowKind::Files => &files[..files_length],
         WindowKind::Portal => &portal_text[..portal_length],
         WindowKind::Recovery => &recovery_text[..recovery_length],
         WindowKind::Settings => &settings[..settings_length],
-        _ => &[],
+        WindowKind::Security => &security[..security_length],
+        WindowKind::Log => &log[..log_length],
     };
 
-    if !lines.is_empty() {
-        for line in lines.split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            draw_line(x, y, line, color::TEXT);
-            y += 16;
-            if y > window.y + window.height - 20 {
-                break;
-            }
-        }
+    if lines.is_empty() {
         return;
     }
-
-    match window.kind {
-        WindowKind::Security => {
-            let running = supervisor::running_count();
-            let quarantined = supervisor::quarantined_count();
-            let grants = portal::grant_count();
-            let lines = [
-                ("DEMO ROOT", crate::fs::DEMO_ROOT),
-                ("SANDBOX", "PRIVATE ROOTS"),
-                (
-                    "SERVICES",
-                    if quarantined == 0 {
-                        "RUNNING"
-                    } else {
-                        "DEGRADED"
-                    },
-                ),
-                (
-                    "PORTAL",
-                    if grants == 0 {
-                        "NO GRANTS"
-                    } else {
-                        "GRANTS ACTIVE"
-                    },
-                ),
-            ];
-            for (label, value) in lines {
-                draw_line(x, y, label.as_bytes(), color::MUTED);
-                y += 14;
-                draw_line(x + 8, y, value.as_bytes(), color::TEXT);
-                y += 18;
-            }
-            draw_line(x, y, b"COUNTERS", color::MUTED);
-            y += 14;
-            let mut buffer = [0u8; 96];
-            let length = format_counters(&mut buffer, running, quarantined);
-            draw_line(x + 8, y, &buffer[..length], color::TEXT);
-            y += 18;
-            draw_line(x, y, b"ESCAPE ATTEMPTS DENIED", color::WARNING);
+    for line in lines.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
         }
-        WindowKind::Log => {
-            for line in [
-                "CAPABILITY CHECK: OK",
-                "SANDBOX ESCAPES: DENIED",
-                "USER PID 4: EXITED 0",
-                "INPUT QUEUE: READY",
-                "COMPOSITOR: SOFTWARE",
-                "FRAMEBUFFER: LINEAR",
-            ] {
-                draw_line(x, y, line.as_bytes(), color::TEXT);
-                y += 18;
-            }
+        draw_line(x, y, line, color::TEXT);
+        y += 16;
+        if y > window.y + window.height - 20 {
+            break;
         }
-        _ => {}
     }
+    draw_denied_events(window, x, y);
+}
+
+/// Closes the security center and system log with a live roll-up of denied
+/// events, drawn in the warning colour so denials read as incidents rather
+/// than as ordinary status text.
+fn draw_denied_events(window: &Window, x: i32, y: i32) {
+    if window.kind != WindowKind::Security && window.kind != WindowKind::Log {
+        return;
+    }
+    if y > window.y + window.height - 20 {
+        return;
+    }
+    let mut buffer = [0u8; 96];
+    let mut writer = LineWriter::new(&mut buffer);
+    writer.push(b"DENIED EVENTS ESCAPES=");
+    writer.value(fs::escape_denials());
+    writer.push(b" ACCESS=");
+    writer.value(fs::access_denials());
+    writer.push(b" QUOTA=");
+    writer.value(fs::quota_denials());
+    writer.push(b" IPC=");
+    writer.value(syscall::ipc_denials());
+    let length = writer.length();
+    draw_line(x, y, &buffer[..length], color::WARNING);
 }
 
 fn draw_taskbar(windows: &[Window; MAX_WINDOWS], focus: usize) {
@@ -434,19 +418,6 @@ fn format_u64(buffer: &mut [u8], mut value: u64) -> usize {
     length
 }
 
-fn format_counters(buffer: &mut [u8], running: usize, quarantined: usize) -> usize {
-    let mut written = 0usize;
-    for (label, value) in [("RUNNING ", running), ("QUARANTINED ", quarantined)] {
-        let bytes = label.as_bytes();
-        buffer[written..written + bytes.len()].copy_from_slice(bytes);
-        written += bytes.len();
-        written += format_u64(&mut buffer[written..], value as u64);
-        buffer[written] = b' ';
-        written += 1;
-    }
-    written
-}
-
 fn format_settings(buffer: &mut [u8], focus: &str) -> usize {
     let mut written = 0usize;
     for line in [
@@ -470,4 +441,142 @@ fn format_settings(buffer: &mut [u8], focus: &str) -> usize {
     written += length;
     buffer[written] = b'\n';
     written + 1
+}
+
+/// A bounded writer for window text; it truncates instead of panicking and
+/// never reads kernel memory beyond what its caller handed it.
+struct LineWriter<'a> {
+    buffer: &'a mut [u8],
+    written: usize,
+}
+
+impl<'a> LineWriter<'a> {
+    fn new(buffer: &'a mut [u8]) -> Self {
+        Self { buffer, written: 0 }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let room = self.buffer.len().saturating_sub(self.written);
+        let length = bytes.len().min(room);
+        self.buffer[self.written..self.written + length].copy_from_slice(&bytes[..length]);
+        self.written += length;
+    }
+
+    /// Appends a decimal value.
+    fn value(&mut self, value: usize) {
+        let mut digits = [0u8; 20];
+        let length = format_u64(&mut digits, value as u64);
+        self.push(&digits[..length]);
+    }
+    /// Terminates the current line.
+    fn end_line(&mut self) {
+        if self.written < self.buffer.len() {
+            self.buffer[self.written] = b'\n';
+            self.written += 1;
+        }
+    }
+
+    /// Returns the number of written bytes.
+    fn length(self) -> usize {
+        self.written
+    }
+}
+
+fn push_version(writer: &mut LineWriter, version: Version) {
+    writer.value(usize::from(version.major));
+    writer.push(b".");
+    writer.value(usize::from(version.minor));
+    writer.push(b".");
+    writer.value(usize::from(version.patch));
+}
+
+/// Formats the SECURITY CENTER content from live kernel counters.
+///
+/// Every line is derived from state the kernel itself recorded during the
+/// boot self-test. The desktop cannot write files, so nothing here is
+/// authored or cached.
+fn format_security(buffer: &mut [u8]) -> usize {
+    let mut writer = LineWriter::new(buffer);
+    match packaging::installed() {
+        Some(installed) => {
+            writer.push(b"PACKAGE ");
+            writer.push(installed.id.as_bytes());
+            writer.push(b" ");
+            push_version(&mut writer, installed.version);
+            writer.end_line();
+            writer.push(b"ROOT ");
+            writer.push(installed.root.as_bytes());
+            writer.end_line();
+        }
+        None => {
+            writer.push(b"PACKAGE NONE VERIFIED");
+            writer.end_line();
+        }
+    }
+    writer.push(b"SERVICES RUNNING=");
+    writer.value(supervisor::running_count());
+    writer.push(b" QUARANTINED=");
+    writer.value(supervisor::quarantined_count());
+    writer.end_line();
+    writer.push(b"ISOLATION OTHER=");
+    writer.push(fs::OTHER_ROOT.as_bytes());
+    writer.end_line();
+    writer.push(b"PORTAL GRANTS=");
+    writer.value(portal::grant_count());
+    writer.push(b" USES=");
+    writer.value(portal::grant_uses());
+    writer.push(b" DENIED=");
+    writer.value(portal::denials());
+    writer.end_line();
+    writer.push(b"USERS EXITS=");
+    writer.value(scheduler::user_exits());
+    writer.push(b" FAULTS=");
+    writer.value(scheduler::user_faults());
+    writer.end_line();
+    writer.push(b"IPC DENIED=");
+    writer.value(syscall::ipc_denials());
+    writer.end_line();
+    match updates::status() {
+        Some(status) => {
+            writer.push(b"UPDATE ");
+            push_version(&mut writer, status.installed);
+            writer.push(b" CTR ");
+            writer.value(usize::try_from(status.installed_counter).unwrap_or(0));
+            writer.push(b" CH ");
+            writer.push(status.channel.name().as_bytes());
+            writer.end_line();
+        }
+        None => {
+            writer.push(b"UPDATE NONE");
+            writer.end_line();
+        }
+    }
+    writer.length()
+}
+
+/// Formats the SYSTEM LOG from the same live counters the security center
+/// uses; the log only reports what already happened.
+fn format_log(buffer: &mut [u8]) -> usize {
+    let mut writer = LineWriter::new(buffer);
+    writer.push(b"CAPABILITIES DENIED=");
+    writer.value(syscall::ipc_denials());
+    writer.end_line();
+    writer.push(b"USERS EXITS=");
+    writer.value(scheduler::user_exits());
+    writer.push(b" FAULTS=");
+    writer.value(scheduler::user_faults());
+    writer.end_line();
+    writer.push(b"PORTAL GRANTS=");
+    writer.value(portal::grant_count());
+    writer.push(b" DENIED=");
+    writer.value(portal::denials());
+    writer.end_line();
+    writer.push(b"INPUT DROPPED=");
+    writer.value(crate::input::dropped() as usize);
+    writer.end_line();
+    writer.push(b"COMPOSITOR SOFTWARE");
+    writer.end_line();
+    writer.push(b"FRAMEBUFFER LINEAR");
+    writer.end_line();
+    writer.length()
 }
