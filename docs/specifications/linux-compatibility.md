@@ -60,7 +60,7 @@ implemented only when a tested Aether interface exists and the runtime uses it.
 
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
-| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, SquashFS all-compression extraction, and host runtime-rootfs packaging implemented**; the populated glibc/Mesa rootfs and in-OS import are missing |
+| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, and embedded signed-rootfs in-OS import implemented**; the populated glibc/Mesa rootfs and user-supplied AppImage import are missing |
 | ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static `PT_LOAD` execution works; interpreter and shared libraries missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: one fixed boot process, no creation |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `arch_prctl` FS base and context-switched TLS pointer; no threads |

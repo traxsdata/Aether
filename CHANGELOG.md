@@ -42,6 +42,10 @@ versioning scheme until the kernel ABI stabilises.
   truncated, read, and written through the Linux file descriptors, with
   `AETHER_LINUX_OVERLAY_OK` boot evidence. The overlay is cleared on exit/fault;
   persistence, settings/logs paths, and user-visible erasure remain follow-up.
+- In-OS signed rootfs import: a 4 MiB kernel bootstrap bump heap, Ed25519 record
+  verification against the test trust store, SquashFS import at boot, and Linux
+  file opens served from the imported tree (`AETHER_LINUX_IMPORT_OK`). The
+  image is the embedded boot fixture, not yet a user-supplied AppImage.
 - Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
   a zstd SquashFS image and signs it as a `linux-rootfs` import record. The
   populated glibc/Mesa/Wayland rootfs and in-OS consumption remain follow-up.

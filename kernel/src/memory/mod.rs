@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Kernel physical-memory and paging support.
 
+mod heap;
 pub mod paging;
 
 use aether_memory::PAGE_SIZE;

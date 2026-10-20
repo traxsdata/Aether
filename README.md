@@ -120,8 +120,9 @@ grants, and the desktop is not a security authority.
   signs a zstd SquashFS runtime rootfs.
 - A bounded `no_std` SquashFS 4 reader (`aether-squashfs`) with zstd, gzip,
   lz4, lzo, xz, and lzma decompression, symlink/hardlink policy, and a host extractor. It
-  extracts the real GridCraft AppImage tree; in-OS mounting and persistent
-  overlay storage remain pending.
+  extracts the real GridCraft AppImage tree. The kernel imports an embedded
+  signed rootfs and serves Linux file opens from it; user-supplied AppImage
+  import and persistent overlay storage remain pending.
 - A first Linux ABI slice: a static freestanding x86-64 Linux ELF is loaded
   into its own PML4, enters through the `syscall` instruction, writes through a
   validated user pointer, and exits cleanly (`AETHER_LINUX_OK`). Dynamic
@@ -154,7 +155,8 @@ grants, and the desktop is not a security authority.
   `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
   `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`,
-  `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_OK`,
+  `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_IMPORT_OK`,
+  `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_OK`,
   `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
   `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
 - `make iso-test`, which boots the generated ISO through UEFI El Torito and

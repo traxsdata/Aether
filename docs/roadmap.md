@@ -135,8 +135,10 @@ user space. It is not a VM. The target and security gates are in
   marked and copied per path, setuid/setgid/sticky stripped, xattrs counted and
   dropped, extraction limits.
 - [ ] Add explicit xattr policy controls beyond count-and-drop.
-- [ ] Import into a private read-only root; reject symlink escapes, hardlinks
+- [x] Import into a private read-only root; reject symlink escapes, hardlinks
   outside the root, duplicate paths, and oversized files.
+- [x] In-OS rootfs import from an embedded signed image with a bounded bootstrap
+  heap; the Linux fixture reads `/etc/motd` from the imported tree.
 - [x] Per-task writable overlay prototype: bounded entries under `/tmp`,
   created/truncated/read/written through the Linux file descriptors, cleared on
   exit and fault.
@@ -153,9 +155,13 @@ user space. It is not a VM. The target and security gates are in
   Linux layer.
 - [x] Runtime rootfs packaging and signing path (zstd SquashFS + signed
   `linux-rootfs` record).
+- [x] In-OS consumption of an embedded signed rootfs: the kernel verifies the
+  test `linux-rootfs` record, imports the SquashFS tree with a bounded
+  bootstrap heap, and Linux file opens read from that tree
+  (`AETHER_LINUX_IMPORT_OK`).
 - [ ] Populate the signed runtime rootfs with pinned glibc, `ld.so`,
-  Mesa/lavapipe, and Wayland client libraries, and install it as an Aether
-  runtime package.
+  Mesa/lavapipe, and Wayland client libraries, install it as an Aether runtime
+  package, and import user-supplied AppImages instead of the embedded fixture.
 
 #### Linux ABI
 

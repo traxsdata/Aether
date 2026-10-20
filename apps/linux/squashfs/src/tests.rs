@@ -42,7 +42,7 @@ fn reads_regular_files_and_fragments() {
     let motd = find(&image, "etc/motd").expect("motd");
     assert_eq!(
         image.read_file(&motd).unwrap(),
-        b"AETHER_SQUASHFS_OK source=/etc/motd\n"
+        b"AETHER_LINUX_ROOT_OK source=/etc/motd\n"
     );
 }
 

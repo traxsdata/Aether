@@ -30,6 +30,8 @@ mod supervisor;
 mod syscall;
 mod updates;
 
+extern crate alloc;
+
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
 use core::panic::PanicInfo;
 

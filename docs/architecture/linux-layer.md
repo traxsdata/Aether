@@ -117,7 +117,12 @@ exact AppImage digest, and the runtime version.
   yet an AppImage import or a persistent per-application store.
 - Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
   a zstd SquashFS image and signs it as a `linux-rootfs` record. The populated
-  glibc/Mesa/Wayland rootfs and in-OS consumption remain missing.
+  glibc/Mesa/Wayland rootfs remains missing.
+- In-OS import: the kernel embeds a small signed `linux-rootfs` SquashFS image,
+  verifies it against the test trust store, imports it with a 4 MiB bootstrap
+  bump heap, and the Linux file syscalls read from the imported table
+  (`AETHER_LINUX_IMPORT_OK`). This is the embedded boot fixture, not yet a
+  user-supplied AppImage.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
   fragments, directories, symlinks, hardlink marking, xattr dropping,

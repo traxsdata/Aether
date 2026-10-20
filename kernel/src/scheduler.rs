@@ -207,6 +207,8 @@ pub enum SchedulerError {
     Capability(CapError),
     /// The embedded Linux test program is not a valid executable.
     LinuxImage,
+    /// The embedded signed Linux runtime rootfs could not be imported.
+    LinuxRoot,
     /// The embedded user program is not a valid executable.
     UserImage(elf::ParseError),
     /// The virtual filesystem could not be formatted or seeded.
@@ -461,6 +463,11 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     user.root = crate::fs::DEMO_ROOT;
     tasks[USER_TASK] = user;
     crate::apps::started(USER_TASK);
+
+    // Verify and import the embedded signed runtime rootfs before the Linux
+    // task can resolve any file.
+    let (root_files, root_bytes) = crate::linux::init().map_err(|_| SchedulerError::LinuxRoot)?;
+    serial_line!("AETHER_LINUX_IMPORT_OK files={root_files} bytes={root_bytes}");
 
     // Load the static Linux test program. It is a boot gate for the Linux
     // syscall entry, not yet an application domain with its own root.

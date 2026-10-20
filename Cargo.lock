@@ -80,6 +80,7 @@ name = "aether-kernel"
 version = "0.1.0"
 dependencies = [
  "aether-abi",
+ "aether-appimage",
  "aether-boot-common",
  "aether-crypto",
  "aether-fs",
@@ -88,6 +89,7 @@ dependencies = [
  "aether-memory",
  "aether-packaging",
  "aether-services",
+ "aether-squashfs",
  "aether-update",
  "aether-wm",
 ]
