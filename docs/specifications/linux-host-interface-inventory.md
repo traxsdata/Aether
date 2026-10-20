@@ -56,8 +56,8 @@ acceptance checklist are recorded below. Implementation status is uneven:
 | Status | Meaning | Facilities |
 |---|---|---:|
 | Existing | A tested interface exists and can be used by the runtime | 2 |
-| Partial | Some interface or host tests exist; the runtime cannot use it yet | 14 |
-| Missing | No interface exists | 11 |
+| Partial | Some interface or host tests exist; the runtime cannot use it yet | 15 |
+| Missing | No interface exists | 10 |
 | Denied | Deliberate absence; the runtime must fail closed | 2 |
 | Deferred | Not required for Gate 3 or Gate 4 | 3 |
 
@@ -77,7 +77,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | HI-01 | AppImage container, digest, signed record, SquashFS import; `appimage-inspect`, `squashfs-extract` | `aether-appimage` + `aether-squashfs` + trust store | `apps/linux/*`, `aether-packaging` | HI-T01 | existing (fixture only) |
 | HI-02 | Runtime rootfs: glibc, `ld.so`, `libm`, `libgcc_s`, Mesa, Wayland, D-Bus, X11 libraries | Signed runtime rootfs built and imported through the test trust store; loader resolves `PT_INTERP` from it. The pinned production glibc/Mesa/Wayland image and package channel are missing | `aether-packaging`, `tools/build-runtime-rootfs.sh`, `tools/build-glibc-rootfs.sh` | HI-T02 | partial |
 | HI-03 | Dynamic ELF loading: `PT_INTERP`, `ET_DYN`, auxv, `ld-linux`, `dlopen`, `dlsym`, `dlclose`, `dl_iterate_phdr`, `__tls_get_addr` | Kernel loader resolves the interpreter through the verified rootfs, maps main/interpreter, builds auxv, and enters `ld.so`; a host-glibc hello links and runs. A user-space `linuxd` library service and broader `dlopen` coverage are missing | `kernel/src/linux_loader.rs`, `apps/linux/elf`, planned `user/linuxd` | HI-T03 | partial |
-| HI-04 | Process creation: `fork`, `execvp`, `posix_spawnp`, `posix_spawn_file_actions_*`, `waitpid`, `waitid`, `pidfd_spawnp`, `setsid`, `setpgid` | Domain-scoped process API over the kernel task model | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T04 | missing |
+| HI-04 | Process creation: `fork`, `execvp`, `posix_spawnp`, `posix_spawn_file_actions_*`, `waitpid`, `waitid`, `pidfd_spawnp`, `setsid`, `setpgid` | Eager-copy `fork`, child process table, `wait4` status/reap, and descriptor inheritance; `execve`, blocking waits, and process groups remain | `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T04 | partial |
 | HI-05 | Threads: `pthread_create`, `pthread_join`, `pthread_detach`, `pthread_setname_np`, `sched_getaffinity`, `set_tid_address`, `rseq` | `clone` with CLONE_VM/THREAD, per-thread kernel stack, TLS, tgid/tid, and clear-child-tid join; detach/affinity/rseq details remain | `kernel/src/scheduler.rs` | HI-T05 | partial |
 | HI-06 | Environment and identity: `environ`, `getenv`, `getauxval`, `uname`, `sysconf`, `gnu_get_libc_version`, `getpwuid_r`, `getgrouplist`, `setlocale`, `realpath`, `getcwd` | Fixed `LD_LIBRARY_PATH` and auxv are supplied; broader environment, passwd, locale, and `getcwd` policy are missing | `kernel/src/linux_loader.rs`, planned `user/linuxd` | HI-T06 | partial |
 | HI-07 | Descriptor I/O: `open`/`open64`/`openat`, `read`, `write`, `writev`, `close`, `lseek64`, `dup`, `dup2`, `fcntl`, `pipe2` | Per-domain descriptor table over native file handles and a bounded pipe ring | `kernel/src/linux.rs`, `kernel/src/scheduler.rs` | HI-T07 | partial |
@@ -132,7 +132,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T01 | `make appimage-test`, `make squashfs-test` | Container and rootfs parsing, digest/signature checks, extraction limits, hostile archives | existing |
 | HI-T02 | `make test`, `make glibc-test` | Builds, signs, imports, and consumes a runtime rootfs; the opt-in target packages host glibc and resolves `PT_INTERP` from it | partial |
 | HI-T03 | `make test`, `make glibc-test` | The default fixture maps a test `ET_DYN` image through `PT_INTERP`; the opt-in target runs a host-glibc hello through `ld.so`, relocations, and shared `libc` (`AETHER_GLIBC_OK`). Broader `dlopen` coverage remains planned | partial |
-| HI-T04 | planned `make linux-proc-test` | Spawn, wait, exit status, descriptor inheritance, and denied spawn outside the domain | planned |
+| HI-T04 | `make test`; planned `make linux-proc-test` | Boot fixture forks a child, the child exits 42, and the parent reaps the encoded status through `wait4`; exec, blocking wait, and process groups remain planned | partial |
 | HI-T05 | `make test`; planned `make linux-thread-test` | Boot fixture clones a thread with a shared address space and TLS, joins through clear-child-tid, and exits cleanly; detach/affinity/rseq and multi-thread stress remain planned | partial |
 | HI-T06 | `make test`, `make glibc-test`; planned `make linux-env-test` | Auxv and a fixed library path reach `ld.so`; host path leakage, passwd, locale, and `getcwd` tests remain planned | partial |
 | HI-T07 | `make test`; planned `make linux-fd-test` | Boot fixture exercises open/read/seek/dup/fcntl/close, pipe2 write/read, and poll; bad-descriptor and bounce-buffer matrices remain planned | partial |

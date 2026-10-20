@@ -225,8 +225,10 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Blocking waits, edge-triggered epoll semantics, and bounded `inotify`.
 - [x] Thread creation: `clone` with `CLONE_VM|CLONE_THREAD`, per-thread
   kernel stacks, TLS, tgid/tid, and clear-child-tid join.
-- [ ] Process syscalls: `fork`, `clone3`, `wait4`, `execve`, process groups,
-  `set_robust_list`, `rseq` details.
+- [x] Process creation: eager-copy `fork`, child status/reap through `wait4`
+  (non-blocking with `sched_yield`), and descriptor inheritance.
+- [ ] Process syscalls: `execve`, blocking `wait4`, `clone3`, process groups,
+  `set_robust_list`, and `rseq` details.
 - [x] Synchronization: futex wait/wake queues and clear-child-tid join; thread
   wake ordering.
 - [ ] Futex timeouts, robust lists, condition variables, and semaphores.

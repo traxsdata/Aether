@@ -345,6 +345,38 @@ pub fn map_user_page(
     Ok(())
 }
 
+/// Copies every present user page into a fresh address space.
+///
+/// This is an eager fork copy, not copy-on-write. The caller owns the returned
+/// PML4 and is responsible for releasing its frames when the process exits.
+pub fn copy_user_address_space(
+    allocator: &mut FrameAllocator<'_>,
+    source: PhysFrame,
+) -> Result<PhysFrame, PagingError> {
+    let target = create_empty_user_address_space(allocator)?;
+    let mut address = USER_BASE;
+    while address < USER_LIMIT {
+        if let Some(entry) = user_leaf_entry(source, address)
+            && entry.is_present()
+            && entry.flags().contains(PageFlags::USER)
+        {
+            let frame = allocator.allocate().ok_or(PagingError::OutOfMemory)?;
+            // SAFETY: Both frames are identity-mapped and exclusively owned by
+            // their respective address spaces.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    entry.address() as *const u8,
+                    frame.start_address() as *mut u8,
+                    PAGE_SIZE as usize,
+                );
+            }
+            map_user_page(target, allocator, address, frame, entry.flags())?;
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(target)
+}
+
 /// Allocates and maps a user range eagerly.
 ///
 /// Every page gets its own zeroed frame. On failure the pages mapped so far are

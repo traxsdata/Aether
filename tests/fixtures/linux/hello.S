@@ -562,6 +562,44 @@ _start:
     mov $signal_message_len, %rdx
     syscall
 
+    /* Fork + wait4: the child exits 42 and the parent reaps the status. */
+    sub $16, %rsp
+    mov $57, %rax               /* fork */
+    syscall
+    test %rax, %rax
+    js fail_fork
+    jz child_process
+parent_wait:
+    mov $61, %rax               /* wait4(-1, &status, WNOHANG) */
+    mov $-1, %rdi
+    mov %rsp, %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_fork
+    jnz reaped_child
+    mov $24, %rax               /* sched_yield */
+    syscall
+    jmp parent_wait
+reaped_child:
+    cmpl $0x2a00, (%rsp)        /* exit 42 << 8 */
+    jne fail_fork
+    add $16, %rsp
+    mov $1, %rax
+    mov $1, %rdi
+    lea fork_message(%rip), %rsi
+    mov $fork_message_len, %rdx
+    syscall
+    jmp after_fork
+
+child_process:
+    mov $60, %rax
+    mov $42, %rdi
+    syscall
+    jmp child_process
+
+after_fork:
     /* Thread + futex: map a shared page, clone, wait for the child. */
     mov $9, %rax
     xor %rdi, %rdi
@@ -717,6 +755,10 @@ fail_mremap:
 fail_signal:
     lea signal_failure(%rip), %rsi
     mov $signal_failure_len, %rdx
+    jmp report_failure
+fail_fork:
+    lea fork_failure(%rip), %rsi
+    mov $fork_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -781,6 +823,12 @@ signal_message:
 signal_failure:
     .ascii "AETHER_LINUX_SIGNAL_FAIL\n"
     .set signal_failure_len, . - signal_failure
+fork_message:
+    .ascii "AETHER_LINUX_FORK_OK fork=ok wait4=ok status=ok\n"
+    .set fork_message_len, . - fork_message
+fork_failure:
+    .ascii "AETHER_LINUX_FORK_FAIL\n"
+    .set fork_failure_len, . - fork_failure
 
 signal_handler:
     movl $1, (%r12)

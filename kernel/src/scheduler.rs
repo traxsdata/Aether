@@ -72,6 +72,7 @@ enum TaskKind {
     User,
     Linux,
     Thread,
+    Process,
 }
 
 /// Syscall ABI selected for a ring-3 task.
@@ -222,6 +223,8 @@ struct Task {
     sigblocked: u64,
     sigpending: u64,
     sigaltstack: Option<(u64, u64)>,
+    parent: usize,
+    exit_status: i64,
 }
 
 impl Task {
@@ -256,6 +259,8 @@ impl Task {
             sigblocked: 0,
             sigpending: 0,
             sigaltstack: None,
+            parent: 0,
+            exit_status: 0,
         }
     }
 }
@@ -1180,6 +1185,125 @@ pub fn linux_clone(
     Ok(slot)
 }
 
+/// Forks the current Linux process into a fresh address space.
+#[allow(clippy::too_many_arguments)]
+pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let parent_pml4 = tasks[current].pml4;
+    let Some(slot) = tasks.iter().position(|task| task.state == TaskState::Empty) else {
+        return Err(LINUX_EAGAIN);
+    };
+    let Some(parent_pml4) = PhysFrame::from_address(parent_pml4) else {
+        return Err(LINUX_EINVAL);
+    };
+    let Some(child_pml4) = crate::memory::with_frame_allocator(|allocator| {
+        paging::copy_user_address_space(allocator, parent_pml4)
+    }) else {
+        return Err(LINUX_ENOMEM);
+    };
+    let child_pml4 = child_pml4.map_err(|_| LINUX_ENOMEM)?;
+
+    let (
+        abi,
+        root,
+        vmas,
+        brk,
+        fs_base,
+        fds,
+        overlay,
+        pipes,
+        eventfds,
+        epolls,
+        sigactions,
+        sigblocked,
+        sigaltstack,
+    ) = {
+        let parent = &tasks[current];
+        (
+            parent.abi,
+            parent.root,
+            parent.vmas,
+            parent.brk,
+            parent.fs_base,
+            parent.linux_fds,
+            parent.linux_overlay,
+            parent.linux_pipes,
+            parent.linux_eventfds,
+            parent.linux_epolls,
+            parent.sigactions,
+            parent.sigblocked,
+            parent.sigaltstack,
+        )
+    };
+    let kernel_stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
+    let kernel_top = stack_top(&kernel_stacks.0[slot]);
+
+    let mut child = Task::new();
+    child.state = TaskState::Ready;
+    child.kind = TaskKind::Process;
+    child.abi = abi;
+    child.pml4 = child_pml4.start_address();
+    child.kernel_stack_top = kernel_top;
+    child.root = root;
+    child.vmas = vmas;
+    child.brk = brk;
+    child.fs_base = fs_base;
+    child.tgid = slot;
+    child.parent = current;
+    child.linux_fds = fds;
+    child.linux_overlay = overlay;
+    child.linux_pipes = pipes;
+    child.linux_eventfds = eventfds;
+    child.linux_epolls = epolls;
+    child.sigactions = sigactions;
+    child.sigblocked = sigblocked;
+    child.sigaltstack = sigaltstack;
+
+    let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
+    let frame_end = (kernel_top - 16) & !15;
+    let frame_start = frame_end - frame_size;
+    // SAFETY: The destination is inside the new task's private kernel stack,
+    // and the source frame is live on the caller's kernel stack.
+    unsafe {
+        ptr::copy_nonoverlapping(
+            frame as *const u8,
+            frame_start as *mut u8,
+            frame_size as usize,
+        );
+        (*(frame_start as *mut InterruptFrame)).rax = 0;
+    }
+    child.saved_rsp = frame_start;
+    tasks[slot] = child;
+    Ok(slot)
+}
+
+/// Reaps an exited child of the current process.
+///
+/// Returns `None` when the child has not exited yet and [`LINUX_ECHILD`] when
+/// there is no matching child. `pid <= 0` matches any child.
+pub fn linux_wait4(pid: i64) -> Result<Option<(usize, i64)>, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let mut has_child = false;
+    for (index, task) in tasks.iter_mut().enumerate() {
+        if task.parent != current || index == current {
+            continue;
+        }
+        has_child = true;
+        if task.state == TaskState::Done && (pid <= 0 || pid as usize == index) {
+            let status = task.exit_status;
+            *task = Task::new();
+            return Ok(Some((index, status)));
+        }
+    }
+    if has_child {
+        Ok(None)
+    } else {
+        Err(LINUX_ECHILD)
+    }
+}
+
 /// Blocks the current Linux task on a futex word.
 pub fn linux_futex_wait(frame: *mut InterruptFrame, address: u64) -> *mut InterruptFrame {
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -1456,7 +1580,9 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
 }
 
 const LINUX_EBADF: i64 = -9;
+const LINUX_ECHILD: i64 = -10;
 const LINUX_EAGAIN: i64 = -11;
+const LINUX_ENOMEM: i64 = -12;
 const LINUX_ENOSYS: i64 = -38;
 const LINUX_ENOTDIR: i64 = -20;
 const LINUX_EISDIR: i64 = -21;
@@ -2359,6 +2485,19 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         let tasks = unsafe { &*TASKS.0.get() };
         tasks[current].kind
     };
+    if kind == TaskKind::Process {
+        release_linux_mappings(current);
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].state = TaskState::Done;
+        tasks[current].exit_status = ((status & 0xff) << 8) as i64;
+        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
+        tasks[current].linux_overlay = [None; OVERLAY_FILES];
+        tasks[current].linux_pipes = [None; MAX_PIPES];
+        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
+        tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        serial_line!("linux: process exit pid={current} status={status}");
+        return schedule_next(current);
+    }
     if kind == TaskKind::Thread {
         clear_child_tid(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
@@ -2410,17 +2549,31 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
 /// continues with the next runnable task.
 pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptFrame {
     let current = CURRENT.load(Ordering::Relaxed);
-    let (linux, thread, kind) = {
+    let (linux, thread, process, kind) = {
         let tasks = unsafe { &*TASKS.0.get() };
         (
             tasks[current].kind == TaskKind::Linux,
             tasks[current].kind == TaskKind::Thread,
+            tasks[current].kind == TaskKind::Process,
             tasks[current].kind,
         )
     };
-    if kind != TaskKind::User && !linux && !thread {
+    if kind != TaskKind::User && !linux && !thread && !process {
         serial_line!("AETHER_BOOT_FAILED reason=user-fault on non-user task");
         halt()
+    }
+    if process {
+        release_linux_mappings(current);
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].state = TaskState::Done;
+        tasks[current].exit_status = 128 + vector as i64;
+        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
+        tasks[current].linux_overlay = [None; OVERLAY_FILES];
+        tasks[current].linux_pipes = [None; MAX_PIPES];
+        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
+        tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        serial_line!("linux: process fault pid={current} vector={vector}");
+        return schedule_next(current);
     }
     if thread {
         clear_child_tid(current);

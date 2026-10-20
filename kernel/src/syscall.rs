@@ -163,6 +163,10 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
         20 => linux_writev(pml4, first, second, third),
         21 => linux_access(pml4, first, second),
+        24 => {
+            unsafe { (*frame).rax = 0 };
+            return scheduler::yield_current(frame);
+        }
         25 => linux_mremap(
             pml4,
             first,
@@ -177,6 +181,8 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
         33 => scheduler::linux_dup2(first, second).map_or_else(|error| error, |fd| fd as i64),
         39 => scheduler::linux_getpid() as i64,
+        57 => scheduler::linux_fork(frame).map_or_else(|error| error, |pid| pid as i64),
+        61 => linux_wait4(pml4, first, second, third),
         56 => linux_clone(
             frame,
             pml4,
@@ -1039,6 +1045,26 @@ fn linux_sigreturn(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // SAFETY: The frame is live on the current kernel stack.
     unsafe { (*frame).rax = LINUX_EINVAL as u64 };
     frame
+}
+
+fn linux_wait4(pml4: PhysFrame, pid: u64, status_pointer: u64, _options: u64) -> i64 {
+    if status_pointer != 0 && !paging::user_range_valid(pml4, status_pointer, 4, true) {
+        return LINUX_EFAULT;
+    }
+    match scheduler::linux_wait4(pid as i64) {
+        Ok(Some((child, status))) => {
+            if status_pointer != 0
+                && write_user_bytes(pml4, status_pointer, &(status as u32).to_ne_bytes()).is_none()
+            {
+                return LINUX_EFAULT;
+            }
+            child as i64
+        }
+        // The prototype reports "not exited yet" instead of blocking; callers
+        // that need blocking use WNOHANG plus sched_yield.
+        Ok(None) => 0,
+        Err(error) => error,
+    }
 }
 
 fn linux_clone(

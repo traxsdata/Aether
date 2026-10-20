@@ -73,6 +73,11 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Linux process slice: eager-copy `fork` into a fresh address space, a child
+  task table with descriptor inheritance, and `wait4` status/reap (polled with
+  `sched_yield`). The boot fixture forks, exits 42 in the child, and reaps the
+  encoded status in the parent (`AETHER_LINUX_FORK_OK`). `execve`, blocking
+  waits, and process groups remain missing.
 - Linux signal slice: `rt_sigaction`, `rt_sigprocmask`, `sigaltstack`, self and
   thread-group `kill`/`tgkill`, user-stack signal frames, `rt_sigreturn`, and
   fault-to-signal delivery. The boot fixture installs SIGUSR1, raises it, runs
