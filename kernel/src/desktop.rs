@@ -6,11 +6,13 @@
 //! and service state through the supervisor. A compromised desktop therefore
 //! cannot mint capabilities; it can only ask the resource-owning services.
 
+use crate::arch::x86_64::serial;
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::graphics::{self, color};
 use crate::input::Key;
 use crate::serial_line;
 use crate::{fs, packaging, portal, recovery, scheduler, supervisor, syscall, updates};
+use aether_gridcraft::{self as gridcraft, AppKey};
 use aether_packaging::manifest::Version;
 use core::cell::UnsafeCell;
 
@@ -20,7 +22,7 @@ struct Global<T>(UnsafeCell<T>);
 // on the single CPU. Paint operations do not run concurrently.
 unsafe impl<T> Sync for Global<T> {}
 
-const MAX_WINDOWS: usize = 6;
+const MAX_WINDOWS: usize = 7;
 
 #[derive(Clone, Copy)]
 struct Window {
@@ -40,6 +42,7 @@ enum WindowKind {
     Settings,
     Recovery,
     Log,
+    GridCraft,
 }
 
 const WINDOWS: [Window; MAX_WINDOWS] = [
@@ -91,11 +94,20 @@ const WINDOWS: [Window; MAX_WINDOWS] = [
         height: 210,
         kind: WindowKind::Log,
     },
+    Window {
+        title: "GRIDCRAFT",
+        x: 24,
+        y: 552,
+        width: 1232,
+        height: 216,
+        kind: WindowKind::GridCraft,
+    },
 ];
 
 struct DesktopState {
     windows: [Window; MAX_WINDOWS],
     focus: usize,
+    gridcraft: gridcraft::App,
 }
 
 impl DesktopState {
@@ -103,6 +115,7 @@ impl DesktopState {
         Self {
             windows: WINDOWS,
             focus: 0,
+            gridcraft: gridcraft::App::new(),
         }
     }
 }
@@ -111,6 +124,26 @@ static DESKTOP: Global<DesktopState> = Global(UnsafeCell::new(DesktopState::new(
 
 /// Initializes the desktop and paints the first frame.
 pub fn init() {
+    let report = gridcraft::self_test();
+    if report.failures == 0 {
+        serial_line!(
+            "AETHER_GRIDCRAFT_OK checks={} failures=0 sum_milli={}",
+            report.checks,
+            report.sum_milli
+        );
+    } else {
+        serial_line!(
+            "gridcraft: self-test failed checks={} failures={}",
+            report.checks,
+            report.failures
+        );
+    }
+    {
+        let _guard = InterruptGuard::enter();
+        // SAFETY: Interrupts are masked and this runs once during boot.
+        let state = unsafe { &mut *DESKTOP.0.get() };
+        state.gridcraft = gridcraft::App::sample();
+    }
     if !graphics::is_ready() {
         serial_line!("AETHER_GRAPHICS_SKIP reason=no-framebuffer");
         return;
@@ -133,17 +166,17 @@ pub fn redraw() {
     if !graphics::is_ready() {
         return;
     }
-    let (focus, windows) = {
+    let (focus, windows, gridcraft) = {
         let _guard = InterruptGuard::enter();
         // SAFETY: Interrupts are masked for the snapshot.
         let state = unsafe { &*DESKTOP.0.get() };
-        (state.focus, state.windows)
+        (state.focus, state.windows, state.gridcraft)
     };
 
     graphics::clear(color::BACKGROUND);
     draw_bar();
     for (index, window) in windows.iter().enumerate() {
-        draw_window(window, index == focus);
+        draw_window(window, index == focus, &gridcraft);
     }
     draw_taskbar(&windows, focus);
 }
@@ -167,7 +200,7 @@ fn draw_bar() {
     );
 }
 
-fn draw_window(window: &Window, focused: bool) {
+fn draw_window(window: &Window, focused: bool, gridcraft: &gridcraft::App) {
     graphics::fill_rect(
         window.x + 5,
         window.y + 5,
@@ -214,10 +247,14 @@ fn draw_window(window: &Window, focused: bool) {
         1,
         color::DIVIDER,
     );
-    draw_content(window);
+    draw_content(window, gridcraft);
 }
 
-fn draw_content(window: &Window) {
+fn draw_content(window: &Window, gridcraft: &gridcraft::App) {
+    if window.kind == WindowKind::GridCraft {
+        draw_gridcraft(window, gridcraft);
+        return;
+    }
     let x = window.x + 12;
     let mut y = window.y + 38;
     let mut files = [0u8; 512];
@@ -263,6 +300,7 @@ fn draw_content(window: &Window) {
         WindowKind::Settings => &settings[..settings_length],
         WindowKind::Security => &security[..security_length],
         WindowKind::Log => &log[..log_length],
+        WindowKind::GridCraft => &[],
     };
 
     if lines.is_empty() {
@@ -279,6 +317,159 @@ fn draw_content(window: &Window) {
         }
     }
     draw_denied_events(window, x, y);
+}
+
+/// Paints the GridCraft spreadsheet window.
+///
+/// Geometry is derived from the window rectangle and every draw is bounded by
+/// the sheet dimensions. The application model evaluates formulas; the
+/// compositor only displays values it returns.
+fn draw_gridcraft(window: &Window, app: &gridcraft::App) {
+    use aether_gridcraft::{COLS, ROWS};
+
+    let left = window.x + 10;
+    let right = window.x + window.width - 10;
+    let top = window.y + 32;
+    let row_header = 28;
+    let cell_width = ((right - left - row_header) / COLS as i32).max(24);
+    let cell_height = 14;
+    let header_height = 14;
+    let grid_top = top + 22;
+    let total_width = row_header + cell_width * COLS as i32;
+
+    // Name box and formula bar.
+    graphics::fill_rect(left, top, 40, 18, color::GRID_HEADER);
+    graphics::outline(left, top, 40, 18, color::GRID_LINE);
+    let mut address = [0u8; 8];
+    let address_length = app.address(&mut address);
+    if let Ok(text) = core::str::from_utf8(&address[..address_length]) {
+        graphics::draw_text(left + 8, top + 5, text, color::ACCENT, 1);
+    }
+
+    let bar_x = left + 44;
+    let bar_width = right - bar_x;
+    graphics::fill_rect(bar_x, top, bar_width, 18, color::GRID_CELL);
+    graphics::outline(bar_x, top, bar_width, 18, color::GRID_LINE);
+    let mut editor = [0u8; 64];
+    let source = app.editor_text();
+    let copy = source.len().min(editor.len());
+    editor[..copy].copy_from_slice(&source[..copy]);
+    let mut editor_length = copy;
+    if app.is_editing() && editor_length < editor.len() {
+        editor[editor_length] = b'_';
+        editor_length += 1;
+    }
+    if let Ok(text) = core::str::from_utf8(&editor[..editor_length]) {
+        let max_chars = ((bar_width - 76) / 6).max(1) as usize;
+        draw_clipped_text(bar_x + 6, top + 5, text, color::TEXT, max_chars);
+    }
+    if let Ok(text) = core::str::from_utf8(app.status().as_bytes()) {
+        let x = bar_x + bar_width - 8 - text.len() as i32 * 6;
+        graphics::draw_text(x, top + 5, text, color::MUTED, 1);
+    }
+
+    // Column and row headers.
+    graphics::fill_rect(
+        left,
+        grid_top,
+        total_width,
+        header_height,
+        color::GRID_HEADER,
+    );
+    for column in 0..COLS {
+        let x = left + row_header + column as i32 * cell_width;
+        if column == app.column() {
+            graphics::fill_rect(x, grid_top, cell_width, header_height, color::GRID_SELECT);
+        }
+        let label = [b'A' + column as u8];
+        if let Ok(text) = core::str::from_utf8(&label) {
+            graphics::draw_text(x + cell_width / 2 - 3, grid_top + 4, text, color::TEXT, 1);
+        }
+    }
+    let mut buffer = [0u8; 32];
+    for row in 0..ROWS {
+        let y = grid_top + header_height + row as i32 * cell_height;
+        if row == app.row() {
+            graphics::fill_rect(left, y, row_header, cell_height, color::GRID_SELECT);
+        }
+        let length = format_u64(&mut buffer, (row + 1) as u64);
+        if let Ok(text) = core::str::from_utf8(&buffer[..length]) {
+            graphics::draw_text(
+                left + row_header - 6 - text.len() as i32 * 6,
+                y + 4,
+                text,
+                if row == app.row() {
+                    color::ACCENT
+                } else {
+                    color::MUTED
+                },
+                1,
+            );
+        }
+        for column in 0..COLS {
+            let x = left + row_header + column as i32 * cell_width;
+            let selected = row == app.row() && column == app.column();
+            graphics::fill_rect(
+                x,
+                y,
+                cell_width,
+                cell_height,
+                if selected {
+                    color::GRID_SELECT
+                } else {
+                    color::GRID_CELL
+                },
+            );
+            let mut display = [0u8; 24];
+            let display_length = app.sheet.display(row, column, &mut display);
+            if display_length > 0
+                && let Ok(text) = core::str::from_utf8(&display[..display_length])
+            {
+                let max_chars = ((cell_width - 6) / 6).max(1) as usize;
+                let rgb = if display.starts_with(b"ERR:") {
+                    color::WARNING
+                } else if column == 3 && row > 0 {
+                    color::ACCENT
+                } else {
+                    color::TEXT
+                };
+                draw_clipped_text(x + 3, y + 4, text, rgb, max_chars);
+            }
+        }
+    }
+
+    // Grid lines and selection outline.
+    for column in 0..=COLS {
+        let x = left + row_header + column as i32 * cell_width;
+        graphics::fill_rect(
+            x,
+            grid_top,
+            1,
+            header_height + ROWS as i32 * cell_height,
+            color::GRID_LINE,
+        );
+    }
+    for row in 0..=ROWS {
+        let y = grid_top + header_height + row as i32 * cell_height;
+        graphics::fill_rect(left, y, total_width, 1, color::GRID_LINE);
+    }
+    graphics::fill_rect(left, grid_top, row_header, 1, color::GRID_LINE);
+    let selection_x = left + row_header + app.column() as i32 * cell_width;
+    let selection_y = grid_top + header_height + app.row() as i32 * cell_height;
+    graphics::outline(
+        selection_x,
+        selection_y,
+        cell_width,
+        cell_height,
+        color::ACCENT,
+    );
+}
+
+fn draw_clipped_text(x: i32, y: i32, text: &str, rgb: u32, max_chars: usize) {
+    let length = text.len().min(max_chars);
+    if let Some(clipped) = text.get(..length) {
+        graphics::draw_text(x, y, clipped, rgb, 1);
+    }
 }
 
 /// Closes the security center and system log with a live roll-up of denied
@@ -343,37 +534,52 @@ pub fn on_key(key: Key) {
         let _guard = InterruptGuard::enter();
         // SAFETY: Interrupts are masked for the state update.
         let state = unsafe { &mut *DESKTOP.0.get() };
-        match key {
-            Key::Tab => {
-                state.focus = (state.focus + 1) % state.windows.len();
-                redraw_needed = true;
+        let gridcraft_focused = state.windows[state.focus].kind == WindowKind::GridCraft;
+        if key == Key::Tab {
+            // Tab always reaches the compositor so every window stays
+            // reachable; an active grid edit is committed first.
+            if gridcraft_focused {
+                state.gridcraft.commit();
             }
-            Key::Up => {
-                state.windows[state.focus].y = (state.windows[state.focus].y - 8).max(40);
-                redraw_needed = true;
-            }
-            Key::Down => {
-                state.windows[state.focus].y =
-                    (state.windows[state.focus].y + 8).min(graphics::height() as i32 - 250);
-                redraw_needed = true;
-            }
-            Key::Left => {
-                state.windows[state.focus].x = (state.windows[state.focus].x - 8).max(0);
-                redraw_needed = true;
-            }
-            Key::Right => {
-                state.windows[state.focus].x =
-                    (state.windows[state.focus].x + 8).min(graphics::width() as i32 - 120);
-                redraw_needed = true;
-            }
-            Key::Enter => {
-                announced = Some(state.windows[state.focus].title);
-            }
-            Key::Escape => {
+            state.focus = (state.focus + 1) % state.windows.len();
+            redraw_needed = true;
+        } else if gridcraft_focused {
+            if key == Key::Escape && !state.gridcraft.is_editing() {
                 state.focus = 0;
                 redraw_needed = true;
+            } else if let Some(app_key) = gridcraft_key(key) {
+                state.gridcraft.on_key(app_key);
+                redraw_needed = true;
             }
-            Key::Char(_) | Key::Backspace => {}
+        } else {
+            match key {
+                Key::Up => {
+                    state.windows[state.focus].y = (state.windows[state.focus].y - 8).max(40);
+                    redraw_needed = true;
+                }
+                Key::Down => {
+                    state.windows[state.focus].y =
+                        (state.windows[state.focus].y + 8).min(graphics::height() as i32 - 250);
+                    redraw_needed = true;
+                }
+                Key::Left => {
+                    state.windows[state.focus].x = (state.windows[state.focus].x - 8).max(0);
+                    redraw_needed = true;
+                }
+                Key::Right => {
+                    state.windows[state.focus].x =
+                        (state.windows[state.focus].x + 8).min(graphics::width() as i32 - 120);
+                    redraw_needed = true;
+                }
+                Key::Enter => {
+                    announced = Some(state.windows[state.focus].title);
+                }
+                Key::Escape => {
+                    state.focus = 0;
+                    redraw_needed = true;
+                }
+                Key::Char(_) | Key::Backspace | Key::Tab => {}
+            }
         }
     }
     if redraw_needed {
@@ -382,6 +588,55 @@ pub fn on_key(key: Key) {
     if let Some(title) = announced {
         serial_line!("desktop: activated window={title}");
     }
+}
+
+fn gridcraft_key(key: Key) -> Option<AppKey> {
+    match key {
+        Key::Char(character) => Some(AppKey::Char(character)),
+        Key::Enter => Some(AppKey::Enter),
+        Key::Backspace => Some(AppKey::Backspace),
+        Key::Escape => Some(AppKey::Escape),
+        Key::Up => Some(AppKey::Up),
+        Key::Down => Some(AppKey::Down),
+        Key::Left => Some(AppKey::Left),
+        Key::Right => Some(AppKey::Right),
+        Key::Tab => None,
+    }
+}
+
+/// Prints the GridCraft sheet as CSV and a bounded status line.
+///
+/// The console shell is a diagnostic surface with kernel authority, so this
+/// only reads the running application's public model.
+pub fn print_gridcraft() {
+    let mut buffer = [0u8; 1024];
+    let mut address = [0u8; 8];
+    let (length, used, editing, checksum, address_length) = {
+        let _guard = InterruptGuard::enter();
+        // SAFETY: Interrupts are masked for the snapshot.
+        let app = unsafe { &*DESKTOP.0.get() }.gridcraft;
+        let length = app.sheet.write_csv(&mut buffer);
+        let mut checksum = 0x811c_9dc5u32;
+        for byte in &buffer[..length] {
+            checksum ^= u32::from(*byte);
+            checksum = checksum.wrapping_mul(0x0100_0193);
+        }
+        (
+            length,
+            app.used_cells(),
+            app.is_editing(),
+            checksum,
+            app.address(&mut address),
+        )
+    };
+    serial::write_bytes(&buffer[..length]);
+    serial_line!(
+        "gridcraft: used={} selected={} mode={} checksum={:#010x}",
+        used,
+        core::str::from_utf8(&address[..address_length]).unwrap_or("?"),
+        if editing { "edit" } else { "ready" },
+        checksum
+    );
 }
 
 /// Returns the focused window title for diagnostics.

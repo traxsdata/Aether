@@ -71,9 +71,10 @@ grants, and the desktop is not a security authority.
   quarantine, plus an application lifecycle table.
 - A serial console shell with filesystem, service, application, recovery, and
   desktop commands.
-- A linear GOP framebuffer service, software compositor, six-window desktop,
+- A linear GOP framebuffer service, software compositor, seven-window desktop,
   PS/2 keyboard input, Security Center, file manager, settings, portal view,
-  and current/previous image recovery view.
+  current/previous image recovery view, and a native GridCraft spreadsheet
+  with a formula bar, cell editing, arithmetic, ranges, and five functions.
 - A native application SDK (`sdk/`) for the initial syscall surface,
   including typed wrappers for the endpoint syscalls and error names.
 - A dependency-free `aether-crypto` crate with SHA-256, SHA-512, and Ed25519
@@ -113,11 +114,11 @@ grants, and the desktop is not a security authority.
   `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`,
   `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
-  `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`, `AETHER_SHELL_OK`, and
-  `AETHER_BOOT_OK`.
+  `AETHER_GRIDCRAFT_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
+  `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
 - `make shell-test`, which drives the console over a QEMU serial socket and
   checks filesystem, service, memory, portal grant/revocation, package,
-  runtime, update, recovery, desktop, and input commands.
+  runtime, update, recovery, desktop, spreadsheet export, and input commands.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
 - `make rollback-test`, which boots a kernel with the
@@ -167,8 +168,9 @@ AETHER_SUPERVISOR_OK starts=11 running=9 quarantined=1
 AETHER_RECOVERY_OK current=aether-0.1.0 previous=aether-0.0.9 selected=aether-0.1.0 rollback=false user_data=true
 portal: audit revoked root=/apps/org.aether.demo path=/portal/README.txt
 AETHER_REVOCATION_OK checks=4
+AETHER_GRIDCRAFT_OK checks=15 failures=0 sum_milli=10000
 AETHER_GRAPHICS_OK mode=1280x800 format=linear
-AETHER_DESKTOP_OK windows=6 checksum=0xab05346d
+AETHER_DESKTOP_OK windows=7 checksum=0xd3be5264
 desktop: activated window=SECURITY CENTER
 AETHER_INPUT_OK keys=6 dropped=0 queue=32
 Aether console shell. Type 'help' for commands.
@@ -298,7 +300,7 @@ kernel/              Aether kernel (no_std, target x86_64-unknown-none)
   src/packaging.rs   package verification, installation, and self-test
   src/runtime.rs     runtime profile registration and isolation self-test
   src/updates.rs     signed update verification and policy self-test
-  src/desktop.rs     software compositor and desktop shell
+  src/desktop.rs     software compositor and desktop shell, GridCraft view
   src/input.rs       PS/2 keyboard service
   src/portal.rs      scoped file portal grants
   src/recovery.rs    current/previous image selection
@@ -307,6 +309,7 @@ tests/fixtures/      test keys and signed package/update fixtures
 tests/compatibility/ compatibility database and classification harness
 tools/               boot, shell, ISO, release, and qualification harnesses
 tools/admin/         package/update/release signing tool (host only)
+apps/gridcraft/      native spreadsheet application model (no_std, host-tested)
 user/                ring-3 native init and sandbox test
 docs/                architecture, security, and decision records
 ```
@@ -420,6 +423,7 @@ Further reading: [memory and paging](docs/architecture/memory.md),
 [capabilities](docs/architecture/capabilities.md), [IPC](docs/architecture/ipc.md),
 [filesystem and file handles](docs/architecture/filesystem.md),
 [compositor and desktop](docs/architecture/desktop.md),
+[GridCraft application](docs/architecture/gridcraft.md),
 [package format](docs/specifications/package-format.md),
 [signed updates](docs/architecture/updates.md),
 [compatibility database](docs/specifications/compatibility.md),

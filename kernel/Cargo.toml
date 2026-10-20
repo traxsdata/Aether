@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 aether-abi = { path = "../abi" }
+aether-gridcraft = { path = "../apps/gridcraft" }
 aether-boot-common = { path = "../boot/common" }
 aether-fs = { path = "fs" }
 aether-memory = { path = "memory" }

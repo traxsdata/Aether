@@ -1,5 +1,6 @@
 # Changelog
 
+
 All notable changes are recorded here. This project follows a prototype
 versioning scheme until the kernel ABI stabilises.
 
@@ -7,6 +8,15 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Native GridCraft spreadsheet window (`apps/gridcraft`) with a bounded 10x10
+  sheet, cell editing, formula bar, ranges, arithmetic, and
+  `SUM`/`AVERAGE`/`MIN`/`MAX`/`COUNT`. The model is `no_std`, allocation-free,
+  and host-tested; the compositor paints it and routes keyboard input.
+- `AETHER_GRIDCRAFT_OK` boot marker, so an application regression fails
+  `make test` instead of shipping a broken grid.
+- `gridcraft` console command that exports the running sheet as CSV.
+- `docs/architecture/gridcraft.md` documents the application and the upstream
+  GridCraft runtime work that remains.
 - `aether-memory`: host-testable bitmap frame allocator and x86-64 page-table
   encoding, with tests for reservations, exhaustion, double free, and layout.
 - Kernel physical frame allocator over the validated boot memory map, with

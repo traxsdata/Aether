@@ -115,6 +115,7 @@ fn execute_line() {
         "runtime" => crate::runtime::print_status(),
         "updates" => crate::updates::print_status(),
         "desktop" => desktop(),
+        "gridcraft" => crate::desktop::print_gridcraft(),
         "clear" => serial::write_str("\x1b[2J\x1b[H"),
         _ => serial_line!("shell: unknown command '{command}'"),
     }
@@ -139,6 +140,7 @@ fn print_help() {
     serial_line!("  runtime          per-application runtime profiles");
     serial_line!("  updates          signed update and rollback status");
     serial_line!("  desktop          compositor and desktop status");
+    serial_line!("  gridcraft        print the spreadsheet as CSV");
     serial_line!("  clear            clear the terminal");
 }
 

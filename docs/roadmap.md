@@ -71,6 +71,8 @@ It is a planning model, not a delivery promise.
 - [x] Graphics and input services over a linear GOP framebuffer and PS/2 IRQ1.
 - [x] Basic software compositor with bounded windows and focus handling.
 - [x] Desktop shell, file manager, settings, and Security Center views.
+- [x] Native GridCraft spreadsheet window with a host-tested formula and
+  editing model ([scope](architecture/gridcraft.md)).
 - [x] File portal with per-process, per-file grant records; revocation blocks
   future portal opens (`AETHER_REVOCATION_OK`).
 - [x] Initial native application SDK (`sdk/`) and user syscall ABI.
@@ -126,9 +128,10 @@ loader, enforces a ring-3 user/kernel boundary, runs a native application in a
 private storage root, reports denied cross-application access, verifies and
 installs a signed package, derives an isolated runtime profile, verifies a
 signed update while rejecting replay, downgrade, and an unknown publisher,
-starts supervised services, paints a composited desktop, accepts keyboard
-input, grants one file through the portal, and verifies the current/previous
-image records without touching user data.
+starts supervised services, paints a composited desktop with the native
+GridCraft spreadsheet, accepts keyboard input, grants one file through the
+portal, and verifies the current/previous image records without touching user
+data.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
 persistent store, network/audio services, an installer, and external review.

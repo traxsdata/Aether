@@ -161,6 +161,7 @@ def main() -> int:
             ("runtime", "runtime org.aether.demo"),
             ("updates", "updates: installed=0.1.0"),
             ("desktop", "desktop: focus="),
+            ("gridcraft", "gridcraft: used="),
             ("input", "input: dropped="),
             ("uptime", "uptime:"),
         ):

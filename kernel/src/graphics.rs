@@ -50,6 +50,14 @@ pub mod color {
     pub const SHADOW: u32 = 0x070c16;
     /// Divider line.
     pub const DIVIDER: u32 = 0x2d3d63;
+    /// Spreadsheet cell background.
+    pub const GRID_CELL: u32 = 0x121d31;
+    /// Spreadsheet header background.
+    pub const GRID_HEADER: u32 = 0x1d2b4a;
+    /// Spreadsheet grid line.
+    pub const GRID_LINE: u32 = 0x2a3a5c;
+    /// Selected spreadsheet cell and header.
+    pub const GRID_SELECT: u32 = 0x234b55;
 }
 
 /// Graphics initialization failure.

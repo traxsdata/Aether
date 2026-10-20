@@ -22,10 +22,12 @@ kernel works headless but does not print `AETHER_GRAPHICS_OK` or
 `kernel/src/desktop.rs` paints directly into the framebuffer:
 
 - top bar with identity and uptime;
-- six windows: Files, Security Center, File Portal, Settings, Recovery, System
-  Log;
+- seven windows: Files, Security Center, File Portal, Settings, Recovery,
+  System Log, and GridCraft;
 - focus outline, drag-by-keyboard movement, and taskbar;
-- a 5×7 bitmap font and deterministic pixel checksum.
+- a 5×7 bitmap font and deterministic pixel checksum;
+- the native GridCraft spreadsheet. Its model, scope, and keyboard contract are
+  documented in [`gridcraft.md`](gridcraft.md).
 
 All geometry is clipped. Repainting is synchronous and takes no locks beyond
 the single-CPU interrupt guard around the desktop state snapshot.
