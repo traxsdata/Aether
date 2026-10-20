@@ -108,14 +108,18 @@ _start:
     js fail_overlay
     mov %rax, %r13
 
-    /* init1(flags=0) requests blocking mode and must be rejected. */
+    /* init1(flags=0) requests default blocking mode and must succeed. */
     mov $294, %rax
     xor %rdi, %rdi
     syscall
-    cmp $-22, %rax
-    jne fail_inotify_flags
+    test %rax, %rax
+    js fail_inotify_flags
+    mov %rax, %r15
+    mov $3, %rax
+    mov %r15, %rdi
+    syscall
 
-    /* Only IN_NONBLOCK is supported; watch the overlay file for IN_MODIFY. */
+    /* Nonblocking mode watches the overlay file for IN_MODIFY. */
     mov $294, %rax
     mov $0x800, %rdi              /* IN_NONBLOCK */
     syscall
@@ -934,6 +938,679 @@ after_thread:
     mov $futex_timeout_message_len, %rdx
     syscall
 
+    /* ---- Gate 2: advanced inotify, pseudo-files, policy, quotas ---- */
+    sub $1024, %rsp
+    /* Nonblocking instance, directory watches on /tmp and /etc. */
+    mov $294, %rax
+    mov $0x800, %rdi
+    syscall
+    test %rax, %rax
+    js g2_fail_inotify
+    mov %rax, %r12
+    mov $254, %rax
+    mov %r12, %rdi
+    lea g2_tmp_path(%rip), %rsi
+    mov $0x12e, %rdx            /* CREATE|MODIFY|ATTRIB|OPEN|CLOSE_WRITE */
+    syscall
+    cmp $1, %rax
+    jne g2_fail_inotify
+    mov %eax, 904(%rsp)
+    mov $254, %rax
+    mov %r12, %rdi
+    lea g2_etc_path(%rip), %rsi
+    mov $0x24, %rdx             /* ATTRIB|OPEN */
+    syscall
+    cmp $2, %rax
+    jne g2_fail_inotify
+    mov %eax, 900(%rsp)
+
+    /* Create /tmp/q1: the /tmp watch must report IN_CREATE with a name. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_q1_path(%rip), %rsi
+    mov $0x241, %rdx
+    mov $0600, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_inotify
+    mov %rax, %r13
+    mov $1, %rax
+    mov %r13, %rdi
+    lea g2_byte(%rip), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne g2_fail_inotify
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $512, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_inotify
+    mov %rax, %r15
+    mov %rsp, %rdi
+    mov %r15, %rsi
+    mov $0x100, %edx            /* IN_CREATE */
+    call g2_scan_mask
+    test %rax, %rax
+    jz g2_fail_inotify
+
+    /* Open and read /etc/motd: the /etc watch must report IN_OPEN. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_motd_path(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_inotify
+    mov %rax, %r13
+    mov $0, %rax
+    mov %r13, %rdi
+    lea 512(%rsp), %rsi
+    mov $16, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_inotify
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $512, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_inotify
+    mov %rax, %r15
+    mov %rsp, %rdi
+    mov %r15, %rsi
+    mov $0x20, %edx             /* IN_OPEN */
+    call g2_scan_mask
+    test %rax, %rax
+    jz g2_fail_inotify
+
+    /* Removing the /etc watch reports IN_IGNORED for its descriptor. */
+    mov $255, %rax
+    mov %r12, %rdi
+    mov 900(%rsp), %esi
+    syscall
+    test %rax, %rax
+    jne g2_fail_inotify
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $256, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_inotify
+    mov %rax, %r15
+    mov %rsp, %rdi
+    mov %r15, %rsi
+    mov $0x8000, %edx           /* IN_IGNORED */
+    call g2_scan_mask
+    test %rax, %rax
+    jz g2_fail_inotify
+
+    /* Overflow: watch /tmp/q1 for IN_MODIFY and queue more than the bound. */
+    mov $254, %rax
+    mov %r12, %rdi
+    lea g2_q1_path(%rip), %rsi
+    mov $2, %rdx
+    syscall
+    cmp $3, %rax
+    jne g2_fail_inotify
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_q1_path(%rip), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_inotify
+    mov %rax, %r13
+    mov $12, %r14
+g2_overflow_write:
+    mov $1, %rax
+    mov %r13, %rdi
+    lea g2_byte(%rip), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne g2_fail_inotify
+    dec %r14
+    jne g2_overflow_write
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $256, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_inotify
+    mov %rax, %r15
+    mov %rsp, %rdi
+    mov %r15, %rsi
+    mov $0x4000, %edx           /* IN_Q_OVERFLOW */
+    call g2_scan_mask
+    test %rax, %rax
+    jz g2_fail_inotify
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+
+    /* Blocking mode: a CLONE_VM thread writes the watched file while the
+     * parent is blocked in read, and the record completes that read. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_block_path(%rip), %rsi
+    mov $0x241, %rdx
+    mov $0600, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_inotify_block
+    mov %rax, %r13
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $294, %rax
+    xor %rdi, %rdi              /* default blocking mode */
+    syscall
+    test %rax, %rax
+    js g2_fail_inotify_block
+    mov %rax, %r12
+    mov $254, %rax
+    mov %r12, %rdi
+    lea g2_block_path(%rip), %rsi
+    mov $2, %rdx
+    syscall
+    cmp $1, %rax
+    jne g2_fail_inotify_block
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x21, %r10             /* SHARED|ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js g2_fail_inotify_block
+    mov %rax, %r14
+    movl $0, (%r14)
+    movl $0, 8(%r14)
+    mov $56, %rax
+    mov $0x1290100, %rdi        /* VM|THREAD|SETTLS|CLEARTID|CHILD_SETTID */
+    lea 0xf00(%r14), %rsi
+    xor %rdx, %rdx
+    lea 8(%r14), %r10
+    lea 0x200(%r14), %r8
+    syscall
+    test %rax, %rax
+    js g2_fail_inotify_block
+    jz g2_block_child
+    movl $1, (%r14)
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $512, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_inotify_block
+    mov %rax, %r15
+    mov %rsp, %rdi
+    mov %r15, %rsi
+    mov $2, %edx
+    call g2_scan_mask
+    test %rax, %rax
+    jz g2_fail_inotify_block
+g2_block_join:
+    cmpl $0, 8(%r14)
+    je g2_block_joined
+    mov $202, %rax
+    lea 8(%r14), %rdi
+    xor %rsi, %rsi
+    syscall
+    jmp g2_block_join
+g2_block_joined:
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $11, %rax
+    mov %r14, %rdi
+    mov $4096, %rsi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea g2_inotify_block_message(%rip), %rsi
+    mov $g2_inotify_block_message_len, %rdx
+    syscall
+
+    /* Pseudo-files: /proc/self/exe, maps, status, fd directory, /dev nodes. */
+    sub $512, %rsp
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_proc_exe(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_proc
+    mov %rax, %r12
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $4, %rdx
+    syscall
+    cmp $4, %rax
+    jne g2_fail_proc
+    cmpl $0x464c457f, (%rsp)
+    jne g2_fail_proc
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_proc_maps(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_proc
+    mov %rax, %r12
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $400, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_proc
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_proc_status(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_proc
+    mov %rax, %r12
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $400, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_proc
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_proc_fd(%rip), %rsi
+    mov $0x10000, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_proc
+    mov %rax, %r12
+    mov $217, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $400, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_proc
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea g2_proc_message(%rip), %rsi
+    mov $g2_proc_message_len, %rdx
+    syscall
+
+    /* /dev/null, /dev/zero, /dev/random, /dev/urandom. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_dev_null(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_dev
+    mov %rax, %r12
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $16, %rdx
+    syscall
+    test %rax, %rax
+    jne g2_fail_dev
+    mov $5, %rax
+    mov %r12, %rdi
+    lea 128(%rsp), %rsi
+    syscall
+    test %rax, %rax
+    jne g2_fail_dev
+    mov 152(%rsp), %eax         /* st_mode */
+    and $0xf000, %eax
+    cmp $0x2000, %eax           /* S_IFCHR */
+    jne g2_fail_dev
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_dev_zero(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_dev
+    mov %rax, %r12
+    movabs $0x1122334455667788, %rax
+    mov %rax, (%rsp)
+    mov %rax, 8(%rsp)
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $16, %rdx
+    syscall
+    cmp $16, %rax
+    jne g2_fail_dev
+    cmpq $0, (%rsp)
+    jne g2_fail_dev
+    cmpq $0, 8(%rsp)
+    jne g2_fail_dev
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_dev_random(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_dev
+    mov %rax, %r12
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $16, %rdx
+    syscall
+    cmp $16, %rax
+    jne g2_fail_dev
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_dev_urandom(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_dev
+    mov %rax, %r12
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $16, %rdx
+    syscall
+    cmp $16, %rax
+    jne g2_fail_dev
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea g2_dev_message(%rip), %rsi
+    mov $g2_dev_message_len, %rdx
+    syscall
+
+    /* Syscall policy: unknown, network, device, and the audit pseudo-file. */
+    mov $9999, %rax
+    syscall
+    cmp $-38, %rax
+    jne g2_fail_policy
+    mov $41, %rax               /* socket */
+    mov $2, %rdi
+    mov $1, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $-13, %rax
+    jne g2_fail_policy
+    mov $16, %rax               /* ioctl */
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $-13, %rax
+    jne g2_fail_policy
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_dev_dri(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $-13, %rax
+    jne g2_fail_policy
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_path_audit(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_policy
+    mov %rax, %r12
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $256, %rdx
+    syscall
+    test %rax, %rax
+    jle g2_fail_policy
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea g2_policy_message(%rip), %rsi
+    mov $g2_policy_message_len, %rdx
+    syscall
+
+    /* Denial: path traversal and a write to the read-only root. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_path_escape(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $-2, %rax
+    jne g2_fail_denial
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_motd_path(%rip), %rsi
+    mov $1, %rdx                /* O_WRONLY */
+    xor %r10, %r10
+    syscall
+    cmp $-30, %rax              /* -EROFS */
+    jne g2_fail_denial
+    mov $1, %rax
+    mov $1, %rdi
+    lea g2_denial_message(%rip), %rsi
+    mov $g2_denial_message_len, %rdx
+    syscall
+    add $512, %rsp
+
+    /* Quotas: overlay bytes, descriptor count, then VMA count. */
+    sub $1024, %rsp
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_q2_path(%rip), %rsi
+    mov $0x241, %rdx
+    mov $0600, %r10
+    syscall
+    test %rax, %rax
+    js g2_fail_quota
+    mov %rax, %r12
+    mov $1, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $600, %rdx
+    syscall
+    cmp $-28, %rax              /* -ENOSPC */
+    jne g2_fail_quota
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    xor %r14, %r14
+g2_fd_loop:
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_motd_path(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_fd_done
+    mov %eax, 512(%rsp,%r14,4)
+    inc %r14
+    cmp $24, %r14
+    jb g2_fd_loop
+    jmp g2_fail_quota
+g2_fd_done:
+    cmp $-24, %rax              /* -EMFILE */
+    jne g2_fail_quota
+    xor %r15, %r15
+g2_fd_close:
+    cmp %r14, %r15
+    jae g2_fd_closed
+    mov 512(%rsp,%r15,4), %edi
+    mov $3, %rax
+    syscall
+    inc %r15
+    jmp g2_fd_close
+g2_fd_closed:
+    xor %r13, %r13
+g2_vma_loop:
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js g2_vma_done
+    inc %r13
+    cmp $64, %r13
+    jb g2_vma_loop
+    jmp g2_fail_quota
+g2_vma_done:
+    cmp $-12, %rax              /* -ENOMEM */
+    jne g2_fail_quota
+    mov $1, %rax
+    mov $1, %rdi
+    lea g2_quota_message(%rip), %rsi
+    mov $g2_quota_message_len, %rdx
+    syscall
+    add $1024, %rsp
+    jmp g2_extras_done
+
+g2_block_child:
+    cmpl $1, (%r14)
+    jne g2_block_child
+    mov $257, %rax
+    mov $-100, %rdi
+    lea g2_block_path(%rip), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js g2_block_child_exit
+    mov %rax, %r13
+    mov $1, %rax
+    mov %r13, %rdi
+    lea g2_byte(%rip), %rsi
+    mov $1, %rdx
+    syscall
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+g2_block_child_exit:
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+    jmp g2_block_child_exit
+
+/* Returns 1 when a packed inotify record contains `mask`.
+ * in: rdi=buffer, rsi=bytes, edx=bit; out: rax. */
+g2_scan_mask:
+    xor %eax, %eax
+    mov %rdi, %r8
+    mov %rsi, %r9
+g2_scan_loop:
+    cmp $16, %r9
+    jb g2_scan_none
+    mov 4(%r8), %r10d
+    test %edx, %r10d
+    jnz g2_scan_found
+    mov 12(%r8), %ecx
+    add $19, %rcx
+    and $-4, %rcx
+    add %rcx, %r8
+    sub %rcx, %r9
+    jmp g2_scan_loop
+g2_scan_found:
+    mov $1, %eax
+    ret
+g2_scan_none:
+    xor %eax, %eax
+    ret
+
+g2_fail_inotify:
+    lea g2_inotify_failure(%rip), %rsi
+    mov $g2_inotify_failure_len, %rdx
+    jmp report_failure
+g2_fail_inotify_block:
+    lea g2_inotify_block_failure(%rip), %rsi
+    mov $g2_inotify_block_failure_len, %rdx
+    jmp report_failure
+g2_fail_proc:
+    lea g2_proc_failure(%rip), %rsi
+    mov $g2_proc_failure_len, %rdx
+    jmp report_failure
+g2_fail_dev:
+    lea g2_dev_failure(%rip), %rsi
+    mov $g2_dev_failure_len, %rdx
+    jmp report_failure
+g2_fail_policy:
+    lea g2_policy_failure(%rip), %rsi
+    mov $g2_policy_failure_len, %rdx
+    jmp report_failure
+g2_fail_denial:
+    lea g2_denial_failure(%rip), %rsi
+    mov $g2_denial_failure_len, %rdx
+    jmp report_failure
+g2_fail_quota:
+    lea g2_quota_failure(%rip), %rsi
+    mov $g2_quota_failure_len, %rdx
+    jmp report_failure
+g2_extras_done:
+
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea event_message(%rip), %rsi
@@ -1086,6 +1763,82 @@ report_failure:
     jmp 2b
 
     .section .rodata
+
+g2_tmp_path:
+    .asciz "/tmp"
+g2_etc_path:
+    .asciz "/etc"
+g2_q1_path:
+    .asciz "/tmp/q1"
+g2_q2_path:
+    .asciz "/tmp/q2"
+g2_block_path:
+    .asciz "/tmp/block"
+g2_motd_path:
+    .asciz "/etc/motd"
+g2_proc_exe:
+    .asciz "/proc/self/exe"
+g2_proc_maps:
+    .asciz "/proc/self/maps"
+g2_proc_status:
+    .asciz "/proc/self/status"
+g2_proc_fd:
+    .asciz "/proc/self/fd"
+g2_dev_null:
+    .asciz "/dev/null"
+g2_dev_zero:
+    .asciz "/dev/zero"
+g2_dev_random:
+    .asciz "/dev/random"
+g2_dev_urandom:
+    .asciz "/dev/urandom"
+g2_dev_dri:
+    .asciz "/dev/dri/card0"
+g2_path_audit:
+    .asciz "/proc/aether/syscalls"
+g2_path_escape:
+    .asciz "/etc/../etc/motd"
+g2_byte:
+    .ascii "x"
+g2_inotify_block_message:
+    .ascii "AETHER_LINUX_INOTIFY_BLOCK_OK blocking=ok dirs=ok events=ok overflow=ok\n"
+    .set g2_inotify_block_message_len, . - g2_inotify_block_message
+g2_proc_message:
+    .ascii "AETHER_LINUX_PROC_OK exe=ok maps=ok status=ok fd=ok\n"
+    .set g2_proc_message_len, . - g2_proc_message
+g2_dev_message:
+    .ascii "AETHER_LINUX_DEV_OK null=ok zero=ok random=ok\n"
+    .set g2_dev_message_len, . - g2_dev_message
+g2_policy_message:
+    .ascii "AETHER_LINUX_SYSCALL_POLICY_OK unknown=enosys network=denied device=denied audit=ok\n"
+    .set g2_policy_message_len, . - g2_policy_message
+g2_denial_message:
+    .ascii "AETHER_LINUX_DENIAL_OK path=ok rofs=ok device=denied\n"
+    .set g2_denial_message_len, . - g2_denial_message
+g2_quota_message:
+    .ascii "AETHER_LINUX_QUOTA_OK overlay=enospc fd=emfile vma=enomem\n"
+    .set g2_quota_message_len, . - g2_quota_message
+g2_inotify_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=advanced\n"
+    .set g2_inotify_failure_len, . - g2_inotify_failure
+g2_inotify_block_failure:
+    .ascii "AETHER_LINUX_INOTIFY_FAIL stage=blocking\n"
+    .set g2_inotify_block_failure_len, . - g2_inotify_block_failure
+g2_proc_failure:
+    .ascii "AETHER_LINUX_PROC_FAIL\n"
+    .set g2_proc_failure_len, . - g2_proc_failure
+g2_dev_failure:
+    .ascii "AETHER_LINUX_DEV_FAIL\n"
+    .set g2_dev_failure_len, . - g2_dev_failure
+g2_policy_failure:
+    .ascii "AETHER_LINUX_SYSCALL_POLICY_FAIL\n"
+    .set g2_policy_failure_len, . - g2_policy_failure
+g2_denial_failure:
+    .ascii "AETHER_LINUX_DENIAL_FAIL\n"
+    .set g2_denial_failure_len, . - g2_denial_failure
+g2_quota_failure:
+    .ascii "AETHER_LINUX_QUOTA_FAIL\n"
+    .set g2_quota_failure_len, . - g2_quota_failure
 message:
     .ascii "AETHER_LINUX_EXEC_OK source=static-linux-elf mmap=ok fs=ok overlay=ok\n"
     .set message_len, . - message

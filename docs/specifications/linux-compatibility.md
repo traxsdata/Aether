@@ -69,9 +69,9 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: futex wait/wake queues, timeout (`ETIMEDOUT`), clear-child-tid join, and eventfd counters shared by threads in one tgid; robust lists, condition variables, and semaphores remain |
 | Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Partial: self/group and cross-process SIGUSR1 fixture coverage; siginfo/ucontext and complete alt-stack/restart semantics remain missing |
 | Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; no sleeps/timers |
-| Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root plus bounded `/tmp` overlay and one exact existing overlay-file `IN_MODIFY` watch; requires `IN_NONBLOCK`. Default blocking init/reads, rootfs/directory watches, other events, overflow, and persistent/shared-thread watch identity are unsupported |
-| Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Timeout-zero `poll`/`epoll_wait`, same-tgid thread-shared eventfd, and narrow nonblocking inotify | Partial: blocking/finite poll and epoll waits, pipe/cross-process waits, and full inotify remain unsupported |
-| Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/dev/urandom`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | Not implemented |
+| Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root, bounded `/tmp` overlay, and inotify with blocking or nonblocking instances, four watches, file and directory events (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`, `IN_IGNORED`), bounded-queue `IN_Q_OVERFLOW`, and thread wakeups. Recursive watches, move/delete/unmount events, and cross-process watch sharing are unsupported |
+| Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Timeout-zero `poll`/`epoll_wait`, same-tgid thread-shared eventfd, and bounded blocking/nonblocking inotify | Partial: blocking/finite poll and epoll waits and pipe/cross-process waits remain unsupported; inotify is bounded to one instance, four watches, and eight queued events per process |
+| Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/proc/self/status`, `/proc/self/fd`, `/dev/urandom`, `/dev/zero`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | **Implemented** in the kernel prototype through open/read/stat/readdir, plus a read-only `/proc/aether/syscalls` audit view. `/sys`, tty, input, and GPU nodes are absent. `/dev/random` and `/dev/urandom` return the same deterministic boot PRNG stream as `getrandom`, not host entropy |
 | Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
 | Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Not implemented; no GPU service |
 | Input | Pointer, keyboard, focus, cursor, keymap | Compositor input protocol | Partial: PS/2 keyboard and mouse in the desktop |
@@ -136,8 +136,8 @@ directory as zstd SquashFS and signs it.
 **Evidence:** `apps/linux/appimage` validates the container and verifies pinned
 digests and signed import records; `apps/linux/squashfs` reads
 zstd/gzip/lz4/lzo/xz/lzma SquashFS metadata, file data, fragments, directories,
-and symlinks, with extraction limits, symlink/hardlink policy, and a host
-`squashfs-extract` tool. It extracts all 16 files (48,350,419 bytes) and two
+and symlinks, with extraction limits, symlink/hardlink policy, an explicit
+xattr allowlist/denylist, and a host `squashfs-extract` tool. It extracts all 16 files (48,350,419 bytes) and two
 symlinks from the tested AppImage. Runtime-rootfs packaging/signing and in-OS
 import of an embedded signed rootfs are implemented; the populated glibc/Mesa
 rootfs and user-supplied AppImage import remain Gate 2 work.
@@ -180,9 +180,18 @@ and runs a dynamically linked C hello through `ld.so`, relocations, and shared
 production runtime. File metadata, `readlink`, `fcntl`, descriptor duplication,
 directory enumeration, and a bounded pipe with non-blocking `poll` are also
 exercised (`AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
-`AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). The inotify fixture requires
-`IN_NONBLOCK` and watches one exact overlay file for `IN_MODIFY`
-(`AETHER_LINUX_INOTIFY_OK`); blocking mode/reads and full inotify are missing.
+`AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). Inotify exercises
+nonblocking and default-blocking instances, multiple file/directory watches,
+`IN_MODIFY`/`IN_ATTRIB`/`IN_OPEN`/`IN_CLOSE_WRITE`/`IN_IGNORED`, queue overflow,
+and a blocking read woken by a `CLONE_VM` thread
+(`AETHER_LINUX_INOTIFY_OK`, `AETHER_LINUX_INOTIFY_BLOCK_OK`). Pseudo-files and
+synthetic devices are read through normal descriptors
+(`AETHER_LINUX_PROC_OK`, `AETHER_LINUX_DEV_OK`). A default-deny syscall
+classifier returns `ENOSYS` for unknown calls and `EACCES` for network/device
+groups, with counters in `/proc/aether/syscalls`
+(`AETHER_LINUX_SYSCALL_POLICY_OK`); path/read-only/device denials and
+descriptor/VMA/overlay quotas have their own markers
+(`AETHER_LINUX_DENIAL_OK`, `AETHER_LINUX_QUOTA_OK`).
 A thread is created with
 `clone(CLONE_VM|CLONE_THREAD)`, synchronizes through `FUTEX_WAIT`/`FUTEX_WAKE`,
 and joins through `CLONE_CHILD_CLEARTID` (`AETHER_LINUX_THREAD_OK`). `mremap`
@@ -204,10 +213,13 @@ root, create/write/read through the `/tmp` overlay, `write`, and `exit`. It
 produces `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 `AETHER_LINUX_VMA_OK`, plus `AETHER_LINUX_OK`; a writable+executable mapping
 and a W+X `mprotect` are denied. Private anonymous pages are allocated on demand
-and reclaimed on `munmap` and task exit. Shared mappings and per-domain mapping
-quotas, blocking poll/epoll waits, pipe/cross-process waits, full inotify,
-siginfo/ucontext, and the user-space `linuxd` protocol remain missing. Gate 2
-remains partial.
+and reclaimed on `munmap` and task exit. Per-domain VMA, descriptor, and
+overlay-byte quotas are enforced with denial evidence
+(`AETHER_LINUX_QUOTA_OK`), as are default-deny syscall classification and
+path/device denials (`AETHER_LINUX_SYSCALL_POLICY_OK`,
+`AETHER_LINUX_DENIAL_OK`). Cross-process shared mappings, blocking poll/epoll
+waits, pipe/cross-process waits, complete inotify semantics, siginfo/ucontext,
+and the user-space `linuxd` protocol remain missing. Gate 2 remains partial.
 
 ### Gate 3 — Headless GridCraft
 
@@ -248,11 +260,13 @@ revocation tests, and a compatibility record no better than the suite supports.
    user-space process/runtime service.
 3. Shared mappings are limited to `MAP_SHARED|MAP_ANONYMOUS` within one
    `CLONE_VM` thread group. File-backed shared mappings are unsupported, and
-   `fork()` returns `ENOSYS` while a shared mapping exists. There are no
-   per-domain mapping quotas.
-4. Blocking/finite poll and epoll waits (including pipe/cross-process waits),
-   full inotify, and complete
-   siginfo/ucontext semantics remain absent.
+   `fork()` returns `ENOSYS` while a shared mapping exists. Per-domain VMA,
+   descriptor, and overlay-byte quotas exist; persistent quotas that survive a
+   crash do not.
+4. Blocking/finite poll and epoll waits (including pipe/cross-process waits)
+   and complete siginfo/ucontext semantics remain absent. Inotify is bounded:
+   no recursive watches, move/delete/unmount events, or cross-process watch
+   sharing; `/sys` and non-synthetic device nodes are absent.
 5. No populated and pinned glibc/Mesa/Wayland runtime rootfs, Wayland service,
    or software renderer.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.

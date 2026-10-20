@@ -117,14 +117,30 @@ exact AppImage digest, and the runtime version.
   SIGUSR1 fixtures. Descriptor/filesystem calls include `openat`, read/write,
   stat/statx, `readlink`, `fcntl`, dup, `getdents64`, pipes, nonblocking poll,
   eventfd/basic epoll, and narrow inotify. Eventfd counters are shared by
-  threads in one tgid; futex timeouts are implemented. The inotify prototype
-  requires
-  `IN_NONBLOCK` and supports `IN_MODIFY` on one exact existing overlay file;
-  default blocking init and blocking reads are unsupported. Named fixture
-  markers are enumerated in the roadmap and host-interface inventory. Shared
-  mappings, blocking/finite poll and epoll waits (`-EOPNOTSUPP`), pipe and
-  cross-process waits, full inotify, and
-  complete siginfo/ucontext remain missing.
+  threads in one tgid; futex timeouts are implemented. Inotify supports default
+  blocking and `IN_NONBLOCK` instances, up to four watches per process, events
+  on exact overlay files and on read-only/explicit `/tmp` directories
+  (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`,
+  `IN_CREATE`, `IN_IGNORED`), a bounded eight-event queue with
+  `IN_Q_OVERFLOW`, and blocking reads woken by another `CLONE_VM` thread.
+  Threads share the per-tgid queue; `fork` takes a snapshot, so cross-process
+  sharing is not implemented. A bounded synthetic `/proc/self/{exe,maps,
+  status,fd}`, `/proc/aether/syscalls`, and `/dev/{null,zero,random,urandom}`
+  are served through open/read/stat/readdir; `/sys` and other device nodes are
+  absent. Named fixture markers are enumerated in the roadmap and
+  host-interface inventory. Shared mappings, blocking/finite poll and epoll
+  waits (`-EOPNOTSUPP`), pipe and cross-process waits, full inotify compatibility
+  (recursive mounts, unlink/move events, per-instance sharing across processes),
+  and complete siginfo/ucontext remain missing.
+- Syscalls use a default-deny classification table: unknown numbers return
+  `ENOSYS`, network and device groups return `EACCES`, and per-class counters
+  are exposed read-only through `/proc/aether/syscalls`
+  (`AETHER_LINUX_SYSCALL_POLICY_OK`). Denial tests cover path traversal,
+  read-only-root writes, `/dev/dri`, sockets, and `ioctl`
+  (`AETHER_LINUX_DENIAL_OK`).
+- Per-domain quotas bound descriptors (`EMFILE`), VMA entries (`ENOMEM`), and
+  overlay bytes (`ENOSPC`), with boot denial evidence
+  (`AETHER_LINUX_QUOTA_OK`).
 - A fixed per-task VMA table tracks ranges and rejects writable+executable
   mappings. Anonymous private pages are faulted in on demand with bounded
   allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.
@@ -145,8 +161,11 @@ exact AppImage digest, and the runtime version.
   user-supplied AppImage.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
-  fragments, directories, symlinks, hardlink marking, xattr dropping,
-  extraction limits, host extractor). Embedded signed-rootfs in-OS import is
+  fragments, directories, symlinks, hardlink marking, xattr policy and
+  extraction limits, host extractor). The importer applies an explicit xattr
+  allowlist: only `user.*` is retained, while `security.capability`, other
+  `security.*`, `trusted.*`, `system.*`, and unknown namespaces are dropped and
+  counted. The host extractor does not apply retained attributes. Embedded signed-rootfs in-OS import is
   implemented; user-supplied AppImage import/opening and persistent overlay
   storage remain missing.
 - `linuxd`, pinned production glibc/Mesa/Wayland rootfs, Wayland bridge, and

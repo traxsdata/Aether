@@ -9,6 +9,7 @@
 
 use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::serial;
+use crate::linux_policy;
 use crate::memory::paging;
 use crate::scheduler;
 use crate::serial_line;
@@ -149,8 +150,29 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         crate::arch::x86_64::halt()
     };
 
+    // Default deny: classify before executing. Unknown numbers never reach a
+    // helper, and network/device groups fail with EACCES instead of falling
+    // through to an implementation that may not exist.
+    let class = linux_policy::classify(number);
+    match class {
+        linux_policy::Class::Unknown => {
+            linux_policy::record_unknown();
+            // SAFETY: The assembly stub passes a live frame on this task's
+            // kernel stack for the duration of the dispatcher call.
+            unsafe { (*frame).rax = LINUX_ENOSYS as u64 };
+            return frame;
+        }
+        linux_policy::Class::Network | linux_policy::Class::Device => {
+            linux_policy::record_denied(class);
+            // SAFETY: Same live-frame invariant as above.
+            unsafe { (*frame).rax = LINUX_EACCES as u64 };
+            return frame;
+        }
+        _ => linux_policy::record(class),
+    }
+
     let result = match number {
-        0 => linux_read(pml4, first, second, third),
+        0 => return linux_read_dispatch(frame, pml4, first, second, third),
         1 => linux_write(pml4, first, second, third),
         3 => scheduler::linux_close(first),
         8 => scheduler::linux_lseek(first, second as i64, third),
@@ -284,28 +306,53 @@ fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i6
     if path.as_bytes().first() != Some(&b'/') {
         return LINUX_ENOENT;
     }
+    // Device paths are denied unless they are one of the four synthetic nodes.
+    if let Some(rest) = path.strip_prefix("/dev/")
+        && !matches!(rest, "null" | "zero" | "random" | "urandom")
+    {
+        return LINUX_EACCES;
+    }
+    if path == "/dev/null" && flags & 0x3 != 0 {
+        return scheduler::linux_open_pseudo(path, true).map_or_else(|error| error, |fd| fd as i64);
+    }
     // Writable paths live in the per-task overlay; the imported root stays
     // read-only.
     const WRITE_FLAGS: u64 = 0x1 | 0x2 | 0x40 | 0x200 | 0x400;
     if flags & WRITE_FLAGS != 0 {
         let create = flags & 0x40 != 0;
         let truncate = flags & 0x200 != 0;
-        return scheduler::linux_overlay_open(path, create, truncate)
+        return scheduler::linux_overlay_open(path, create, truncate, true)
             .map_or_else(|error| error, |fd| fd as i64);
     }
     let _ = directory;
     scheduler::linux_open_read(path).map_or_else(|error| error, |fd| fd as i64)
 }
 
-fn linux_read(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {
+/// Reads a descriptor, entering a blocking wait for an empty blocking inotify
+/// descriptor. A blocking read does not return to this frame, so it is handled
+/// before the generic result write.
+fn linux_read_dispatch(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    descriptor: u64,
+    pointer: u64,
+    length: u64,
+) -> *mut InterruptFrame {
     if length as usize > MAX_SYSCALL_IO {
-        return LINUX_EINVAL;
+        return linux_result(frame, LINUX_EINVAL);
     }
-    // SAFETY: The range is validated and the syscall path is non-preemptible.
+    // SAFETY: `user_bytes_mut` walks the caller's page table and rejects any
+    // range that is not present, writable, and in the user window.
     let Some(buffer) = (unsafe { user_bytes_mut(pml4, pointer, length) }) else {
-        return LINUX_EFAULT;
+        return linux_result(frame, LINUX_EFAULT);
     };
-    scheduler::linux_read(descriptor, buffer).map_or_else(|error| error, |count| count as i64)
+    match scheduler::linux_read(descriptor, buffer) {
+        Ok(count) => linux_result(frame, count as i64),
+        Err(error) if error == LINUX_EAGAIN && scheduler::linux_inotify_blocks(descriptor) => {
+            scheduler::linux_inotify_block(frame, pointer, length as usize)
+        }
+        Err(error) => linux_result(frame, error),
+    }
 }
 
 fn linux_pread(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64, offset: u64) -> i64 {

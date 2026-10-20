@@ -57,6 +57,8 @@ pub enum Error {
     UnsafeSymlink,
     /// Two entries resolve to the same path.
     DuplicatePath,
+    /// Extended-attribute metadata is malformed or exceeds its bound.
+    InvalidXattr,
     /// A configured extraction limit was exceeded.
     Limit,
 }
@@ -125,6 +127,15 @@ pub struct ExtractedFile {
     pub mode: u16,
 }
 
+/// One extended attribute retained by the import policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Xattr {
+    /// Attribute name including its namespace prefix.
+    pub name: String,
+    /// Attribute value bytes.
+    pub value: Vec<u8>,
+}
+
 /// One entry in an imported tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeKind {
@@ -149,6 +160,8 @@ pub struct TreeEntry {
     pub inode: u32,
     /// Whether this entry shares its inode with an earlier path.
     pub hardlink: bool,
+    /// Extended attributes retained by the import allowlist.
+    pub xattrs: Vec<Xattr>,
 }
 
 /// Result of importing a tree.
@@ -164,8 +177,10 @@ pub struct ImportedTree {
     pub symlinks: usize,
     /// Number of repeated inode numbers.
     pub hardlinks: usize,
-    /// Number of inodes that carried xattr metadata (metadata is dropped).
+    /// Number of extended attributes retained by the allowlist.
     pub xattrs: usize,
+    /// Number of extended attributes dropped by the policy.
+    pub xattrs_dropped: usize,
 }
 
 /// Extraction limits.
@@ -196,6 +211,7 @@ pub struct Image<'a> {
     inode_table: usize,
     directory_table: usize,
     fragment_table: usize,
+    xattr_id_table: Option<usize>,
     block_size: usize,
     compression: u16,
     fragments: u32,
@@ -230,6 +246,7 @@ impl<'a> Image<'a> {
         let inode_table = read_u64(superblock, 64).ok_or(Error::BadSuperblock)?;
         let directory_table = read_u64(superblock, 72).ok_or(Error::BadSuperblock)?;
         let fragment_table = read_u64(superblock, 80).ok_or(Error::BadSuperblock)?;
+        let xattr_id_table = read_u64(superblock, 56).ok_or(Error::BadSuperblock)?;
         if major != 4
             || minor != 0
             || inodes == 0
@@ -251,6 +268,11 @@ impl<'a> Image<'a> {
             directory_table: usize::try_from(base + directory_table)
                 .map_err(|_| Error::Truncated)?,
             fragment_table: usize::try_from(base + fragment_table).map_err(|_| Error::Truncated)?,
+            xattr_id_table: if xattr_id_table == u64::MAX {
+                None
+            } else {
+                Some(usize::try_from(base + xattr_id_table).map_err(|_| Error::Truncated)?)
+            },
             block_size: block_size as usize,
             compression,
             fragments,
@@ -259,6 +281,9 @@ impl<'a> Image<'a> {
         if image.inode_table as u64 >= image_end
             || image.directory_table as u64 >= image_end
             || (fragments != 0 && image.fragment_table as u64 >= image_end)
+            || image
+                .xattr_id_table
+                .is_some_and(|table| table as u64 >= image_end)
         {
             return Err(Error::BadSuperblock);
         }
@@ -386,9 +411,12 @@ impl<'a> Image<'a> {
     /// Symlinks must be relative and stay below the root. Duplicate paths are
     /// rejected. Repeated inode numbers are marked as hardlinks and their data
     /// is copied per path, so a host extraction never creates a link that could
-    /// cross the root. Setuid, setgid, and sticky bits are stripped. Xattr
-    /// metadata is counted and dropped; file capabilities never reach the
-    /// runtime root.
+    /// cross the root. Setuid, setgid, and sticky bits are stripped. Extended
+    /// attributes are filtered by [`xattr_allowed`]: only `user.*` survives;
+    /// `security.capability`, other `security.*`, `trusted.*`, `system.*`, and
+    /// unknown namespaces are counted as dropped and never enter the tree.
+    /// Retained attributes are exposed on [`TreeEntry::xattrs`]; the host
+    /// extractor does not apply them to the output filesystem.
     pub fn import(&self, limits: Limits) -> Result<ImportedTree, Error> {
         let root = self.root()?;
         let mut state = WalkState::default();
@@ -400,7 +428,76 @@ impl<'a> Image<'a> {
             symlinks: state.symlinks,
             hardlinks: state.hardlinks,
             xattrs: state.xattrs,
+            xattrs_dropped: state.xattrs_dropped,
         })
+    }
+
+    /// Reads the xattr list referenced by an inode's xattr index.
+    ///
+    /// The id table stores one 16-byte `(offset, count, size)` entry per inode
+    /// in metadata blocks located by a 64-bit lookup list. Parsing is bounded
+    /// to 64 attributes and 64 KiB per inode.
+    fn xattr_entries(&self, index: u32) -> Result<Vec<Xattr>, Error> {
+        let table = self.xattr_id_table.ok_or(Error::InvalidXattr)?;
+        let header = self
+            .bytes
+            .get(table..table.checked_add(16).ok_or(Error::Truncated)?)
+            .ok_or(Error::Truncated)?;
+        let xattr_table = read_u64(header, 0).ok_or(Error::InvalidXattr)?;
+        let ids = read_u32(header, 8).ok_or(Error::InvalidXattr)?;
+        if index >= ids {
+            return Err(Error::InvalidXattr);
+        }
+        let per_block = METADATA_BLOCK_BYTES / 16;
+        let block_index = index as usize / per_block;
+        let entry_offset = (index as usize % per_block) * 16;
+        let location = table
+            .checked_add(16 + block_index.checked_mul(8).ok_or(Error::Truncated)?)
+            .ok_or(Error::Truncated)?;
+        let block_position = read_u64(self.bytes, location).ok_or(Error::InvalidXattr)?;
+        let block_position = usize::try_from(block_position).map_err(|_| Error::Truncated)?;
+        let (data, _) = self.metadata_block(0, block_position)?;
+        let entry = data
+            .get(entry_offset..entry_offset + 16)
+            .ok_or(Error::InvalidXattr)?;
+        let offset = read_u64(entry, 0).ok_or(Error::InvalidXattr)?;
+        let count = read_u32(entry, 8).ok_or(Error::InvalidXattr)?;
+        let size = read_u32(entry, 12).ok_or(Error::InvalidXattr)?;
+        if count > 64 || size > 65536 {
+            return Err(Error::Limit);
+        }
+        let start = self
+            .offset
+            .checked_add(usize::try_from(xattr_table).map_err(|_| Error::Truncated)?)
+            .ok_or(Error::Truncated)?;
+        // The id-table `size` field is advisory in some mksquashfs versions, so
+        // grow the read block by block until the declared attribute count
+        // parses. The loop is bounded to 16 metadata blocks.
+        let mut skip = usize::try_from(offset).map_err(|_| Error::Truncated)?;
+        let mut block = 0usize;
+        let mut stream = Vec::new();
+        for _ in 0..16 {
+            let (data, on_disk) = self.metadata_block(start, block)?;
+            if skip != 0 {
+                if skip > data.len() {
+                    skip -= data.len();
+                    block = block.checked_add(on_disk).ok_or(Error::Truncated)?;
+                    continue;
+                }
+                stream.extend_from_slice(&data[skip..]);
+                skip = 0;
+            } else {
+                stream.extend_from_slice(&data);
+            }
+            match parse_xattr_stream(&stream, count) {
+                Ok(attributes) => return Ok(attributes),
+                Err(Error::InvalidXattr) if stream.len() < 65536 => {
+                    block = block.checked_add(on_disk).ok_or(Error::Truncated)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(Error::Limit)
     }
 
     fn walk(
@@ -436,9 +533,22 @@ impl<'a> Image<'a> {
                     if state.paths.insert(path.clone(), ()).is_some() {
                         return Err(Error::DuplicatePath);
                     }
-                    if child.xattr != u32::MAX {
-                        state.xattrs += 1;
+                    let xattrs = if child.xattr == u32::MAX {
+                        Vec::new()
+                    } else {
+                        self.xattr_entries(child.xattr)?
+                    };
+                    for xattr in &xattrs {
+                        if xattr_allowed(&xattr.name) {
+                            state.xattrs += 1;
+                        } else {
+                            state.xattrs_dropped += 1;
+                        }
                     }
+                    let retained: Vec<Xattr> = xattrs
+                        .into_iter()
+                        .filter(|xattr| xattr_allowed(&xattr.name))
+                        .collect();
                     match child.kind {
                         Kind::Directory { .. } => {
                             state.directories += 1;
@@ -448,6 +558,7 @@ impl<'a> Image<'a> {
                                 mode: child.mode & 0o777,
                                 inode: child.number,
                                 hardlink: false,
+                                xattrs: retained,
                             });
                             self.walk(&child, &path, depth + 1, limits, state)?;
                         }
@@ -469,6 +580,7 @@ impl<'a> Image<'a> {
                                 mode: child.mode & 0o777,
                                 inode: child.number,
                                 hardlink,
+                                xattrs: retained,
                             });
                         }
                         Kind::Symlink(target) => {
@@ -482,6 +594,7 @@ impl<'a> Image<'a> {
                                 mode: child.mode & 0o777,
                                 inode: child.number,
                                 hardlink: false,
+                                xattrs: retained,
                             });
                         }
                     }
@@ -500,6 +613,7 @@ impl<'a> Image<'a> {
                     mode: inode.mode & 0o777,
                     inode: inode.number,
                     hardlink: false,
+                    xattrs: Vec::new(),
                 });
             }
             Kind::Symlink(target) => {
@@ -513,6 +627,7 @@ impl<'a> Image<'a> {
                     mode: inode.mode & 0o777,
                     inode: inode.number,
                     hardlink: false,
+                    xattrs: Vec::new(),
                 });
             }
         }
@@ -573,6 +688,7 @@ impl<'a> Image<'a> {
                 let file_size = read_u64(start, 24).ok_or(Error::InvalidInode)?;
                 let fragment = read_u32(start, 44).ok_or(Error::InvalidInode)?;
                 let fragment_offset = read_u32(start, 48).ok_or(Error::InvalidInode)?;
+                xattr = read_u32(start, 52).ok_or(Error::InvalidInode)?;
                 let block_sizes =
                     parse_block_sizes(start, 56, file_size, fragment, self.block_size)?;
                 Kind::File {
@@ -773,6 +889,7 @@ struct WalkState {
     symlinks: usize,
     hardlinks: usize,
     xattrs: usize,
+    xattrs_dropped: usize,
     paths: BTreeMap<String, ()>,
     inodes: BTreeMap<u32, ()>,
     tree: Vec<TreeEntry>,
@@ -791,6 +908,73 @@ fn read_all(reader: &mut impl lzma_rust2::Read, maximum: usize) -> Result<Vec<u8
             return Err(Error::Decompress);
         }
     }
+}
+
+fn parse_xattr_stream(stream: &[u8], count: u32) -> Result<Vec<Xattr>, Error> {
+    let mut cursor = 0usize;
+    let mut result = Vec::new();
+    for _ in 0..count {
+        let header = stream.get(cursor..cursor + 4).ok_or(Error::InvalidXattr)?;
+        let kind = read_u16(header, 0).ok_or(Error::InvalidXattr)?;
+        let name_length = read_u16(header, 2).ok_or(Error::InvalidXattr)? as usize;
+        cursor += 4;
+        let suffix = stream
+            .get(cursor..cursor + name_length)
+            .ok_or(Error::InvalidXattr)?;
+        cursor += name_length;
+        let prefix = match kind {
+            0 => "user.",
+            1 => "trusted.",
+            2 => "security.",
+            3 => "system.posix_acl_access",
+            4 => "system.posix_acl_default",
+            _ => return Err(Error::InvalidXattr),
+        };
+        let name = if kind <= 2 {
+            let Ok(suffix) = core::str::from_utf8(suffix) else {
+                return Err(Error::InvalidXattr);
+            };
+            format!("{prefix}{suffix}")
+        } else {
+            prefix.to_string()
+        };
+        let value_header = stream.get(cursor..cursor + 4).ok_or(Error::InvalidXattr)?;
+        let value_length = read_u32(value_header, 0).ok_or(Error::InvalidXattr)? as usize;
+        cursor += 4;
+        let value = stream
+            .get(cursor..cursor + value_length)
+            .ok_or(Error::InvalidXattr)?;
+        cursor += value_length;
+        result.push(Xattr {
+            name,
+            value: value.to_vec(),
+        });
+    }
+    Ok(result)
+}
+
+/// Returns whether an extended attribute may be retained by the importer.
+///
+/// Policy is an explicit allowlist plus a denylist override:
+/// - only the `user.` namespace is allowed;
+/// - `security.capability` and every `security.`, `trusted.`, `system.`, or
+///   unknown-namespace attribute is dropped.
+///
+/// The denylist is checked first so a future prefix change cannot accidentally
+/// retain a file capability.
+#[must_use]
+pub fn xattr_allowed(name: &str) -> bool {
+    if matches!(
+        name,
+        "security.capability"
+            | "security.ima"
+            | "security.evm"
+            | "security.selinux"
+            | "security.apparmor"
+    ) {
+        return false;
+    }
+    name.starts_with("user.")
 }
 
 fn safe_symlink(target: &[u8]) -> bool {
