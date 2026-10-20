@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from boot_support import BASE_MARKERS, find_firmware, has_failure
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
@@ -22,31 +23,6 @@ IMAGE = BUILD / "aether.img"
 SERIAL = BUILD / "serial.log"
 VARS = BUILD / "OVMF_VARS.fd"
 
-BASE_MARKERS = (
-    "AETHER_MM_OK",
-    "AETHER_SCHED_OK",
-    "AETHER_ISOLATION_OK",
-    "AETHER_CAP_OK",
-    "AETHER_IPC_OK",
-    "AETHER_IPC_USER_OK",
-    "AETHER_APP_OK",
-    "AETHER_FS_OK",
-    "AETHER_SANDBOX_OK",
-    "AETHER_SUPERVISOR_OK",
-    "AETHER_RECOVERY_OK",
-    "AETHER_REVOCATION_OK",
-    "AETHER_PACKAGE_OK",
-    "AETHER_RUNTIME_OK",
-    "AETHER_UPDATE_OK",
-    "AETHER_GRAPHICS_OK",
-    "AETHER_DESKTOP_OK",
-    "AETHER_WM_OK",
-    "AETHER_POINTER_OK",
-    "AETHER_INPUT_OK",
-    "AETHER_PORTAL_OK",
-    "AETHER_SHELL_OK",
-    "AETHER_BOOT_OK",
-)
 # Feature-specific self-tests append their own markers through the environment
 # (comma separated, for example AETHER_EXTRA_MARKERS=AETHER_RECOVERY_ROLLBACK_OK)
 # so `make rollback-test` can require the evidence its build produces.
@@ -68,36 +44,6 @@ FAILURES = (
 EXPECT_FAULT = os.environ.get("AETHER_EXPECT_FAULT") == "1"
 EXPECT_BOOT_FAILURE = os.environ.get("AETHER_EXPECT_BOOT_FAILURE") == "1"
 TIMEOUT = int(os.environ.get("AETHER_BOOT_TIMEOUT", "90"))
-
-CODE_CANDIDATES = (
-    Path("/usr/share/OVMF/OVMF_CODE_4M.fd"),
-    Path("/usr/share/OVMF/OVMF_CODE.fd"),
-    Path("/usr/share/edk2/ovmf/OVMF_CODE.fd"),
-    Path("/usr/share/edk2/ovmf/OVMF_CODE_4M.fd"),
-    Path("/usr/share/qemu/OVMF.fd"),
-)
-VARS_CANDIDATES = (
-    Path("/usr/share/OVMF/OVMF_VARS_4M.fd"),
-    Path("/usr/share/OVMF/OVMF_VARS.fd"),
-    Path("/usr/share/edk2/ovmf/OVMF_VARS.fd"),
-    Path("/usr/share/edk2/ovmf/OVMF_VARS_4M.fd"),
-)
-
-
-def find_firmware() -> tuple[Path, Path | None]:
-    code_env = os.environ.get("OVMF_CODE")
-    vars_env = os.environ.get("OVMF_VARS")
-    if code_env:
-        code = Path(code_env)
-        variables = Path(vars_env) if vars_env else None
-        return code, variables
-
-    code = next((path for path in CODE_CANDIDATES if path.exists()), None)
-    if code is None:
-        raise SystemExit("error: OVMF firmware not found; set OVMF_CODE and OVMF_VARS")
-    variables = next((path for path in VARS_CANDIDATES if path.exists()), None)
-    return code, variables
-
 
 def qemu_command(code: Path, variables: Path | None) -> list[str]:
     command = [
@@ -169,7 +115,7 @@ def main() -> int:
                     print("FAIL: fault self-test hit an unexpected failure", file=sys.stderr)
                     return 1
             elif EXPECT_BOOT_FAILURE:
-                if any(marker in log for marker in FAILURES):
+                if has_failure(log):
                     print(log)
                     print("PASS: harness detected the expected boot failure")
                     return 0
@@ -180,7 +126,7 @@ def main() -> int:
             else:
                 # Check failure markers first: a kernel that prints the
                 # success markers and then fails must not be accepted.
-                if any(marker in log for marker in FAILURES):
+                if has_failure(log):
                     print(log)
                     print("FAIL: boot reported an error", file=sys.stderr)
                     return 1
