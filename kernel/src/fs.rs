@@ -58,6 +58,7 @@ pub fn init() -> Result<(), FsError> {
         "system",
         "system/images",
         "system/updates",
+        "system/portal",
         "home",
         "portal",
     ] {
@@ -328,6 +329,29 @@ pub fn sys_portal_open(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) 
     }
 }
 
+/// Requests an interactive portal grant for a path outside the process root.
+///
+/// The request is only a consent-queue entry. It grants no capability; a
+/// desktop approval installs the exact-file record, and a later
+/// `portal_open` still checks that record.
+pub fn sys_portal_request(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) -> Option<i64> {
+    let path = user_str(pml4, pointer, length)?;
+    if access_from_rights(rights).is_none() {
+        return Some(errno::EINVAL);
+    }
+    let result = scheduler::with_current_caps(|root, _caps| {
+        portal_permission(root, rights)?;
+        crate::portal::request(root, path, rights).map_err(|error| match error {
+            crate::portal::PortalError::NoRequest => errno::ENOSPC,
+            _ => errno::EINVAL,
+        })
+    });
+    Some(match result {
+        Ok(index) => index as i64,
+        Err(error) => error,
+    })
+}
+
 /// Reads from an open file.
 pub fn sys_read(pml4: PhysFrame, handle: u64, buffer: u64, length: u64) -> Option<i64> {
     let cap = decode_handle(handle)?;
@@ -514,6 +538,60 @@ impl aether_wm::browser::BrowserSource for BrowserFiles {
             })
             .map_err(browser_error)
     }
+
+    fn remove(&mut self, path: &str) -> Result<(), aether_wm::browser::BrowserError> {
+        let (root, relative) = browser_scope(path).map_err(browser_error)?;
+        with_fs(|filesystem| filesystem.remove(root, relative)).map_err(browser_error)
+    }
+
+    fn rename(
+        &mut self,
+        path: &str,
+        new_name: &str,
+    ) -> Result<(), aether_wm::browser::BrowserError> {
+        if new_name.is_empty()
+            || new_name.len() > aether_fs::MAX_NAME
+            || new_name == "."
+            || new_name == ".."
+            || new_name
+                .bytes()
+                .any(|byte| byte == b'/' || byte.is_ascii_control())
+        {
+            return Err(aether_wm::browser::BrowserError::InvalidData);
+        }
+        let (root, relative) = browser_scope(path).map_err(browser_error)?;
+        let mut destination = [0u8; aether_fs::MAX_PATH];
+        let parent_length = relative.rfind('/').map_or(0, |index| index + 1);
+        let end = parent_length + new_name.len();
+        if end > destination.len() {
+            return Err(aether_wm::browser::BrowserError::InvalidData);
+        }
+        destination[..parent_length].copy_from_slice(&relative.as_bytes()[..parent_length]);
+        destination[parent_length..end].copy_from_slice(new_name.as_bytes());
+        let destination = core::str::from_utf8(&destination[..end])
+            .map_err(|_| aether_wm::browser::BrowserError::InvalidData)?;
+        with_fs(|filesystem| filesystem.rename(root, relative, destination)).map_err(browser_error)
+    }
+
+    fn duplicate(&mut self, path: &str) -> Result<(), aether_wm::browser::BrowserError> {
+        let (root, relative) = browser_scope(path).map_err(browser_error)?;
+        let mut copy = [0u8; aether_fs::MAX_PATH];
+        let parent_length = relative.rfind('/').map_or(0, |index| index + 1);
+        for suffix in 1..=9u8 {
+            let name = [b'c', b'o', b'p', b'y', b'0' + suffix];
+            let end = parent_length + name.len();
+            copy[..parent_length].copy_from_slice(&relative.as_bytes()[..parent_length]);
+            copy[parent_length..end].copy_from_slice(&name);
+            let destination = core::str::from_utf8(&copy[..end])
+                .map_err(|_| aether_wm::browser::BrowserError::InvalidData)?;
+            match with_fs(|filesystem| filesystem.copy_file(root, relative, destination)) {
+                Ok(()) => return Ok(()),
+                Err(aether_fs::FsError::Exists) => continue,
+                Err(error) => return Err(browser_error(error)),
+            }
+        }
+        Err(aether_wm::browser::BrowserError::Unavailable)
+    }
 }
 
 fn browser_error(error: FsError) -> aether_wm::browser::BrowserError {
@@ -532,7 +610,17 @@ pub fn write_path(path: &str, data: &[u8]) -> Result<(), FsError> {
 
 /// Deletes a file for the kernel console.
 pub fn remove_path(path: &str) -> Result<(), FsError> {
-    with_fs(|filesystem| filesystem.unlink("/", path))
+    with_fs(|filesystem| filesystem.remove("/", path))
+}
+
+/// Renames or moves a file for the kernel console.
+pub fn rename_path(from: &str, to: &str) -> Result<(), FsError> {
+    with_fs(|filesystem| filesystem.rename("/", from, to))
+}
+
+/// Copies a file for the kernel console.
+pub fn copy_path(from: &str, to: &str) -> Result<(), FsError> {
+    with_fs(|filesystem| filesystem.copy_file("/", from, to))
 }
 
 /// Returns a file's size.

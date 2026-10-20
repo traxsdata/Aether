@@ -49,8 +49,12 @@ It is a planning model, not a delivery promise.
 - [x] Syscall gate with user pointer, length, handle, and rights validation.
 - [x] Per-task kernel stacks for ring-3 interrupts and syscalls.
 - [x] Fault containment: a ring-3 fault retires the task instead of the kernel.
-- [ ] Revocation and complete object-lifetime rules for every object type.
-- [ ] Blocking IPC, wakeup queues, timeouts, and broader adversarial IPC tests.
+- [x] Revocation and object-lifetime rules for every implemented object type:
+  generation-checked object destruction for endpoints, per-table alias
+  revocation, endpoint release on exit/fault, and file handles released on
+  task retirement.
+- [x] Blocking IPC with tick timeouts and scheduler wakeups, plus adversarial
+  tests for stale aliases, closed endpoints, and timeout behavior.
 
 ## Phase 3 — Minimal operating system
 
@@ -79,6 +83,12 @@ It is a planning model, not a delivery promise.
   updates, elapsed-tick animation, and real-input ISO regression tests.
 - [x] File portal with per-process, per-file grant records; revocation blocks
   future portal opens (`AETHER_REVOCATION_OK`).
+- [x] Interactive portal consent UI with explicit approve/deny controls,
+  shell equivalents, and exact-file grant records persisted through the
+  filesystem service.
+- [ ] Durable grant storage across power loss: the record codec and
+  `/system/portal/grants` store are implemented, but the only block device is
+  the current RAM disk, so a reboot still starts from the seeded record.
 - [x] Initial native application SDK (`sdk/`) and user syscall ABI.
 - [x] System image and recovery prototype with current/previous selection and
   preserved user data.
@@ -86,10 +96,11 @@ It is a planning model, not a delivery promise.
 - [x] UEFI El Torito ISO boot test under OVMF (`make iso-test`) and VMware
   Workstation VMX generation (`make vmware-vmx`). A VMware Workstation smoke
   test remains pending; see [the VMware notes](reference/vmware-workstation.md).
-- [ ] Interactive portal consent UI and persistent grant storage.
 - [ ] Ring-3 compositor/application views with capability-scoped surface/input
   IPC; current ring-0 adapters are trusted, not compromise-contained.
-- [ ] Files copy/move/rename/delete, tabs/split panes, and safe import/export.
+- [x] Files copy, move, rename, and delete, with service-scoped mutations,
+  duplicate naming, generation-safe open-file checks, and a boot gate.
+- [ ] Files tabs/split panes and safe import/export.
 - [ ] GPU acceleration, audio, networking, and multi-window application
   rendering.
 
@@ -103,10 +114,10 @@ It is a planning model, not a delivery promise.
   ([report](specifications/windows-host-interface-report.md)). The feasibility
   gate is not met, so no runtime is promised.
 - [x] Developer documentation for packaging, updates, hardware, and recovery.
+- [x] Interactive permission consent and grant revocation UI.
 - [ ] Windows compatibility prototype and per-application prefixes.
 - [ ] Better storage (persistent block device), networking, audio, and
   accelerated graphics.
-- [ ] Interactive permission consent and grant revocation UI.
 - [ ] External security review.
 
 ## Phase 6 — Public beta and release engineering
@@ -130,21 +141,24 @@ It is a planning model, not a delivery promise.
 
 ## Current milestone
 
-The tree implements the Phase 4 deliverables except interactive portal consent
-and launching a packaged application from the desktop, so its exit criterion is
-still pending. The implementable Phase 5/6 slices are in place on the QEMU
-platform: a clean checkout builds a FAT image and a UEFI ISO, boots through the
-loader, enforces a ring-3 user/kernel boundary, runs a native application in a
-private storage root, reports denied cross-application access, verifies and
-installs a signed package, derives an isolated runtime profile, verifies a
-signed update while rejecting replay, downgrade, and an unknown publisher,
-starts supervised services, paints a double-buffered desktop with a tested
-window manager, accepts keyboard and PS/2 mouse input, grants one file through
-the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
-image records without touching user data. VMware Workstation itself has not yet
-been smoke-tested.
+The tree implements the Phase 2 object-lifetime and blocking-IPC slices and
+the Phase 4 consent and file-mutation slices, but the Phase 4 exit criterion is
+still pending because application views remain ring-0 adapters. The
+implementable Phase 5/6 slices are in place on the QEMU platform: a clean
+checkout builds a FAT image and a UEFI ISO, boots through the loader, enforces
+a ring-3 user/kernel boundary, runs a native application in a private storage
+root, reports denied cross-application access, verifies and installs a signed
+package, derives an isolated runtime profile, verifies a signed update while
+rejecting replay, downgrade, and an unknown publisher, starts supervised
+services, paints a double-buffered desktop with a tested window manager,
+accepts keyboard and PS/2 mouse input, grants one file through the portal,
+queues and decides consent requests, copies/renames/deletes scoped files,
+boots the UEFI ISO under OVMF, and verifies the current/previous image records
+without touching user data. VMware Workstation itself has not yet been
+smoke-tested.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
-persistent store, network/audio services, an installer, and external review.
-Persistent storage, interactive consent, SMP, blocking IPC, and capability
-revocation remain follow-up work.
+durable block store, network/audio services, an installer, ring-3 compositor
+surfaces, and external review. Higher-half kernel mapping, ring-3 application
+views, Files tabs/split panes, durable grant storage across power loss, SMP,
+and network/audio/GPU services remain follow-up work.

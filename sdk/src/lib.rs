@@ -38,6 +38,30 @@ pub unsafe fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) 
     result
 }
 
+/// Raw syscall with five arguments (the fifth arrives in R8).
+///
+/// # Safety
+///
+/// Same contract as [`syscall4`].
+#[inline]
+pub unsafe fn syscall5(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64 {
+    let result: i64;
+    // SAFETY: The ABI fixes the register assignment; the kernel validates
+    // every pointer and handle.
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            inlateout("rax") number as i64 => result,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            in("r10") arg3,
+            in("r8") arg4,
+        );
+    }
+    result
+}
+
 /// Yields the CPU.
 pub fn yield_now() -> i64 {
     // SAFETY: No pointers or handles are involved.
@@ -132,6 +156,29 @@ pub fn portal_open(path: &str, rights: u64) -> Result<u64, i64> {
         Err(result)
     } else {
         Ok(result as u64)
+    }
+}
+
+/// Asks the desktop for an exact-file portal grant.
+///
+/// The request only appears in the consent UI; it grants nothing. A request
+/// index is returned so a caller can display or retry, and the path only
+/// becomes usable after the user approves it and `portal_open` succeeds.
+pub fn portal_request(path: &str, rights: u64) -> Result<usize, i64> {
+    // SAFETY: The path slice is readable and the kernel validates it.
+    let result = unsafe {
+        syscall4(
+            Syscall::PortalRequest as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            rights,
+            0,
+        )
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as usize)
     }
 }
 
@@ -262,6 +309,15 @@ pub fn endpoint_send_with_transfer(handle: u64, payload: &[u8], transfer: u64) -
     if result < 0 { Err(result) } else { Ok(()) }
 }
 
+/// Closes an endpoint capability and revokes every alias of it in the caller's
+/// table. If the caller owns the endpoint, the object is destroyed, so aliases
+/// held by other tasks become stale and report `EBADF` on use.
+pub fn endpoint_close(handle: u64) -> Result<(), i64> {
+    // SAFETY: No pointers are involved; the kernel validates the handle.
+    let result = unsafe { syscall4(Syscall::EndpointClose as u64, handle, 0, 0, 0) };
+    if result < 0 { Err(result) } else { Ok(()) }
+}
+
 /// Receives one message from an endpoint capability.
 ///
 /// The buffer must be able to hold a maximum-size message so a receive is
@@ -292,6 +348,40 @@ pub fn endpoint_receive(handle: u64, buffer: &mut [u8]) -> Result<(usize, u64), 
     }
 }
 
+/// Receives one message, yielding the CPU until the queue has a message or
+/// `timeout_ticks` timer ticks have elapsed.
+///
+/// `timeout_ticks` is measured in scheduler ticks (100 Hz on the supported
+/// platform); zero waits without a deadline. Returns `ETIMEDOUT` when the
+/// deadline passes, and `EAGAIN` only for a non-blocking receive.
+pub fn endpoint_receive_timeout(
+    handle: u64,
+    buffer: &mut [u8],
+    timeout_ticks: u32,
+) -> Result<(usize, u64), i64> {
+    if buffer.len() < MAX_MESSAGE_BYTES {
+        return Err(errno::EINVAL);
+    }
+    let mut transferred = 0u32;
+    // SAFETY: Same validated ranges as `endpoint_receive`; the fifth argument
+    // is a scalar timeout, not a pointer.
+    let result = unsafe {
+        syscall5(
+            Syscall::EndpointReceiveTimeout as u64,
+            handle,
+            buffer.as_mut_ptr() as u64,
+            MAX_MESSAGE_BYTES as u64,
+            core::ptr::addr_of_mut!(transferred) as u64,
+            u64::from(timeout_ticks),
+        )
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok((result.max(0) as usize, u64::from(transferred)))
+    }
+}
+
 /// Convenience constants for callers.
 pub const READ: u64 = FileRights::READ;
 /// Write access.
@@ -313,6 +403,7 @@ pub fn error_name(error: i64) -> &'static str {
         errno::ENOGRANT => "ENOGRANT",
         errno::EIO => "EIO",
         errno::EAGAIN => "EAGAIN",
+        errno::ETIMEDOUT => "ETIMEDOUT",
         _ => "unknown",
     }
 }

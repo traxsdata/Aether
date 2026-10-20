@@ -102,6 +102,7 @@ pub fn decode(scancode: u8) -> Option<Key> {
         0x01 => Some(Key::Escape),
         0x0e => Some(Key::Backspace),
         0x0f => Some(Key::Tab),
+        0x53 => Some(Key::Delete),
         0x1c => Some(Key::Enter),
         0x48 => Some(Key::Up),
         0x50 => Some(Key::Down),

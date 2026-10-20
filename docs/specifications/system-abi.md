@@ -127,6 +127,9 @@ Implemented calls:
 | 15 | `endpoint_create` | — | endpoint capability handle (or `ENOSPC` when the pool is exhausted) |
 | 16 | `endpoint_send` | endpoint handle, payload, payload length, transfer handle (0 = none) | 0 (`EAGAIN` when the queue is full) |
 | 17 | `endpoint_receive` | endpoint handle, buffer, buffer length (at least 32), required transferred-handle out-field | bytes received; the out-field receives the transferred handle, or 0 |
+| 18 | `endpoint_close` | endpoint handle | 0; revokes every alias in the caller's table and destroys an owned endpoint |
+| 19 | `endpoint_receive_timeout` | same as 17, plus timeout ticks in `R8` (0 = no deadline) | bytes received, or `ETIMEDOUT` |
+| 20 | `portal_request` | path, path length, rights | pending consent-request index (grants nothing until approved) |
 
 Rules for this implementation:
 
@@ -176,12 +179,17 @@ Error numbers (two's-complement `i64` in `RAX`):
 | -7 | `EBADF` | bad handle: forged, stale, or wrong object type |
 | -8 | `ENOGRANT` | no portal grant for this path/right |
 | -9 | `EIO` | device or filesystem corruption |
-| -10 | `EAGAIN` | the endpoint queue is full (send) or empty (receive); retry |
+| -10 | `EAGAIN` | the endpoint queue is full (send) or empty (non-blocking receive); retry |
+| -11 | `ETIMEDOUT` | a blocking receive reached its tick deadline |
 
-Still planned: process creation/wait, general capability derivation and
-revocation, blocking IPC with timeouts, memory-object mapping, window rendering
-syscalls, delete/rename/execute/list rights, and a versioned SDK release
-process.
+Still planned: process creation/wait, derivation-tree capability slots and
+mapping removal, a per-endpoint wait list with cancellation, memory-object
+mapping, window rendering syscalls, and a versioned SDK release process.
+
+Endpoint close/destroy, blocking receives with timeouts, and exact-file portal
+consent requests are implemented. A portal request is display state only: it
+creates no capability, and the desktop approval installs a persisted exact-file
+record that `portal_open` still checks.
 
 ## Loader-to-kernel calling convention
 
