@@ -33,3 +33,6 @@ recovery-rollback-selftest = []
 # Boot the Gate 4 portal slice with a seeded workbook grant and a test-only
 # revocation control path. Not part of the normal kernel feature set.
 gate4-portal-test = []
+# Boot the Gate 4 GUI portal slice with a real XLSX grant, immediate save
+# evidence, and kernel-driven post-exit revocation checks.
+gate4-gui-test = []

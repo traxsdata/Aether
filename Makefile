@@ -21,6 +21,10 @@ LINUX_APP_ELF := $(BUILD)/linux-appimage-app.elf
 GATE4_APP_ELF := $(BUILD)/linux-gate4-portal.elf
 GATE4_APPIMAGE := $(BUILD)/linux-gate4-portal.AppImage
 GATE4_APPIMAGE_RECORD := $(BUILD)/linux-gate4-portal.import
+GATE4_GUI_APP_ELF := $(BUILD)/linux-gate4-gui-portal.elf
+GATE4_GUI_APPIMAGE := $(BUILD)/linux-gate4-gui-portal.AppImage
+GATE4_GUI_APPIMAGE_RECORD := $(BUILD)/linux-gate4-gui-portal.import
+GATE4_GUI_NAMESPACE := /run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx
 LINUX_RUNTIME_DIR := $(BUILD)/linux-runtime-pinned-root
 LINUX_ROOTFS := $(BUILD)/linux-runtime.sqfs
 LINUX_ROOTFS_RECORD := $(BUILD)/linux-runtime.import
@@ -61,7 +65,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test shell-test fault-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -96,6 +100,9 @@ linux-fixture:
 	$(AS) --64 tests/fixtures/linux/gate4-portal.S -o $(BUILD)/linux-gate4-portal.o
 	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
 		$(BUILD)/linux-gate4-portal.o -o $(GATE4_APP_ELF)
+	$(AS) --64 tests/fixtures/linux/gate4-gui-portal.S -o $(BUILD)/linux-gate4-gui-portal.o
+	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
+		$(BUILD)/linux-gate4-gui-portal.o -o $(GATE4_GUI_APP_ELF)
 	if [ "$(LINUX_RUNTIME_PREBUILT)" = "0" ]; then \
 		sh tools/build-pinned-runtime.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
 			$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED); \
@@ -207,6 +214,24 @@ gate4-portal-test:
 	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GATE4_PORTAL_OK,AETHER_GATE4_SAVE_OK,AETHER_GATE4_REVOKE_OK \
 	AETHER_REQUIRE_TEXT='AETHER_GATE4_PORTAL_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx bytes=58 staging=sctmp+rename temp_bytes=58 staged_bytes=87 renames=1|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|portal: audit revoked' \
+	$(PYTHON) tools/test-boot.py
+
+# Gate 4 GUI portal slice: run a static XLSX read/stage/commit fixture against
+# the real workbook grant. This exercises the GUI feature without the Wayland
+# display path. The windowed GridCraft target consumes the same feature and
+# passes GATE4_GUI_NAMESPACE as argv.
+gate4-gui-portal-test:
+	$(MAKE) linux-fixture
+	sh tools/build-appimage-fixture.sh $(GATE4_GUI_APPIMAGE) $(GATE4_GUI_APPIMAGE_RECORD) \
+		$(LINUX_RUNTIME_SEED) $(GATE4_GUI_APP_ELF)
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 KERNEL_FEATURES=gate4-gui-test \
+		LINUX_APPIMAGE_PROGRAM=/usr/bin/app \
+		LINUX_APPIMAGE_ARGS='$(GATE4_GUI_NAMESPACE)' \
+		STAGED_APPIMAGE=$(GATE4_GUI_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(GATE4_GUI_APPIMAGE_RECORD) image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_EXTRA_MARKERS=AETHER_GATE4_PORTAL_OK,AETHER_GATE4_SAVE_OK,AETHER_GATE4_REVOKE_OK \
+	AETHER_REQUIRE_TEXT='portal: seeded Gate 4 GUI workbook grant|id=5b428ae53860eb72|AETHER_GATE4_PORTAL_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_bytes=4089|AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4089 staging=sctmp+rename source=kernel|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_denials=1 write_denials=1' \
 	$(PYTHON) tools/test-boot.py
 
 shell-test: image

@@ -384,6 +384,27 @@ Kernel-owned evidence, emitted only after validating the operation:
 - `AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx
   read_denials=1 write_denials=1 source=kernel`
 
+The GUI feature `gate4-gui-test` keeps that static transcript intact and adds
+a separate exact-file grant for the real 4,089-byte XLSX fixture at
+`/home/gate4-gui.xlsx`. Its namespace is
+`/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx` (grant id
+`5b428ae53860eb72`), and `AETHER_PORTAL_WORKBOOK` names it for argv. The kernel
+validates the committed bytes as a ZIP/XLSX container (`PK\x03\x04` at offset
+0, size > 1024) and emits the save marker immediately on the successful
+`.sctmp` rename:
+
+```text
+AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4089 staging=sctmp+rename source=kernel
+```
+
+After the GUI app exits, the kernel revokes this grant itself, retries a direct
+read, temp open, and rename, and emits `AETHER_GATE4_REVOKE_OK` only when all
+three are denied with `Revoked`. If the save marker never fired, the post-exit
+path reports `AETHER_BOOT_FAILED reason=gate4-gui save marker missing` instead
+of claiming success. `make gate4-gui-portal-test` exercises this feature with a
+static XLSX read/stage/commit fixture; the windowed GridCraft target consumes
+the same feature and namespace argument. This is not GUI evidence by itself.
+
 The launch environment carries `AETHER_PORTAL_WORKBOOK` with the namespace
 path, and a dynamically linked GUI app can receive the same path through the
 existing `LINUX_APPIMAGE_ARGS` argv. The test fixture itself is static and uses

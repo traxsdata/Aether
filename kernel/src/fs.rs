@@ -62,6 +62,24 @@ pub const GATE4_SAVED_FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/gate
 pub const GATE4_ENVIRONMENT: &str =
     "AETHER_PORTAL_WORKBOOK=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx";
 
+/// Real XLSX workbook backing file used by the Gate 4 GUI test.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_WORKBOOK: &str = "/home/gate4-gui.xlsx";
+/// Linux-visible namespace for the Gate 4 GUI workbook grant.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_NAMESPACE: &str = "/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx";
+/// Staging sibling used by the GUI save transaction.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_TEMP_NAMESPACE: &str =
+    "/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx.sctmp";
+/// Real XLSX bytes seeded into the kernel filesystem.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/gate4/workbook-gui.xlsx");
+/// Environment entry that names the GUI portal workbook for argv/Makefile use.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_ENVIRONMENT: &str =
+    "AETHER_PORTAL_WORKBOOK=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx";
+
 /// Formats and seeds the virtual volume.
 pub fn init() -> Result<(), FsError> {
     let _guard = InterruptGuard::enter();
@@ -102,6 +120,8 @@ pub fn init() -> Result<(), FsError> {
     filesystem.write_file("/", "/portal/README.txt", b"file portal grants\n")?;
     #[cfg(feature = "gate4-portal-test")]
     filesystem.write_file("/", GATE4_WORKBOOK, GATE4_WORKBOOK_FIXTURE)?;
+    #[cfg(feature = "gate4-gui-test")]
+    filesystem.write_file("/", GATE4_GUI_WORKBOOK, GATE4_GUI_FIXTURE)?;
 
     Ok(())
 }

@@ -209,6 +209,18 @@ user space. It is not a VM. The target and security gates are in
     mismatch, wrong temp suffix, cross-grant rename, revocation, and temp quota
     are covered. The launch environment also carries `AETHER_PORTAL_WORKBOOK`
     for a future GUI launch.
+  - [x] Gate 4 GUI portal contract (QEMU prototype scope):
+    `make gate4-gui-portal-test` runs a static XLSX read/stage/commit fixture
+    against the `gate4-gui-test` feature. It seeds the real 4,089-byte XLSX at
+    `/home/gate4-gui.xlsx` for the demo root, exposes
+    `/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx`
+    (grant id `5b428ae53860eb72`) through `AETHER_PORTAL_WORKBOOK`, validates
+    the committed ZIP/XLSX bytes (`PK\x03\x04`, size > 1024), and emits
+    `AETHER_GATE4_SAVE_OK` immediately on the successful `.sctmp` rename.
+    After the app exits, the kernel revokes the grant itself, attempts a fresh
+    read, temp open, and rename, and emits `AETHER_GATE4_REVOKE_OK` only after
+    all three deny. The windowed GridCraft target consumes this feature with
+    the same namespace path as argv.
   - [ ] Gate 4 GUI remains open: the Wayland bridge, compositor presentation,
     software Vulkan/GL, keyboard/pointer input, the real windowed
     `usr/bin/gridcraft` run, and a pixel/checksum plus input-trace record have
@@ -505,9 +517,14 @@ back, and then fails closed on a fresh read, write, and rename after the kernel
 revokes the grant. Kernel-owned markers `AETHER_GATE4_PORTAL_OK`,
 `AETHER_GATE4_SAVE_OK`, and `AETHER_GATE4_REVOKE_OK` are emitted after the
 kernel validates the read operation, the staging/rename transaction, the saved
-bytes in its filesystem, and the denials. The GUI, Wayland bridge, software
-renderer, input routing, and a real windowed GridCraft run remain open; the
-compatibility record stays `limited`.
+bytes in its filesystem, and the denials. The GUI feature
+`gate4-gui-test` adds a real 4,089-byte XLSX grant at
+`/home/gate4-gui.xlsx` (namespace
+`/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx`), emits the save marker
+immediately after validating the committed ZIP/XLSX bytes, and performs the
+post-exit revocation and fresh read/write/rename denials in the kernel. The
+GUI, Wayland bridge, software renderer, input routing, and a real windowed
+GridCraft run remain open; the compatibility record stays `limited`.
 
 Neither the Gate 2 prototype nor the Gate 3 run is a production compatibility
 claim. Linux syscall dispatch, ELF/library mapping, and VMA management remain in
