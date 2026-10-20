@@ -24,6 +24,12 @@ versioning scheme until the kernel ABI stabilises.
   switching, single-task futex, `clock_gettime`, `getrandom`, and `uname`. The
   boot fixture now exercises allocation, TLS, write, and exit in one run.
   File-backed mappings, reclaim, and real threads remain missing.
+- Linux read-only root and file syscalls for the compatibility layer:
+  validated absolute paths, a fixed embedded file set, `openat`, `read`,
+  `pread64`, `close`, `lseek`, and `access`, with a per-task descriptor table
+  cleared on exit and fault. The static fixture now reads `/etc/motd` and the
+  boot gate requires `AETHER_LINUX_ROOT_OK`. No writable root, directories,
+  `stat`, or portal integration yet.
 - Pinned SHA-256 verification for AppImage import (`Digest`,
   `parse_verified`) and an optional digest argument to `appimage-inspect`.
   A mismatch is rejected before the container is parsed. Publisher signatures

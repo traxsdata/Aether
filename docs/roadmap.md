@@ -105,12 +105,88 @@ It is a planning model, not a delivery promise.
 - [x] Developer documentation for packaging, updates, hardware, and recovery.
 - [ ] Windows compatibility prototype and per-application prefixes.
 - [x] Linux AppImage container inspection (Gate 0): validated ELF/SquashFS
-  bounds, compression, and table offsets
-  ([plan](specifications/linux-compatibility.md)). No Linux binary runs yet.
+  bounds, compression, table offsets, and pinned SHA-256 digest
+  ([plan](specifications/linux-compatibility.md)).
 - [x] Linux ABI entry slice: static ELF loading, validated Linux `syscall`
   entry, `write`/`exit`, and a boot gate (`AETHER_LINUX_OK`).
-- [ ] Linux compatibility layer: dynamic loader/glibc, process/thread/futex/
-  signal personality, SquashFS import, Wayland bridge, and software renderer.
+- [x] Linux memory and TLS slice: boot-reserved anonymous arena, `mmap`,
+  `mprotect`, `brk`, `arch_prctl` FS base, single-task futex, time, and random.
+- [x] Linux read-only root and file slice: validated paths, `openat`, `read`,
+  `pread64`, `close`, `lseek`, and `access`; no writable root.
+- [ ] Linux compatibility layer: complete the steps below.
+
+### Linux application layer
+
+The layer runs unmodified Linux x86-64 applications, including AppImages, in
+user space. It is not a VM. The target and security gates are in
+[Linux compatibility](specifications/linux-compatibility.md); the design is in
+[ADR-015](decisions/ADR-015-linux-app-runtime.md) and
+[the Linux layer](architecture/linux-layer.md).
+
+#### Import and runtime root
+
+- [x] Validate AppImage type 2, ELF runtime, SquashFS bounds, and table offsets.
+- [x] Pin and verify the artifact SHA-256 before parsing.
+- [ ] Implement a bounded SquashFS 4 reader with zstd, gzip, xz, and lz4 block
+  decompression; reject unsupported inode and xattr layouts.
+- [ ] Import into a private read-only root; reject symlink escapes, hardlinks
+  outside the root, duplicate paths, and oversized files.
+- [ ] Add a per-application writable overlay for settings, logs, and temporary
+  files; cap its size and make it erasable by the user.
+- [ ] Verify publisher signatures/trust store for runtime rootfs and AppImages;
+  record the runtime version in the compatibility database.
+- [ ] Package the Linux runtime rootfs (glibc, `ld.so`, Mesa/lavapipe, Wayland
+  client libraries) as a signed Aether runtime package.
+
+#### Linux ABI
+
+- [ ] Runtime frame allocator and per-task VMA table.
+- [ ] File-backed `mmap`, `munmap` reclaim, `mprotect`, `mremap`, and page-fault
+  handling; preserve W^X.
+- [ ] Dynamic ELF loader: `PT_INTERP`, auxv, `ld.so`, relocations, library
+  search, TLS, and `LD_LIBRARY_PATH` restrictions.
+- [ ] File syscalls: `stat`/`fstat`/`statx`, `readlink`, `getdents64`, `fcntl`,
+  `dup`, `pipe`, `poll`/`epoll`, `eventfd`, `inotify` (bounded).
+- [ ] Process and thread syscalls: `clone`, `clone3`, `wait4`, `execve`,
+  `set_tid_address`, `set_robust_list`, `rseq`, thread-local storage.
+- [ ] Synchronization: real futex wait/wake queues, timeouts, robust lists;
+  semaphores and condition variables through glibc.
+- [ ] Signals: `rt_sigaction`, `rt_sigprocmask`, `sigaltstack`,
+  `rt_sigreturn`, fault-to-signal delivery, and per-thread masks.
+- [ ] Time and scheduling: `nanosleep`, `clock_nanosleep`, `timerfd`,
+  `sched_getaffinity`, `prlimit64`, and bounded CPU/memory quotas.
+- [ ] Pseudo-files: `/proc/self/{exe,maps,status,fd}`, `/dev/{null,zero,random}`,
+  and a read-only `/sys` subset only where required.
+- [ ] Syscall policy: default-deny allowlist, `ENOSYS` for unsupported calls,
+  per-domain network/device denial, and an audit counter per syscall class.
+
+#### Display, input, and media
+
+- [ ] Wayland service: registry, `wl_compositor`, `wl_surface`, `wl_shm`,
+  xdg-shell, seat/keyboard/pointer, output, and clipboard.
+- [ ] Validate shared-memory buffers (size, stride, format, lifetime) before the
+  compositor presents them; no framebuffer or DRM/PCI access from the app.
+- [ ] Input focus, keyboard layout, pointer capture, and drag-and-drop policy.
+- [ ] XDG desktop portal subset for file open/save; all user files through
+  `fsd`/portal grants, never an ambient home directory.
+- [ ] Software renderer: bundle Mesa lavapipe (Vulkan) or llvmpipe (GL), expose
+  `VK_KHR_wayland_surface`/EGL, and select it explicitly in the runtime profile.
+- [ ] Accelerated GPU service is a later optimization, not a dependency for the
+  first GridCraft run.
+
+#### Application milestones
+
+- [ ] Gate 3: import `gridcraft-0.8.0-linux-x86_64.AppImage` and run its
+  `gridcraft-cli` headlessly (`eval`, CSV import/export) with a read-only root
+  and private overlay.
+- [ ] Gate 4: run `usr/bin/gridcraft` windowed with Wayland, software rendering,
+  keyboard/pointer input, and workbook open/save through the portal.
+- [ ] Test security denials: no ambient files, network, devices, sibling app
+  roots, or native ABI from the Linux domain; crash containment and quotas.
+- [ ] Update the compatibility database to `limited`, `compatible`, or
+  `verified` only with named tests, exact AppImage digest, runtime version,
+  platform, date, and documented limitations.
+
 - [ ] Better storage (persistent block device), networking, audio, and
   accelerated graphics.
 - [ ] Interactive permission consent and grant revocation UI.
@@ -147,7 +223,8 @@ installs a signed package, derives an isolated runtime profile, verifies a
 signed update while rejecting replay, downgrade, and an unknown publisher,
 starts supervised services, paints a double-buffered desktop with a tested
 window manager, accepts keyboard and PS/2 mouse input, grants one file through
-the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
+the portal, runs a static Linux ELF through the Linux ABI entry and a read-only
+root, boots the UEFI ISO under OVMF, and verifies the current/previous
 image records without touching user data. VMware Workstation itself has not yet
 been smoke-tested.
 

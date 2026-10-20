@@ -150,7 +150,12 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     };
 
     let result = match number {
+        0 => linux_read(pml4, first, second, third),
         1 => linux_write(pml4, first, second, third),
+        3 => scheduler::linux_close(first),
+        8 => scheduler::linux_lseek(first, second as i64, third),
+        17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
+        21 => linux_access(pml4, first, second),
         9 => linux_mmap(first, second, third, unsafe { (*frame).r10 }, unsafe {
             (*frame).r8
         }),
@@ -165,6 +170,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         218 | 273 | 334 => 0,
         228 => linux_clock_gettime(pml4, second),
         318 => linux_getrandom(pml4, first, second),
+        257 => linux_openat(pml4, first, second, third),
         60 | 231 => return scheduler::linux_exit(first),
         _ => LINUX_ENOSYS,
     };
@@ -181,6 +187,68 @@ const LINUX_ENOSYS: i64 = -38;
 
 const LINUX_ENOMEM: i64 = -12;
 const LINUX_EPERM: i64 = -1;
+const LINUX_ENOENT: i64 = -2;
+const LINUX_EACCES: i64 = -13;
+const LINUX_EROFS: i64 = -30;
+
+fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i64 {
+    let Some(path) = user_cstr(pml4, pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    if path.as_bytes().first() != Some(&b'/') {
+        return LINUX_ENOENT;
+    }
+    // The Linux root is read-only. Reject write, create, truncate, and append.
+    const WRITE_FLAGS: u64 = 0x1 | 0x2 | 0x40 | 0x200 | 0x400;
+    if flags & WRITE_FLAGS != 0 {
+        return LINUX_EROFS;
+    }
+    let _ = directory;
+    scheduler::linux_open(path).map_or_else(|error| error, |fd| fd as i64)
+}
+
+fn linux_read(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {
+    if length as usize > MAX_SYSCALL_IO {
+        return LINUX_EINVAL;
+    }
+    // SAFETY: The range is validated and the syscall path is non-preemptible.
+    let Some(buffer) = (unsafe { user_bytes_mut(pml4, pointer, length) }) else {
+        return LINUX_EFAULT;
+    };
+    scheduler::linux_read(descriptor, buffer).map_or_else(|error| error, |count| count as i64)
+}
+
+fn linux_pread(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64, offset: u64) -> i64 {
+    if length as usize > MAX_SYSCALL_IO {
+        return LINUX_EINVAL;
+    }
+    // SAFETY: The range is validated and the syscall path is non-preemptible.
+    let Some(buffer) = (unsafe { user_bytes_mut(pml4, pointer, length) }) else {
+        return LINUX_EFAULT;
+    };
+    scheduler::linux_pread(descriptor, buffer, offset)
+        .map_or_else(|error| error, |count| count as i64)
+}
+
+fn linux_access(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
+    let Some(path) = user_cstr(pml4, pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    if !scheduler::linux_access(path) {
+        return LINUX_ENOENT;
+    }
+    // Read-only root: no write or execute access.
+    if mode & 0x3 != 0 {
+        return LINUX_EACCES;
+    }
+    0
+}
+
+fn user_cstr<'a>(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<&'a str> {
+    let bytes = user_bytes(pml4, pointer, maximum, false)?;
+    let end = bytes.iter().position(|byte| *byte == 0)?;
+    core::str::from_utf8(&bytes[..end]).ok()
+}
 
 fn linux_mmap(address: u64, length: u64, protections: u64, flags: u64, fd: u64) -> i64 {
     // Anonymous private memory only. File mappings need a filesystem service

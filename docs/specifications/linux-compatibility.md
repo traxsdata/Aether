@@ -68,7 +68,7 @@ implemented only when a tested Aether interface exists and the runtime uses it.
 | Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: single-task `FUTEX_WAIT`/`WAKE` no-ops; no wait queue |
 | Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Not implemented |
 | Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; no sleeps/timers |
-| Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: kernel-internal filesystem, no user process API |
+| Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: validated read-only embedded root with `openat`/`read`/`pread64`/`close`/`lseek`/`access`; no stat, write, directories, or portal |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/dev/urandom`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | Not implemented |
 | Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
 | Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Not implemented; no GPU service |
@@ -140,9 +140,10 @@ with ambient authority.
 
 **Evidence:** boot transcript, syscall coverage tests, denial tests. **Partial:**
 a static freestanding Linux ELF runs at CPL3, exercises `mmap`, FS-based TLS,
-`write`, and `exit`, and produces `AETHER_LINUX_OK`; dynamic loader, threads,
-real futex waiting, signals, file mappings, and the user-space `linuxd`
-protocol remain missing.
+`openat`/`read`/`close` against a validated read-only root, `write`, and
+`exit`, and produces `AETHER_LINUX_ROOT_OK` plus `AETHER_LINUX_OK`; dynamic
+loader, threads, real futex waiting, signals, file mappings, and the
+user-space `linuxd` protocol remain missing.
 
 ### Gate 3 — Headless GridCraft
 

@@ -42,6 +42,39 @@ _start:
     cmpq $0x99, %fs:8
     jne fail_fs
 
+    /* openat(AT_FDCWD, "/etc/motd", O_RDONLY, 0) */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea motd_path(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_file
+    mov %rax, %r13
+
+    /* read(fd, arena, 128) */
+    mov $0, %rax
+    mov %r13, %rdi
+    mov %r12, %rsi
+    mov $128, %rdx
+    syscall
+    test %rax, %rax
+    jle fail_file
+    mov %rax, %r14
+
+    /* write(1, arena, bytes_read) */
+    mov $1, %rax
+    mov $1, %rdi
+    mov %r12, %rsi
+    mov %r14, %rdx
+    syscall
+
+    /* close(fd) */
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea message(%rip), %rsi
@@ -61,6 +94,10 @@ fail_mmap:
 fail_fs:
     lea fs_failure(%rip), %rsi
     mov $fs_failure_len, %rdx
+    jmp report_failure
+fail_file:
+    lea file_failure(%rip), %rsi
+    mov $file_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -81,5 +118,10 @@ mmap_failure:
 fs_failure:
     .ascii "AETHER_LINUX_EXEC_FAIL stage=fs\n"
     .set fs_failure_len, . - fs_failure
+file_failure:
+    .ascii "AETHER_LINUX_EXEC_FAIL stage=file\n"
+    .set file_failure_len, . - file_failure
+motd_path:
+    .asciz "/etc/motd"
 
     .section .note.GNU-stack,"",@progbits

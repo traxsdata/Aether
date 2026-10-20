@@ -101,12 +101,15 @@ exact AppImage digest, and the runtime version.
 - Linux `syscall` entry: implemented, with `write`, `exit`/`exit_group`,
   `mmap`, `mprotect`, `brk`, `arch_prctl` FS base, single-task futex,
   `clock_gettime`, `getrandom`, `uname`, `getpid`/`gettid`, and
-  `set_tid_address`. The static fixture `tests/fixtures/linux/hello.S` runs at
-  CPL3, allocates and writes anonymous memory, sets FS-based TLS, writes through
-  a validated user pointer, exits cleanly, and gates the boot with
-  `AETHER_LINUX_OK`. Anonymous memory comes from a boot-reserved arena; there
-  is no runtime frame allocator or VMA table yet.
-- SquashFS/zstd extraction: not implemented.
+  `set_tid_address`, and a read-only root with `openat`, `read`, `pread64`,
+  `close`, `lseek`, and `access`. The static fixture
+  `tests/fixtures/linux/hello.S` runs at CPL3, allocates and writes anonymous
+  memory, sets FS-based TLS, opens and reads `/etc/motd`, writes through a
+  validated user pointer, exits cleanly, and gates the boot with
+  `AETHER_LINUX_ROOT_OK` and `AETHER_LINUX_OK`. Anonymous memory comes from a
+  boot-reserved arena; there is no runtime frame allocator or VMA table yet.
+  The root is embedded and read-only; it is not yet an AppImage import.
+- SquashFS/zstd extraction and writable overlay: not implemented.
 - Dynamic glibc libraries, threads, real futex waiting, signals, file-backed
   mappings, and memory reclaim: not implemented.
 - Wayland bridge and software renderer: not implemented.

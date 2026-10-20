@@ -18,6 +18,7 @@ mod graphics;
 mod icons;
 mod input;
 mod ipc;
+mod linux;
 mod memory;
 mod packaging;
 mod portal;

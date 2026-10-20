@@ -73,6 +73,12 @@ pub enum TaskAbi {
     Linux,
 }
 
+#[derive(Clone, Copy)]
+struct LinuxFile {
+    file: usize,
+    offset: usize,
+}
+
 #[derive(Clone, Copy, Default)]
 struct TaskHandles {
     ep_a_send: Option<CapHandle>,
@@ -95,6 +101,7 @@ struct Task {
     mmap_end: u64,
     brk: u64,
     fs_base: u64,
+    linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
 }
 
 impl Task {
@@ -118,6 +125,7 @@ impl Task {
             mmap_end: 0,
             brk: 0,
             fs_base: 0,
+            linux_fds: [None; crate::linux::MAX_FDS],
         }
     }
 }
@@ -878,6 +886,112 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
     schedule_next(current)
 }
 
+const LINUX_EBADF: i64 = -9;
+const LINUX_EINVAL: i64 = -22;
+const LINUX_EMFILE: i64 = -24;
+const LINUX_ENOENT: i64 = -2;
+
+/// Opens a file from the read-only Linux root and returns a file descriptor.
+pub fn linux_open(path: &str) -> Result<u64, i64> {
+    let Some(file) = crate::linux::lookup(path) else {
+        return Err(LINUX_ENOENT);
+    };
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(LINUX_EBADF);
+    }
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile { file, offset: 0 });
+            return Ok(descriptor as u64);
+        }
+    }
+    Err(LINUX_EMFILE)
+}
+
+/// Reads from a Linux file descriptor into a validated user buffer.
+pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
+        return Err(LINUX_EBADF);
+    };
+    let Some(file) = crate::linux::file(slot.file) else {
+        return Err(LINUX_EBADF);
+    };
+    let remaining = file.data.len().saturating_sub(slot.offset);
+    let length = remaining.min(out.len());
+    out[..length].copy_from_slice(&file.data[slot.offset..slot.offset + length]);
+    slot.offset += length;
+    Ok(length)
+}
+
+/// Reads from a Linux file descriptor without changing its offset.
+pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get(fd as usize).and_then(Option::as_ref) else {
+        return Err(LINUX_EBADF);
+    };
+    let Some(file) = crate::linux::file(slot.file) else {
+        return Err(LINUX_EBADF);
+    };
+    let offset = usize::try_from(offset).map_err(|_| LINUX_EINVAL)?;
+    if offset > file.data.len() {
+        return Ok(0);
+    }
+    let length = (file.data.len() - offset).min(out.len());
+    out[..length].copy_from_slice(&file.data[offset..offset + length]);
+    Ok(length)
+}
+
+/// Closes a Linux file descriptor.
+pub fn linux_close(fd: u64) -> i64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get_mut(fd as usize) else {
+        return LINUX_EBADF;
+    };
+    if slot.take().is_some() {
+        0
+    } else {
+        LINUX_EBADF
+    }
+}
+
+/// Repositions a Linux file descriptor.
+pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
+        return LINUX_EBADF;
+    };
+    let Some(file) = crate::linux::file(slot.file) else {
+        return LINUX_EBADF;
+    };
+    let base = match whence {
+        0 => 0i64,
+        1 => slot.offset as i64,
+        2 => file.data.len() as i64,
+        _ => return LINUX_EINVAL,
+    };
+    let Some(position) = base.checked_add(offset) else {
+        return LINUX_EINVAL;
+    };
+    if position < 0 || position as usize > file.data.len() {
+        return LINUX_EINVAL;
+    }
+    slot.offset = position as usize;
+    position
+}
+
+/// Reports whether a path exists in the read-only root.
+#[must_use]
+pub fn linux_access(path: &str) -> bool {
+    crate::linux::lookup(path).is_some()
+}
+
 /// Reserves anonymous memory from the Linux task's pre-mapped arena.
 pub fn linux_mmap(length: u64) -> Result<u64, ()> {
     if length == 0 {
@@ -935,6 +1049,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     }
 
     tasks[current].state = TaskState::Done;
+    tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     LINUX_EXITS.fetch_add(1, Ordering::Release);
     let result = if status == 0 {
         UserTestResult::Passed
@@ -964,6 +1079,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     // tasks and the kernel continue.
     let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
     if linux {
+        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         LINUX_FAULTS.fetch_add(1, Ordering::Release);
         LINUX_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
     } else {
