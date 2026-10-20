@@ -58,6 +58,23 @@ impl Rights {
     /// Write the referenced object.
     pub const WRITE: Self = Self(1 << 4);
 
+    /// Returns the rights that are meaningful for `kind`.
+    ///
+    /// Minting a capability with a right outside this set is rejected so a
+    /// caller cannot mint a self-authorizing capability (spec rule: rights are
+    /// limited to operations appropriate for the object type).
+    #[must_use]
+    pub const fn for_object(kind: ObjectType) -> Self {
+        match kind {
+            ObjectType::Empty => Self(0),
+            ObjectType::Endpoint => Self::SEND.union(Self::RECEIVE).union(Self::TRANSFER),
+            // Frame objects have no exposed operations yet; no capability for
+            // them can be minted until their sharing semantics are defined.
+            ObjectType::Frame => Self(0),
+            ObjectType::File => Self::READ.union(Self::WRITE),
+        }
+    }
+
     /// No rights.
     #[must_use]
     pub const fn empty() -> Self {
@@ -131,6 +148,8 @@ pub enum CapError {
     TableFull,
     /// The capability refers to a different object type.
     WrongObjectType,
+    /// The requested rights are not valid for the object type.
+    InvalidRights,
 }
 
 /// Per-task capability table.
@@ -148,12 +167,22 @@ impl CapTable {
     }
 
     /// Grants a capability for `object` with `rights`.
+    ///
+    /// The rights must be valid for the object type; see
+    /// [`Rights::for_object`]. Granting a self-authorizing right set is
+    /// rejected rather than silently attenuated.
     pub fn grant(
         &mut self,
         object: ObjectId,
         kind: ObjectType,
         rights: Rights,
     ) -> Result<CapHandle, CapError> {
+        if rights.bits() & !Rights::for_object(kind).bits() != 0 {
+            return Err(CapError::InvalidRights);
+        }
+        if rights.bits() == 0 {
+            return Err(CapError::InvalidRights);
+        }
         let index = self
             .slots
             .iter()
@@ -173,8 +202,8 @@ impl CapTable {
         })
     }
 
-    /// Validates a handle and required rights, returning the capability.
-    fn check(&self, handle: CapHandle, required: Rights) -> Result<Capability, CapError> {
+    /// Validates a handle and returns the capability it denotes.
+    fn lookup(&self, handle: CapHandle) -> Result<Capability, CapError> {
         let cap = self
             .slots
             .get(usize::from(handle.index))
@@ -183,6 +212,12 @@ impl CapTable {
         if cap.is_empty() || cap.slot_generation != handle.generation {
             return Err(CapError::InvalidHandle);
         }
+        Ok(cap)
+    }
+
+    /// Validates a handle and its rights, returning the capability.
+    fn check(&self, handle: CapHandle, required: Rights) -> Result<Capability, CapError> {
+        let cap = self.lookup(handle)?;
         if !cap.rights.contains(required) {
             return Err(CapError::InsufficientRights);
         }
@@ -195,9 +230,12 @@ impl CapTable {
         handle: CapHandle,
         required: Rights,
     ) -> Result<(ObjectId, Rights), CapError> {
-        let cap = self.check(handle, required)?;
+        let cap = self.lookup(handle)?;
         if !matches!(cap.kind, ObjectType::Endpoint) {
             return Err(CapError::WrongObjectType);
+        }
+        if !cap.rights.contains(required) {
+            return Err(CapError::InsufficientRights);
         }
         Ok((
             ObjectId {
@@ -210,14 +248,62 @@ impl CapTable {
 
     /// Returns the file object referenced by a handle.
     pub fn file(&self, handle: CapHandle, required: Rights) -> Result<ObjectId, CapError> {
-        let cap = self.check(handle, required)?;
+        let cap = self.lookup(handle)?;
         if !matches!(cap.kind, ObjectType::File) {
             return Err(CapError::WrongObjectType);
+        }
+        if !cap.rights.contains(required) {
+            return Err(CapError::InsufficientRights);
         }
         Ok(ObjectId {
             index: cap.object_index,
             generation: cap.object_generation,
         })
+    }
+
+    /// Returns the number of capabilities that name a `File` object.
+    ///
+    /// The file service uses this as the caller's current open-handle count
+    /// when enforcing per-application limits.
+    #[must_use]
+    pub const fn file_count(&self) -> usize {
+        let mut count = 0usize;
+        let mut index = 0usize;
+        while index < MAX_CAPS {
+            let slot = &self.slots[index];
+            if !slot.is_empty() && matches!(slot.kind, ObjectType::File) {
+                count += 1;
+            }
+            index += 1;
+        }
+        count
+    }
+
+    /// Snapshots the handles of all held `File` capabilities.
+    ///
+    /// The returned array is zero-padded; only the first `count` entries are
+    /// valid. Callers must copy this snapshot before mutating the table, so a
+    /// release loop cannot iterate a table it is shrinking.
+    #[must_use]
+    pub fn file_handles(&self) -> ([CapHandle; MAX_CAPS], usize) {
+        let mut out = [CapHandle {
+            index: 0,
+            generation: 0,
+        }; MAX_CAPS];
+        let mut count = 0usize;
+        let mut index = 0usize;
+        while index < MAX_CAPS {
+            let slot = &self.slots[index];
+            if !slot.is_empty() && matches!(slot.kind, ObjectType::File) {
+                out[count] = CapHandle {
+                    index: index as u8,
+                    generation: slot.slot_generation,
+                };
+                count += 1;
+            }
+            index += 1;
+        }
+        (out, count)
     }
 
     /// Revokes a capability. The slot generation advances so a stale handle
@@ -252,7 +338,14 @@ impl CapTable {
     }
 
     /// Inserts a transferred capability.
+    ///
+    /// As with [`CapTable::grant`], the descriptor's rights must be valid for
+    /// its object type. A transferred capability can therefore never carry
+    /// more authority than the minting path allows.
     pub fn insert_transfer(&mut self, cap: TransferCap) -> Result<CapHandle, CapError> {
+        if cap.rights.bits() & !Rights::for_object(cap.kind).bits() != 0 {
+            return Err(CapError::InvalidRights);
+        }
         let index = self
             .slots
             .iter()
@@ -452,12 +545,119 @@ mod tests {
     #[test]
     fn wrong_object_type_is_rejected() {
         let mut table = CapTable::new();
-        let handle = table
-            .grant(object(0), ObjectType::Frame, Rights::SEND)
+        let endpoint = table
+            .grant(object(0), ObjectType::Endpoint, Rights::SEND)
             .expect("slot");
         assert_eq!(
-            table.endpoint(handle, Rights::SEND),
+            table.endpoint(endpoint, Rights::SEND),
+            Ok((object(0), Rights::SEND))
+        );
+        assert_eq!(
+            table.file(endpoint, Rights::READ),
             Err(CapError::WrongObjectType)
         );
+    }
+
+    #[test]
+    fn rights_are_limited_to_the_object_type() {
+        let mut table = CapTable::new();
+        // Endpoint rights on a file, file rights on an endpoint, zero rights,
+        // and meaningless rights on a Frame object are all refused at mint
+        // time instead of silently attenuated.
+        assert_eq!(
+            table.grant(object(0), ObjectType::File, Rights::SEND),
+            Err(CapError::InvalidRights)
+        );
+        assert_eq!(
+            table.grant(object(0), ObjectType::Endpoint, Rights::READ),
+            Err(CapError::InvalidRights)
+        );
+        assert_eq!(
+            table.grant(object(0), ObjectType::File, Rights::empty()),
+            Err(CapError::InvalidRights)
+        );
+        assert_eq!(
+            table.grant(object(0), ObjectType::Frame, Rights::SEND),
+            Err(CapError::InvalidRights)
+        );
+        assert_eq!(
+            table.grant(object(0), ObjectType::Frame, Rights::empty()),
+            Err(CapError::InvalidRights)
+        );
+
+        let file = table
+            .grant(object(1), ObjectType::File, Rights::READ | Rights::WRITE)
+            .expect("slot");
+        assert!(table.file(file, Rights::READ).is_ok());
+
+        let endpoint = table
+            .grant(
+                object(2),
+                ObjectType::Endpoint,
+                Rights::SEND | Rights::RECEIVE | Rights::TRANSFER,
+            )
+            .expect("slot");
+        assert!(table.endpoint(endpoint, Rights::TRANSFER).is_ok());
+    }
+
+    #[test]
+    fn transferred_rights_stay_valid_for_the_object_type() {
+        let mut sender = CapTable::new();
+        let source = sender
+            .grant(
+                object(0),
+                ObjectType::Endpoint,
+                Rights::SEND | Rights::RECEIVE | Rights::TRANSFER,
+            )
+            .expect("slot");
+        let cap = match sender.check(source, Rights::TRANSFER) {
+            Ok(cap) => cap,
+            Err(_) => unreachable!("transfer right"),
+        };
+        let valid = TransferCap {
+            kind: cap.kind,
+            rights: cap.rights,
+            object_index: cap.object_index,
+            object_generation: cap.object_generation,
+        };
+        let mut receiver = CapTable::new();
+        assert!(receiver.insert_transfer(valid).is_ok());
+
+        // A transferred descriptor cannot carry rights the minting rules
+        // forbid for the object type, so a malformed relay cannot smuggle
+        // authority through IPC.
+        let smuggled = TransferCap {
+            kind: ObjectType::Endpoint,
+            rights: Rights::READ,
+            object_index: 0,
+            object_generation: 1,
+        };
+        let mut other = CapTable::new();
+        assert_eq!(
+            other.insert_transfer(smuggled),
+            Err(CapError::InvalidRights)
+        );
+    }
+
+    #[test]
+    fn file_snapshot_and_count_track_handles() {
+        let mut table = CapTable::new();
+        assert_eq!(table.file_count(), 0);
+        let first = table
+            .grant(object(0), ObjectType::File, Rights::READ)
+            .expect("slot");
+        let endpoint = table
+            .grant(object(0), ObjectType::Endpoint, Rights::SEND)
+            .expect("slot");
+        let second = table
+            .grant(object(1), ObjectType::File, Rights::WRITE)
+            .expect("slot");
+        assert_eq!(table.file_count(), 2);
+
+        let (handles, count) = table.file_handles();
+        assert_eq!(count, 2);
+        assert!(handles.iter().take(count).any(|h| *h == first));
+        assert!(handles.iter().take(count).any(|h| *h == second));
+        assert!(!handles[..count].contains(&endpoint));
     }
 }
