@@ -9,10 +9,12 @@ receive only the capabilities they need, user files are opened through explicit
 grants, and the desktop is not a security authority.
 
 > **Status: native desktop prototype. Phase 4's core deliverables are in
-> place; interactive portal consent and its exit criterion (launching a
-> packaged application from the desktop with an explicit consent grant) are
-> still pending. The Phase 5/6 packaging, compatibility, update, and
-> release-engineering slices are in place.**
+> place, including interactive portal consent and scoped file mutation; its
+> exit criterion (launching a packaged application from the desktop as a
+> ring-3 application view) is still pending. Higher-half mapping, ring-3
+> compositor surfaces, durable storage, networking, audio, GPU acceleration,
+> and an external review are not implemented. The Phase 5/6 packaging,
+> compatibility, update, and release-engineering slices are in place.**
 > The tree has a reproducible UEFI boot path and ISO, a validated physical
 > memory map, kernel-owned page tables with NX and write-protect enforcement, a
 > 100 Hz preemptive scheduler, a ring-3 user/kernel boundary, validated
@@ -69,9 +71,14 @@ grants, and the desktop is not a security authority.
 - A bounded virtual block device and filesystem with directories, files, open
   handles, path traversal rejection, quotas, and per-process roots.
 - Generation-checked file capabilities; `open`, `read`, `write`, `close`,
-  `list`, and `stat` syscalls; a kernel-mediated file portal grant with
-  exact-path revocation (`AETHER_REVOCATION_OK`); and enforcement of the
-  verified package's declared open-file limit (`ENOSPC` on excess opens).
+  `list`, and `stat` syscalls; scoped copy/rename/delete with open-handle
+  protection (`AETHER_FILES_MUTATE_OK`); a kernel-mediated file portal with an
+  interactive consent UI, exact-path revocation (`AETHER_REVOCATION_OK`), and
+  persisted grant records; and enforcement of the verified package's declared
+  open-file limit (`ENOSPC` on excess opens).
+- Endpoint close/destroy with per-table alias revocation and task-exit cleanup,
+  plus blocking endpoint receive with tick deadlines and `ETIMEDOUT`
+  (`AETHER_IPC_USER_OK` reports block/timeout/close counters).
 - A host-tested service supervisor with dependency order, restart budgets, and
   quarantine, plus an application lifecycle table.
 - A serial console shell with filesystem, service, application, recovery, and
@@ -87,11 +94,12 @@ grants, and the desktop is not a security authority.
   atomic page flips and do not guarantee tear-free scanout.
 - Original vector artwork, a procedural wallpaper, an original 5×7 typeface,
   and a host-testable `aether-wm` state/layout and Files-browser model.
-- Working read-only Files navigation: sidebar locations, folder selection and
+- Files navigation with sidebar locations, folder selection and
   double-click/Enter, parent navigation, keyboard scrolling, refresh, and bounded
-  text previews. Private application vaults are denied by the service adapter.
-  Mutations, persistent storage, and a general file/application opener are not
-  implemented.
+  text previews. Scoped copy (`F3`), rename (`F2`), and delete (`Delete`) use
+  service-enforced paths; private application vaults are denied by the adapter.
+  Tabs/split panes, a durable block store, and a general application opener are
+  not implemented.
 - PS/2 keyboard and mouse input: IRQ1 and IRQ12, modifier capture, bounded
   queues, E0 dedicated arrows, independent left/right modifiers, packet
   validation, retained pointer press/release events, and deterministic self-tests.
@@ -177,15 +185,16 @@ grants, and the desktop is not a security authority.
   `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`,
   `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
-  `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`,
-  `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_IMPORT_OK`,
+  `AETHER_FILES_OK`, `AETHER_FILES_MUTATE_OK`, `AETHER_WM_OK`,
+  `AETHER_POINTER_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_IMPORT_OK`,
   `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`,
   `AETHER_LINUX_DIR_OK`, `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`,
-  `AETHER_LINUX_THREAD_OK`, `AETHER_LINUX_MREMAP_OK`, `AETHER_LINUX_SIGNAL_OK`, `AETHER_LINUX_FORK_OK`,
-  `AETHER_LINUX_EXECVE_OK`, `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
-  `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`,
-  `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
-  `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
+  `AETHER_LINUX_THREAD_OK`, `AETHER_LINUX_MREMAP_OK`, `AETHER_LINUX_SIGNAL_OK`,
+  `AETHER_LINUX_FORK_OK`, `AETHER_LINUX_EXECVE_OK`,
+  `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
+  `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`, `AETHER_INPUT_OK`,
+  `AETHER_PORTAL_OK`, `AETHER_PORTAL_CONSENT_OK`, `AETHER_SHELL_OK`, and
+  `AETHER_BOOT_OK`.
 - `make iso-test`, which boots the generated ISO through UEFI El Torito and
   requires the full boot/security marker set. It drives real PS/2 window and
   Files interactions on VGA and QEMU's VMware SVGA device, checks RGB colors and

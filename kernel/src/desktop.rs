@@ -48,6 +48,24 @@ struct DesktopState {
     cursor_paints: u64,
     last_paint_ticks: u64,
     max_paint_ticks: u64,
+    rename: RenameState,
+}
+
+#[derive(Clone, Copy)]
+struct RenameState {
+    active: bool,
+    buffer: [u8; 16],
+    len: usize,
+}
+
+impl RenameState {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            buffer: [0; 16],
+            len: 0,
+        }
+    }
 }
 
 impl DesktopState {
@@ -67,6 +85,7 @@ impl DesktopState {
             cursor_paints: 0,
             last_paint_ticks: 0,
             max_paint_ticks: 0,
+            rename: RenameState::new(),
         }
     }
 }
@@ -144,6 +163,81 @@ fn mark_files_dirty() {
     unsafe {
         (*DESKTOP.0.get()).files_dirty = true;
     }
+}
+
+fn mark_live_dirty() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
+    unsafe {
+        (*DESKTOP.0.get()).live_dirty = true;
+    }
+}
+
+fn rename_state() -> RenameState {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the snapshot.
+    unsafe { (*DESKTOP.0.get()).rename }
+}
+
+fn begin_rename() -> bool {
+    let Some(name) = with_browser(|browser| {
+        browser.selected_name().map(|name| {
+            let mut buffer = [0u8; 16];
+            let length = name.len().min(buffer.len());
+            buffer[..length].copy_from_slice(&name.as_bytes()[..length]);
+            (buffer, length)
+        })
+    }) else {
+        return false;
+    };
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update.
+    unsafe {
+        let state = &mut (*DESKTOP.0.get()).rename;
+        state.buffer = name.0;
+        state.len = name.1;
+        state.active = true;
+    }
+    true
+}
+
+fn cancel_rename() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update.
+    unsafe {
+        (*DESKTOP.0.get()).rename.active = false;
+    }
+}
+
+fn rename_push(byte: u8) {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update.
+    unsafe {
+        let state = &mut (*DESKTOP.0.get()).rename;
+        if state.active && state.len < state.buffer.len() {
+            state.buffer[state.len] = byte;
+            state.len += 1;
+        }
+    }
+}
+
+fn rename_backspace() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update.
+    unsafe {
+        let state = &mut (*DESKTOP.0.get()).rename;
+        state.len = state.len.saturating_sub(1);
+    }
+}
+
+fn rename_name() -> Option<([u8; 16], usize)> {
+    let state = rename_state();
+    if !state.active || state.len == 0 {
+        return None;
+    }
+    let mut name = [0u8; 16];
+    name[..state.len].copy_from_slice(&state.buffer[..state.len]);
+    Some((name, state.len))
 }
 
 /// Repaints the whole desktop.
@@ -343,6 +437,35 @@ fn route_pointer(wm: &mut Wm, last_buttons: &mut u8, mouse: input::MouseSnapshot
                 )
             });
             mark_files_dirty();
+        } else if let aether_wm::Hit::Window(id) = hit
+            && wm
+                .window(id)
+                .is_some_and(|window| window.kind == WindowKind::Portal)
+            && let Some(frame) = wm.window_frame(id)
+            && let Some((index, approve, deny)) =
+                portal_pending_buttons(layout::content_rect(frame))
+        {
+            let decision = if approve.contains(point) {
+                Some(true)
+            } else if deny.contains(point) {
+                Some(false)
+            } else {
+                None
+            };
+            if let Some(approved) = decision {
+                let result = if approved {
+                    portal::approve(index)
+                } else {
+                    portal::deny(index)
+                };
+                match result {
+                    Ok(()) => {
+                        serial_line!("desktop: portal consent index={index} approved={approved}");
+                        mark_live_dirty();
+                    }
+                    Err(_) => serial_line!("desktop: stale portal consent index={index}"),
+                }
+            }
         }
     } else {
         wm.pointer_moved(point);
@@ -362,6 +485,7 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
         Key::Char(byte) => WmKey::Char(byte),
         Key::Enter => WmKey::Enter,
         Key::Backspace => WmKey::Backspace,
+        Key::Delete => WmKey::Delete,
         Key::Tab => WmKey::Tab,
         Key::Escape => WmKey::Escape,
         Key::Up => WmKey::Up,
@@ -378,6 +502,54 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
         && wm.menu_state().is_none()
         && !modifiers.command()
         && !modifiers.shift;
+    let files_focused = wm
+        .focused_window()
+        .is_some_and(|window| window.kind == WindowKind::Files)
+        && !wm.overview_open()
+        && !wm.spotlight_open()
+        && wm.menu_state().is_none();
+    if files_focused && rename_state().active {
+        match key {
+            Key::Char(byte)
+                if !modifiers.command()
+                    && (byte.is_ascii_alphanumeric() || b"-. _".contains(&byte)) =>
+            {
+                if byte != b' ' {
+                    rename_push(byte);
+                }
+                mark_files_dirty();
+                return;
+            }
+            Key::Backspace => {
+                rename_backspace();
+                mark_files_dirty();
+                return;
+            }
+            Key::Enter => {
+                let renamed = rename_name().is_some_and(|(buffer, length)| {
+                    let name = core::str::from_utf8(&buffer[..length]).unwrap_or("");
+                    with_browser(|browser| browser.rename_selected(&mut fs::BrowserFiles, name))
+                });
+                cancel_rename();
+                mark_files_dirty();
+                serial_line!("desktop: files rename ok={renamed}");
+                return;
+            }
+            Key::Escape => {
+                cancel_rename();
+                mark_files_dirty();
+                return;
+            }
+            _ => return,
+        }
+    }
+    if files_active && key == Key::Function(2) {
+        if begin_rename() {
+            mark_files_dirty();
+            serial_line!("desktop: files rename prompt");
+        }
+        return;
+    }
     if files_active && with_browser(|browser| browser.key(translated, &mut fs::BrowserFiles)) {
         mark_files_dirty();
         return;
@@ -451,6 +623,96 @@ pub fn self_test() {
         );
     } else {
         serial_line!("AETHER_FILES_FAILED reason=navigation-or-scope");
+        failures += 1;
+    }
+
+    // Interactive consent is separate from the boot-time grant self-test:
+    // queue a request, prove it grants nothing, approve it, then revoke and
+    // compact the record. The path is reserved for this test.
+    const CONSENT_PATH: &str = "/portal/consent-self-test";
+    let before_grants = portal::grant_count();
+    let mut consent_ok = false;
+    if let Ok(index) = portal::request(
+        fs::DEMO_ROOT,
+        CONSENT_PATH,
+        aether_abi::user::FileRights::READ,
+    ) && portal::check(
+        fs::DEMO_ROOT,
+        CONSENT_PATH,
+        aether_abi::user::FileRights::READ,
+    )
+    .is_err()
+        && portal::pending(index).is_some()
+        && portal::approve(index).is_ok()
+        && portal::check(
+            fs::DEMO_ROOT,
+            CONSENT_PATH,
+            aether_abi::user::FileRights::READ,
+        )
+        .is_ok()
+        && portal::grant_count() == before_grants + 1
+    {
+        consent_ok = true;
+        if let Some(index) = (0..8)
+            .find(|slot| portal::grant(*slot).is_some_and(|grant| grant.path() == CONSENT_PATH))
+        {
+            let _ = portal::revoke_index(index);
+        }
+        portal::forget_revoked();
+    }
+    if consent_ok && portal::grant_count() == before_grants {
+        serial_line!(
+            "AETHER_PORTAL_CONSENT_OK checks=5 requests={}",
+            portal::request_count()
+        );
+    } else {
+        serial_line!("AETHER_PORTAL_FAILED reason=consent");
+        failures += 1;
+    }
+
+    // File mutations run against a reserved path in the ordinary Home
+    // service scope. The test copies, renames, and deletes its own file, so a
+    // failure cannot touch user data.
+    const MUTATE_PATH: &str = "/home/mutate.txt";
+    let setup = fs::write_path(MUTATE_PATH, b"mutation-test\n");
+    let mut mutate_ok = setup.is_ok();
+    if let Err(error) = setup {
+        serial_line!("desktop: mutation setup failed path={MUTATE_PATH} error={error:?}");
+    }
+    if mutate_ok {
+        let mut files = Browser::new();
+        let navigated = files.navigate("/home", &mut fs::BrowserFiles);
+        let selected = files.select_name("mutate.txt");
+        let duplicated = selected && files.duplicate_selected(&mut fs::BrowserFiles);
+        let copied = duplicated && files.select_name("copy1");
+        let renamed = copied && files.rename_selected(&mut fs::BrowserFiles, "renamed.txt");
+        let reselected = renamed && files.select_name("renamed.txt");
+        let deleted_copy = reselected && files.delete_selected(&mut fs::BrowserFiles);
+        let original = deleted_copy && files.select_name("mutate.txt");
+        let deleted_original = original && files.delete_selected(&mut fs::BrowserFiles);
+        mutate_ok = navigated
+            && selected
+            && duplicated
+            && copied
+            && renamed
+            && reselected
+            && deleted_copy
+            && original
+            && deleted_original;
+        if !mutate_ok {
+            serial_line!(
+                "desktop: mutation steps nav={navigated} select={selected} copy={duplicated} \
+                 copy_select={copied} rename={renamed} select2={reselected} delete_copy={deleted_copy} \
+                 select3={original} delete={deleted_original} error={:?}",
+                files.error()
+            );
+        }
+        let _ = fs::remove_path(MUTATE_PATH);
+    }
+    if mutate_ok {
+        serial_line!("AETHER_FILES_MUTATE_OK copy=1 rename=1 delete=1");
+    } else {
+        serial_line!("AETHER_FILES_FAILED reason=mutation");
         failures += 1;
     }
 
@@ -1030,6 +1292,24 @@ fn paint_files(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
             );
         }
     }
+    let rename = rename_state();
+    if rename.active {
+        let mut line = [0u8; 48];
+        let prefix = b"RENAME: ";
+        line[..prefix.len()].copy_from_slice(prefix);
+        let end = prefix.len() + rename.len.min(line.len() - prefix.len());
+        line[prefix.len()..end].copy_from_slice(&rename.buffer[..end - prefix.len()]);
+        let line = core::str::from_utf8(&line[..end]).unwrap_or("RENAME:");
+        draw_text_fit(
+            pane.x + 10,
+            pane.bottom() - 16,
+            line,
+            pane.width - 20,
+            palette.accent,
+            1,
+        );
+        return;
+    }
     let footer = if let Some(error) = browser.error() {
         error.message()
     } else if browser.preview_truncated() && browser.preview_open() {
@@ -1181,6 +1461,26 @@ fn paint_security(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
     }
 }
 
+const PORTAL_BUTTON_WIDTH: i32 = 84;
+const PORTAL_BUTTON_HEIGHT: i32 = 22;
+
+fn portal_first_pending() -> Option<usize> {
+    (0..4).find(|index| portal::pending(*index).is_some())
+}
+
+fn portal_pending_buttons(content: Rect) -> Option<(usize, Rect, Rect)> {
+    let index = portal_first_pending()?;
+    let y = content.y + 50 + 56 + 34;
+    let approve = Rect::new(content.x + 16, y, PORTAL_BUTTON_WIDTH, PORTAL_BUTTON_HEIGHT);
+    let deny = Rect::new(
+        approve.right() + 8,
+        y,
+        PORTAL_BUTTON_WIDTH,
+        PORTAL_BUTTON_HEIGHT,
+    );
+    Some((index, approve, deny))
+}
+
 fn paint_portal(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
     let _ = wm;
     draw_text(
@@ -1214,9 +1514,66 @@ fn paint_portal(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
         draw_number(x + 8, top + 22, *value, palette.text, 2);
     }
 
+    let mut y = top + 56;
+    graphics::fill_rect(
+        content.x + 16,
+        y - 8,
+        content.width - 32,
+        1,
+        palette.divider,
+    );
+    draw_text(content.x + 16, y, "PENDING CONSENT", palette.accent, 1);
+    y += 13;
+    if let Some(_index) = portal_first_pending() {
+        let mut text = [0u8; 320];
+        let length = portal::pending_summary(&mut text);
+        if let Some(line) = text[..length].split(|byte| *byte == b'\n').next() {
+            draw_text_bytes(content.x + 18, y, line, palette.text, 1);
+        }
+        y += 13;
+        for line in text[..length].split(|byte| *byte == b'\n').skip(1).take(2) {
+            if line.is_empty() {
+                continue;
+            }
+            draw_text_bytes(content.x + 18, y, line, palette.muted, 1);
+            y += 12;
+        }
+        if let Some((_, approve, deny)) = portal_pending_buttons(content) {
+            graphics::fill_round_rect(
+                approve.x,
+                approve.y,
+                approve.width,
+                approve.height,
+                6,
+                palette.accent,
+            );
+            draw_text_centered(
+                approve.x,
+                approve.right(),
+                approve.y + 5,
+                "APPROVE",
+                palette.window,
+                1,
+            );
+            graphics::fill_round_rect(deny.x, deny.y, deny.width, deny.height, 6, palette.card);
+            graphics::outline_round_rect(
+                deny.x,
+                deny.y,
+                deny.width,
+                deny.height,
+                6,
+                palette.warning,
+            );
+            draw_text_centered(deny.x, deny.right(), deny.y + 5, "DENY", palette.warning, 1);
+        }
+        y = content.y + 50 + 56 + 34 + PORTAL_BUTTON_HEIGHT + 14;
+    } else {
+        draw_text(content.x + 18, y, "NO PENDING REQUESTS", palette.faint, 1);
+        y += 18;
+    }
+
     let mut text = [0u8; 640];
     let length = portal::summary(&mut text);
-    let mut y = top + 56;
     graphics::fill_rect(
         content.x + 16,
         y - 8,

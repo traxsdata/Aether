@@ -69,11 +69,23 @@ Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
   `EAGAIN` and an empty queue denies `endpoint_receive` with `EAGAIN`; the
   kernel counts denied attempts and the boot gate requires the negative paths
   to have run.
+- Blocking receive (`endpoint_receive_timeout`, system call 19) yields the CPU
+  through the timer while the queue is empty and returns `ETIMEDOUT` after a
+  tick deadline. A timeout of zero waits without a deadline. The syscall gate
+  restores its masked interrupt state before returning.
+- Closing an endpoint (`endpoint_close`, system call 18) revokes every alias in
+  the caller's table. When the caller owns the object, it is destroyed and the
+  slot generation advances, so aliases held by other tasks fail with `EBADF`
+  instead of naming a later object. Task exit and user faults release all
+  endpoint aliases and destroy owned endpoints.
 - Host tests cover bounded messages, rights, forged handles, endpoint
-  confusion, queue capacity, table exhaustion, and transfer.
-- Ring-3 exposure: `endpoint_create` (15), `endpoint_send` (16), and
-  `endpoint_receive` (17) validate the handle, the payload range, and the
-  transferred-handle out-field before any queue is touched (see
+  confusion, queue capacity, table exhaustion, transfer, per-object revocation,
+  and generation reuse. Ring-3 boot tests cover a real blocking timeout, a
+  stale handle after close, and reuse of the released endpoint slot.
+- Ring-3 exposure: `endpoint_create` (15), `endpoint_send` (16),
+  `endpoint_receive` (17), `endpoint_close` (18), and
+  `endpoint_receive_timeout` (19) validate the handle, the payload range, and
+  the transferred-handle out-field before any queue is touched (see
   `docs/specifications/system-abi.md`). Application code uses the `aether-sdk`
   wrappers. The boot self-test drives both the positive and every documented
   negative path from user mode; the kernel prints `AETHER_IPC_USER_OK` with
@@ -81,6 +93,8 @@ Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
 
 The endpoint object pool is fixed at eight objects for the whole boot; the
 next `endpoint_create` fails with `ENOSPC` instead of growing kernel memory,
-so queue memory is bounded by construction. Blocking receives and timeouts
-remain follow-up work; the polled `EAGAIN` contract is the documented
-transient behavior.
+so queue memory is bounded by construction. Blocking waits are implemented as
+timer-driven scheduler wakeups rather than a per-endpoint wait list; this keeps
+the current single-CPU design simple and still stops the task from spinning in
+user mode. A dedicated wake queue, cancellation, and SMP wake IPIs remain
+follow-up work.

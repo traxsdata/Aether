@@ -300,6 +300,24 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
 
         vm.key("ctrl-spc")
         vm.wait(lambda value: value["mode"] == "SEARCH", "open Aether Search")
+        for letter in "portal":
+            vm.key(letter)
+        vm.key("ret")
+        vm.wait(lambda value: "Portal" in value["windows"], "open the File Portal from search")
+        portal = vm.state()["windows"]["Portal"]
+        px, py, pw, ph = portal["frame"]
+        # The consent controls are painted from the same content geometry used
+        # by the pointer route: 50px cards, 56px gap, then a 34px offset.
+        vm.move_to(px + 1 + 16 + 42, py + 31 + 140 + 11)
+        vm.click()
+        time.sleep(0.3)
+        grants = vm.console("portal")
+        if "grants=2" not in grants:
+            raise RuntimeError(f"portal consent click did not install a grant:\n{grants}")
+        vm.console("portal revoke 1")
+
+        vm.key("ctrl-spc")
+        vm.wait(lambda value: value["mode"] == "SEARCH", "reopen Aether Search")
         panel_width = min(520, w - 64)
         panel_height = min(312, h - 100)
         vm.move_to((w - panel_width) // 2 + 80, (h - panel_height) // 3 + 28)
@@ -319,7 +337,8 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
             vm.console("desktop redraw")
             durations.append((time.monotonic() - started) * 1000)
         summary = (f"PASS: {device} {w}x{h}: real PS/2 arrows/drag/resize, Files folders/previews, "
-                   f"private-data denial, search, menu, cursor-only path, RGB colors and damage/full equality; "
+                   f"private-data denial, portal consent click, search, menu, cursor-only path, "
+                   f"RGB colors and damage/full equality; "
                    f"redraw+diagnostic median={statistics.median(durations):.1f}ms samples={[round(value, 1) for value in durations]}")
         (out / "result.txt").write_text(summary + "\n")
         print(summary)

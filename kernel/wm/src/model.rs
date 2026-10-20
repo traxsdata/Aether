@@ -1977,7 +1977,12 @@ impl Wm {
                     }
                     outcome.changed = true;
                 }
-                Key::Tab | Key::Char(_) | Key::Function(_) | Key::Left | Key::Right => {}
+                Key::Tab
+                | Key::Char(_)
+                | Key::Function(_)
+                | Key::Left
+                | Key::Right
+                | Key::Delete => {}
             }
             return outcome;
         }
@@ -2228,7 +2233,7 @@ impl Wm {
                 }
                 outcome.changed = true;
             }
-            Key::Function(_) | Key::Char(_) | Key::Backspace => {}
+            Key::Function(_) | Key::Char(_) | Key::Backspace | Key::Delete => {}
         }
         outcome
     }

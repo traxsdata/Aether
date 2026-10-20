@@ -95,6 +95,23 @@ pub enum Syscall {
     /// comes from the kernel; a message field never names the sender. Returns
     /// the payload length, or `EAGAIN` when the queue is empty.
     EndpointReceive = 17,
+    /// Close an endpoint capability. Every alias of that endpoint in the
+    /// caller's table is revoked. When the caller owns the endpoint, the
+    /// object is destroyed and all outstanding aliases in every task become
+    /// stale (`EBADF`). Returns zero.
+    EndpointClose = 18,
+    /// Receive a bounded IPC message, waiting until one arrives or the
+    /// timeout expires. Arguments are the same as `EndpointReceive`, plus
+    /// `arg5` (R8) whose low 32 bits are the timeout in timer ticks; zero
+    /// means "wait without a deadline". Returns the payload length,
+    /// `EAGAIN` on timeout, or another endpoint error. The task yields the
+    /// CPU while it waits.
+    EndpointReceiveTimeout = 19,
+    /// Ask the desktop for an exact-file portal grant. `arg1` is the path
+    /// pointer, `arg2` the length, and `arg3` the `FileRights` set. The
+    /// request is display state only; it grants no authority until a user
+    /// approves it. Returns the pending-request index, or `ENOSPC`/`EINVAL`.
+    PortalRequest = 20,
 }
 
 impl Syscall {
@@ -120,6 +137,9 @@ impl Syscall {
             15 => Some(Self::EndpointCreate),
             16 => Some(Self::EndpointSend),
             17 => Some(Self::EndpointReceive),
+            18 => Some(Self::EndpointClose),
+            19 => Some(Self::EndpointReceiveTimeout),
+            20 => Some(Self::PortalRequest),
             _ => None,
         }
     }
@@ -159,6 +179,8 @@ pub mod errno {
     pub const EIO: i64 = -9;
     /// The endpoint queue is full (send) or empty (receive); retry later.
     pub const EAGAIN: i64 = -10;
+    /// A blocking operation reached its deadline without a message.
+    pub const ETIMEDOUT: i64 = -11;
 }
 
 /// Result of the boot-time user-mode self-test.

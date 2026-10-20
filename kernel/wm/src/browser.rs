@@ -44,6 +44,20 @@ pub trait BrowserSource {
     fn list(&mut self, path: &str, out: &mut [u8]) -> Result<usize, BrowserError>;
     /// Reads a bounded prefix of a file. No application is executed by a preview.
     fn read(&mut self, path: &str, out: &mut [u8]) -> Result<usize, BrowserError>;
+    /// Deletes a file or empty directory. The service must enforce scope and
+    /// refuse deletion while a file capability is open.
+    fn remove(&mut self, _path: &str) -> Result<(), BrowserError> {
+        Err(BrowserError::Unavailable)
+    }
+    /// Renames a file or directory to `new_name` in the same directory.
+    fn rename(&mut self, _path: &str, _new_name: &str) -> Result<(), BrowserError> {
+        Err(BrowserError::Unavailable)
+    }
+    /// Duplicates a file or directory under a service-chosen, non-existent
+    /// name in the same directory. The service owns the naming policy.
+    fn duplicate(&mut self, _path: &str) -> Result<(), BrowserError> {
+        Err(BrowserError::Unavailable)
+    }
 }
 
 /// One validated directory entry.
@@ -353,6 +367,12 @@ impl Browser {
             }
             Key::Enter if !self.preview_open => self.open_selected(source),
             Key::Backspace => self.parent(source),
+            Key::Delete => {
+                self.delete_selected(source);
+            }
+            Key::Function(3) => {
+                self.duplicate_selected(source);
+            }
             Key::Escape if self.preview_open || self.error.is_some() => {
                 self.preview_open = false;
                 self.error = None;
@@ -362,6 +382,113 @@ impl Browser {
         }
         self.set_visible_rows(self.visible);
         true
+    }
+
+    /// Name of the selected entry.
+    #[must_use]
+    pub fn selected_name(&self) -> Option<&str> {
+        self.entries.get(self.selected).map(Entry::name)
+    }
+
+    /// Selects an entry by name. Returns `false` when it is not present.
+    pub fn select_name(&mut self, name: &str) -> bool {
+        let Some(index) = self.entries().iter().position(|entry| entry.name() == name) else {
+            return false;
+        };
+        self.selected = index;
+        self.set_visible_rows(self.visible);
+        true
+    }
+
+    /// Full path of the selected entry.
+    pub fn selected_path<'a>(&self, out: &'a mut [u8; PATH_BYTES]) -> Option<&'a str> {
+        let entry = self.entries.get(self.selected).copied()?;
+        let mut len = self.path_len;
+        out.get_mut(..len)?.copy_from_slice(&self.path[..len]);
+        if len > 1 {
+            *out.get_mut(len)? = b'/';
+            len += 1;
+        }
+        let end = len.checked_add(entry.len)?;
+        out.get_mut(len..end)?
+            .copy_from_slice(&entry.name[..entry.len]);
+        core::str::from_utf8(&out[..end]).ok()
+    }
+
+    /// Deletes the selected file or empty directory, then reloads the folder.
+    pub fn delete_selected(&mut self, source: &mut impl BrowserSource) -> bool {
+        if self.preview_open {
+            return false;
+        }
+        let mut path = [0u8; PATH_BYTES];
+        let Some(path) = self.selected_path(&mut path) else {
+            return false;
+        };
+        let mut owned = [0u8; PATH_BYTES];
+        let length = path.len();
+        owned[..length].copy_from_slice(path.as_bytes());
+        let path = core::str::from_utf8(&owned[..length]).unwrap_or("");
+        match source.remove(path) {
+            Ok(()) => {
+                self.refresh(source);
+                true
+            }
+            Err(error) => {
+                self.error = Some(error);
+                true
+            }
+        }
+    }
+
+    /// Duplicates the selected file under a service-chosen new name.
+    pub fn duplicate_selected(&mut self, source: &mut impl BrowserSource) -> bool {
+        if self.preview_open {
+            return false;
+        }
+        let mut path = [0u8; PATH_BYTES];
+        let Some(path) = self.selected_path(&mut path) else {
+            return false;
+        };
+        let mut owned = [0u8; PATH_BYTES];
+        let length = path.len();
+        owned[..length].copy_from_slice(path.as_bytes());
+        let path = core::str::from_utf8(&owned[..length]).unwrap_or("");
+        match source.duplicate(path) {
+            Ok(()) => {
+                self.refresh(source);
+                true
+            }
+            Err(error) => {
+                self.error = Some(error);
+                true
+            }
+        }
+    }
+
+    /// Renames the selected entry within the current folder.
+    pub fn rename_selected(&mut self, source: &mut impl BrowserSource, name: &str) -> bool {
+        if self.preview_open || !valid_name(name) {
+            self.error = Some(BrowserError::InvalidData);
+            return false;
+        }
+        let mut path = [0u8; PATH_BYTES];
+        let Some(path) = self.selected_path(&mut path) else {
+            return false;
+        };
+        let mut owned = [0u8; PATH_BYTES];
+        let length = path.len();
+        owned[..length].copy_from_slice(path.as_bytes());
+        let path = core::str::from_utf8(&owned[..length]).unwrap_or("");
+        match source.rename(path, name) {
+            Ok(()) => {
+                self.refresh(source);
+                true
+            }
+            Err(error) => {
+                self.error = Some(error);
+                true
+            }
+        }
     }
 
     /// Handles shared-layout controls and row selection/double-click activation.
@@ -551,6 +678,71 @@ mod tests {
         assert!(browser.entries().is_empty());
         browser.key(Key::Backspace, &mut Source);
         assert_eq!(browser.path(), "/home");
+    }
+
+    #[test]
+    fn mutations_refresh_the_view_and_surface_service_errors() {
+        struct MutatingSource {
+            entries: [&'static str; 3],
+            count: usize,
+            fail: bool,
+        }
+        impl BrowserSource for MutatingSource {
+            fn list(&mut self, _path: &str, out: &mut [u8]) -> Result<usize, BrowserError> {
+                let mut written = 0usize;
+                for name in self.entries.iter().take(self.count) {
+                    out[written..written + name.len()].copy_from_slice(name.as_bytes());
+                    written += name.len();
+                    out[written..written + 5].copy_from_slice(b"\tf\t1\n");
+                    written += 5;
+                }
+                Ok(written)
+            }
+            fn read(&mut self, _path: &str, out: &mut [u8]) -> Result<usize, BrowserError> {
+                out[0] = b'x';
+                Ok(1)
+            }
+            fn remove(&mut self, _path: &str) -> Result<(), BrowserError> {
+                if self.fail {
+                    return Err(BrowserError::Access);
+                }
+                self.entries = ["b.txt", "c.txt", ""];
+                self.count = 2;
+                Ok(())
+            }
+            fn duplicate(&mut self, _path: &str) -> Result<(), BrowserError> {
+                self.entries = ["a.txt", "b.txt", "copy1"];
+                self.count = 3;
+                Ok(())
+            }
+            fn rename(&mut self, _path: &str, new_name: &str) -> Result<(), BrowserError> {
+                if new_name == "b.txt" {
+                    return Err(BrowserError::InvalidData);
+                }
+                self.entries[0] = "renamed";
+                Ok(())
+            }
+        }
+        let mut source = MutatingSource {
+            entries: ["a.txt", "b.txt", "c.txt"],
+            count: 3,
+            fail: false,
+        };
+        let mut browser = Browser::new();
+        browser.refresh(&mut source);
+        assert!(browser.select_name("a.txt"));
+        assert!(browser.duplicate_selected(&mut source));
+        assert_eq!(browser.entries().len(), 3);
+        assert!(browser.selected_name().is_some());
+        assert!(browser.rename_selected(&mut source, "renamed"));
+        assert!(!browser.rename_selected(&mut source, "../bad"));
+        assert_eq!(browser.error(), Some(BrowserError::InvalidData));
+        browser.error = None;
+        assert!(browser.delete_selected(&mut source));
+        assert_eq!(browser.entries().len(), 2);
+        source.fail = true;
+        assert!(browser.delete_selected(&mut source));
+        assert_eq!(browser.error(), Some(BrowserError::Access));
     }
 
     #[test]

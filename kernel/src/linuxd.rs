@@ -226,8 +226,10 @@ pub fn init(service_caps: &mut CapTable) -> Result<(), LinuxdError> {
         return Err(LinuxdError::Policy);
     }
 
-    let request = crate::ipc::create_endpoint().ok_or(LinuxdError::Endpoint)?;
-    let approval = crate::ipc::create_endpoint().ok_or(LinuxdError::Endpoint)?;
+    let request = crate::ipc::create_endpoint(crate::scheduler::LINUXD_TASK as u16)
+        .ok_or(LinuxdError::Endpoint)?;
+    let approval = crate::ipc::create_endpoint(crate::scheduler::LINUXD_TASK as u16)
+        .ok_or(LinuxdError::Endpoint)?;
     let request_recv = service_caps
         .grant(request, ObjectType::Endpoint, Rights::RECEIVE)
         .map_err(|_| LinuxdError::Endpoint)?;

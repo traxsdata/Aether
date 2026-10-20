@@ -7,6 +7,28 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Per-object capability revocation: `revoke_object` invalidates every alias in
+  a table and advances slot generations. Endpoints now have explicit close and
+  destroy semantics, task exit/fault releases endpoint aliases and destroys
+  owned objects, and stale handles fail with `EBADF` instead of naming a
+  recycled endpoint.
+- Blocking endpoint receive with tick timeouts (`endpoint_receive_timeout`),
+  scheduler yield/wakeup while the queue is empty, and `ETIMEDOUT`. The boot
+  gate now requires real block, timeout, close, and stale-handle evidence from
+  ring 3.
+- Interactive file-portal consent: `portal_request` queues a request that
+  grants nothing; the Portal window has approve/deny controls and the console
+  has `portal approve`/`portal deny`. Approvals install exact-file records
+  through a host-tested codec and rewrite `/system/portal/grants`
+  (`AETHER_PORTAL_CONSENT_OK`).
+- Scoped filesystem mutations: `rename`, `copy_file`, `remove`, and `rmdir`,
+  with existing-destination refusal, directory-into-itself protection, and
+  open-file deletion checks. Files exposes duplicate (`F3`), rename (`F2`),
+  and delete (`Delete`); the console exposes `cp` and `mv`
+  (`AETHER_FILES_MUTATE_OK`).
+- Host tests for revocation aliases/generation reuse, grant-record parsing and
+  corruption rejection, filesystem copy/rename/delete, browser mutations, and
+  the Delete scancode.
 - Linux Gate 3 headless GridCraft prototype: `make gate3-test` stages the
   pinned 19,024,376-byte GridCraft 0.8.0 AppImage, verifies its signed import
   record and SHA-256, imports the SquashFS payload, and launches the bundled
@@ -334,6 +356,12 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Changed
 
+- Portal grant records are fixed-size validated records rather than
+  `&'static str` boot seeds. Corrupt or duplicate stores fail closed instead of
+  loading partially.
+- The system ABI documents calls 18–20 and `ETIMEDOUT`; the SDK exposes
+  `endpoint_close`, `endpoint_receive_timeout`, `syscall5`, and
+  `portal_request`.
 - The desktop paints through a bounded back buffer where possible and presents
   damaged regions. The graphics service honors both UEFI RGBX/BGRX layouts;
   assuming BGRX for both codes hid an incorrect ABI enum instead of fixing it.
@@ -455,6 +483,13 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Known limitations
 
+- Grant records live on the RAM disk, so they survive service restarts but not
+  a power cycle until a durable block device exists.
+- Blocking IPC uses timer-driven scheduler wakeups rather than a per-endpoint
+  wait list; cancellation and SMP wake IPIs remain follow-up work.
+- Files tabs/split panes, safe import/export, ring-3 compositor surfaces,
+  higher-half mapping, durable storage, networking, audio, and accelerated
+  graphics remain unimplemented.
 - Services and the desktop still execute as kernel modules; only the native
   application runs at CPL3. Moving service bodies into supervised user
   processes is follow-up work.
@@ -466,13 +501,8 @@ versioning scheme until the kernel ABI stabilises.
   networking, audio, GPU acceleration, or general graphical package manager.
 - The filesystem is a bring-up format: 32 inodes, 4 KiB per file, one
   directory block per directory, and no crash-consistency protocol.
-- Portal grants are seeded at boot and can be revoked from the console; there
-  is no interactive consent UI, persistent grant store, or graphical revocation
-  control, and revocation does not invalidate an already-open capability.
-- The scheduler has no priorities, sleeping/wakeup queues, or dynamic task
-  creation; IPC is polled rather than blocking.
-- Capability revocation, endpoint destruction, and complete object-lifetime
-  behavior are not implemented.
+- The scheduler has no priorities or dynamic task creation; blocking IPC uses
+  timer-driven wakeups rather than per-endpoint wait lists.
 - Identity map only; no higher-half kernel, guard pages, or kernel heap.
 - No IST for double-fault and stack-overflow recovery.
 - The kernel image is embedded in the loader, so updating the kernel requires

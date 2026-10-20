@@ -47,16 +47,25 @@ each resource class the system must define what happens to:
 - Data already copied or displayed.
 - In-flight IPC that carries the capability.
 
-The initial policy is fail-closed where revocation exists: a revoked portal
-grant is already checked on every future `portal_open` call, while handles
-opened before the revoke keep working because "open handles stay valid" is the
-documented, weaker rule for them — the desktop shows the audit when this
-happens. General capability revocation removes future minting authority
-first; already-open file capabilities are re-checked right-by-right on every
-syscall, so a downgraded grant never yields new access, but mapping removal
-and child-capability invalidation are not implemented yet (DERIVE and MAP
-rights do not exist in the minted subset). Revocation cannot undo information
-an application has already legitimately read.
+The implemented policy is fail-closed for every object type that has been
+minted:
+
+- **Endpoints.** `revoke_object` removes every alias in a table and advances
+  each slot generation. `endpoint_close` revokes the caller's aliases and, when
+  the caller owns the object, destroys it; every alias in every task then fails
+  with `EndpointGone`/`EBADF`. Task exit and faults destroy owned endpoints and
+  revoke held aliases. This covers open handles and in-flight aliases because
+  the object generation is checked before any queue operation.
+- **Files.** A revoked portal grant is checked on every future `portal_open`.
+  Open file capabilities are re-checked right-by-right on every syscall and are
+  all released when the task exits or faults. Bytes already read cannot be
+  unread; the policy never claims otherwise.
+- **Derived capabilities.** `DERIVE` and `MAP` rights are not minted in this
+  prototype, so no derivation tree or mapping revocation exists yet.
+
+Mapping removal, a durable revocation log, and SMP-safe revocation remain
+follow-up work; the single-CPU implementation serializes table mutation with
+interrupt masking.
 
 ## Design notes for the first implementation
 
@@ -102,12 +111,13 @@ scheduler test:
 - Tests cover mint-time rights masking, file right snapshots and counts,
   insufficient rights, forged/stale handles, wrong endpoints, table
   exhaustion, queue capacity, capability transfer (including the mandatory
-  `TRANSFER` strip), and removal/generation reuse.
+  `TRANSFER` strip), per-object alias revocation, and removal/generation reuse.
 
 Portal grants can be revoked, which blocks future `portal_open` calls;
 already-open file capabilities are re-checked against the open handle's
 minted rights on every operation, so they cannot gain authority from a
-revocation. General capability revocation, endpoint revocation, complete
-object destruction, and derivation-tree-based invalidation are not
-implemented yet; `DERIVE` and `MAP` rights do not exist in the minted subset.
-The generation counters prepare the table for them.
+revocation. Endpoints have explicit close/destroy semantics and are released
+on task exit and faults. Derivation-tree-based invalidation, mapping removal,
+a durable revocation log, and SMP-safe revocation are not implemented yet;
+`DERIVE` and `MAP` rights do not exist in the minted subset. The generation
+counters prepare the table for them.

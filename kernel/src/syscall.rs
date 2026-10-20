@@ -9,6 +9,7 @@
 
 use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::serial;
+use crate::arch::x86_64::timer;
 use crate::linux_policy;
 use crate::memory::paging;
 use crate::memory::shared;
@@ -23,6 +24,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 static IPC_SENDS: AtomicUsize = AtomicUsize::new(0);
 static IPC_RECEIVES: AtomicUsize = AtomicUsize::new(0);
 static IPC_DENIED: AtomicUsize = AtomicUsize::new(0);
+static IPC_BLOCKS: AtomicUsize = AtomicUsize::new(0);
+static IPC_TIMEOUTS: AtomicUsize = AtomicUsize::new(0);
+static IPC_CLOSES: AtomicUsize = AtomicUsize::new(0);
 
 /// Returns the number of IPC messages user tasks sent.
 #[must_use]
@@ -40,6 +44,24 @@ pub fn ipc_receives() -> usize {
 #[must_use]
 pub fn ipc_denials() -> usize {
     IPC_DENIED.load(Ordering::Acquire)
+}
+
+/// Returns the number of times a blocking receive yielded the CPU.
+#[must_use]
+pub fn ipc_blocks() -> usize {
+    IPC_BLOCKS.load(Ordering::Acquire)
+}
+
+/// Returns the number of blocking receives that reached their deadline.
+#[must_use]
+pub fn ipc_timeouts() -> usize {
+    IPC_TIMEOUTS.load(Ordering::Acquire)
+}
+
+/// Returns the number of endpoint capabilities closed from user mode.
+#[must_use]
+pub fn ipc_closes() -> usize {
+    IPC_CLOSES.load(Ordering::Acquire)
 }
 
 fn ipc_denied(error: IpcError) -> i64 {
@@ -141,6 +163,9 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         Syscall::PortalOpen => {
             crate::fs::sys_portal_open(pml4, rdi, rsi, rdx).unwrap_or(errno::EINVAL)
         }
+        Syscall::PortalRequest => {
+            crate::fs::sys_portal_request(pml4, rdi, rsi, rdx).unwrap_or(errno::EINVAL)
+        }
         Syscall::Read => crate::fs::sys_read(pml4, rdi, rsi, rdx).unwrap_or(errno::EINVAL),
         Syscall::WriteFile => crate::fs::sys_write(pml4, rdi, rsi, rdx).unwrap_or(errno::EINVAL),
         Syscall::Close => crate::fs::sys_close(rdi).unwrap_or(errno::EBADF),
@@ -148,7 +173,12 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         Syscall::Stat => crate::fs::sys_stat(pml4, rdi, rsi).unwrap_or(errno::EINVAL),
         Syscall::EndpointCreate => endpoint_create(),
         Syscall::EndpointSend => endpoint_send(pml4, rdi, rsi, rdx, r10),
-        Syscall::EndpointReceive => endpoint_receive(pml4, rdi, rsi, rdx, r10),
+        Syscall::EndpointReceive => endpoint_receive(pml4, rdi, rsi, rdx, r10, None),
+        Syscall::EndpointReceiveTimeout => {
+            let fifth = unsafe { (*frame).r8 };
+            endpoint_receive(pml4, rdi, rsi, rdx, r10, Some(fifth & u64::from(u32::MAX)))
+        }
+        Syscall::EndpointClose => endpoint_close(rdi),
         _ => errno::ENOSYS,
     };
 
@@ -2441,7 +2471,7 @@ fn endpoint_create() -> i64 {
         if !caps.has_free_slot() {
             return Err(errno::ENOSPC);
         }
-        match crate::ipc::create_endpoint() {
+        match crate::ipc::create_endpoint(_current as u16) {
             None => Err(errno::ENOSPC),
             Some(object) => caps
                 .grant(object, aether_ipc::ObjectType::Endpoint, full)
@@ -2471,7 +2501,19 @@ fn ipc_denied_usage() -> i64 {
 /// any, is installed in the caller's table by the endpoint before the queue
 /// slot is released, so it is never consumed without the table entry
 /// staying visible to the caller.
-fn endpoint_receive(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, out: u64) -> i64 {
+///
+/// With `timeout` set, the call is a blocking receive: an empty queue yields
+/// the CPU and retries on the next timer wakeup until a message arrives or the
+/// tick deadline passes. Interrupts are re-enabled only around the wait, and
+/// the syscall gate is restored to its masked state before returning.
+fn endpoint_receive(
+    pml4: PhysFrame,
+    handle: u64,
+    pointer: u64,
+    length: u64,
+    out: u64,
+    timeout: Option<u64>,
+) -> i64 {
     let Some(cap) = decode_ipc_handle(handle) else {
         return ipc_denied_usage();
     };
@@ -2484,45 +2526,91 @@ fn endpoint_receive(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, out
     if ranges_overlap(pointer, length, out, 4) {
         return ipc_denied_usage();
     }
+
+    let deadline =
+        timeout.and_then(|ticks| (ticks != 0).then(|| scheduler::ticks().saturating_add(ticks)));
+
+    loop {
+        match receive_once(pml4, cap, pointer, out) {
+            Ok(received_len) => {
+                IPC_RECEIVES.fetch_add(1, Ordering::Release);
+                return received_len as i64;
+            }
+            Err(IpcError::Empty) if timeout.is_some() => {
+                // A finite timeout has expired, and an unbounded wait (0) is
+                // only cancelled by a message or task retirement.
+                if deadline.is_some_and(|deadline| scheduler::ticks() >= deadline) {
+                    IPC_TIMEOUTS.fetch_add(1, Ordering::Release);
+                    return errno::ETIMEDOUT;
+                }
+                IPC_BLOCKS.fetch_add(1, Ordering::Release);
+                // Let the timer and every other task run. The gate entered
+                // with interrupts masked; restore that state before return so
+                // the syscall epilogue is not preempted.
+                timer::enable_interrupts();
+                timer::halt_until_interrupt();
+                timer::disable_interrupts();
+            }
+            Err(error) => return ipc_denied(error),
+        }
+    }
+}
+
+/// One validated receive attempt for [`endpoint_receive`].
+fn receive_once(
+    pml4: PhysFrame,
+    cap: aether_ipc::CapHandle,
+    pointer: u64,
+    out: u64,
+) -> Result<usize, IpcError> {
     let Some(buffer) = (unsafe {
-        // SAFETY: The kernel checks the whole user range, including the user
-        // bit and write permission, before returning the slice.
+        // SAFETY: The range was validated by the caller, including the user
+        // bit and write permission.
         user_bytes_mut(pml4, pointer, MAX_MESSAGE_BYTES as u64)
     }) else {
-        return ipc_denied_usage();
+        return Err(IpcError::MessageTooLong);
     };
     let mut received_len = 0usize;
-    let result =
-        scheduler::with_current_ipc(|_current, caps| match crate::ipc::receive(caps, cap) {
-            Ok(message) => {
-                let payload = message.payload();
-                let transferred = match message.transferred {
-                    Some(transferred) => {
-                        (u32::from(transferred.generation) << 8) | u32::from(transferred.index)
-                    }
-                    None => 0,
-                };
-                buffer[..payload.len()].copy_from_slice(payload);
-                for byte in buffer[payload.len()..].iter_mut() {
-                    *byte = 0;
+    scheduler::with_current_ipc(|_current, caps| match crate::ipc::receive(caps, cap) {
+        Ok(message) => {
+            let payload = message.payload();
+            let transferred = match message.transferred {
+                Some(transferred) => {
+                    (u32::from(transferred.generation) << 8) | u32::from(transferred.index)
                 }
-                // SAFETY: `out` was validated as a four-byte writable user range
-                // and is disjoint from the payload buffer; the byte-wise copy
-                // avoids alignment requirements, and interrupts are masked so no
-                // context switch can occur inside the store.
-                unsafe {
-                    let bytes = transferred.to_ne_bytes();
-                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
-                }
-                received_len = payload.len();
-                Ok(())
+                None => 0,
+            };
+            buffer[..payload.len()].copy_from_slice(payload);
+            for byte in buffer[payload.len()..].iter_mut() {
+                *byte = 0;
             }
-            Err(error) => Err(error),
-        });
+            // SAFETY: `out` was validated as a four-byte writable user range
+            // and is disjoint from the payload buffer; the byte-wise copy
+            // avoids alignment requirements, and interrupts are masked so no
+            // context switch can occur inside the store.
+            unsafe {
+                let bytes = transferred.to_ne_bytes();
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
+            }
+            received_len = payload.len();
+            Ok(())
+        }
+        Err(error) => Err(error),
+    })?;
+    Ok(received_len)
+}
+
+/// `EndpointClose`: revokes the caller's aliases and destroys an owned object.
+fn endpoint_close(handle: u64) -> i64 {
+    let Some(cap) = decode_ipc_handle(handle) else {
+        return ipc_denied_usage();
+    };
+    let result =
+        scheduler::with_current_ipc(|current, caps| crate::ipc::close(caps, cap, current as u16));
     match result {
         Ok(()) => {
-            IPC_RECEIVES.fetch_add(1, Ordering::Release);
-            received_len as i64
+            IPC_CLOSES.fetch_add(1, Ordering::Release);
+            0
         }
         Err(error) => ipc_denied(error),
     }

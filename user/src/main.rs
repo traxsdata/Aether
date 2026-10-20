@@ -297,6 +297,53 @@ fn ipc_section() {
         Err(error) => require_denial("init: ipc-create-limit", error, "ENOSPC"),
         Ok(_) => fail("endpoint pool grew past its bound"),
     }
+
+    // Blocking receive with a deadline: an empty queue must yield the CPU and
+    // return ETIMEDOUT only after the requested ticks have elapsed. This is
+    // the blocking path, not a user-space spin loop.
+    let before = sdk::uptime();
+    match sdk::endpoint_receive_timeout(second, &mut message, 5) {
+        Err(error) => require_denial("init: ipc-timeout", error, "ETIMEDOUT"),
+        Ok((_, _)) => fail("blocking receive returned a message from an empty queue"),
+    }
+    if sdk::uptime().saturating_sub(before) < 5 {
+        fail("blocking receive did not wait for the timeout");
+    }
+    puts("init: ipc blocking timeout ok\n");
+
+    // Closing the owner's endpoint destroys the object and revokes every alias
+    // in this table. The old handle must fail as stale, and the pool slot must
+    // become available again.
+    if sdk::endpoint_close(first).is_err() {
+        fail("endpoint close failed");
+    }
+    match sdk::endpoint_send(first, b"stale") {
+        Err(error) => require_denial("init: ipc-closed", error, "EBADF"),
+        Ok(()) => fail("a closed endpoint handle was accepted"),
+    }
+    match sdk::endpoint_create() {
+        Ok(replacement) => {
+            if sdk::endpoint_send(replacement, b"reused").is_err() {
+                fail("send on recreated endpoint failed");
+            }
+            match sdk::endpoint_receive_timeout(replacement, &mut message, 10) {
+                Ok((length, 0)) if &message[..length] == b"reused" => {
+                    puts("init: ipc endpoint lifetime ok\n")
+                }
+                Ok((_, _)) => fail("recreated endpoint payload mismatch"),
+                Err(error) => {
+                    puts("init: recreated receive failed ");
+                    puts(sdk::error_name(error));
+                    fail("recreated endpoint receive");
+                }
+            }
+        }
+        Err(error) => {
+            puts("init: endpoint slot was not reclaimed ");
+            puts(sdk::error_name(error));
+            fail("endpoint pool lifetime");
+        }
+    }
 }
 
 /// Exercises the filesystem sandbox and the verified package's limits.
@@ -396,6 +443,23 @@ fn portal_section() {
     // The seeded grant is READ; a write attempt through the same grant must
     // also fail with ENOGRANT because the grant is rights-aware too.
     report_portal("init: portal-write", "/home/welcome.txt", sdk::WRITE);
+
+    // Asking for a new file creates a pending consent record, not authority.
+    // The desktop must approve it before the path becomes openable; this
+    // request intentionally stays pending for an interactive review.
+    match sdk::portal_request("/home/import.txt", sdk::READ) {
+        Ok(index) => {
+            puts("init: portal request pending=");
+            puts_u64(index as u64);
+            puts("\n");
+        }
+        Err(error) => {
+            puts("init: portal request failed ");
+            puts(sdk::error_name(error));
+            puts("\n");
+        }
+    }
+    report_portal("init: portal-unapproved", "/home/import.txt", sdk::READ);
 }
 
 #[unsafe(no_mangle)]

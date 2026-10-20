@@ -123,26 +123,35 @@ query, and `Escape` closes the panel. The index is a bounded static table; no
 file contents or private data are searched, and the desktop gains no authority
 from a search result.
 
-## Files application MVP
+## Files application
 
-Files is a working **read-only RAM-filesystem browser**, not a decorative listing
-or a complete Explorer implementation. Open it from the dock or `Ctrl+N`:
+Files is a working **scoped RAM-filesystem browser and mutator**, not a
+decorative listing or a complete Explorer implementation. Open it from the dock
+or `Ctrl+N`:
 
 - Click a sidebar location (Volume, Home, System, Portal).
 - Select a row and double-click it, or use `Up`/`Down` and `Enter`, to open a
   folder or a bounded text preview. Selection scrolls into view.
 - `Backspace` or the `<` button closes a preview or opens the parent folder.
 - `F5` or the `R` button refreshes the folder after a diagnostic shell change.
+- `F3` duplicates the selected file under a service-chosen `copyN` name, `F2`
+  opens a bounded rename prompt, and `Delete` removes a file or empty folder.
 - Previews show at most 512 bytes, do not execute programs, sanitize unsupported
   glyphs/control bytes, and mark truncation. Errors are shown, not disguised as
   empty folders. Failed navigation preserves the previous valid view.
 
-The filesystem-service adapter permits read-only browsing of `/home`, `/system`,
-and `/portal`; the root exposes directory names, but `/apps` vault contents are
-denied. A UI path is not a grant and previewing does not authorize another app.
-This adapter is still trusted ring-0 code, not a separately isolated service.
-Copy/move/rename/delete, tabs/split panes, persistent storage, and portal
-import/export are future work.
+The filesystem-service adapter permits scoped browsing and mutation of `/home`,
+`/system`, and `/portal`; the root exposes directory names, but `/apps` vault
+contents are denied. A UI path is not a grant and previewing does not authorize
+another app. Deletion is refused while a file capability is open, and rename
+refuses an existing destination. This adapter is still trusted ring-0 code, not
+a separately isolated service. Tabs/split panes, safe portal import/export, and
+durable storage are future work.
+
+The Portal window shows one pending consent request at a time with `APPROVE`
+and `DENY` controls. A request grants nothing; approval installs an exact-file
+record in the portal table, and revocation removes future authority. The same
+decisions are available from the console as `portal approve|deny|revoke <n>`.
 
 ## Liquid Glass and accessibility
 

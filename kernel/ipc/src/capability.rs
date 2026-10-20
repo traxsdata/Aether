@@ -313,6 +313,59 @@ impl CapTable {
         count
     }
 
+    /// Snapshots the handles of all capabilities for an object type.
+    ///
+    /// The returned array is zero-padded; only the first `count` entries are
+    /// valid. Callers must copy this snapshot before mutating the table.
+    #[must_use]
+    pub fn handles_of_type(&self, kind: ObjectType) -> ([CapHandle; MAX_CAPS], usize) {
+        let mut out = [CapHandle {
+            index: 0,
+            generation: 0,
+        }; MAX_CAPS];
+        let mut count = 0usize;
+        let mut index = 0usize;
+        while index < MAX_CAPS {
+            let slot = &self.slots[index];
+            if !slot.is_empty() && slot.kind == kind {
+                out[count] = CapHandle {
+                    index: index as u8,
+                    generation: slot.slot_generation,
+                };
+                count += 1;
+            }
+            index += 1;
+        }
+        (out, count)
+    }
+
+    /// Revokes every capability that names `object`.
+    ///
+    /// This is the object-lifetime primitive: destroying or revoking an
+    /// object must invalidate every handle in this table, including handles
+    /// installed by capability transfer. Each affected slot advances its
+    /// generation, so a held [`CapHandle`] cannot name a later capability that
+    /// reuses the slot. Returns the number of revoked handles.
+    pub fn revoke_object(&mut self, object: ObjectId) -> usize {
+        let mut revoked = 0usize;
+        let mut index = 0usize;
+        while index < MAX_CAPS {
+            let slot = &mut self.slots[index];
+            if !slot.is_empty()
+                && slot.object_index == object.index
+                && slot.object_generation == object.generation
+            {
+                *slot = Capability {
+                    slot_generation: slot.slot_generation.wrapping_add(1).max(1),
+                    ..Capability::EMPTY
+                };
+                revoked += 1;
+            }
+            index += 1;
+        }
+        revoked
+    }
+
     /// Snapshots the handles of all held `File` capabilities.
     ///
     /// The returned array is zero-padded; only the first `count` entries are
@@ -574,6 +627,73 @@ mod tests {
             table.file(handle, Rights::READ),
             Err(CapError::InvalidHandle)
         );
+    }
+
+    #[test]
+    fn revoking_an_object_invalidates_every_alias_and_preserves_generations() {
+        let mut table = CapTable::new();
+        let target = object(7);
+        let first = table
+            .grant(target, ObjectType::Endpoint, Rights::SEND)
+            .expect("slot");
+        let second = table
+            .grant(target, ObjectType::File, Rights::READ)
+            .expect("slot");
+        let unrelated = table
+            .grant(object(8), ObjectType::Endpoint, Rights::SEND)
+            .expect("slot");
+
+        assert_eq!(table.revoke_object(target), 2);
+        assert_eq!(
+            table.check(first, Rights::SEND),
+            Err(CapError::InvalidHandle)
+        );
+        assert_eq!(
+            table.file(second, Rights::READ),
+            Err(CapError::InvalidHandle)
+        );
+        assert_eq!(
+            table.endpoint(unrelated, Rights::SEND),
+            Ok((object(8), Rights::SEND))
+        );
+
+        // A replacement in the same slot must not validate the old handles.
+        let replacement = table
+            .grant(target, ObjectType::Endpoint, Rights::SEND)
+            .expect("slot");
+        assert!(
+            replacement.index == first.index || replacement.index == second.index,
+            "the test expects a recycled slot"
+        );
+        assert_eq!(
+            table.check(first, Rights::SEND),
+            Err(CapError::InvalidHandle)
+        );
+        assert_eq!(
+            table.file(second, Rights::READ),
+            Err(CapError::InvalidHandle)
+        );
+        assert_eq!(table.revoke_object(target), 1);
+        assert_eq!(table.revoke_object(target), 0);
+    }
+
+    #[test]
+    fn handles_of_type_only_returns_the_requested_kind() {
+        let mut table = CapTable::new();
+        let endpoint = table
+            .grant(object(1), ObjectType::Endpoint, Rights::SEND)
+            .expect("slot");
+        let file = table
+            .grant(object(2), ObjectType::File, Rights::READ)
+            .expect("slot");
+
+        let (handles, count) = table.handles_of_type(ObjectType::Endpoint);
+        assert_eq!(count, 1);
+        assert_eq!(handles[0], endpoint);
+        let (handles, count) = table.handles_of_type(ObjectType::File);
+        assert_eq!(count, 1);
+        assert_eq!(handles[0], file);
+        assert_eq!(table.handles_of_type(ObjectType::Frame).1, 0);
     }
 
     #[test]
