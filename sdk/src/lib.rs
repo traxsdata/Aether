@@ -11,7 +11,7 @@
 use aether_abi::user::{FileRights, Syscall, errno};
 
 /// Maximum bytes an IPC message payload may carry; enforced by the kernel.
-pub const MAX_MESSAGE_BYTES: usize = 32;
+pub const MAX_MESSAGE_BYTES: usize = 64;
 
 /// Raw syscall with up to four arguments.
 ///
@@ -220,8 +220,8 @@ pub fn file_size(path: &str) -> Result<usize, i64> {
 
 /// Creates a bounded IPC endpoint and returns its capability handle.
 ///
-/// The kernel endpoint pool is fixed (four endpoints), so a fifth create
-/// fails with `ENOSPC` instead of growing kernel memory. The returned
+/// The kernel endpoint pool is fixed (eight endpoints), so creation past
+/// that bound fails with `ENOSPC` instead of growing kernel memory. The returned
 /// capability carries `SEND`, `RECEIVE`, and `TRANSFER` rights.
 pub fn endpoint_create() -> Result<u64, i64> {
     // SAFETY: No pointers or handles are involved.

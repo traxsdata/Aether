@@ -12,6 +12,10 @@ authors.workspace = true
 name = "aether-init"
 path = "src/main.rs"
 
+[[bin]]
+name = "aether-linuxd"
+path = "src/bin/linuxd.rs"
+
 [dependencies]
 aether-abi = { path = "../abi" }
 aether-sdk = { path = "../sdk" }

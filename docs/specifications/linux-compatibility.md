@@ -113,13 +113,18 @@ private read-only root + private writable overlay
     +----------- narrow kernel primitives -----+--> [ compositor ] [ input ]
 ```
 
-- `linuxd` is a user-space service. It owns Linux ABI emulation, the ELF loader,
-  library search paths, environment, `/proc` synthesis, and per-application
-  configuration.
-- The kernel provides only primitives that cannot be emulated safely in user
-  space: address-space mapping, thread creation and scheduling, futex
-  wait/wake, fault delivery, and the syscall trap. It does not gain a Linux
-  filesystem, network stack, device drivers, or graphics stack.
+- `linuxd` is a user-space service. In the current Gate 2 slice it is the
+  ring-3 launch policy manager: it validates the signed identity, version, and
+  selected launch path over a capability-scoped IPC channel and approves the
+  application task. The longer-term design also moves Linux ABI emulation, the
+  ELF loader, library search paths, `/proc` synthesis, and per-application
+  configuration into it; those are not implemented yet.
+- The kernel still provides the Linux syscall trap and dispatcher, ELF and
+  `PT_INTERP` mapping, page tables/VMAs, thread scheduling, futex waits, fault
+  delivery, and runtime library loading. These are not system-call remoting:
+  `linuxd` does not handle Linux registers or emulate descriptors in this
+  slice. The kernel does not gain a Linux filesystem, network stack, device
+  drivers, or graphics stack.
 - `waylandd` exposes the Wayland subset used by `winit`/`egui`. It receives
   shared-memory buffers, validates their geometry, and asks the compositor to
   present them in the application's window.
@@ -250,11 +255,17 @@ re-arm (`AETHER_LINUX_EPOLL_BLOCK_OK`), and cross-process blocking pipe
 read/write plus end-of-file (`AETHER_LINUX_PIPE_BLOCK_OK`). Relative and
 absolute sleeps with signal `EINTR` (`AETHER_LINUX_NANOSLEEP_OK`) and
 one-shot/periodic timerfds seen through `poll` and `epoll`
-(`AETHER_LINUX_TIMERFD_OK`) are also exercised. A bounded `linuxd` supervisor
-service prototype selects the verified runtime profile, checks the signed
-AppImage identity and launch path, and reports status (`AETHER_LINUXD_OK`). It
-remains kernel-side: Linux syscalls are still dispatched in the kernel, and the
-ring-3 service plus syscall-remoting ABI are unimplemented. The overlay maps
+(`AETHER_LINUX_TIMERFD_OK`) are also exercised. A ring-3 `linuxd`
+launch manager runs in its own PML4 with a two-capability IPC channel. The
+kernel verifies the signed runtime profile and AppImage, sends the signed
+identity, version, and launch path, and waits for approval. `linuxd` first
+rejects a deliberately invalid path (`AETHER_LINUXD_DENY_OK`), then approves
+the genuine request; the kernel creates and schedules the application task only
+after approval (`AETHER_LINUXD_OK`, `AETHER_LINUXD_USER_OK`). The service's
+native syscall surface is allowlisted and excludes files, portal access,
+endpoint creation, and window requests. Linux syscall dispatch, ELF mapping,
+and library loading remain kernel-side; the syscall-remoting ABI is
+unimplemented and is not claimed. The overlay maps
 `/tmp`, `/settings`, and `/logs`, enforces a 1 KiB per-application quota and
 512-byte per-file limit, survives task exit within a boot, and supports erasure
 (`AETHER_LINUX_OVERLAY_PERSIST_OK`, `AETHER_LINUX_OVERLAY_ERASE_OK`). It is
@@ -318,9 +329,10 @@ revocation tests, and a compatibility record no better than the suite supports.
 1. The runtime pin is derived from the host glibc; Mesa and Wayland content are
    absent, and the pin is not reproducible across hosts until a pinned artifact
    channel exists.
-2. `linuxd` is a kernel-side supervisor prototype. The ring-3 service,
-   syscall-remoting ABI, and removal of Linux dispatch from the kernel remain
-   unimplemented.
+2. `linuxd` is a ring-3 launch-policy manager, but the Linux syscall
+   dispatcher, ELF/library mapping, and VMA management remain in the kernel.
+   The syscall-remoting ABI and removal of Linux dispatch from the kernel are
+   unimplemented; no remote-syscall claim is made.
 3. Shared mappings are bounded and in-memory. `MAP_SHARED|MAP_ANONYMOUS`
    survives `fork` through reference-counted frames, and read-shared file
    mappings alias a bounded page cache across processes. There is no writeback

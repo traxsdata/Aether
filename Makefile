@@ -10,6 +10,7 @@ PYTHON ?= python3
 BUILD := build
 KERNEL_ELF := $(BUILD)/aether-kernel.elf
 USER_ELF := $(BUILD)/aether-init.elf
+LINUXD_ELF := $(BUILD)/aether-linuxd.elf
 LOADER_EFI := $(BUILD)/BOOTX64.EFI
 LINUX_ELF := $(BUILD)/linux-hello.elf
 LINUX_DYN_ELF := $(BUILD)/linux-dynamic.elf
@@ -60,6 +61,7 @@ user:
 	RUSTFLAGS="$(USER_RUSTFLAGS)" \
 		$(CARGO) build -p aether-init --release --target $(KERNEL_TARGET) --locked
 	cp target/$(KERNEL_TARGET)/release/aether-init $(USER_ELF)
+	cp target/$(KERNEL_TARGET)/release/aether-linuxd $(LINUXD_ELF)
 
 linux-fixture:
 	@mkdir -p $(BUILD)
@@ -90,6 +92,7 @@ linux-fixture:
 kernel: user linux-fixture
 	@mkdir -p $(BUILD)
 	AETHER_USER_ELF=$(abspath $(USER_ELF)) \
+	AETHER_LINUXD_ELF=$(abspath $(LINUXD_ELF)) \
 	AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 	AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 	AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
@@ -217,6 +220,7 @@ lint: kernel
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
+		AETHER_LINUXD_ELF=$(abspath $(LINUXD_ELF)) \
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
@@ -226,6 +230,7 @@ lint: kernel
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
+		AETHER_LINUXD_ELF=$(abspath $(LINUXD_ELF)) \
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
