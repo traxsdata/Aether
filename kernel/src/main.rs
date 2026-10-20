@@ -143,6 +143,14 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         info.kernel_end,
         info.entry_point
     );
+    // The loader stages the AppImage and record as EfiLoaderData. Refuse a
+    // present descriptor that does not fall inside a loader-owned region
+    // before the kernel ever forms a slice over it.
+    if !artifact_in_loader_memory(info.linux_appimage, regions)
+        || !artifact_in_loader_memory(info.linux_appimage_record, regions)
+    {
+        boot_failure("staged artifact outside loader memory");
+    }
 
     arch::x86_64::init();
     // SAFETY: Boot is single-threaded, interrupts are disabled, and this runs
@@ -166,7 +174,32 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             .memory_region_count
             .saturating_mul(core::mem::size_of::<MemoryRegion>() as u64);
         frames.reserve_range(info.memory_regions, map_bytes);
+        // The loader retains the staged AppImage and its signed record. They
+        // are loader-owned in the firmware map; reserve them again so a loader
+        // regression cannot hand these pages to the allocator.
+        if info.linux_appimage.is_present() {
+            frames.reserve_range(info.linux_appimage.address, info.linux_appimage.length);
+        }
+        if info.linux_appimage_record.is_present() {
+            frames.reserve_range(
+                info.linux_appimage_record.address,
+                info.linux_appimage_record.length,
+            );
+        }
     });
+
+    if info.linux_appimage.is_present() && info.linux_appimage_record.is_present() {
+        serial_line!(
+            "boot: loader staged AppImage address={:#x} length={} record={:#x} record_length={}",
+            info.linux_appimage.address,
+            info.linux_appimage.length,
+            info.linux_appimage_record.address,
+            info.linux_appimage_record.length
+        );
+    } else {
+        serial_line!("boot: no loader-staged AppImage in the hand-off");
+    }
+    linux::stage_appimage(info.linux_appimage, info.linux_appimage_record);
 
     let framebuffer_mapped =
         match memory::with_frame_allocator(|frames| memory::paging::init(frames, info, regions)) {
@@ -241,4 +274,22 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 fn boot_failure(reason: &str) -> ! {
     serial_line!("AETHER_BOOT_FAILED reason={reason}");
     arch::x86_64::halt()
+}
+
+/// Returns `true` when an absent artifact or a present artifact fully inside a
+/// loader-owned memory region. This prevents the import path from
+/// dereferencing a firmware-supplied address outside the identity-mapped
+/// loader allocation.
+fn artifact_in_loader_memory(artifact: aether_abi::BootArtifact, regions: &[MemoryRegion]) -> bool {
+    if !artifact.is_present() {
+        return true;
+    }
+    let Some(end) = artifact.address.checked_add(artifact.length) else {
+        return false;
+    };
+    regions.iter().any(|region| {
+        region.kind() == Some(MemoryKind::Loader)
+            && artifact.address >= region.start
+            && region.end().is_some_and(|region_end| end <= region_end)
+    })
 }

@@ -173,13 +173,19 @@ exact AppImage digest, and the runtime version.
   verifies it against the test trust store, imports it with a 4 MiB bootstrap
   bump heap, and the Linux file syscalls read from the imported table
   (`AETHER_LINUX_IMPORT_OK`). A second, differently identified AppImage is
-  staged by the harness: `tools/build-appimage-fixture.sh` creates a type-2
-  container with a signed `linux-appimage` record, the kernel verifies the
-  record and digest before parsing, imports the SquashFS payload, and launches
-  `/usr/bin/app` (`AETHER_LINUX_APPIMAGE_OK`,
-  `AETHER_LINUX_APPIMAGE_EXEC_OK`). The identity and version come from the
-  signed record, not kernel constants. This is a harness-staged artifact; there
-  is no persistent block device or user-facing file picker yet.
+  staged by the UEFI loader, not embedded in the kernel: the loader reads
+  `\linux\app.AppImage` and `\linux\app.import` from the boot volume, retains
+  the buffers below 4 GiB, and publishes their physical extents in `BootInfo`
+  v4 (`linux_appimage`, `linux_appimage_record`). The kernel verifies the
+  signed `linux-appimage` record and image digest against the trust store
+  before the container parser or SquashFS importer sees them, then imports the
+  payload and launches `/usr/bin/app`
+  (`AETHER_LINUX_APPIMAGE_STAGED_OK source=loader`,
+  `AETHER_LINUX_APPIMAGE_OK`, `AETHER_LINUX_APPIMAGE_EXEC_OK`). The identity
+  and version come from the signed record, not kernel constants, and the
+  AppImage runtime is never executed. A missing or tampered file fails closed
+  before parsing or launch. This is still a boot-volume artifact with no
+  user-facing file picker or persistent block device.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
   fragments, directories, symlinks, hardlink marking, xattr policy and

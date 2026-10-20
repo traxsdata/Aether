@@ -21,7 +21,7 @@ Defined in [`abi/src/lib.rs`](../../abi/src/lib.rs).
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | `u64` | `0x4145_5448_4552_4f53` (`AETHEROS`) |
-| `version` | `u32` | Current value: `3` |
+| `version` | `u32` | Current value: `4` |
 | `struct_size` | `u32` | Size of this structure in bytes |
 | `memory_regions` | `u64` | Physical address of the region array |
 | `memory_region_count` | `u64` | Number of regions, at most 256 |
@@ -30,11 +30,20 @@ Defined in [`abi/src/lib.rs`](../../abi/src/lib.rs).
 | `entry_point` | `u64` | Kernel entry physical address |
 | `system_table` | `u64` | UEFI system table for runtime services, or 0 |
 | `framebuffer` | `FramebufferInfo` | Linear GOP framebuffer or all-zero |
+| `linux_appimage` | `BootArtifact` | Loader-staged AppImage extent, or all-zero |
+| `linux_appimage_record` | `BootArtifact` | Signed import-record extent, or all-zero |
 | `reserved` | `[u64; 4]` | Must be zero |
 
-The current structure size is 136 bytes and the version is 3. A kernel that
+The current structure size is 168 bytes and the version is 4. A kernel that
 sees a smaller `struct_size`, an unknown version, or a bad magic refuses to
 boot.
+
+`BootArtifact` contains a physical `address` and `length`. An all-zero pair is
+absent; a half-present, misaligned, overflowing, or oversized pair is rejected.
+The AppImage is bounded to 32 MiB and its record to 64 KiB. The loader reads
+`\linux\app.AppImage` and `\linux\app.import` from the boot volume, keeps the
+pages allocated across `ExitBootServices`, and never executes the AppImage
+runtime. The kernel verifies the record and digest before parsing.
 
 ## FramebufferInfo
 
@@ -64,6 +73,9 @@ validation pass. `PixelFormat::encode_rgb` / `decode_rgb` convert the renderer's
 some rendering code ignored the format entirely. Version 3 fixes those semantics
 without changing the structure size. Rebuild loader and kernel together; mixed
 versions are rejected. See [ADR-016](../decisions/ADR-016-desktop-review-and-uefi-correctness.md).
+
+Version 4 appends the two `BootArtifact` descriptors and grows the structure to
+168 bytes. Version 3 loaders cannot boot a version 4 kernel.
 
 ## MemoryRegion
 
@@ -96,7 +108,9 @@ the array. The loader guarantees that:
 
 The kernel must not dereference `memory_regions` before `validate()` succeeds.
 The loader allocates `BootInfo`, the firmware-map buffer, and the region array
-below 4 GiB so they remain inside the kernel's 16 GiB identity map.
+below 4 GiB so they remain inside the kernel's 16 GiB identity map. It applies
+the same rule to the staged AppImage and record, which remain allocated as
+loader-owned memory and are reserved again by the kernel frame allocator.
 
 ## User-space ABI (implemented subset)
 

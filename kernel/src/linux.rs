@@ -2,16 +2,21 @@
 //! Linux runtime root: signed AppImage/SquashFS import at boot.
 //!
 //! The kernel embeds a small signed `linux-rootfs` SquashFS image as the boot
-//! fixture for the Linux layer. Before the Linux task starts, the image's
+//! fixture for the Linux runtime. Before the Linux task starts, the image's
 //! Ed25519 record is checked against the test trust store, its digest is
 //! compared, and the tree is imported with `aether-squashfs`. The resulting
 //! read-only file table is what Linux `openat`/`read` see.
 //!
-//! This is not the final AppImage path: the image is embedded, the trust store
-//! is a test fixture, and the import runs once at boot. It does prove signed
-//! rootfs consumption and the same parser used by host import.
+//! The user AppImage is different: the UEFI loader reads it from
+//! `\linux\app.AppImage` together with `\linux\app.import`, retains the pages,
+//! and reports their physical extents in `BootInfo`. The kernel verifies the
+//! signed record and digest before either the container parser or the
+//! SquashFS importer sees the bytes. The AppImage runtime is never executed.
+//!
+//! The trust store is still a test fixture and the import runs once at boot.
 
 use crate::serial_line;
+use aether_abi::BootArtifact;
 use aether_appimage::manifest;
 use aether_packaging::signed::{TrustStore, TrustedPublisher};
 use aether_squashfs::{Image, Limits};
@@ -26,8 +31,6 @@ pub const MAX_FDS: usize = 8;
 
 const ROOTFS: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS"));
 const ROOTFS_RECORD: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS_RECORD"));
-const APPIMAGE: &[u8] = include_bytes!(env!("AETHER_LINUX_APPIMAGE"));
-const APPIMAGE_RECORD: &[u8] = include_bytes!(env!("AETHER_LINUX_APPIMAGE_RECORD"));
 const APPIMAGE_PROGRAM: &str = env!("AETHER_LINUX_APPIMAGE_PROGRAM");
 const TRUST_PUBLIC_KEY: &str = include_str!("../../tests/fixtures/keys/test.pub");
 const TRUST_PUBLISHER: &str = "Aether Test Publisher";
@@ -50,6 +53,25 @@ struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
 static ROOT: Global<Option<Root>> = Global(UnsafeCell::new(None));
+
+/// Physical extents published by the loader for the staged AppImage.
+struct StagedApp {
+    appimage: BootArtifact,
+    record: BootArtifact,
+}
+
+static STAGED: Global<Option<StagedApp>> = Global(UnsafeCell::new(None));
+
+/// Records the loader-staged AppImage and its signed import record.
+///
+/// Called once from the kernel entry point after `BootInfo` validation. The
+/// distinct artifact type keeps these pages separate from the embedded runtime
+/// rootfs; nothing here is trusted until [`import_appimage`] verifies the
+/// record against the trust store.
+pub fn stage_appimage(appimage: BootArtifact, record: BootArtifact) {
+    // SAFETY: Boot is single-threaded and this is the only write to STAGED.
+    unsafe { *STAGED.0.get() = Some(StagedApp { appimage, record }) };
+}
 
 /// Selected Linux runtime profile from the packaged rootfs.
 pub struct RuntimeProfile {
@@ -201,24 +223,50 @@ pub fn runtime_profile() -> Option<&'static RuntimeProfile> {
     unsafe { (*RUNTIME.0.get()).as_ref() }
 }
 
-/// Verifies and imports the user-supplied AppImage fixture.
+/// Verifies and imports the loader-staged user AppImage.
 ///
 /// The identity, version, and digest come from the signed `linux-appimage`
-/// record, not from kernel constants. The record and image digest are checked
-/// before the container parser or SquashFS importer sees either one.
+/// record on the boot volume, not from kernel constants. The loader reported
+/// only a physical extent; the record and image digest are checked before the
+/// container parser or SquashFS importer sees either one. A missing or
+/// tampered artifact fails closed before any parsing or launch.
 pub fn import_appimage() -> Result<(), ()> {
-    let trust = trust().ok_or(())?;
-    let record = manifest::verify_image(APPIMAGE_RECORD, &trust, APPIMAGE).map_err(|error| {
-        serial_line!("linux: AppImage record rejected: {error:?}");
+    // SAFETY: STAGED is written once during boot and immutable afterwards.
+    let Some(staged) = (unsafe { (*STAGED.0.get()).as_ref() }) else {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=missing");
+        return Err(());
+    };
+    if !staged.appimage.is_present() || !staged.record.is_present() {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=missing");
+        return Err(());
+    }
+    let appimage = staged_bytes(staged.appimage).map_err(|()| {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=bounds");
     })?;
-    let info = aether_appimage::parse(APPIMAGE).map_err(|error| {
+    let record_bytes = staged_bytes(staged.record).map_err(|()| {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=record-bounds");
+    })?;
+    let trust = trust().ok_or_else(|| {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=trust");
+    })?;
+    let record = manifest::verify_image(record_bytes, &trust, appimage).map_err(|error| {
+        serial_line!("linux: AppImage record rejected: {error:?}");
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=verify");
+    })?;
+    serial_line!(
+        "AETHER_LINUX_APPIMAGE_STAGED_OK source=loader id={} version={} bytes={}",
+        record.id,
+        record.version,
+        appimage.len()
+    );
+    let info = aether_appimage::parse(appimage).map_err(|error| {
         serial_line!("linux: AppImage container rejected: {error:?}");
     })?;
     let start = info.squashfs_offset;
     let end = start
         .checked_add(usize::try_from(info.squashfs_bytes).map_err(|_| ())?)
         .ok_or(())?;
-    let image = Image::from_squashfs(APPIMAGE.get(start..end).ok_or(())?).map_err(|error| {
+    let image = Image::from_squashfs(appimage.get(start..end).ok_or(())?).map_err(|error| {
         serial_line!("linux: AppImage SquashFS rejected: {error:?}");
     })?;
     let tree = image.import(Limits::default()).map_err(|error| {
@@ -247,6 +295,21 @@ pub fn import_appimage() -> Result<(), ()> {
         })
     };
     Ok(())
+}
+
+/// Borrows a loader-staged artifact as a byte slice.
+///
+/// `BootInfo::validate` bounds the address and length before this is called.
+/// The loader allocated the pages below 4 GiB and retained them across
+/// `ExitBootServices`; the kernel identity map covers the full extent.
+fn staged_bytes(artifact: BootArtifact) -> Result<&'static [u8], ()> {
+    let length = usize::try_from(artifact.length).map_err(|_| ())?;
+    if !artifact.is_present() || length == 0 {
+        return Err(());
+    }
+    // SAFETY: The ABI validation bounded `address + length` below 2^52, and
+    // the loader-owned pages remain mapped and readable for the whole boot.
+    Ok(unsafe { core::slice::from_raw_parts(artifact.address as *const u8, length) })
 }
 
 /// Returns the imported AppImage identity, version, and launch path.

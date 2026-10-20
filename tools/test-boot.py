@@ -50,6 +50,9 @@ FAILURES = (
 )
 EXPECT_FAULT = os.environ.get("AETHER_EXPECT_FAULT") == "1"
 EXPECT_BOOT_FAILURE = os.environ.get("AETHER_EXPECT_BOOT_FAILURE") == "1"
+# Optional substring that a deliberately failing boot must contain. This proves
+# the intended fail-closed branch ran instead of some unrelated failure.
+EXPECT_FAILURE_TEXT = os.environ.get("AETHER_EXPECT_FAILURE_TEXT", "")
 TIMEOUT = int(os.environ.get("AETHER_BOOT_TIMEOUT", "90"))
 
 def qemu_command(code: Path, variables: Path | None) -> list[str]:
@@ -122,7 +125,9 @@ def main() -> int:
                     print("FAIL: fault self-test hit an unexpected failure", file=sys.stderr)
                     return 1
             elif EXPECT_BOOT_FAILURE:
-                if has_failure(log):
+                if has_failure(log) and (
+                    not EXPECT_FAILURE_TEXT or EXPECT_FAILURE_TEXT in log
+                ):
                     print(log)
                     print("PASS: harness detected the expected boot failure")
                     return 0

@@ -61,7 +61,7 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
-| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, pinned host-glibc root profile, and embedded signed-rootfs in-OS import implemented**; the populated Mesa/Wayland rootfs, a cross-host reproducible pin, and user-supplied AppImage import are missing |
+| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, pinned host-glibc root profile, embedded signed-rootfs in-OS import, and loader-staged signed AppImage import implemented**; the populated Mesa/Wayland rootfs, a cross-host reproducible pin, and user-selected AppImage import are missing |
 | ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static and dynamic exec fixtures propagate bounded argv/envp; a `PT_INTERP` fixture, opt-in host-glibc hello, and a host-derived pinned glibc/loader profile run; Mesa/Wayland libraries and a cross-host reproducible pin remain missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: eager-copy fork, blocking `wait4` with nonchild/selector checks, bounded same-session process groups with `setpgid`/`getpgid`/`getsid`/`setsid` validation, static/dynamic exec, and bounded `clone3` thread creation; stopped/continued waits and group selectors return `ENOSYS`/`EINVAL` |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `clone` and `clone3` threads, per-thread stacks/TLS, clear-child-tid join, and bounded `rseq` registration/validation (CPU id always 0, no abort notifications); detach and affinity remain |
@@ -191,11 +191,20 @@ and runs a dynamically linked C hello through `ld.so`, relocations, and shared
 production runtime. `make runtime-rootfs-pinned` packages the host-derived
 pinned profile, and the normal boot test consumes it: the kernel verifies the
 manifest digest against the build pin and reports the exact glibc version
-(`AETHER_RUNTIME_ROOT_OK`). A separately identified signed AppImage is staged
-by `tools/build-appimage-fixture.sh`; the kernel verifies its record and digest
-before import and launches `/usr/bin/app` (`AETHER_LINUX_APPIMAGE_OK`,
-`AETHER_LINUX_APPIMAGE_EXEC_OK`). The user AppImage is harness-staged, not
-selected from a persistent device or file picker. File metadata, `readlink`, `fcntl`, descriptor duplication,
+(`AETHER_RUNTIME_ROOT_OK`). A separately identified signed AppImage is built by
+`tools/build-appimage-fixture.sh`, copied to the boot volume as
+`\linux\app.AppImage` with its signed record at `\linux\app.import`, and read
+by the UEFI loader rather than embedded in the kernel. The loader publishes
+the physical extents in `BootInfo` v4 and retains the buffers; the kernel
+verifies the record and digest against the trust store before parsing,
+reports `AETHER_LINUX_APPIMAGE_STAGED_OK source=loader`, imports the payload,
+and launches `/usr/bin/app` (`AETHER_LINUX_APPIMAGE_OK`,
+`AETHER_LINUX_APPIMAGE_EXEC_OK`). The AppImage runtime is never executed.
+A missing file fails in the loader and a tampered file fails verification
+before parsing or launch (`make appimage-stage-missing-test`,
+`make appimage-stage-tamper-test`). The user AppImage is still placed on the
+boot volume by the image build, not selected from a persistent device or file
+picker. File metadata, `readlink`, `fcntl`, descriptor duplication,
 directory enumeration, and a bounded pipe with non-blocking `poll` are also
 exercised (`AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
 `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). Inotify exercises
@@ -324,9 +333,10 @@ revocation tests, and a compatibility record no better than the suite supports.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.
 7. No persistent storage; the RAM disk and the application overlay are
    volatile, so overlay persistence is limited to one boot.
-8. The AppImage import path is exercised with a harness-staged second signed
-   artifact; there is no user file picker, persistent block device, or runtime
-   package channel yet.
+8. The AppImage import path is exercised with a separately built signed
+   artifact that the UEFI loader stages from the boot volume. There is no user
+   file picker, writable install location, or persistent block device, so the
+   artifact is still test-built rather than user-supplied.
 
 These are ordered dependencies, not independent bugs. Gate 3 does not require
 graphics; Gate 4 does. Owners and test IDs are in the
