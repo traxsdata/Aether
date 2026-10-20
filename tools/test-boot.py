@@ -33,6 +33,7 @@ SUCCESS_MARKERS = (
     "AETHER_SANDBOX_OK",
     "AETHER_SUPERVISOR_OK",
     "AETHER_RECOVERY_OK",
+    "AETHER_REVOCATION_OK",
     "AETHER_PACKAGE_OK",
     "AETHER_RUNTIME_OK",
     "AETHER_UPDATE_OK",
@@ -158,14 +159,16 @@ def main() -> int:
                     print("FAIL: expected a boot failure, but the boot succeeded", file=sys.stderr)
                     return 1
             else:
-                if all(marker in log for marker in SUCCESS_MARKERS):
-                    print(log)
-                    print(f"PASS: {' '.join(SUCCESS_MARKERS)}")
-                    return 0
+                # Check failure markers first: a kernel that prints the
+                # success markers and then fails must not be accepted.
                 if any(marker in log for marker in FAILURES):
                     print(log)
                     print("FAIL: boot reported an error", file=sys.stderr)
                     return 1
+                if all(marker in log for marker in SUCCESS_MARKERS):
+                    print(log)
+                    print(f"PASS: {' '.join(SUCCESS_MARKERS)}")
+                    return 0
             time.sleep(0.25)
         print(read_serial())
         if EXPECT_FAULT:
