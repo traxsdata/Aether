@@ -156,6 +156,19 @@ if [ "$copied" -eq 0 ]; then
     exit 1
 fi
 
+# Replace the host Wayland client with the in-app Aether bridge when the build
+# supplies one. The SONAME and path stay identical so winit/SCTK and lavapipe
+# resolve the bridge without application changes.
+if [ -n "${AETHER_WAYLAND_BRIDGE_DIR:-}" ]; then
+    for bridge in libwayland-client.so.0 libwayland-cursor.so.0; do
+        if [ ! -f "$AETHER_WAYLAND_BRIDGE_DIR/$bridge" ]; then
+            echo "error: Wayland bridge missing: $AETHER_WAYLAND_BRIDGE_DIR/$bridge" >&2
+            exit 1
+        fi
+        cp "$AETHER_WAYLAND_BRIDGE_DIR/$bridge" "$ROOT/lib/x86_64-linux-gnu/$bridge"
+    done
+fi
+
 # The Vulkan loader resolves this ICD by its normal system path.
 cat > "$ROOT/usr/share/vulkan/icd.d/lvp_icd.json" <<'ICD'
 {
