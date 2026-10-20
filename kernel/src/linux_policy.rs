@@ -66,8 +66,8 @@ pub const fn classify(number: u64) -> Class {
         9 | 10 | 11 | 12 | 25 | 158 => Class::Memory,
         // clone, fork, vfork, execve, exit, wait4, getpid, set/get groups,
         // set_tid_address and similar process bookkeeping.
-        39 | 56 | 57 | 58 | 59 | 60 | 61 | 63 | 102 | 104 | 107 | 108 | 109 | 110 | 112
-        | 121 | 186 | 218 | 231 | 273 | 274 | 334 | 435 => Class::Process,
+        39 | 56 | 57 | 58 | 59 | 60 | 61 | 63 | 102 | 104 | 107 | 108 | 109 | 110 | 112 | 121
+        | 186 | 218 | 231 | 273 | 274 | 334 | 435 => Class::Process,
         // rt_sigaction, rt_sigprocmask, rt_sigreturn, kill, tgkill, sigaltstack.
         13 | 14 | 15 | 62 | 131 | 234 => Class::Signal,
         // clock_gettime, nanosleep, clock_nanosleep, timerfd.

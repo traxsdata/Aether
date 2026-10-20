@@ -21,6 +21,7 @@ mod ipc;
 mod linux;
 mod linux_loader;
 mod linux_policy;
+mod linuxd;
 mod memory;
 mod packaging;
 mod portal;

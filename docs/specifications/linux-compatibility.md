@@ -149,8 +149,9 @@ zstd/gzip/lz4/lzo/xz/lzma SquashFS metadata, file data, fragments, directories,
 and symlinks, with extraction limits, symlink/hardlink policy, an explicit
 xattr allowlist/denylist, and a host `squashfs-extract` tool. It extracts all 16 files (48,350,419 bytes) and two
 symlinks from the tested AppImage. Runtime-rootfs packaging/signing and in-OS
-import of an embedded signed rootfs are implemented; the populated glibc/Mesa
-rootfs and user-supplied AppImage import remain Gate 2 work.
+import of both the packed runtime rootfs and a separately identified signed
+AppImage are implemented. The runtime pin is host-derived (glibc only); Mesa
+and Wayland content are still absent.
 
 ### Gate 1 — Host-interface inventory
 
@@ -187,7 +188,14 @@ hands control from the test interpreter to the main entry
 rootfs from host glibc, resolves the real `PT_INTERP` path through that rootfs,
 and runs a dynamically linked C hello through `ld.so`, relocations, and shared
 `libc` (`AETHER_GLIBC_OK`). This is a host-ABI smoke test, not the pinned
-production runtime. File metadata, `readlink`, `fcntl`, descriptor duplication,
+production runtime. `make runtime-rootfs-pinned` packages the host-derived
+pinned profile, and the normal boot test consumes it: the kernel verifies the
+manifest digest against the build pin and reports the exact glibc version
+(`AETHER_RUNTIME_ROOT_OK`). A separately identified signed AppImage is staged
+by `tools/build-appimage-fixture.sh`; the kernel verifies its record and digest
+before import and launches `/usr/bin/app` (`AETHER_LINUX_APPIMAGE_OK`,
+`AETHER_LINUX_APPIMAGE_EXEC_OK`). The user AppImage is harness-staged, not
+selected from a persistent device or file picker. File metadata, `readlink`, `fcntl`, descriptor duplication,
 directory enumeration, and a bounded pipe with non-blocking `poll` are also
 exercised (`AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
 `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`). Inotify exercises
@@ -233,7 +241,15 @@ re-arm (`AETHER_LINUX_EPOLL_BLOCK_OK`), and cross-process blocking pipe
 read/write plus end-of-file (`AETHER_LINUX_PIPE_BLOCK_OK`). Relative and
 absolute sleeps with signal `EINTR` (`AETHER_LINUX_NANOSLEEP_OK`) and
 one-shot/periodic timerfds seen through `poll` and `epoll`
-(`AETHER_LINUX_TIMERFD_OK`) are also exercised. A static freestanding Linux ELF runs at CPL3,
+(`AETHER_LINUX_TIMERFD_OK`) are also exercised. A bounded `linuxd` supervisor
+service prototype selects the verified runtime profile, checks the signed
+AppImage identity and launch path, and reports status (`AETHER_LINUXD_OK`). It
+remains kernel-side: Linux syscalls are still dispatched in the kernel, and the
+ring-3 service plus syscall-remoting ABI are unimplemented. The overlay maps
+`/tmp`, `/settings`, and `/logs`, enforces a 1 KiB per-application quota and
+512-byte per-file limit, survives task exit within a boot, and supports erasure
+(`AETHER_LINUX_OVERLAY_PERSIST_OK`, `AETHER_LINUX_OVERLAY_ERASE_OK`). It is
+RAM-backed and does not survive power loss. A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only
@@ -283,10 +299,12 @@ revocation tests, and a compatibility record no better than the suite supports.
 
 ## Current blockers
 
-1. No pinned production glibc/Mesa/Wayland runtime rootfs; the current dynamic
-   proof packages the host glibc and runs a hello, not GridCraft.
-2. No user-space `linuxd`; kernel fixtures do not constitute the planned
-   user-space process/runtime service.
+1. The runtime pin is derived from the host glibc; Mesa and Wayland content are
+   absent, and the pin is not reproducible across hosts until a pinned artifact
+   channel exists.
+2. `linuxd` is a kernel-side supervisor prototype. The ring-3 service,
+   syscall-remoting ABI, and removal of Linux dispatch from the kernel remain
+   unimplemented.
 3. Shared mappings are limited to `MAP_SHARED|MAP_ANONYMOUS` within one
    `CLONE_VM` thread group. File-backed shared mappings are unsupported, and
    `fork()` returns `ENOSYS` while a shared mapping exists. Per-domain VMA,
@@ -304,8 +322,11 @@ revocation tests, and a compatibility record no better than the suite supports.
 5. No populated and pinned glibc/Mesa/Wayland runtime rootfs, Wayland service,
    or software renderer.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.
-7. No persistent storage; the current RAM disk is volatile.
-8. No user-supplied AppImage opening or Linux runtime package channel.
+7. No persistent storage; the RAM disk and the application overlay are
+   volatile, so overlay persistence is limited to one boot.
+8. The AppImage import path is exercised with a harness-staged second signed
+   artifact; there is no user file picker, persistent block device, or runtime
+   package channel yet.
 
 These are ordered dependencies, not independent bugs. Gate 3 does not require
 graphics; Gate 4 does. Owners and test IDs are in the
