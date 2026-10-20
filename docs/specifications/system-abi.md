@@ -21,7 +21,7 @@ Defined in [`abi/src/lib.rs`](../../abi/src/lib.rs).
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | `u64` | `0x4145_5448_4552_4f53` (`AETHEROS`) |
-| `version` | `u32` | Current value: `2` |
+| `version` | `u32` | Current value: `3` |
 | `struct_size` | `u32` | Size of this structure in bytes |
 | `memory_regions` | `u64` | Physical address of the region array |
 | `memory_region_count` | `u64` | Number of regions, at most 256 |
@@ -32,7 +32,7 @@ Defined in [`abi/src/lib.rs`](../../abi/src/lib.rs).
 | `framebuffer` | `FramebufferInfo` | Linear GOP framebuffer or all-zero |
 | `reserved` | `[u64; 4]` | Must be zero |
 
-The current structure size is 136 bytes and the version is 2. A kernel that
+The current structure size is 136 bytes and the version is 3. A kernel that
 sees a smaller `struct_size`, an unknown version, or a bad magic refuses to
 boot.
 
@@ -40,12 +40,12 @@ boot.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `base` | `u64` | Physical framebuffer base, or zero |
+| `base` | `u64` | Four-byte-aligned physical framebuffer base, or zero |
 | `size` | `u64` | Mapped byte length, at least `stride * height * 4` |
 | `width` | `u32` | Visible horizontal pixels |
 | `height` | `u32` | Visible vertical pixels |
 | `stride` | `u32` | Pixels per scan line |
-| `format` | `u32` | 0 = BGRX, 1 = RGBX, 2 = bitmask, 3 = blit-only |
+| `format` | `u32` | 0 = RGBX, 1 = BGRX, 2 = bitmask, 3 = blit-only (UEFI GOP values) |
 | `reserved` | `u32` | Must be zero |
 
 An absent framebuffer is all zero. A present descriptor must use a linear
@@ -53,6 +53,17 @@ An absent framebuffer is all zero. A present descriptor must use a linear
 size covering the visible rows. The kernel maps the framebuffer identity,
 cache-disabled, and non-executable. Bitmask and blit-only modes are rejected
 for the current software compositor.
+
+Dimensions and stride are bounded to 8192 pixels, and the aperture to 512 MiB.
+The loader checks the 36-byte GOP mode-information layout (one 16-byte pixel
+mask, stride at offset 32) and never enlarges the reported aperture to make
+validation pass. `PixelFormat::encode_rgb` / `decode_rgb` convert the renderer's
+`0x00RRGGBB` colors to and from native little-endian words, clearing reserved bits.
+
+**Migration from version 2:** version 2 reversed the RGB/BGR discriminant names;
+some rendering code ignored the format entirely. Version 3 fixes those semantics
+without changing the structure size. Rebuild loader and kernel together; mixed
+versions are rejected. See [ADR-016](../decisions/ADR-016-desktop-review-and-uefi-correctness.md).
 
 ## MemoryRegion
 

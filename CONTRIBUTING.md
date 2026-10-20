@@ -26,12 +26,17 @@ git push -u origin feat/<short-topic>
 ```
 
 `make ci` runs formatting, clippy, documentation link checks, licence checks,
-host unit tests, the QEMU boot test, the UEFI ISO boot test, the shell test, the
+Rust host and Python tooling tests, the QEMU boot test, the UEFI ISO boot and
+real-input desktop/Files tests on VGA/SVGA emulation, the shell test, the
 fault-path test, the rollback-path test, a negative boot test that proves the
 harness rejects a deliberately failing kernel, and the signed-release tamper
 demonstration. A hosted GitHub Actions workflow that runs the same commands is a
 follow-up; until it is published, run `make ci` locally before opening the pull
 request so failures are not spread across reviewers.
+
+The gate also generates the Workstation VMX for the tested ISO; this verifies
+configuration generation, not a VMware Workstation boot. Actual Workstation
+results must be listed separately from QEMU SVGA emulation evidence.
 
 Open a pull request against `main`. Keep the branch rebased on current `main`;
 do not force-push a branch that someone else is reviewing unless you have

@@ -73,6 +73,10 @@ It is a planning model, not a delivery promise.
 - [x] Double-buffered software compositor with a host-tested window manager,
   bounded windows, focus/z-order, Spaces, menus, dock, and search.
 - [x] Desktop shell, file manager, settings, and Security Center views.
+- [x] Read-only Files folder navigation, selection, keyboard scrolling, refresh,
+  and bounded text previews; no implicit application-vault access.
+- [x] Cached wallpaper, damage-tracked scene rendering/presentation, cursor-only
+  updates, elapsed-tick animation, and real-input ISO regression tests.
 - [x] File portal with per-process, per-file grant records; revocation blocks
   future portal opens (`AETHER_REVOCATION_OK`).
 - [x] Initial native application SDK (`sdk/`) and user syscall ABI.
@@ -83,6 +87,9 @@ It is a planning model, not a delivery promise.
   Workstation VMX generation (`make vmware-vmx`). A VMware Workstation smoke
   test remains pending; see [the VMware notes](reference/vmware-workstation.md).
 - [ ] Interactive portal consent UI and persistent grant storage.
+- [ ] Ring-3 compositor/application views with capability-scoped surface/input
+  IPC; current ring-0 adapters are trusted, not compromise-contained.
+- [ ] Files copy/move/rename/delete, tabs/split panes, and safe import/export.
 - [ ] GPU acceleration, audio, networking, and multi-window application
   rendering.
 

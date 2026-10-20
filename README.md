@@ -78,11 +78,19 @@ grants, and the desktop is not a security authority.
   rounded windows with traffic-light controls, drag/resize/zoom/minimize, four
   Spaces with an overview, a global Liquid Glass transparency setting,
   high-contrast and reduced-motion modes, and Spotlight-style search. Painted
-  surfaces are composed into a 1920×1200 back buffer and presented atomically.
+  surfaces use a bounded 1920×1200 back buffer, wallpaper caching, damage-tracked
+  repaint/presentation, and a small cursor-only update path. GOP copies are not
+  atomic page flips and do not guarantee tear-free scanout.
 - Original vector artwork, a procedural wallpaper, an original 5×7 typeface,
-  and a host-testable `aether-wm` state/layout crate with 35 model tests.
+  and a host-testable `aether-wm` state/layout and Files-browser model.
+- Working read-only Files navigation: sidebar locations, folder selection and
+  double-click/Enter, parent navigation, keyboard scrolling, refresh, and bounded
+  text previews. Private application vaults are denied by the service adapter.
+  Mutations, persistent storage, and a general file/application opener are not
+  implemented.
 - PS/2 keyboard and mouse input: IRQ1 and IRQ12, modifier capture, bounded
-  queues, packet validation, and a deterministic pointer self-test.
+  queues, E0 dedicated arrows, independent left/right modifiers, packet
+  validation, retained pointer press/release events, and deterministic self-tests.
 - A UEFI El Torito ISO boot test (`make iso-test`) and a generated VMware
   Workstation `.vmx` (`make vmware-vmx`) for the newest ISO.
 - A native application SDK (`sdk/`) for the initial syscall surface,
@@ -117,19 +125,22 @@ grants, and the desktop is not a security authority.
 - Host unit tests for ABI layout and region validation, memory arithmetic, the
   frame allocator, page-table encoding, capability tables, IPC endpoints, the
   filesystem, service supervision, application lifecycle, the window-manager
-  model and layout, hashes, signatures, package policy, update policy, runtime
-  policy, and the defensive ELF parser.
+  model and layout, browser navigation, input decoders, actual renderer writes
+  against guarded/padded surfaces, hashes, signatures, package/update/runtime
+  policy, build tooling, and the defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
   `AETHER_IPC_OK`, `AETHER_IPC_USER_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`,
   `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`,
   `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
-  `AETHER_WM_OK`, `AETHER_POINTER_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
+  `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
   `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
 - `make iso-test`, which boots the generated ISO through UEFI El Torito and
-  requires the loader, kernel, graphics, desktop, window-manager, pointer,
-  shell, and boot markers.
+  requires the full boot/security marker set. It drives real PS/2 window and
+  Files interactions on VGA and QEMU's VMware SVGA device, checks RGB colors and
+  partial/full screenshot equality, and records redraw timings. This is not a
+  VMware Workstation qualification.
 - `make shell-test`, which drives the console over a QEMU serial socket and
   checks filesystem, service, memory, portal grant/revocation, package,
   runtime, update, recovery, desktop, and input commands.
@@ -149,9 +160,10 @@ grants, and the desktop is not a security authority.
   release/tamper demonstration. A hosted GitHub Actions workflow is a separate
   follow-up.
 
-A representative serial transcript from a successful `make test` boot (region
-counts, frame addresses, and ELF extents vary with firmware, build, and feature
-set; `commit=` is bracketed so this file does not have to be rebuilt):
+The following illustrates the format of a successful `make test` transcript;
+it is not a fresh tested-commit attestation. Addresses, counts, ELF extents,
+checksums and timings vary by firmware/build. Use the captured logs and artifact
+digest from your own test run for PR evidence (`commit=` is elided here):
 
 ```text
 AETHER_LOADER_OK stage=entry version=0.1.0
@@ -162,12 +174,12 @@ loader: memory regions=39 usable=1012 MiB
 loader: boot services exited after 1 attempt(s)
 AETHER_LOADER_HANDOFF entry=0x4000000
 AETHER_KERNEL_OK stage=entry version=0.1.0 commit=...
-boot: hand-off validated (version 2, 136 bytes)
+boot: hand-off validated (version 3, 136 bytes)
 boot: memory map: 39 regions, 1012 MiB allocatable
 boot: cpu: NX and write-protect enabled
 boot: paging: identity map to 1024 MiB, 9 page-table frames, CR3=0x0000000000100000
 boot: framebuffer mapped 1280x800 stride=1280 format=1
-graphics: framebuffer 1280x800 format=RedGreenBlueReserved backbuffer=on
+graphics: framebuffer 1280x800 format=BlueGreenRedReserved backbuffer=on
 boot: graphics service ready
 boot: frame allocator: 1011 MiB free (258919 frames), bitmap capacity 16384 MiB
 AETHER_MM_OK
@@ -187,8 +199,8 @@ AETHER_GRAPHICS_OK mode=1280x800 format=linear
 AETHER_DESKTOP_OK windows=3 spaces=4 checksum=0x31803549
 input: ps2 mouse ready
 AETHER_POINTER_OK dx=12 dy=-2 packets=1
-desktop: activated window=FILES
 AETHER_INPUT_OK keys=8 dropped=0 queue=32 mouse=ps2
+AETHER_FILES_OK folders=4 navigation=1 preview=1 private_denied=1
 AETHER_WM_OK windows=3 spaces=4 dock=8 menus=6 search=1 glass=Tinted
 Aether console shell. Type 'help' for commands.
 AETHER_SHELL_OK
@@ -248,7 +260,7 @@ Prerequisites on a Linux host:
   (pinned by `rust-toolchain.toml`).
 - `mtools` (`mformat`, `mmd`, `mcopy`).
 - QEMU (`qemu-system-x86_64`) and OVMF firmware for `make test`.
-- GNU Make and Python 3.
+- GNU Make and Python 3.11 or later.
 - `xorriso` for `make iso`.
 
 ```sh
@@ -284,7 +296,7 @@ make docs-check    # relative Markdown links
 make license-check # workspace and dependency licence metadata
 make lint          # rustfmt, host/kernel/user/loader clippy
 make iso           # timestamped UEFI El Torito ISO under build/ISOs
-make iso-test      # boot the ISO through UEFI and require the desktop markers
+make iso-test      # boot ISO on VGA/SVGA; test actual window/Files interactions
 make vmware-vmx    # write build/aether-vmware.vmx for the newest ISO
 make release       # signed release bundle (requires a signing key)
 make release-check # verify a release bundle against a trusted publisher key
@@ -317,6 +329,7 @@ updates/             signed update manifests and rollback policy (no_std)
 kernel/fs/           host-testable virtual block device and filesystem
 kernel/memory/       host-testable frame allocator and page-table encoding
 kernel/ipc/          host-testable capability tables and IPC endpoints
+kernel/input/        host-testable PS/2 decoders, modifiers, and event queues
 kernel/services/     host-testable supervisor, lifecycle, and runtime profiles
 kernel/wm/           host-testable window-manager model, layout, and animation
 kernel/              Aether kernel (no_std, target x86_64-unknown-none)
@@ -326,7 +339,7 @@ kernel/              Aether kernel (no_std, target x86_64-unknown-none)
   src/runtime.rs     runtime profile registration and isolation self-test
   src/updates.rs     signed update verification and policy self-test
   src/desktop.rs     double-buffered Golden Gate-inspired desktop shell
-  src/graphics.rs    clipped, anti-aliased primitives and back-buffer present
+  src/graphics.rs    clipped software primitives, caches, damaged-region present
   src/icons.rs       original vector icon and wallpaper artwork
   src/input.rs       PS/2 keyboard and mouse service
   src/portal.rs      scoped file portal grants
@@ -334,6 +347,7 @@ kernel/              Aether kernel (no_std, target x86_64-unknown-none)
 sdk/                 native application SDK
 tests/fixtures/      test keys and signed package/update fixtures
 tests/compatibility/ compatibility database and classification harness
+tests/rendering/     host harness for the actual kernel graphics module
 tools/               boot, shell, ISO, release, and qualification harnesses
 tools/admin/         package/update/release signing tool (host only)
 user/                ring-3 native init and sandbox test
@@ -397,7 +411,8 @@ until it is closed because revocation cannot undo bytes already read.
 The desktop is not a policy authority: it can display grants and request
 capabilities, but the filesystem and portal services make the decision. Desktop
 and service code still runs in the kernel in this prototype, so that separation
-is a code-structure rule, not an enforced user-space boundary. Service profiles
+is a code-structure rule, not an enforced user-space boundary: compromise of the
+ring-0 compositor would be kernel compromise. Service profiles
 are declared and the supervisor quarantines a service that exhausts its restart
 budget.
 

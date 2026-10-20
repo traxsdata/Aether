@@ -13,16 +13,26 @@ do not add virtual hardware the kernel does not drive.
 ```sh
 . "$HOME/.cargo/env"
 make iso
+make iso-test
 make vmware-vmx
 ```
 
 `make iso` writes a timestamped image under `build/ISOs/`. `make vmware-vmx`
 writes `build/aether-vmware.vmx` with an absolute `cdrom-image` path to the
-newest ISO.
+newest ISO. The VMX target does not rebuild it, so the image you just tested is
+the image attached to the VM. To use a specific existing artifact:
+
+```sh
+AETHER_ISO=/absolute/path/aether.iso sh tools/make-vmware-vmx.sh
+```
+
+If you copy the ISO/VMX to a different host (for example from a Linux build host
+to Windows Workstation), update `ide1:0.fileName` and `serial0.fileName` to paths
+on that host, or create the VM manually using the table below.
 
 ## Open the generated VM
 
-1. Install VMware Workstation with UEFI virtual-machine support.
+1. Install VMware Workstation 17 or later (the VMX uses hardware version 20).
 2. Open `build/aether-vmware.vmx` (or create a custom VM from the ISO).
 3. Confirm **Firmware: UEFI**, not BIOS. Aether has no BIOS boot path.
 4. Disable **Secure Boot**. The prototype ISO is unsigned.
@@ -51,31 +61,62 @@ ISO again.
 | USB | Not present |
 | Pointer | PS/2 |
 
-The generated `.vmx` sets these values.
+The generated `.vmx` sets these values, limits the advertised display to
+1920×1200 for the buffered path, disables the enhanced/USB pointer, and captures
+COM1 in `build/aether-vmware-serial.log`.
 
 ## Framebuffer behaviour
 
 VMware's virtual SVGA adapter reports a GOP mode through UEFI. The kernel
-accepts any linear 32-bit GOP mode, composes into a 1920×1200 back buffer, and
-falls back to direct framebuffer painting above that size. The layout adapts to
+accepts validated linear 32-bit GOP modes, uses a 1920×1200 back buffer plus a
+wallpaper cache, repaints damaged regions, and uses a small cursor-only path.
+Modes above that buffer size fall back to slower direct framebuffer painting.
+The layout adapts to
 800×600, 1024×768, 1280×800, 1440×900, and 1920×1080; the work area is derived
 from the visible framebuffer rather than a hard-coded QEMU resolution.
 
-VMware typically exposes a BGRX framebuffer. The graphics service writes
-`0x00RRGGBB` and treats both linear GOP format codes as the common BGRX memory
-layout. This was verified with QEMU/OVMF screenshots; if a VMware firmware
-reports the opposite byte order on a particular host, the theme colours will
-appear swapped while the desktop remains usable. A framebuffer byte-order
-self-test is follow-up work.
+The loader reads the actual GOP stride (including padding) from the standard
+36-byte mode-information structure and rejects short descriptors/apertures.
+Boot ABI 3 follows UEFI: `0 = RGBX`, `1 = BGRX`. The graphics service converts
+its `0x00RRGGBB` colors for the reported format; it does not assume that all
+firmware is BGRX. Host tests exercise both formats and padded scan lines; the
+ISO tests also check screenshot colors. Dimensions/stride are bounded to 8192
+pixels and mapped apertures to 512 MiB. Rebuild loader and kernel together.
+
+GOP exposes no vblank or page-flip API. Buffered drawing avoids showing each
+intermediate paint operation, but the final copy is not atomic/guaranteed
+tear-free and is not accelerated by VMware 3D settings.
 
 ## Evidence and limits
 
-`make iso-test` boots the generated ISO with OVMF and requires the loader,
-kernel, graphics, desktop, window-manager, pointer, shell, and boot markers. CI
-runs it in addition to the FAT-image boot test.
+`make iso-test` boots the same generated ISO with OVMF on VGA and QEMU's VMware
+SVGA adapter. It requires all boot/security markers, then drives real PS/2
+window movement/resizing, Files navigation/previews, private-vault denial,
+menus/search, and the cursor-only path. It compares damaged/full screenshots,
+checks colors, and reports redraw times. Logs and screenshots are under
+`build/iso-test/`; the artifact path and digest are in `artifact.json`.
 
 The repository's automated environment does not contain VMware Workstation, so
 the VMware path is documented and the identical UEFI El Torito artifact is
 tested under OVMF. A VMware-specific smoke test must be recorded before this
 document is presented as a tested platform. Do not attach a virtual disk or
-store real data: storage and the installer are not implemented.
+store real data: persistent storage and the installer are not implemented.
+
+## Workstation smoke-test checklist (still required)
+
+Record the Workstation version, host OS, ISO SHA-256, dirty/commit identifier,
+VMX settings, GOP mode/stride/format, and the COM1 transcript. Confirm:
+
+1. `AETHER_BOOT_OK`, `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`,
+   `AETHER_INPUT_OK`, and the other required markers appear with no failures.
+2. Close/minimize/restore/zoom, title-bar drag, corner resize, Spaces, search and
+   menus work using both the physical keyboard and grabbed PS/2 pointer.
+3. Files opens Home and `welcome.txt` (double-click or Enter), Backspace returns,
+   refresh works, and private app data is denied.
+4. Traffic-light/accent colors are correct, corners remain rounded, and moving
+   a window/cursor leaves no trails. Capture `desktop` render timings and a
+   screenshot. Do not use QEMU timings as a VMware performance promise.
+
+If a machine stops in firmware, check UEFI, Secure Boot, connected CD/DVD, and
+the ISO path first. If it reaches the desktop but is sluggish, keep 3D off,
+use at most 1920×1200, and inspect `desktop`/`input` counters and the serial log.

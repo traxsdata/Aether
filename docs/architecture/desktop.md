@@ -9,7 +9,7 @@ code, fonts, bitmaps, wallpapers, or icon resources are embedded or traced.
 Every palette value, glyph, icon, animation curve, and layout rule in this tree
 is defined by the project.
 
-The defining reference is the public high-level description of Golden Gate:
+The defining reference is [Apple's public high-level description](https://www.apple.com/os/macos/) of Golden Gate:
 enhanced Liquid Glass readability and a user-controlled opacity slider. Aether
 implements those ideas at the level the current software renderer can honestly
 support: layered alpha compositing, specular highlights, darkened edges, three
@@ -19,7 +19,9 @@ glass levels, and no claim of GPU blur or HDR.
 
 ```text
 aether-wm (kernel/wm)       host-tested policy: geometry, windows, focus,
-                            workspaces, menus, dock, Spotlight, animation
+                            workspaces, menus, dock, Spotlight, animation,
+                            and bounded Files presentation state
+aether-input (kernel/input) host-tested decoders, modifiers, bounded event FIFO
 kernel/src/desktop.rs       renderer and input adapter (trusted kernel code)
 kernel/src/icons.rs         original vector artwork
 kernel/src/graphics.rs      double-buffered software compositor
@@ -27,22 +29,36 @@ kernel/src/input.rs         IRQ1 keyboard and IRQ12 PS/2 mouse
 ```
 
 `aether-wm` is `no_std`, forbids `unsafe`, allocates nothing, and has no
-framebuffer, device, filesystem, or capability access. It is tested on the host
+hardware I/O, ambient service access, or capability handling. Browser requests
+use an explicitly supplied service adapter. It is tested on the host
 for focus, z-order, hit testing, workspace transitions, menu navigation,
 Spotlight filtering, settings, responsive layout, and animation completion.
 
-## Double-buffered composition
+## Bounded, damage-tracked composition
 
-The compositor paints into a static 1920×1200 32-bit back buffer and presents
-the completed frame with one linear copy. This removes the tearing visible when
-an immediate-mode renderer paints directly into a linear framebuffer: a
-screenshot or display never observes a half-drawn window. Modes larger than the
-back buffer fall back to direct painting rather than failing to boot.
+The compositor uses a static 1920×1200 32-bit back buffer and an equally bounded
+wallpaper cache: 18,432,000 bytes total (about 17.6 MiB). It recomputes the
+procedural wallpaper only when its palette changes. Geometry/state changes
+damage both old and new window extents, including shadows. All layers are
+repainted back-to-front inside that region, then only damaged pixels are copied
+to the display. Inner content clips cannot widen the damage clip; a rounded
+silhouette clip prevents content from squaring off the lower window corners.
 
-The back buffer costs 9.2 MiB of kernel BSS. That is deliberate: the prototype
-has no general kernel allocator available to the compositor and no GPU, and a
-bounded static buffer has simple lifetime and security properties. Presentation
-is the only path that writes the real framebuffer.
+A 15×22 backing store restores the pixels under the cursor, so ordinary pointer
+motion does not redraw the scene or copy the whole screen. Queued keys and mouse
+events are batched before rendering, scene frames are paced start-to-start at
+up to roughly 33 Hz (without adding a delay after painting), and animations
+advance by actual elapsed 100 Hz timer ticks. Files reads
+are event-driven, not repeated during every paint. `desktop` reports scene/cursor
+paint counts and coarse last/max render times; `desktop redraw` explicitly
+requests a full repaint for diagnostics.
+
+This prevents intermediate drawing operations from going directly to scanout,
+but **is not atomic or guaranteed tear-free**: GOP has no vblank/page-flip API,
+and the final volatile copy can overlap scanout. Modes larger than the buffers
+fall back to slower direct painting. Descriptor dimensions/stride are bounded
+to 8192 pixels and apertures to 512 MiB. Both UEFI RGBX and BGRX formats and
+padded strides are honored, with host tests of actual surface writes.
 
 The renderer builds an original procedural "golden hour" wallpaper, then paints
 windows back-to-front, the workspace overview, the dock, the menu bar, any open
@@ -70,7 +86,9 @@ The top bar contains the Aether mark (system menu), the active application name,
 File, View, Window, and Help menus, and right-hand status items for search,
 Spaces, security state, and an uptime clock. Every menu is a real static action
 list; there is no decorative menu chrome. Menus support pointer selection and
-keyboard navigation (`Up`, `Down`, `Enter`, `Escape`).
+keyboard navigation (`F10` opens the system menu; `Left`/`Right` change menus;
+`Up`, `Down`, `Enter`, `Escape` navigate/activate/dismiss). Padding and separator
+clicks cannot execute an action, and search-field clicks cannot activate results.
 
 The system menu exposes application windows, Spaces, the overview, and the
 appearance/accessibility toggles. The app menu exposes close, minimize, zoom,
@@ -105,6 +123,27 @@ query, and `Escape` closes the panel. The index is a bounded static table; no
 file contents or private data are searched, and the desktop gains no authority
 from a search result.
 
+## Files application MVP
+
+Files is a working **read-only RAM-filesystem browser**, not a decorative listing
+or a complete Explorer implementation. Open it from the dock or `Ctrl+N`:
+
+- Click a sidebar location (Volume, Home, System, Portal).
+- Select a row and double-click it, or use `Up`/`Down` and `Enter`, to open a
+  folder or a bounded text preview. Selection scrolls into view.
+- `Backspace` or the `<` button closes a preview or opens the parent folder.
+- `F5` or the `R` button refreshes the folder after a diagnostic shell change.
+- Previews show at most 512 bytes, do not execute programs, sanitize unsupported
+  glyphs/control bytes, and mark truncation. Errors are shown, not disguised as
+  empty folders. Failed navigation preserves the previous valid view.
+
+The filesystem-service adapter permits read-only browsing of `/home`, `/system`,
+and `/portal`; the root exposes directory names, but `/apps` vault contents are
+denied. A UI path is not a grant and previewing does not authorize another app.
+This adapter is still trusted ring-0 code, not a separately isolated service.
+Copy/move/rename/delete, tabs/split panes, persistent storage, and portal
+import/export are future work.
+
 ## Liquid Glass and accessibility
 
 Settings provides four live controls:
@@ -119,7 +158,11 @@ Settings provides four live controls:
 Keyboard operation has parity with the pointer: `Tab`/`Ctrl+Tab` cycle focus,
 arrow keys move the focused window, `Ctrl+W` closes, `Ctrl+M` minimizes,
 `Ctrl+F` zooms, `Ctrl+N` opens Files, `Ctrl+,` opens Settings, and `F3` opens
-Spaces. Focus is always visible through the accent border and title treatment.
+Spaces. `Shift+arrows` resize a floating window. In Files, unmodified Up/Down
+select entries rather than moving the window. Settings actions are reachable
+through keyboard menus or search. Focus is visible through the accent border
+and title treatment; minimizing transfers focus immediately, and restoring a
+zoomed window preserves its zoom state.
 
 A screen reader is not implemented in this prototype. Text is an original 5×7
 bitmap font; there is no font scaling or IME support. The high-contrast,
@@ -130,11 +173,15 @@ accessibility scope of this milestone.
 
 `kernel/src/input.rs` owns IRQ1 and IRQ12. The 8259 PIC unmasks IRQ0, IRQ1, the
 IRQ2 cascade, and IRQ12; the IDT installs vectors 32, 33, and 44. The keyboard
-handler decodes set-1 make/break scancodes and captures Ctrl, Alt, Shift, and
-Super modifiers with each key. The mouse driver initialises the auxiliary PS/2
+handler decodes set-1 make/break scancodes, including E0 dedicated arrows, and
+tracks both sides of Ctrl, Alt, Shift, and Super independently. The mouse driver initialises the auxiliary PS/2
 port, enables data reporting, and decodes three-byte packets with correct 9-bit
-sign extension and inverted Y. Both paths use bounded queues/state and never call
-the desktop from interrupt context.
+sign extension and inverted Y. Both paths use bounded FIFOs and never call the
+desktop from interrupt context. Pointer presses/releases are retained between
+paints; after overflow, an atomic final snapshot prevents a stuck drag. Shared
+controller output is routed by its source bit and parity/timeout status, not
+just the IRQ vector. Mouse probing attempts to re-enable the keyboard on every
+exit, including timeout paths.
 
 QEMU and VMware expose legacy PS/2 through the same i8042 interface. If the
 controller probe fails, the desktop remains keyboard-only and the boot log says
@@ -144,10 +191,12 @@ so; keyboard input is not disabled by the mouse probe.
 
 The desktop still runs at ring 0 in this prototype. It is not a security domain
 and must not be presented as one. Its logic is deliberately non-authoritative:
-it reads directory contents through the filesystem service, displays live
-supervisor/application/portal state, and asks the portal for grants. It cannot
-mint a file capability or bypass a filesystem root check. The window manager
-itself has no service access at all.
+it uses filesystem/portal service adapters and displays live service state. Those
+calls are a coding convention: **compromise of ring-0 desktop code is kernel
+compromise**, not a contained application failure. Only the pure WM model has no
+service access. The technical specification's user-space compositor/service
+boundary remains unimplemented; this must not be called a completed microkernel
+desktop. See [ADR-016](../decisions/ADR-016-desktop-review-and-uefi-correctness.md).
 
 Not implemented: GPU acceleration, real background blur, HDR, screen capture,
 per-application GPU surfaces, a user-space compositor protocol, multiple
@@ -155,3 +204,14 @@ displays, persistent preferences, screen readers, IME/text input, window
 snapping, and application-provided window content. The current application
 views are trusted kernel-drawn views over live service state. Moving the
 compositor and application views to ring 3 is follow-up work.
+
+## Validation
+
+`make unittest` covers decoders, browser navigation and malformed data, WM state,
+damage bounds, and the actual graphics module against padded/guarded RAM
+surfaces in `tests/rendering`. `make iso-test` boots the same ISO with VGA and
+QEMU's VMware SVGA adapter, then drives real PS/2 input to test dragging/resizing,
+folder navigation/previews, denied vault access, search/menu interactions, and
+the cursor-only path. It checks RGB colors and compares partial/full screenshots
+while excluding only the changing uptime clock. Logs/screenshots and redraw
+timings are in `build/iso-test/<adapter>/`. This is not a VMware Workstation test.

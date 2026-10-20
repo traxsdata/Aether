@@ -13,7 +13,7 @@ Desktop, file manager, Security Center   implemented (window manager + composito
 Services                                  implemented as supervised kernel modules
   storaged / fsd / appd / inputd / displayd / desktopd / portald / securityd
         |
-Capability-based microkernel              boot, memory, exceptions, scheduler,
+Capability-oriented kernel prototype     boot, memory, exceptions, scheduler,
                                           syscalls, capabilities, IPC, timer,
                                           package/update verification
         |
@@ -42,9 +42,13 @@ supervision rules are already declared.
    still hosts the service implementations in this prototype.
 5. **Application to user data.** Enforced by per-process roots and file
    capabilities. Outside files are reachable only through an exact-path portal
-   grant; the desktop cannot mint authority.
+   grant. Ordinary ring-3 applications cannot mint authority.
 6. **Desktop to policy.** The compositor displays state and requests portal
-   actions. The filesystem, supervisor, and portal services make the decisions.
+   actions through filesystem, supervisor, and portal adapters. This is a coding
+   convention, not an enforced boundary: the current ring-0 compositor is trusted
+   kernel code. A compromise there would be kernel compromise. The specification's
+   user-space compositor/service boundary remains follow-up work; see
+   [ADR-016](../decisions/ADR-016-desktop-review-and-uefi-correctness.md).
 7. **Publisher to system.** A package is installed only after manifest policy,
    publisher pin, Ed25519 signature, and payload digest verification. A signed
    update is activated only when the manifest, image digest, rollback counter,
@@ -61,6 +65,8 @@ supervision rules are already declared.
 - `kernel/memory/` contains the host-tested frame allocator and page-table
   encoding.
 - `kernel/ipc/` contains host-tested capability tables and endpoint queues.
+- `kernel/input/` contains pure input decoders, modifiers, and bounded FIFOs;
+  `kernel/wm/` contains window/layout/damage and browser presentation models.
 - `kernel/services/` contains the host-tested supervisor, application
   lifecycle rules, and runtime profiles.
 - `crypto/` contains dependency-free SHA-256, SHA-512, and Ed25519 used by
