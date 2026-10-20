@@ -312,6 +312,108 @@ _start:
     jle fail_meta
     add $256, %rsp
 
+    sub $512, %rsp
+    /* openat(AT_FDCWD, "/", O_RDONLY|O_DIRECTORY) */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea root_path(%rip), %rsi
+    mov $0x10000, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_dir
+    mov %rax, %r13
+    mov $217, %rax              /* getdents64 */
+    mov %r13, %rdi
+    mov %rsp, %rsi
+    mov $512, %rdx
+    syscall
+    test %rax, %rax
+    jle fail_dir
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+
+    /* openat(AT_FDCWD, "/usr/bin", O_RDONLY|O_DIRECTORY) */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea usrbin_path(%rip), %rsi
+    mov $0x10000, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_dir
+    mov %rax, %r13
+    mov $217, %rax
+    mov %r13, %rdi
+    mov %rsp, %rsi
+    mov $512, %rdx
+    syscall
+    test %rax, %rax
+    jle fail_dir
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    add $512, %rsp
+
+    sub $64, %rsp
+    /* pipe2(fds, 0) */
+    mov $293, %rax
+    mov %rsp, %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_pipe
+    mov (%rsp), %r13d           /* read fd */
+    mov 4(%rsp), %r14d          /* write fd */
+    mov $1, %rax                /* write "ping" */
+    mov %r14, %rdi
+    lea pipe_data(%rip), %rsi
+    mov $4, %rdx
+    syscall
+    cmp $4, %rax
+    jne fail_pipe
+    mov %r13d, 16(%rsp)         /* pollfd.fd */
+    movw $1, 20(%rsp)           /* POLLIN */
+    movw $0, 22(%rsp)
+    mov $7, %rax                /* poll */
+    lea 16(%rsp), %rdi
+    mov $1, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_pipe
+    cmpw $1, 22(%rsp)
+    jne fail_pipe
+    mov $0, %rax                /* read back */
+    mov %r13, %rdi
+    lea 24(%rsp), %rsi
+    mov $4, %rdx
+    syscall
+    cmp $4, %rax
+    jne fail_pipe
+    cmpl $0x676e6970, 24(%rsp)  /* "ping" */
+    jne fail_pipe
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $3, %rax
+    mov %r14, %rdi
+    syscall
+    add $64, %rsp
+
+    mov $1, %rax                /* write */
+    mov $1, %rdi                /* stdout */
+    lea pipe_message(%rip), %rsi
+    mov $pipe_message_len, %rdx
+    syscall
+
+    mov $1, %rax                /* write */
+    mov $1, %rdi                /* stdout */
+    lea dir_message(%rip), %rsi
+    mov $dir_message_len, %rdx
+    syscall
+
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea meta_message(%rip), %rsi
@@ -359,6 +461,14 @@ fail_vma:
 fail_meta:
     lea meta_failure(%rip), %rsi
     mov $meta_failure_len, %rdx
+    jmp report_failure
+fail_dir:
+    lea dir_failure(%rip), %rsi
+    mov $dir_failure_len, %rdx
+    jmp report_failure
+fail_pipe:
+    lea pipe_failure(%rip), %rsi
+    mov $pipe_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -385,6 +495,24 @@ meta_message:
 meta_failure:
     .ascii "AETHER_LINUX_FILEMETA_FAIL\n"
     .set meta_failure_len, . - meta_failure
+dir_message:
+    .ascii "AETHER_LINUX_DIR_OK root=ok usrbin=ok\n"
+    .set dir_message_len, . - dir_message
+dir_failure:
+    .ascii "AETHER_LINUX_DIR_FAIL\n"
+    .set dir_failure_len, . - dir_failure
+pipe_message:
+    .ascii "AETHER_LINUX_PIPE_OK write=ok poll=ok read=ok\n"
+    .set pipe_message_len, . - pipe_message
+pipe_failure:
+    .ascii "AETHER_LINUX_PIPE_FAIL\n"
+    .set pipe_failure_len, . - pipe_failure
+pipe_data:
+    .ascii "ping"
+root_path:
+    .asciz "/"
+usrbin_path:
+    .asciz "/usr/bin"
 proc_exe:
     .asciz "/proc/self/exe"
 mmap_failure:

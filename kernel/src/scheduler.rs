@@ -85,6 +85,28 @@ pub enum TaskAbi {
 enum LinuxFileSource {
     Root(usize),
     Overlay(usize),
+    Directory { path: [u8; 64], len: usize },
+    Pipe { index: usize, write: bool },
+}
+
+const PIPE_BYTES: usize = 512;
+const MAX_PIPES: usize = 2;
+
+#[derive(Clone, Copy)]
+struct LinuxPipe {
+    data: [u8; PIPE_BYTES],
+    read: usize,
+    write: usize,
+    len: usize,
+}
+
+impl LinuxPipe {
+    const EMPTY: Self = Self {
+        data: [0; PIPE_BYTES],
+        read: 0,
+        write: 0,
+        len: 0,
+    };
 }
 
 #[derive(Clone, Copy)]
@@ -141,6 +163,7 @@ struct Task {
     fs_base: u64,
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
     linux_overlay: [Option<LinuxOverlay>; OVERLAY_FILES],
+    linux_pipes: [Option<LinuxPipe>; MAX_PIPES],
 }
 
 impl Task {
@@ -165,6 +188,7 @@ impl Task {
             fs_base: 0,
             linux_fds: [None; crate::linux::MAX_FDS],
             linux_overlay: [None; OVERLAY_FILES],
+            linux_pipes: [None; MAX_PIPES],
         }
     }
 }
@@ -1046,11 +1070,15 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
 }
 
 const LINUX_EBADF: i64 = -9;
+const LINUX_EAGAIN: i64 = -11;
+const LINUX_ENOTDIR: i64 = -20;
+const LINUX_EISDIR: i64 = -21;
 const LINUX_EINVAL: i64 = -22;
 const LINUX_EMFILE: i64 = -24;
 const LINUX_ENOENT: i64 = -2;
 const LINUX_EROFS: i64 = -30;
 const LINUX_ENAMETOOLONG: i64 = -36;
+const LINUX_ESPIPE: i64 = -29;
 const LINUX_ENOSPC: i64 = -28;
 
 /// Opens a file from the read-only Linux root and returns a file descriptor.
@@ -1082,7 +1110,70 @@ pub fn linux_open_read(path: &str) -> Result<u64, i64> {
     {
         return Ok(fd);
     }
+    if crate::linux::is_dir(path) {
+        return linux_open_directory(path);
+    }
     linux_open(path)
+}
+
+/// Opens a directory descriptor for `getdents64`.
+pub fn linux_open_directory(path: &str) -> Result<u64, i64> {
+    if path.len() > 64 || !crate::linux::is_dir(path) {
+        return Err(LINUX_ENOENT);
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(LINUX_EBADF);
+    }
+    let mut directory = [0u8; 64];
+    directory[..path.len()].copy_from_slice(path.as_bytes());
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::Directory {
+                    path: directory,
+                    len: path.len(),
+                },
+                offset: 0,
+            });
+            return Ok(descriptor as u64);
+        }
+    }
+    Err(LINUX_EMFILE)
+}
+
+/// Fills `out` with Linux `dirent64` records from a directory descriptor.
+///
+/// The returned count is bytes written; the descriptor cursor advances by the
+/// number of entries consumed. Entry names are bounded by the imported tree.
+pub fn linux_getdents(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
+        return Err(LINUX_EBADF);
+    };
+    let LinuxFileSource::Directory { path, len } = slot.source else {
+        return Err(LINUX_ENOTDIR);
+    };
+    let path = core::str::from_utf8(&path[..len]).map_err(|_| LINUX_EBADF)?;
+    let mut written = 0usize;
+    while let Some((name, inode, kind)) = crate::linux::dir_entry(path, slot.offset) {
+        let record_length = (19 + name.len() + 1 + 7) & !7;
+        if written + record_length > out.len() {
+            break;
+        }
+        let record = &mut out[written..written + record_length];
+        record.fill(0);
+        record[..8].copy_from_slice(&inode.to_le_bytes());
+        record[8..16].copy_from_slice(&((slot.offset + 1) as i64).to_le_bytes());
+        record[16..18].copy_from_slice(&(record_length as u16).to_le_bytes());
+        record[18] = kind;
+        record[19..19 + name.len()].copy_from_slice(name.as_bytes());
+        written += record_length;
+        slot.offset += 1;
+    }
+    Ok(written)
 }
 
 /// Opens or creates a file in the task's private writable overlay.
@@ -1140,6 +1231,86 @@ pub fn linux_overlay_open(path: &str, create: bool, truncate: bool) -> Result<u6
     Err(LINUX_EMFILE)
 }
 
+/// Creates a bounded pipe and returns its read and write descriptors.
+pub fn linux_pipe() -> Result<(u64, u64), i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(index) = task.linux_pipes.iter().position(|pipe| pipe.is_none()) else {
+        return Err(LINUX_EMFILE);
+    };
+    task.linux_pipes[index] = Some(LinuxPipe::EMPTY);
+    let mut read_fd = None;
+    let mut write_fd = None;
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_some() {
+            continue;
+        }
+        if read_fd.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::Pipe {
+                    index,
+                    write: false,
+                },
+                offset: 0,
+            });
+            read_fd = Some(descriptor as u64);
+        } else if write_fd.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::Pipe { index, write: true },
+                offset: 0,
+            });
+            write_fd = Some(descriptor as u64);
+            break;
+        }
+    }
+    match (read_fd, write_fd) {
+        (Some(read), Some(write)) => Ok((read, write)),
+        _ => {
+            for slot in task.linux_fds.iter_mut().skip(3) {
+                if let Some(file) = *slot
+                    && matches!(file.source, LinuxFileSource::Pipe { index: i, .. } if i == index)
+                {
+                    *slot = None;
+                }
+            }
+            task.linux_pipes[index] = None;
+            Err(LINUX_EMFILE)
+        }
+    }
+}
+
+/// Returns poll readiness bits for a Linux descriptor.
+pub fn linux_poll(fd: u64, events: i16) -> i16 {
+    const POLLIN: i16 = 1;
+    const POLLOUT: i16 = 4;
+    const POLLNVAL: i16 = 0x20;
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get(fd as usize).and_then(Option::as_ref) else {
+        return POLLNVAL;
+    };
+    let mut ready = 0i16;
+    match slot.source {
+        LinuxFileSource::Pipe { index, .. } => {
+            let Some(pipe) = task.linux_pipes.get(index).and_then(Option::as_ref) else {
+                return POLLNVAL;
+            };
+            if events & POLLIN != 0 && pipe.len > 0 {
+                ready |= POLLIN;
+            }
+            if events & POLLOUT != 0 && pipe.len < PIPE_BYTES {
+                ready |= POLLOUT;
+            }
+        }
+        LinuxFileSource::Root(_)
+        | LinuxFileSource::Overlay(_)
+        | LinuxFileSource::Directory { .. } => {
+            ready = events & (POLLIN | POLLOUT);
+        }
+    }
+    ready
+}
+
 /// Reads from a Linux file descriptor into a validated user buffer.
 pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -1168,30 +1339,67 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
             slot.offset += length;
             Ok(length)
         }
+        LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
+        LinuxFileSource::Pipe {
+            index,
+            write: false,
+        } => {
+            let Some(pipe) = task.linux_pipes.get_mut(index).and_then(Option::as_mut) else {
+                return Err(LINUX_EBADF);
+            };
+            if pipe.len == 0 {
+                return Err(LINUX_EAGAIN);
+            }
+            let length = pipe.len.min(out.len());
+            for (offset, byte) in out.iter_mut().take(length).enumerate() {
+                *byte = pipe.data[(pipe.read + offset) % PIPE_BYTES];
+            }
+            pipe.read = (pipe.read + length) % PIPE_BYTES;
+            pipe.len -= length;
+            Ok(length)
+        }
+        LinuxFileSource::Pipe { write: true, .. } => Err(LINUX_EBADF),
     }
 }
 
-/// Writes to a writable overlay descriptor.
+/// Writes to a writable overlay or pipe descriptor.
 pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
     let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
         return Err(LINUX_EBADF);
     };
-    let LinuxFileSource::Overlay(index) = slot.source else {
-        return Err(LINUX_EROFS);
-    };
-    let Some(entry) = task.linux_overlay.get_mut(index).and_then(Option::as_mut) else {
-        return Err(LINUX_EBADF);
-    };
-    let end = slot.offset.checked_add(data.len()).ok_or(LINUX_ENOSPC)?;
-    if end > OVERLAY_BYTES {
-        return Err(LINUX_ENOSPC);
+    match slot.source {
+        LinuxFileSource::Overlay(index) => {
+            let Some(entry) = task.linux_overlay.get_mut(index).and_then(Option::as_mut) else {
+                return Err(LINUX_EBADF);
+            };
+            let end = slot.offset.checked_add(data.len()).ok_or(LINUX_ENOSPC)?;
+            if end > OVERLAY_BYTES {
+                return Err(LINUX_ENOSPC);
+            }
+            entry.data[slot.offset..end].copy_from_slice(data);
+            entry.len = entry.len.max(end);
+            slot.offset = end;
+            Ok(data.len())
+        }
+        LinuxFileSource::Pipe { index, write: true } => {
+            let Some(pipe) = task.linux_pipes.get_mut(index).and_then(Option::as_mut) else {
+                return Err(LINUX_EBADF);
+            };
+            if pipe.len == PIPE_BYTES {
+                return Err(LINUX_EAGAIN);
+            }
+            let length = data.len().min(PIPE_BYTES - pipe.len);
+            for (offset, byte) in data.iter().take(length).enumerate() {
+                pipe.data[(pipe.write + offset) % PIPE_BYTES] = *byte;
+            }
+            pipe.write = (pipe.write + length) % PIPE_BYTES;
+            pipe.len += length;
+            Ok(length)
+        }
+        _ => Err(LINUX_EROFS),
     }
-    entry.data[slot.offset..end].copy_from_slice(data);
-    entry.len = entry.len.max(end);
-    slot.offset = end;
-    Ok(data.len())
 }
 
 /// Reads from a Linux file descriptor without changing its offset.
@@ -1225,6 +1433,8 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
             out[..length].copy_from_slice(&entry.data[offset..offset + length]);
             Ok(length)
         }
+        LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
+        LinuxFileSource::Pipe { .. } => Err(LINUX_ESPIPE),
     }
 }
 
@@ -1256,6 +1466,7 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
             .get(index)
             .and_then(Option::as_ref)
             .map_or(0, |entry| entry.len),
+        LinuxFileSource::Directory { .. } | LinuxFileSource::Pipe { .. } => 0,
     };
     let base = match whence {
         0 => 0i64,
@@ -1276,7 +1487,7 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
 /// Reports whether a path exists in the read-only root.
 #[must_use]
 pub fn linux_access(path: &str) -> bool {
-    crate::linux::lookup(path).is_some()
+    crate::linux::lookup(path).is_some() || crate::linux::is_dir(path)
 }
 
 /// Reserves a range in the Linux task's VMA window.
@@ -1342,6 +1553,9 @@ pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), Vma
 /// The root is a flat imported tree, so regular files have a stable inode
 /// derived from their index and a synthetic mode.
 pub fn linux_stat_path(path: &str) -> Option<(u64, u64, u32)> {
+    if crate::linux::is_dir(path) {
+        return Some((0, 2, 0o040755));
+    }
     let index = crate::linux::lookup(path)?;
     let file = crate::linux::file(index)?;
     Some((file.data.len() as u64, index as u64 + 1, 0o100644))
@@ -1367,6 +1581,8 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
                 .ok_or(LINUX_EBADF)?;
             Ok((entry.len as u64, index as u64 + 1, 0o100644))
         }
+        LinuxFileSource::Directory { .. } => Ok((0, 2, 0o040755)),
+        LinuxFileSource::Pipe { .. } => Ok((0, 0, 0o010600)),
     }
 }
 
@@ -1424,6 +1640,7 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
             .and_then(Option::as_ref)
             .map(|entry| entry.len as u64)
             .ok_or(LINUX_EBADF),
+        LinuxFileSource::Directory { .. } | LinuxFileSource::Pipe { .. } => Ok(0),
     }
 }
 
@@ -1566,6 +1783,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].state = TaskState::Done;
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     tasks[current].linux_overlay = [None; OVERLAY_FILES];
+    tasks[current].linux_pipes = [None; MAX_PIPES];
     tasks[current].vmas.reset();
     let result = if status == 0 {
         UserTestResult::Passed
@@ -1609,6 +1827,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     if linux {
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
+        tasks[current].linux_pipes = [None; MAX_PIPES];
         tasks[current].vmas.reset();
         if current == LINUX_DYN_TASK {
             LINUX_DYN_FAULTS.fetch_add(1, Ordering::Release);

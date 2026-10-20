@@ -56,8 +56,8 @@ acceptance checklist are recorded below. Implementation status is uneven:
 | Status | Meaning | Facilities |
 |---|---|---:|
 | Existing | A tested interface exists and can be used by the runtime | 2 |
-| Partial | Some interface or host tests exist; the runtime cannot use it yet | 11 |
-| Missing | No interface exists | 14 |
+| Partial | Some interface or host tests exist; the runtime cannot use it yet | 12 |
+| Missing | No interface exists | 13 |
 | Denied | Deliberate absence; the runtime must fail closed | 2 |
 | Deferred | Not required for Gate 3 or Gate 4 | 3 |
 
@@ -80,13 +80,13 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | HI-04 | Process creation: `fork`, `execvp`, `posix_spawnp`, `posix_spawn_file_actions_*`, `waitpid`, `waitid`, `pidfd_spawnp`, `setsid`, `setpgid` | Domain-scoped process API over the kernel task model | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T04 | missing |
 | HI-05 | Threads: `pthread_create`, `pthread_join`, `pthread_detach`, `pthread_setname_np`, `sched_getaffinity`, `set_tid_address`, `rseq` | Thread primitive with per-thread kernel state | `kernel/src/scheduler.rs` | HI-T05 | missing |
 | HI-06 | Environment and identity: `environ`, `getenv`, `getauxval`, `uname`, `sysconf`, `gnu_get_libc_version`, `getpwuid_r`, `getgrouplist`, `setlocale`, `realpath`, `getcwd` | Fixed `LD_LIBRARY_PATH` and auxv are supplied; broader environment, passwd, locale, and `getcwd` policy are missing | `kernel/src/linux_loader.rs`, planned `user/linuxd` | HI-T06 | partial |
-| HI-07 | Descriptor I/O: `open`/`open64`/`openat`, `read`, `write`, `writev`, `close`, `lseek64`, `dup`, `dup2`, `fcntl`, `ftruncate64`, `pipe2`, `poll` | Per-domain descriptor table over native file handles | `kernel/src/linux.rs`, `kernel/src/fs.rs` | HI-T07 | partial |
+| HI-07 | Descriptor I/O: `open`/`open64`/`openat`, `read`, `write`, `writev`, `close`, `lseek64`, `dup`, `dup2`, `fcntl`, `pipe2` | Per-domain descriptor table over native file handles and a bounded pipe ring | `kernel/src/linux.rs`, `kernel/src/scheduler.rs` | HI-T07 | partial |
 
 ### Files, memory, and kernel primitives
 
 | ID | Facility and artifact evidence | Aether interface | Owner | Test | Status |
 |---|---|---|---|---|---|
-| HI-08 | Metadata and directories: `stat64`, `statx`, `fstat64`, `newfstatat`, `readlink`, `mkdir`, `unlink`, `rename`, `opendir`, `readdir64`, `closedir`, `dirfd` | Synthetic stat/statx for root files and `/proc/self` links; filesystem service operations with per-domain roots for the rest | `kernel/src/syscall.rs`, `kernel/fs`, planned `user/linuxd` | HI-T08 | partial |
+| HI-08 | Metadata and directories: `stat64`, `statx`, `fstat64`, `newfstatat`, `readlink`, `getdents64`, `mkdir`, `unlink`, `rename`, `dirfd` | Synthetic stat/statx and directory enumeration over the imported root; filesystem service mutations remain missing | `kernel/src/linux.rs`, `kernel/src/scheduler.rs`, `kernel/fs` | HI-T08 | partial |
 | HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Portal grant handles and `/run/aether/portal/<grant>` paths; `/home/user` is the private overlay | `kernel/src/portal.rs`, planned `user/portald` | HI-T09 | missing |
 | HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `brk`, file mappings, W^X | Per-task VMA table over the boot arena; file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk` | `kernel/src/memory`, `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T10 | partial |
 | HI-11 | Synchronization: `futex`, pthread mutex/condition variables, robust lists, `eventfd` | Futex wait/wake queues with timeouts | `kernel/src/scheduler.rs`, `kernel/src/ipc.rs` | HI-T11 | partial |
@@ -94,7 +94,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | HI-13 | Time and waits: `clock_gettime`, `clock_nanosleep`, `poll` timeouts, `timerfd` | Time service plus a blocking wait queue | `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T13 | partial |
 | HI-14 | Random: `getrandom` | Kernel random source | `kernel/src/syscall.rs` | HI-T14 | partial |
 | HI-15 | Pseudo-files: `/proc/self/{exe,maps,status,fd}`, `/dev/{null,zero,random}`, bounded `/sys` | `linuxd` synthesis plus fixed device nodes | planned `user/linuxd` | HI-T15 | missing |
-| HI-16 | Multiplexing and notification: `poll`, `epoll`, `eventfd`, `inotify` | Bounded wait/notification service | planned `user/linuxd`, `kernel/src/ipc.rs` | HI-T16 | missing |
+| HI-16 | Multiplexing and notification: `poll`, `epoll`, `eventfd`, `inotify` | Non-blocking `poll` over files and pipes; blocking waits, epoll, eventfd, and inotify are missing | planned `user/linuxd`, `kernel/src/ipc.rs` | HI-T16 | partial |
 | HI-17 | Unix sockets: `socketpair`, `connect`, `bind`, `listen`, `accept4`, `sendmsg`, `recvmsg`, `getsockopt`, `setsockopt` | Brokered local sockets with validated `SCM_RIGHTS` | planned `user/linuxd`, `kernel/src/ipc.rs` | HI-T17 | missing |
 | HI-18 | Network: `socket`, `getaddrinfo`, `freeaddrinfo`, `gai_strerror`, `shutdown`; AF_INET/AF_INET6 | Network service with explicit capability | planned network service | HI-T18 | denied |
 
@@ -135,8 +135,8 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T04 | planned `make linux-proc-test` | Spawn, wait, exit status, descriptor inheritance, and denied spawn outside the domain | planned |
 | HI-T05 | planned `make linux-thread-test` | Create/join/detach, per-thread TLS, affinity mask, timeout, and clean domain exit | planned |
 | HI-T06 | `make test`, `make glibc-test`; planned `make linux-env-test` | Auxv and a fixed library path reach `ld.so`; host path leakage, passwd, locale, and `getcwd` tests remain planned | partial |
-| HI-T07 | `make test`; planned `make linux-fd-test` | Boot fixture exercises open/read/seek/dup/fcntl/close; pipe/poll and bad-descriptor matrices remain planned | partial |
-| HI-T08 | `make test`; planned `make linux-fs-test` | Boot fixture exercises newfstatat/fstat/statx/readlink; readdir/mkdir/unlink/rename and outside-path denial remain planned | partial |
+| HI-T07 | `make test`; planned `make linux-fd-test` | Boot fixture exercises open/read/seek/dup/fcntl/close, pipe2 write/read, and poll; bad-descriptor and bounce-buffer matrices remain planned | partial |
+| HI-T08 | `make test`; planned `make linux-fs-test` | Boot fixture exercises newfstatat/fstat/statx/readlink and getdents64 on `/` and `/usr/bin`; mutations and outside-path denial remain planned | partial |
 | HI-T09 | planned `make linux-portal-test` | File chooser grant, exact-file open, revocation, denial, and no ambient home | planned |
 | HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixture maps a file, unmaps and reuses an address, grows `brk`, and denies W+X; frames are allocated at map time and reclaimed on unmap | partial |
 | HI-T11 | planned `make linux-sync-test` | Futex wait/wake, timeout, robust list, eventfd, and thread wake ordering | planned |
@@ -144,7 +144,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T13 | planned `make linux-time-test` | Monotonic/realtime clocks, sleep, poll timeout, and timer cancellation | planned |
 | HI-T14 | planned `make linux-random-test` | `getrandom` fills a bounded buffer and fails closed at the domain boundary | planned |
 | HI-T15 | planned `make linux-procfs-test` | Synthesized `/proc` and `/dev` nodes; no host process or device enumeration | planned |
-| HI-T16 | planned `make linux-poll-test` | Poll/epoll/eventfd/inotify bounds and wake behavior | planned |
+| HI-T16 | `make test`; planned `make linux-poll-test` | Boot fixture polls a pipe for `POLLIN`; epoll/eventfd/inotify and blocking wake behavior remain planned | partial |
 | HI-T17 | planned `make linux-socket-test` | Local socket pairing and `SCM_RIGHTS` validation; no network sockets | planned |
 | HI-T18 | planned `make linux-net-deny-test` | AF_INET/AF_INET6 and DNS fail closed without a capability | planned |
 | HI-T19 | planned `make wayland-test` | Registry, surfaces, commits, frame callbacks, xdg-shell toplevel, and teardown | planned |

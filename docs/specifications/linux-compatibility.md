@@ -143,7 +143,7 @@ interface, with owners and test cases.
 **Evidence:** [the Linux host-interface inventory](linux-host-interface-inventory.md)
 maps 32 facilities from the pinned GUI and CLI payloads to an interface, owner,
 and test ID, with decisions for X11, D-Bus, process spawning, clipboard, paths,
-locale, GPU, and network. **Met:** 2 facilities are existing, 11 partial, 14
+locale, GPU, and network. **Met:** 2 facilities are existing, 12 partial, 13
 missing, 2 deliberately denied, and 3 deferred. The inventory is complete; the
 missing interfaces are Gate 2 work and their absence does not invalidate the
 mapping. Do not claim compatibility.
@@ -167,8 +167,10 @@ glibc-test` target builds a runtime rootfs from the host glibc, resolves the
 real `PT_INTERP` path through that rootfs, and runs a dynamically linked C
 hello through `ld.so`, relocations, and shared `libc` (`AETHER_GLIBC_OK`). This
 is a host-ABI smoke test, not the pinned production runtime. File metadata,
-`readlink`, `fcntl`, and descriptor duplication are also exercised
-(`AETHER_LINUX_FILEMETA_OK`). A static freestanding Linux ELF runs at CPL3,
+`readlink`, `fcntl`, descriptor duplication, directory enumeration, and a
+bounded pipe with non-blocking `poll` are also exercised
+(`AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
+`AETHER_LINUX_PIPE_OK`). A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only

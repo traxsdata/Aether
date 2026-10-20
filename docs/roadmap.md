@@ -218,9 +218,10 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Pinned glibc/Mesa/Wayland runtime rootfs, package channel, broader
   `dlopen`/library coverage, and `LD_LIBRARY_PATH` policy.
 - [x] File metadata and descriptor calls: `stat`/`fstat`/`newfstatat`/`statx`,
-  `readlink`, `fcntl`, `dup`, `dup2`, and descriptor table cleanup.
-- [ ] Remaining file calls: `getdents64`, `pipe`, `poll`/`epoll`, `eventfd`,
-  `inotify` (bounded).
+  `readlink`, `getdents64`, `fcntl`, `dup`, `dup2`, `pipe2`, non-blocking
+  `poll`, and descriptor table cleanup.
+- [ ] Remaining file calls: blocking `poll`, `epoll`, `eventfd`, and bounded
+  `inotify`.
 - [ ] Process and thread syscalls: `clone`, `clone3`, `wait4`, `execve`,
   `set_tid_address`, `set_robust_list`, `rseq`, thread-local storage.
 - [ ] Synchronization: real futex wait/wake queues, timeouts, robust lists;
@@ -304,8 +305,9 @@ table, file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, FS-based
 TLS, read-only root files, a bounded `/tmp` overlay, stat/statx/readlink and
 descriptor duplication, and a dynamic `ET_DYN`/`PT_INTERP` loader with auxv
 (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
-`AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`,
-`AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
+`AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`, `AETHER_LINUX_DIR_OK`,
+`AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_DYN_INTERP_OK`,
+`AETHER_LINUX_DYN_MAIN_OK`,
 `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`), and the opt-in `make glibc-test`
 runs a host-glibc hello through `ld.so` (`AETHER_GLIBC_OK`). The native ABI is
 denied to Linux tasks. This is a test

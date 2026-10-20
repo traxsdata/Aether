@@ -73,6 +73,11 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Linux directory and pipe slice: `getdents64` over the imported root,
+  bounded `pipe2` rings, and non-blocking `poll` for files, directories, and
+  pipes. The boot fixture enumerates `/` and `/usr/bin`, writes and reads a
+  pipe, and polls it (`AETHER_LINUX_DIR_OK`, `AETHER_LINUX_PIPE_OK`). Blocking
+  waits, epoll, eventfd, and inotify remain missing.
 - Linux runtime-rootfs and glibc proof: the build stages a signed runtime
   rootfs, imports it at boot, and the loader resolves `PT_INTERP` through it
   instead of embedded interpreter bytes. `make glibc-test` packages the host

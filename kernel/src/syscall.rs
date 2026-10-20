@@ -155,6 +155,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         3 => scheduler::linux_close(first),
         8 => scheduler::linux_lseek(first, second as i64, third),
         4 | 6 => linux_stat(pml4, first, second),
+        7 => linux_poll(pml4, first, second),
         5 => linux_fstat(pml4, first, second),
         13 | 14 | 131 => 0,
         17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
@@ -166,7 +167,9 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         72 => linux_fcntl(first, second, third),
         89 => linux_readlink(pml4, first, second, third, 0),
         204 => linux_sched_getaffinity(pml4, first, second, third),
+        217 => linux_getdents(pml4, first, second, third),
         262 => linux_newfstatat(pml4, first, second, third),
+        293 => linux_pipe2(pml4, first, second),
         267 => linux_readlink(pml4, second, third, unsafe { (*frame).r10 }, first),
         302 => linux_prlimit(pml4, first, second, unsafe { (*frame).r10 }),
         332 => linux_statx(
@@ -561,6 +564,60 @@ fn linux_readlink(
     let length = target.len().min(buffer_length as usize);
     write_user_bytes(pml4, buffer_pointer, &target[..length])
         .map_or(LINUX_EFAULT, |()| length as i64)
+}
+
+fn linux_pipe2(pml4: PhysFrame, fds_pointer: u64, _flags: u64) -> i64 {
+    let Ok((read, write)) = scheduler::linux_pipe() else {
+        return LINUX_ENOMEM;
+    };
+    let mut buffer = [0u8; 8];
+    buffer[..4].copy_from_slice(&(read as u32).to_le_bytes());
+    buffer[4..].copy_from_slice(&(write as u32).to_le_bytes());
+    write_user_bytes(pml4, fds_pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
+}
+
+fn linux_poll(pml4: PhysFrame, fds_pointer: u64, count: u64) -> i64 {
+    if count > 16 {
+        return LINUX_EINVAL;
+    }
+    let length = count * 8;
+    // SAFETY: The pollfd array is validated as writable user memory.
+    let Some(fds) = (unsafe { user_bytes_mut(pml4, fds_pointer, length) }) else {
+        return LINUX_EFAULT;
+    };
+    let mut ready = 0i64;
+    for index in 0..count as usize {
+        let offset = index * 8;
+        let fd = i32::from_ne_bytes(fds[offset..offset + 4].try_into().unwrap_or([0; 4]));
+        let events = i16::from_ne_bytes(fds[offset + 4..offset + 6].try_into().unwrap_or([0; 2]));
+        let revents = if fd < 0 {
+            0
+        } else {
+            scheduler::linux_poll(fd as u64, events)
+        };
+        fds[offset + 6..offset + 8].copy_from_slice(&revents.to_ne_bytes());
+        if revents != 0 {
+            ready += 1;
+        }
+    }
+    ready
+}
+
+fn linux_getdents(
+    pml4: PhysFrame,
+    descriptor: u64,
+    buffer_pointer: u64,
+    buffer_length: u64,
+) -> i64 {
+    if buffer_length as usize > MAX_SYSCALL_IO {
+        return LINUX_EINVAL;
+    }
+    // SAFETY: The range is validated as writable user memory and the syscall
+    // path holds interrupts masked.
+    let Some(buffer) = (unsafe { user_bytes_mut(pml4, buffer_pointer, buffer_length) }) else {
+        return LINUX_EFAULT;
+    };
+    scheduler::linux_getdents(descriptor, buffer).map_or_else(|error| error, |count| count as i64)
 }
 
 fn linux_fcntl(fd: u64, command: u64, _argument: u64) -> i64 {

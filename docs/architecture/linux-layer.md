@@ -114,7 +114,8 @@ exact AppImage digest, and the runtime version.
   `clock_gettime`, `getrandom`, `uname`, `getpid`/`gettid`, and
   `set_tid_address`, and a read-only root with `openat`, `read`, `pread64`,
   `close`, `lseek`, `access`, `stat`/`fstat`/`newfstatat`/`statx`,
-  `readlink`, `fcntl`, `dup`, and `dup2`. The static fixture
+  `readlink`, `fcntl`, `dup`, `dup2`, `getdents64`, `pipe2`, and non-blocking
+  `poll`. The static fixture
   `tests/fixtures/linux/hello.S` runs at CPL3, allocates and writes anonymous
   memory, maps `/etc/motd` through file-backed `mmap`, releases it with
   `munmap`, reuses the address with `MAP_FIXED`, grows the break, sets FS-based

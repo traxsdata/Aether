@@ -125,6 +125,99 @@ pub fn file_data(path: &str) -> Option<&'static [u8]> {
     file(index).map(|file| file.data.as_slice())
 }
 
+/// Returns `true` when `path` names a directory in the imported root.
+///
+/// The imported tree is flat, so a directory exists when at least one file
+/// path continues below it.
+#[must_use]
+pub fn is_dir(path: &str) -> bool {
+    let directory = normalize(path);
+    let Some(root) = root() else {
+        return false;
+    };
+    root.files.iter().any(|file| {
+        file.path
+            .strip_prefix(directory)
+            .is_some_and(|rest| directory.is_empty() || rest.starts_with('/'))
+            && !(directory.is_empty() && file.path.is_empty())
+    })
+}
+
+/// Returns the `index`th entry of a directory.
+///
+/// Entry 0 is `.` and entry 1 is `..`; following entries are direct children
+/// in import order with duplicates removed. The returned name borrows the
+/// immutable imported tree, so it lives for the rest of the boot.
+#[must_use]
+pub fn dir_entry(directory: &str, index: usize) -> Option<(&'static str, u64, u8)> {
+    const DT_DIR: u8 = 4;
+    const DT_REG: u8 = 8;
+    let directory = normalize(directory);
+    let root = root()?;
+    match index {
+        0 => return Some((".", 2, DT_DIR)),
+        1 => return Some(("..", 2, DT_DIR)),
+        _ => {}
+    }
+    let mut matched = 0usize;
+    for (file_index, file) in root.files.iter().enumerate() {
+        let (parent, name) = split_parent(&file.path);
+        if parent != directory {
+            continue;
+        }
+        let duplicate = root.files[..file_index].iter().any(|other| {
+            let (other_parent, other_name) = split_parent(&other.path);
+            other_parent == parent && other_name == name
+        });
+        if duplicate {
+            continue;
+        }
+        matched += 1;
+        if matched + 1 == index {
+            let kind = if child_is_dir(root, parent, name) {
+                DT_DIR
+            } else {
+                DT_REG
+            };
+            return Some((name, file_index as u64 + 1, kind));
+        }
+    }
+    None
+}
+
+fn root() -> Option<&'static Root> {
+    // SAFETY: ROOT is immutable after boot and lives for the program lifetime.
+    unsafe { (*ROOT.0.get()).as_ref() }
+}
+
+fn normalize(path: &str) -> &str {
+    path.trim_start_matches('/').trim_end_matches('/')
+}
+
+fn split_parent(path: &str) -> (&str, &str) {
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+
+fn child_is_dir(root: &Root, parent: &str, name: &str) -> bool {
+    let mut prefix = [0u8; MAX_PATH + 2];
+    let mut length = 0usize;
+    if !parent.is_empty() {
+        prefix[..parent.len()].copy_from_slice(parent.as_bytes());
+        length = parent.len();
+        prefix[length] = b'/';
+        length += 1;
+    }
+    if length + name.len() + 1 > prefix.len() {
+        return false;
+    }
+    prefix[length..length + name.len()].copy_from_slice(name.as_bytes());
+    length += name.len();
+    prefix[length] = b'/';
+    length += 1;
+    let prefix = core::str::from_utf8(&prefix[..length]).unwrap_or("");
+    root.files.iter().any(|file| file.path.starts_with(prefix))
+}
+
 /// Returns file metadata by index.
 #[must_use]
 pub fn file(index: usize) -> Option<&'static RootFile> {
