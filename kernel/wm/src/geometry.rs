@@ -142,6 +142,23 @@ impl Rect {
         self.intersection(other).is_some()
     }
 
+    /// Smallest rectangle covering both rectangles.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        Self::from_points(
+            self.x.min(other.x),
+            self.y.min(other.y),
+            self.right().max(other.right()),
+            self.bottom().max(other.bottom()),
+        )
+    }
+
     /// Returns a rectangle inset by the same amount on every side.
     #[must_use]
     pub const fn inset(self, amount: i32) -> Self {

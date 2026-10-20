@@ -4,7 +4,7 @@
 //! The loader hands over a linear, 32-bit GOP framebuffer. The kernel maps it
 //! cache-disabled during paging setup and this module owns all pixel writes.
 //! There is no GPU command stream: the first desktop paints a software
-//! compositor directly into the framebuffer.
+//! compositor into a bounded back buffer when the mode fits.
 
 use crate::serial_line;
 use aether_abi::{FramebufferInfo, PixelFormat};
@@ -21,7 +21,10 @@ struct Framebuffer {
     width: u32,
     height: u32,
     stride: u32,
+    format: PixelFormat,
     clip: Option<Clip>,
+    round_clip: Option<(Clip, i32)>,
+    damage: Option<Clip>,
     volatile: bool,
 }
 
@@ -37,7 +40,8 @@ struct Front {
 /// Maximum resolution held in the off-screen composition buffer.
 ///
 /// A back buffer lets a frame complete before the display is touched, which
-/// removes tearing and makes animation pacing independent of display latency.
+/// avoids exposing intermediate drawing operations. GOP has no vblank/page-flip
+/// API, so the scanout can still tear during the final copy.
 /// Larger modes fall back to direct painting rather than failing to boot.
 const BACK_WIDTH: u32 = 1920;
 const BACK_HEIGHT: u32 = 1200;
@@ -45,11 +49,25 @@ const BACK_PIXELS: usize = BACK_WIDTH as usize * BACK_HEIGHT as usize;
 
 struct BackBuffer(UnsafeCell<[u32; BACK_PIXELS]>);
 
-// SAFETY: The back buffer is only accessed by the single CPU through the
-// interrupt-serialized graphics service.
+// SAFETY: Only the idle/boot context on the single CPU enters graphics; IRQs
+// never render and no other scheduled task accesses these buffers.
 unsafe impl Sync for BackBuffer {}
 
 static BACK_BUFFER: BackBuffer = BackBuffer(UnsafeCell::new([0; BACK_PIXELS]));
+static WALLPAPER: BackBuffer = BackBuffer(UnsafeCell::new([0; BACK_PIXELS]));
+static WALLPAPER_VALID: Global<bool> = Global(UnsafeCell::new(false));
+
+/// Pointer backing is tiny: moving it need not repaint or present a full screen.
+pub const CURSOR_WIDTH: i32 = 15;
+pub const CURSOR_HEIGHT: i32 = 22;
+struct CursorBacking {
+    rect: Option<Clip>,
+    pixels: [u32; CURSOR_WIDTH as usize * CURSOR_HEIGHT as usize],
+}
+static CURSOR_BACKING: Global<CursorBacking> = Global(UnsafeCell::new(CursorBacking {
+    rect: None,
+    pixels: [0; CURSOR_WIDTH as usize * CURSOR_HEIGHT as usize],
+}));
 
 #[derive(Clone, Copy)]
 struct Clip {
@@ -61,11 +79,12 @@ struct Clip {
 
 impl Clip {
     fn contains(self, x: i32, y: i32) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
+        x >= self.x
+            && y >= self.y
+            && i64::from(x) < i64::from(self.x) + i64::from(self.width)
+            && i64::from(y) < i64::from(self.y) + i64::from(self.height)
     }
 }
-
-unsafe impl Send for Framebuffer {}
 
 static FRAMEBUFFER: Global<Option<Framebuffer>> = Global(UnsafeCell::new(None));
 static FRONT: Global<Option<Front>> = Global(UnsafeCell::new(None));
@@ -79,16 +98,11 @@ pub enum GraphicsError {
 
 impl Framebuffer {
     fn unpack(&self, rgb: u32) -> u32 {
-        // The supported virtual firmware exposes a 32-bit BGRX surface for
-        // both linear GOP formats. Writing 0x00RRGGBB in little-endian order
-        // produces B, G, R, X bytes. The boot harness validates the result with
-        // a screenshot; treating the format code as a byte-order guarantee was
-        // wrong on QEMU/OVMF, which reports RGB while presenting BGRX.
-        rgb
+        self.format.decode_rgb(rgb).unwrap_or(0)
     }
 
     fn pack(&self, rgb: u32) -> u32 {
-        self.unpack(rgb)
+        self.format.encode_rgb(rgb).unwrap_or(0)
     }
 
     fn visible(&self, x: i32, y: i32) -> bool {
@@ -97,6 +111,54 @@ impl Framebuffer {
             && x < self.width as i32
             && y < self.height as i32
             && self.clip.is_none_or(|clip| clip.contains(x, y))
+            && self.damage.is_none_or(|clip| clip.contains(x, y))
+            && self.round_clip.is_none_or(|(clip, radius)| {
+                if !clip.contains(x, y) {
+                    return false;
+                }
+                let inset = rounded_inset(y - clip.y, clip.height, radius);
+                x >= clip.x + inset && x < clip.x + clip.width - inset
+            })
+    }
+
+    fn clipped(&self, x: i32, y: i32, width: i32, height: i32) -> Option<Clip> {
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let mut left = i64::from(x).max(0);
+        let mut top = i64::from(y).max(0);
+        let mut right = (i64::from(x) + i64::from(width)).min(i64::from(self.width));
+        let mut bottom = (i64::from(y) + i64::from(height)).min(i64::from(self.height));
+        for clip in [
+            self.clip,
+            self.damage,
+            self.round_clip.map(|(clip, _)| clip),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            left = left.max(i64::from(clip.x));
+            top = top.max(i64::from(clip.y));
+            right = right.min(i64::from(clip.x) + i64::from(clip.width));
+            bottom = bottom.min(i64::from(clip.y) + i64::from(clip.height));
+        }
+        (left < right && top < bottom).then_some(Clip {
+            x: left as i32,
+            y: top as i32,
+            width: (right - left) as i32,
+            height: (bottom - top) as i32,
+        })
+    }
+
+    fn row_span(&self, rect: Clip, row: i32) -> (i32, i32) {
+        if let Some((clip, radius)) = self.round_clip {
+            let inset = rounded_inset(row - clip.y, clip.height, radius);
+            let left = rect.x.max(clip.x + inset);
+            let right = (rect.x + rect.width).min(clip.x + clip.width - inset);
+            (left, (right - left).max(0))
+        } else {
+            (rect.x, rect.width)
+        }
     }
 
     fn pixel(&mut self, x: i32, y: i32, rgb: u32) {
@@ -149,17 +211,69 @@ impl Framebuffer {
     }
 
     fn rect(&mut self, x: i32, y: i32, width: i32, height: i32, rgb: u32) {
-        for row in 0..height {
-            for column in 0..width {
-                self.pixel(x + column, y + row, rgb);
+        let Some(rect) = self.clipped(x, y, width, height) else {
+            return;
+        };
+        let packed = self.pack(rgb);
+        for row in rect.y..rect.y + rect.height {
+            let (left, width) = self.row_span(rect, row);
+            if width == 0 {
+                continue;
+            }
+            // SAFETY: `clipped` bounds each row to the validated surface.
+            unsafe {
+                let pointer = (self.base as *mut u32)
+                    .add(row as usize * self.stride as usize + left as usize);
+                if self.volatile {
+                    for column in 0..width as usize {
+                        pointer.add(column).write_volatile(packed);
+                    }
+                } else {
+                    core::slice::from_raw_parts_mut(pointer, width as usize).fill(packed);
+                }
             }
         }
     }
 
     fn rect_blend(&mut self, x: i32, y: i32, width: i32, height: i32, rgb: u32, alpha: u8) {
-        for row in 0..height {
-            for column in 0..width {
-                self.pixel_blend(x + column, y + row, rgb, alpha);
+        if alpha == 0 {
+            return;
+        }
+        if alpha == 255 {
+            self.rect(x, y, width, height, rgb);
+            return;
+        }
+        let Some(rect) = self.clipped(x, y, width, height) else {
+            return;
+        };
+        // Blend native words directly: channel permutation commutes with alpha
+        // blending, so RGB/BGR conversion is needed only once per rectangle.
+        let rgb = self.pack(rgb);
+        let alpha = u32::from(alpha);
+        let inverse = 255 - alpha;
+        for row in rect.y..rect.y + rect.height {
+            let (left, width) = self.row_span(rect, row);
+            for column in left..left + width {
+                // SAFETY: `clipped` bounds the read/write to the mapped surface.
+                unsafe {
+                    let pointer = (self.base as *mut u32)
+                        .add(row as usize * self.stride as usize + column as usize);
+                    let existing = if self.volatile {
+                        pointer.read_volatile()
+                    } else {
+                        pointer.read()
+                    };
+                    let channel = |shift: u32| {
+                        (((existing >> shift) & 0xff) * inverse + ((rgb >> shift) & 0xff) * alpha)
+                            / 255
+                    };
+                    let value = (channel(16) << 16) | (channel(8) << 8) | channel(0);
+                    if self.volatile {
+                        pointer.write_volatile(value);
+                    } else {
+                        pointer.write(value);
+                    }
+                }
             }
         }
     }
@@ -173,13 +287,15 @@ pub fn init(info: &FramebufferInfo, mapped: bool) -> Result<bool, GraphicsError>
     let Some(format) = PixelFormat::from_raw(info.format) else {
         return Err(GraphicsError::UnsupportedFormat);
     };
-    if !format.is_linear() {
+    if !format.is_linear() || info.validate().is_err() {
         return Err(GraphicsError::UnsupportedFormat);
     }
     // SAFETY: The framebuffer is mapped cache-disabled by the paging layer and
     // the ABI validated its length. The back buffer is static and exclusively
     // owned by this module.
     unsafe {
+        *WALLPAPER_VALID.0.get() = false;
+        (*CURSOR_BACKING.0.get()).rect = None;
         *FRONT.0.get() = Some(Front {
             base: info.base as *mut u8,
             width: info.width,
@@ -197,7 +313,10 @@ pub fn init(info: &FramebufferInfo, mapped: bool) -> Result<bool, GraphicsError>
             width: info.width,
             height: info.height,
             stride,
+            format,
             clip: None,
+            round_clip: None,
+            damage: None,
             volatile,
         });
     }
@@ -267,6 +386,139 @@ pub fn set_clip(x: i32, y: i32, width: i32, height: i32) {
 /// Removes the current clip rectangle.
 pub fn clear_clip() {
     let _ = with_framebuffer(|fb| fb.clip = None);
+}
+
+/// Clips content to the outer rounded window silhouette, independently of its
+/// rectangular content clip and the frame's damage region.
+pub fn set_round_clip(x: i32, y: i32, width: i32, height: i32, radius: i32) {
+    let radius = radius.max(0).min(width.max(0) / 2).min(height.max(0) / 2);
+    let _ = with_framebuffer(|fb| {
+        fb.round_clip = Some((
+            Clip {
+                x,
+                y,
+                width,
+                height,
+            },
+            radius,
+        ))
+    });
+}
+
+/// Ends rounded window content clipping.
+pub fn clear_round_clip() {
+    let _ = with_framebuffer(|fb| fb.round_clip = None);
+}
+
+/// Sets the persistent frame damage clip. Inner window clips cannot widen it.
+pub fn set_damage(x: i32, y: i32, width: i32, height: i32) {
+    let _ = with_framebuffer(|fb| {
+        fb.damage = Some(Clip {
+            x,
+            y,
+            width: width.max(0),
+            height: height.max(0),
+        })
+    });
+}
+
+/// Ends damage-clipped painting before cursor composition/presentation.
+pub fn clear_damage() {
+    let _ = with_framebuffer(|fb| fb.damage = None);
+}
+
+/// Caches the wallpaper in normal RAM. Only call after painting the full screen.
+pub fn cache_wallpaper() {
+    let _ = with_framebuffer(|fb| {
+        if fb.volatile {
+            return;
+        }
+        // SAFETY: Back-buffer modes fit both disjoint static arrays.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                fb.base as *const u32,
+                WALLPAPER.0.get() as *mut u32,
+                fb.width as usize * fb.height as usize,
+            );
+            *WALLPAPER_VALID.0.get() = true;
+        }
+    });
+}
+
+/// Restores just the damaged wallpaper region. Returns false in direct mode.
+pub fn restore_wallpaper(x: i32, y: i32, width: i32, height: i32) -> bool {
+    with_framebuffer(|fb| {
+        // SAFETY: The flag is private to the single-owner graphics service.
+        if fb.volatile || !unsafe { *WALLPAPER_VALID.0.get() } {
+            return false;
+        }
+        if let Some(rect) = fb.clipped(x, y, width, height) {
+            for row in rect.y..rect.y + rect.height {
+                let offset = row as usize * fb.stride as usize + rect.x as usize;
+                // SAFETY: Both RAM buffers share the validated packed stride.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (WALLPAPER.0.get() as *const u32).add(offset),
+                        (fb.base as *mut u32).add(offset),
+                        rect.width as usize,
+                    );
+                }
+            }
+        }
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Saves the scene under the cursor before drawing it into the back buffer.
+pub fn save_cursor_background(x: i32, y: i32) {
+    let _ = with_framebuffer(|fb| {
+        if fb.volatile {
+            return;
+        }
+        let rect = fb.clipped(x, y, CURSOR_WIDTH, CURSOR_HEIGHT);
+        // SAFETY: The graphics service is the only owner, and clipping limits
+        // the copy to the cursor array and the validated RAM back buffer.
+        unsafe {
+            let backing = &mut *CURSOR_BACKING.0.get();
+            backing.rect = rect;
+            if let Some(rect) = rect {
+                for row in 0..rect.height as usize {
+                    core::ptr::copy_nonoverlapping(
+                        (fb.base as *const u32)
+                            .add((rect.y as usize + row) * fb.stride as usize + rect.x as usize),
+                        backing.pixels.as_mut_ptr().add(row * CURSOR_WIDTH as usize),
+                        rect.width as usize,
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Erases the previous cursor and returns its old presentation bounds.
+pub fn restore_cursor_background() -> Option<(i32, i32, i32, i32)> {
+    with_framebuffer(|fb| {
+        if fb.volatile {
+            return None;
+        }
+        // SAFETY: Bounds were clipped by `save_cursor_background`; the backing
+        // store is exclusively owned by this service on the single CPU.
+        unsafe {
+            let backing = &mut *CURSOR_BACKING.0.get();
+            let rect = backing.rect.take()?;
+            for row in 0..rect.height as usize {
+                core::ptr::copy_nonoverlapping(
+                    backing.pixels.as_ptr().add(row * CURSOR_WIDTH as usize),
+                    (fb.base as *mut u32)
+                        .add((rect.y as usize + row) * fb.stride as usize + rect.x as usize),
+                    rect.width as usize,
+                );
+            }
+            Some((rect.x, rect.y, rect.width, rect.height))
+        }
+    })
+    .flatten()
 }
 
 /// Fills a rectangle with a vertical colour gradient.
@@ -612,6 +864,8 @@ fn glyph(character: char) -> [u8; 7] {
         '!' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04],
         '?' => [0x0e, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
         '*' => [0x00, 0x15, 0x0e, 0x1f, 0x0e, 0x15, 0x00],
+        '&' => [0x0c, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0d],
+        '·' => [0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00],
         '#' => [0x0a, 0x0a, 0x1f, 0x0a, 0x1f, 0x0a, 0x0a],
         '\'' => [0x04, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00],
         '"' => [0x0a, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00],
@@ -655,8 +909,14 @@ pub fn draw_text(x: i32, y: i32, text: &str, rgb: u32, scale: i32) -> i32 {
 /// Copies the completed back buffer to the display.
 ///
 /// This is the only path that writes the real framebuffer when a back buffer is
-/// active. A frame is therefore never presented half-painted.
+/// active. This avoids copying intermediate drawing operations, but is not an
+/// atomic page flip and cannot guarantee tear-free scanout without vblank.
 pub fn present() {
+    present_region(0, 0, width() as i32, height() as i32);
+}
+
+/// Presents only damaged pixels, preserving firmware scan-line padding.
+pub fn present_region(x: i32, y: i32, width: i32, height: i32) {
     // SAFETY: Both descriptors are boot-time constants and the copy stays
     // within each surface's validated dimensions.
     unsafe {
@@ -671,10 +931,12 @@ pub fn present() {
         }
         let source = draw.base as *const u32;
         let target = front.base as *mut u32;
-        let width = draw.width as usize;
-        for row in 0..draw.height as usize {
-            for column in 0..width {
-                let value = source.add(row * width + column).read();
+        let Some(rect) = draw.clipped(x, y, width, height) else {
+            return;
+        };
+        for row in rect.y as usize..(rect.y + rect.height) as usize {
+            for column in rect.x as usize..(rect.x + rect.width) as usize {
+                let value = source.add(row * draw.stride as usize + column).read();
                 target
                     .add(row * front.stride as usize + column)
                     .write_volatile(value);

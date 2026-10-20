@@ -82,6 +82,17 @@ fn animation_advances_by_elapsed_ticks() {
 }
 
 #[test]
+fn zero_duration_animations_complete_without_waiting_for_a_tick() {
+    let mut anim = Anim::starting(0);
+    assert_eq!(anim.value(), 256);
+    assert!(anim.is_complete());
+    anim.retarget(0, 0);
+    anim.restart(0);
+    assert_eq!(anim.value(), 256);
+    assert!(!anim.is_active());
+}
+
+#[test]
 fn easing_is_monotonic_and_bounded() {
     let mut previous = 0;
     for value in 0..=256u16 {
@@ -384,6 +395,7 @@ fn settings_rows_are_clickable_and_accessible() {
     let mut wm = Wm::new(Rect::new(0, 0, 800, 600));
     let settings = wm.open(WindowKind::Settings).unwrap();
     wm.focus_window(settings);
+    wm.finish_animations();
     assert!(wm.settings_row_rect(settings, 0).is_some());
     assert!(wm.settings_row_rect(settings, 1).is_some());
     assert!(wm.settings_row_rect(settings, 2).is_some());
@@ -556,4 +568,218 @@ fn max_windows_is_enforced_without_panicking() {
     for _ in 0..20 {
         wm.tick(1);
     }
+}
+
+#[test]
+fn minimize_immediately_transfers_focus_to_the_topmost_eligible_window() {
+    let mut wm = sample();
+    let welcome = wm.focus_id().unwrap();
+    wm.minimize_window(welcome);
+    assert_ne!(wm.focus_id(), Some(welcome));
+    for _ in 0..10 {
+        wm.focus_next(-1);
+        assert_ne!(wm.focus_id(), Some(welcome));
+    }
+    for kind in [WindowKind::Files, WindowKind::Security] {
+        wm.minimize_window(wm.window_id(kind).unwrap());
+    }
+    assert_eq!(wm.focus_id(), None);
+}
+
+#[test]
+fn reopening_and_minimizing_preserve_zoom_state_and_restore_geometry() {
+    let mut wm = sample();
+    let id = wm.window_id(WindowKind::Files).unwrap();
+    let original = wm.window(id).unwrap().frame;
+    wm.zoom_window(id);
+    let zoomed = wm.window(id).unwrap().frame;
+    wm.open(WindowKind::Files);
+    assert_eq!(wm.window(id).unwrap().state, WindowState::Maximized);
+    wm.minimize_window(id);
+    wm.open(WindowKind::Files);
+    assert_eq!(wm.window(id).unwrap().frame, zoomed);
+    assert_eq!(wm.window(id).unwrap().state, WindowState::Maximized);
+    wm.zoom_window(id);
+    assert_eq!(wm.window(id).unwrap().frame, original);
+}
+
+#[test]
+fn repeated_focus_cycles_visit_every_window_in_both_directions() {
+    for direction in [-1, 1] {
+        let mut wm = sample();
+        let start = wm.focus_id().unwrap();
+        let mut seen = vec![start];
+        for _ in 0..2 {
+            wm.focus_next(direction);
+            let id = wm.focus_id().unwrap();
+            assert!(!seen.contains(&id));
+            seen.push(id);
+        }
+        wm.focus_next(direction);
+        assert_eq!(wm.focus_id(), Some(start));
+    }
+}
+
+#[test]
+fn dock_restore_switches_to_the_minimized_windows_workspace() {
+    let mut wm = sample();
+    let id = wm.window_id(WindowKind::Files).unwrap();
+    wm.minimize_window(id);
+    wm.switch_workspace(2);
+    wm.finish_animations();
+    let icon = layout::dock_icon_rects(wm.screen(), wm.dock_hover())[0];
+    wm.pointer_down(icon.center(), 100);
+    assert_eq!(wm.workspace(), 0);
+    assert_eq!(wm.focus_id(), Some(id));
+    assert_eq!(wm.window(id).unwrap().state, WindowState::Normal);
+}
+
+#[test]
+fn closing_windows_remain_painted_but_cannot_receive_input() {
+    let mut wm = sample();
+    let id = wm.focus_id().unwrap();
+    wm.close_window(id);
+    assert!(wm.window(id).unwrap().is_visible());
+    let point = traffic_lights(wm.window(id).unwrap().frame).close.center();
+    assert_ne!(wm.hit_test(point), crate::Hit::Close(id));
+    wm.tick(30);
+    assert!(wm.window(id).is_none());
+}
+
+#[test]
+fn spotlight_field_and_padding_never_execute_the_first_result() {
+    let mut wm = sample();
+    wm.open_spotlight();
+    let panel = layout::spotlight_panel(wm.screen());
+    for point in [
+        layout::spotlight_field(panel).center(),
+        Point::new(panel.x + 2, panel.y + 60),
+        Point::new(panel.x + 20, panel.y + 53),
+    ] {
+        wm.pointer_down(point, 1);
+        assert!(wm.spotlight_open());
+        assert_eq!(wm.focused_window().unwrap().kind, WindowKind::Welcome);
+    }
+    wm.pointer_down(layout::spotlight_result_rect(panel, 0).center(), 2);
+    assert!(!wm.spotlight_open());
+    assert_eq!(wm.focused_window().unwrap().kind, WindowKind::Files);
+}
+
+#[test]
+fn menu_padding_does_not_execute_actions_and_logo_toggles_closed() {
+    let mut wm = sample();
+    let logo = layout::menu_logo_rect(wm.screen()).center();
+    wm.pointer_down(logo, 1);
+    let panel = wm.menu_panel().unwrap();
+    wm.pointer_down(Point::new(panel.x + 1, panel.y + 1), 2);
+    assert!(wm.menu_state().is_some());
+    wm.pointer_down(logo, 3);
+    assert!(wm.menu_state().is_none());
+}
+
+#[test]
+fn keyboard_can_open_every_menu_and_resize_without_a_pointer() {
+    let mut wm = sample();
+    wm.key(Key::Function(10), Modifiers::default());
+    for kind in MenuKind::ALL {
+        assert_eq!(wm.menu_state().unwrap().kind, kind);
+        assert!(wm.menu_state().unwrap().keyboard);
+        wm.key(Key::Right, Modifiers::default());
+    }
+    wm.key(Key::Escape, Modifiers::default());
+    let before = wm.focused_window().unwrap().frame;
+    wm.key(
+        Key::Right,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(wm.focused_window().unwrap().frame.width, before.width + 8);
+}
+
+#[test]
+fn window_ids_do_not_alias_live_windows_after_wrapping() {
+    let mut wm = Wm::new(Rect::new(0, 0, 1280, 800));
+    let files = wm.open(WindowKind::Files).unwrap();
+    for _ in 0..600 {
+        let other = wm.open(WindowKind::Welcome).unwrap();
+        assert_ne!(files, other);
+        wm.close_window(other);
+        wm.tick(30);
+        assert_eq!(wm.window(files).unwrap().kind, WindowKind::Files);
+        assert_eq!(wm.order(), &[files]);
+    }
+}
+
+#[test]
+fn reduce_motion_also_finishes_dock_magnification() {
+    let mut wm = sample();
+    wm.toggle_setting(0);
+    let icon = layout::dock_icon_rects(wm.screen(), wm.dock_hover())[0];
+    wm.pointer_moved(icon.center());
+    assert_eq!(wm.dock_hover()[0], 256);
+    assert!(!wm.is_animating());
+    wm.pointer_moved(Point::new(0, 0));
+    assert_eq!(*wm.dock_hover(), [0; DOCK_ITEMS]);
+    assert!(!wm.is_animating());
+}
+
+#[test]
+fn menu_alpha_never_wraps_at_the_tinted_setting() {
+    use crate::GlassLevel;
+    assert_eq!(GlassLevel::Clear.menu_alpha(), 208);
+    assert_eq!(GlassLevel::Balanced.menu_alpha(), 238);
+    assert_eq!(GlassLevel::Tinted.menu_alpha(), 250);
+}
+
+#[test]
+fn cursor_only_movement_does_not_damage_the_scene() {
+    let mut wm = sample();
+    let before = wm;
+    wm.pointer_moved(wm.cursor().offset(2, 2));
+    assert_eq!(wm.damage_since(&before), None);
+}
+
+#[test]
+fn static_overlays_do_not_force_continuous_full_screen_repaints() {
+    let mut wm = sample();
+    wm.open_spotlight();
+    let before = wm;
+    wm.tick(1);
+    assert_eq!(wm.damage_since(&before), None);
+    wm.close_spotlight();
+    wm.toggle_overview();
+    wm.finish_animations();
+    let before = wm;
+    wm.tick(1);
+    assert_eq!(wm.damage_since(&before), None);
+}
+
+#[test]
+fn moving_a_window_damages_old_and_new_frames_including_shadows() {
+    let mut wm = sample();
+    let before = wm;
+    let old = wm.focused_window().unwrap().frame;
+    wm.move_focused(8, 8);
+    let new = wm.focused_window().unwrap().frame;
+    let damage = wm.damage_since(&before).unwrap();
+    assert_eq!(damage.intersection(old.inset(-24)), Some(old.inset(-24)));
+    assert_eq!(damage.intersection(new.inset(-24)), Some(new.inset(-24)));
+    assert!(damage.width < wm.screen().width);
+    assert!(damage.height < wm.screen().height);
+}
+
+#[test]
+fn hit_testing_tracks_animated_not_logical_window_frames() {
+    let mut wm = Wm::new(Rect::new(0, 0, 1280, 800));
+    let id = wm.open(WindowKind::Settings).unwrap();
+    let frame = wm.window_frame(id).unwrap();
+    assert_ne!(frame, wm.window(id).unwrap().frame);
+    assert_eq!(
+        wm.hit_test(traffic_lights(frame).close.center()),
+        crate::Hit::Close(id)
+    );
+    wm.finish_animations();
+    assert_eq!(wm.window_frame(id), Some(wm.window(id).unwrap().frame));
 }

@@ -24,13 +24,19 @@ pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"AETHEROS");
 ///
 /// Bump this for any layout or semantic change. The kernel refuses versions it
 /// does not implement.
-pub const BOOT_INFO_VERSION: u32 = 2;
+pub const BOOT_INFO_VERSION: u32 = 3;
 
 /// Maximum number of memory regions passed to the kernel.
 ///
 /// The bound keeps both sides allocation-free. The loader fails closed if
 /// firmware reports more regions than this.
 pub const MAX_MEMORY_REGIONS: usize = 256;
+
+/// Prototype bound on visible dimensions and scan-line stride.
+/// Keeps software-compositor arithmetic and firmware-driven work bounded.
+pub const MAX_FRAMEBUFFER_DIMENSION: u32 = 8192;
+/// Largest framebuffer aperture mapped by the prototype (512 MiB).
+pub const MAX_FRAMEBUFFER_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Coarse memory classification used by the kernel.
 #[repr(u32)]
@@ -94,10 +100,10 @@ impl MemoryKind {
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelFormat {
-    /// Blue, green, red, reserved byte order.
-    BlueGreenRedReserved = 0,
     /// Red, green, blue, reserved byte order.
-    RedGreenBlueReserved = 1,
+    RedGreenBlueReserved = 0,
+    /// Blue, green, red, reserved byte order.
+    BlueGreenRedReserved = 1,
     /// Hardware bit masks; the kernel falls back to text-only output.
     BitMask = 2,
     /// No linear framebuffer is available.
@@ -109,8 +115,8 @@ impl PixelFormat {
     #[must_use]
     pub const fn from_raw(value: u32) -> Option<Self> {
         match value {
-            0 => Some(Self::BlueGreenRedReserved),
-            1 => Some(Self::RedGreenBlueReserved),
+            0 => Some(Self::RedGreenBlueReserved),
+            1 => Some(Self::BlueGreenRedReserved),
             2 => Some(Self::BitMask),
             3 => Some(Self::BltOnly),
             _ => None,
@@ -124,6 +130,28 @@ impl PixelFormat {
             self,
             Self::BlueGreenRedReserved | Self::RedGreenBlueReserved
         )
+    }
+
+    /// Encodes `0x00RRGGBB` as a little-endian framebuffer word.
+    ///
+    /// The discriminants and byte order match UEFI GOP. Unsupported formats
+    /// return `None`; the reserved byte is always zero.
+    #[must_use]
+    pub const fn encode_rgb(self, rgb: u32) -> Option<u32> {
+        match self {
+            Self::RedGreenBlueReserved => {
+                Some(((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff))
+            }
+            Self::BlueGreenRedReserved => Some(rgb & 0x00ff_ffff),
+            Self::BitMask | Self::BltOnly => None,
+        }
+    }
+
+    /// Decodes a little-endian framebuffer word into `0x00RRGGBB`.
+    #[must_use]
+    pub const fn decode_rgb(self, pixel: u32) -> Option<u32> {
+        // Swapping red and blue is its own inverse.
+        self.encode_rgb(pixel)
     }
 }
 
@@ -184,7 +212,16 @@ impl FramebufferInfo {
         let Some(format) = PixelFormat::from_raw(self.format) else {
             return Err(BootInfoError::InvalidFramebuffer);
         };
-        if !format.is_linear() || self.width == 0 || self.height == 0 || self.stride < self.width {
+        if !format.is_linear()
+            || !self.base.is_multiple_of(4)
+            || self.width == 0
+            || self.height == 0
+            || self.width > MAX_FRAMEBUFFER_DIMENSION
+            || self.height > MAX_FRAMEBUFFER_DIMENSION
+            || self.stride > MAX_FRAMEBUFFER_DIMENSION
+            || self.size > MAX_FRAMEBUFFER_BYTES
+            || self.stride < self.width
+        {
             return Err(BootInfoError::InvalidFramebuffer);
         }
         let Some(row_bytes) = (self.stride as u64).checked_mul(4) else {
@@ -632,6 +669,74 @@ mod tests {
         assert_eq!(size_of::<MemoryRegion>(), 24);
         assert_eq!(size_of::<FramebufferInfo>(), 40);
         assert_eq!(size_of::<BootInfo>(), 136);
+    }
+
+    #[test]
+    fn gop_format_codes_and_pixel_bytes_match_uefi() {
+        assert_eq!(PixelFormat::RedGreenBlueReserved as u32, 0);
+        assert_eq!(PixelFormat::BlueGreenRedReserved as u32, 1);
+        for (format, expected) in [
+            (PixelFormat::RedGreenBlueReserved, [0x12, 0x34, 0x56, 0]),
+            (PixelFormat::BlueGreenRedReserved, [0x56, 0x34, 0x12, 0]),
+        ] {
+            assert_eq!(PixelFormat::from_raw(format as u32), Some(format));
+            let word = format.encode_rgb(0xab12_3456).unwrap();
+            assert_eq!(word.to_le_bytes(), expected);
+            assert_eq!(format.decode_rgb(word), Some(0x123456));
+            for rgb in [0xff0000, 0x00ff00, 0x0000ff, 0, 0xffffff] {
+                assert_eq!(
+                    format.decode_rgb(format.encode_rgb(rgb).unwrap()),
+                    Some(rgb)
+                );
+            }
+        }
+        assert_eq!(PixelFormat::BitMask.encode_rgb(0xff0000), None);
+        assert_eq!(PixelFormat::BltOnly.decode_rgb(0), None);
+    }
+
+    #[test]
+    fn framebuffer_rejects_unaligned_and_unrepresentable_dimensions() {
+        let mut framebuffer = FramebufferInfo {
+            base: 0x8000_0000,
+            size: 800 * 600 * 4,
+            width: 800,
+            height: 600,
+            stride: 800,
+            format: 1,
+            reserved: 0,
+        };
+        assert_eq!(framebuffer.validate(), Ok(()));
+        framebuffer.base += 1;
+        assert_eq!(
+            framebuffer.validate(),
+            Err(BootInfoError::InvalidFramebuffer)
+        );
+        framebuffer.base -= 1;
+        framebuffer.size = MAX_FRAMEBUFFER_BYTES + 1;
+        assert_eq!(
+            framebuffer.validate(),
+            Err(BootInfoError::InvalidFramebuffer)
+        );
+        framebuffer.size = 800 * 600 * 4;
+        framebuffer.stride = MAX_FRAMEBUFFER_DIMENSION + 1;
+        assert_eq!(
+            framebuffer.validate(),
+            Err(BootInfoError::InvalidFramebuffer)
+        );
+        framebuffer.stride = 800;
+        framebuffer.height = u32::MAX;
+        framebuffer.size = u64::MAX / 2;
+        assert_eq!(
+            framebuffer.validate(),
+            Err(BootInfoError::InvalidFramebuffer)
+        );
+    }
+
+    #[test]
+    fn rejects_previous_boot_abi_instead_of_reinterpreting_pixel_formats() {
+        let mut info = header();
+        info.version = 2;
+        assert_eq!(info.validate(), Err(BootInfoError::UnsupportedVersion(2)));
     }
 
     #[test]

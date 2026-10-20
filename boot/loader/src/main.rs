@@ -385,13 +385,18 @@ unsafe fn query_framebuffer(services: &BootServices) -> FramebufferInfo {
             return FramebufferInfo::NONE;
         }
         let mode = &*gop.mode;
-        if mode.info.is_null() || mode.frame_buffer_base == 0 {
-            serial_line!("loader: GOP mode has no linear framebuffer");
+        if mode.info.is_null()
+            || mode.size_of_info < core::mem::size_of::<uefi::GraphicsOutputModeInformation>()
+            || !(mode.info as usize)
+                .is_multiple_of(core::mem::align_of::<uefi::GraphicsOutputModeInformation>())
+        {
+            serial_line!("loader: GOP mode information is absent, truncated, or misaligned");
             return FramebufferInfo::NONE;
         }
         let info = &*mode.info;
-        if info.pixel_format > 1 || info.horizontal_resolution == 0 || info.vertical_resolution == 0
-        {
+        let Some(framebuffer) =
+            info.framebuffer(mode.frame_buffer_base, mode.frame_buffer_size as u64)
+        else {
             serial_line!(
                 "loader: GOP mode unsupported {}x{} format={}",
                 info.horizontal_resolution,
@@ -399,37 +404,16 @@ unsafe fn query_framebuffer(services: &BootServices) -> FramebufferInfo {
                 info.pixel_format
             );
             return FramebufferInfo::NONE;
-        }
-
-        // Some firmware revisions report the mode information without the
-        // trailing scan-line field. The frame-buffer size is authoritative;
-        // fall back to the visible width when the field is not present.
-        let mut stride = info.horizontal_resolution;
-        if mode.size_of_info as usize >= core::mem::size_of::<uefi::GraphicsOutputModeInformation>()
-        {
-            stride = info.pixels_per_scan_line.max(info.horizontal_resolution);
-        }
-        let required = u64::from(stride)
-            .saturating_mul(u64::from(info.vertical_resolution))
-            .saturating_mul(4);
-        let size = (mode.frame_buffer_size as u64).max(required);
+        };
         serial_line!(
             "loader: GOP {}x{} stride={} format={}",
             info.horizontal_resolution,
             info.vertical_resolution,
-            stride,
+            framebuffer.stride,
             info.pixel_format
         );
 
-        FramebufferInfo {
-            base: mode.frame_buffer_base,
-            size,
-            width: info.horizontal_resolution,
-            height: info.vertical_resolution,
-            stride,
-            format: info.pixel_format,
-            reserved: 0,
-        }
+        framebuffer
     }
 }
 

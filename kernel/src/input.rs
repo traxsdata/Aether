@@ -8,7 +8,8 @@
 
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::serial_line;
-use aether_wm::Modifiers;
+use aether_input::{EventQueue, Keyboard, MouseDecoder};
+pub use aether_input::{Key, KeyEvent};
 use core::cell::UnsafeCell;
 
 struct Global<T>(UnsafeCell<T>);
@@ -20,82 +21,7 @@ unsafe impl<T> Sync for Global<T> {}
 
 const QUEUE_LEN: usize = 32;
 
-/// A decoded key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Key {
-    /// Printable character.
-    Char(u8),
-    /// Enter/Return.
-    Enter,
-    /// Backspace.
-    Backspace,
-    /// Tab.
-    Tab,
-    /// Escape.
-    Escape,
-    /// Arrow up.
-    Up,
-    /// Arrow down.
-    Down,
-    /// Arrow left.
-    Left,
-    /// Arrow right.
-    Right,
-    /// Function key, one-based (F1 is 1).
-    Function(u8),
-}
-
-/// A key and the modifiers held when it was pressed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KeyEvent {
-    /// Decoded key.
-    pub key: Key,
-    /// Modifiers captured at the make scancode.
-    pub modifiers: Modifiers,
-}
-
-struct Queue {
-    buffer: [Option<KeyEvent>; QUEUE_LEN],
-    head: usize,
-    tail: usize,
-    len: usize,
-    received: u32,
-    dropped: u32,
-}
-
-impl Queue {
-    const fn new() -> Self {
-        Self {
-            buffer: [None; QUEUE_LEN],
-            head: 0,
-            tail: 0,
-            len: 0,
-            received: 0,
-            dropped: 0,
-        }
-    }
-
-    fn push(&mut self, event: KeyEvent) {
-        self.received = self.received.saturating_add(1);
-        if self.len == QUEUE_LEN {
-            self.dropped = self.dropped.saturating_add(1);
-            return;
-        }
-        self.buffer[self.tail] = Some(event);
-        self.tail = (self.tail + 1) % QUEUE_LEN;
-        self.len += 1;
-    }
-
-    fn pop(&mut self) -> Option<KeyEvent> {
-        if self.len == 0 {
-            return None;
-        }
-        let event = self.buffer[self.head].take();
-        self.head = (self.head + 1) % QUEUE_LEN;
-        self.len -= 1;
-        event
-    }
-}
+type Queue = EventQueue<KeyEvent, QUEUE_LEN>;
 
 #[derive(Clone, Copy)]
 struct MouseState {
@@ -104,8 +30,7 @@ struct MouseState {
     buttons: u8,
     width: i32,
     height: i32,
-    packet: [u8; 3],
-    index: usize,
+    decoder: MouseDecoder,
     packets: u32,
     available: bool,
 }
@@ -118,8 +43,7 @@ impl MouseState {
             buttons: 0,
             width: 1,
             height: 1,
-            packet: [0; 3],
-            index: 0,
+            decoder: MouseDecoder::new(),
             packets: 0,
             available: false,
         }
@@ -131,49 +55,36 @@ impl MouseState {
         self.buttons = 0;
         self.width = width.max(1);
         self.height = height.max(1);
-        self.packet = [0; 3];
-        self.index = 0;
+        self.decoder.reset();
         self.packets = 0;
     }
 
-    fn push(&mut self, byte: u8) {
-        // Bit 3 is fixed in every PS/2 packet's first byte. Use it to recover
-        // packet boundaries after a lost/stray byte instead of permanently
-        // grouping the stream into the wrong triples.
-        if self.index == 0 && byte & 0x08 == 0 {
-            return;
-        }
-        self.packet[self.index] = byte;
-        self.index += 1;
-        if self.index < 3 {
-            return;
-        }
-        self.index = 0;
-        let flags = self.packet[0];
-        if flags & 0x08 == 0 {
-            return;
-        }
-        let dx = if flags & 0x10 != 0 {
-            i16::from(self.packet[1]) - 256
-        } else {
-            i16::from(self.packet[1])
+    fn push(&mut self, byte: u8) -> bool {
+        let Some(packet) = self.decoder.push(byte) else {
+            return false;
         };
-        let dy = if flags & 0x20 != 0 {
-            i16::from(self.packet[2]) - 256
-        } else {
-            i16::from(self.packet[2])
-        };
-        // The device marks an overflowing axis in the header; its movement
-        // byte is then saturated and must not be interpreted as a real delta.
-        if flags & 0x40 == 0 {
-            self.x = (self.x + i32::from(dx)).clamp(0, self.width - 1);
-        }
+        self.x = self
+            .x
+            .saturating_add(i32::from(packet.dx))
+            .clamp(0, self.width - 1);
         // PS/2 reports positive Y upward; screen coordinates grow downward.
-        if flags & 0x80 == 0 {
-            self.y = (self.y - i32::from(dy)).clamp(0, self.height - 1);
-        }
-        self.buttons = flags & 0x07;
+        self.y = self
+            .y
+            .saturating_sub(i32::from(packet.dy))
+            .clamp(0, self.height - 1);
+        self.buttons = packet.buttons;
         self.packets = self.packets.saturating_add(1);
+        true
+    }
+
+    fn snapshot(&self) -> MouseSnapshot {
+        MouseSnapshot {
+            x: self.x,
+            y: self.y,
+            buttons: self.buttons,
+            packets: self.packets,
+            available: self.available,
+        }
     }
 }
 
@@ -194,13 +105,9 @@ pub struct MouseSnapshot {
 
 static QUEUE: Global<Queue> = Global(UnsafeCell::new(Queue::new()));
 static MOUSE: Global<MouseState> = Global(UnsafeCell::new(MouseState::new()));
-static MODIFIERS: Global<Modifiers> = Global(UnsafeCell::new(Modifiers {
-    ctrl: false,
-    alt: false,
-    shift: false,
-    super_key: false,
-}));
-static EXTENDED: Global<bool> = Global(UnsafeCell::new(false));
+static KEYBOARD: Global<Keyboard> = Global(UnsafeCell::new(Keyboard::new()));
+static POINTER_EVENTS: Global<EventQueue<MouseSnapshot, QUEUE_LEN>> =
+    Global(UnsafeCell::new(EventQueue::new()));
 
 const PS2_DATA: u16 = 0x60;
 const PS2_STATUS: u16 = 0x64;
@@ -244,16 +151,6 @@ fn wait_input_empty() -> bool {
     false
 }
 
-fn wait_output_full() -> bool {
-    for _ in 0..100_000 {
-        // SAFETY: PS/2 status port is fixed on the supported platform.
-        if unsafe { inb(PS2_STATUS) } & 0x01 != 0 {
-            return true;
-        }
-    }
-    false
-}
-
 fn flush_output() {
     for _ in 0..16 {
         // SAFETY: PS/2 status and data ports are fixed.
@@ -283,42 +180,73 @@ fn controller_data(data: u8) -> bool {
     true
 }
 
-fn read_data() -> Option<u8> {
-    if !wait_output_full() {
-        return None;
+fn read_data(auxiliary: bool) -> Option<u8> {
+    for _ in 0..100_000 {
+        // SAFETY: Fixed PS/2 ports; the caller masks interrupts.
+        let status = unsafe { inb(PS2_STATUS) };
+        if status & 1 == 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        // SAFETY: The status indicates a readable output byte.
+        let byte = unsafe { inb(PS2_DATA) };
+        if status & 0xc0 == 0 && (status & 0x20 != 0) == auxiliary {
+            return Some(byte);
+        }
+        route_byte(status, byte);
     }
-    // SAFETY: Fixed PS/2 data port.
-    Some(unsafe { inb(PS2_DATA) })
+    None
 }
 
 fn mouse_command(command: u8) -> bool {
-    if !controller_command(0xd4) || !controller_data(command) {
-        return false;
+    for _ in 0..3 {
+        if !controller_command(0xd4) || !controller_data(command) {
+            return false;
+        }
+        match read_data(true) {
+            Some(0xfa) => return true,
+            Some(0xfe) => continue, // bounded device-requested resend
+            _ => return false,
+        }
     }
-    // A device ACK (0xFA) is expected; treat a timeout as a failed probe.
-    matches!(read_data(), Some(0xfa))
+    false
 }
 
 fn probe_mouse() -> bool {
+    let available = probe_mouse_inner();
+    // Every exit, including a missing auxiliary port or a command timeout,
+    // attempts to re-enable the keyboard clock. Never strand it after 0xAD.
+    let keyboard_enabled = controller_command(0xae);
+    if !available {
+        let _ = controller_command(0xa7);
+    }
+    available && keyboard_enabled
+}
+
+fn probe_mouse_inner() -> bool {
     flush_output();
-    let _ = controller_command(0xad); // disable keyboard
-    let _ = controller_command(0xa7); // disable auxiliary port
+    if !controller_command(0xad) || !controller_command(0xa7) {
+        return false;
+    }
     flush_output();
 
     if !controller_command(0x20) {
         return false;
     }
-    let Some(mut config) = read_data() else {
+    let Some(mut config) = read_data(false) else {
         return false;
     };
-    // Enable IRQ1 and IRQ12, and allow both device clocks.
+    // Preserve firmware's translation mode. Keep the keyboard clock disabled
+    // during the mouse exchange so a keystroke cannot be mistaken for an ACK.
     config |= 0x03;
-    config &= !0x30;
+    config |= 0x10;
+    config &= !0x20;
     if !controller_command(0x60) || !controller_data(config) {
         return false;
     }
-    let _ = controller_command(0xa8); // enable auxiliary port
-    let _ = controller_command(0xae); // enable keyboard
+    if !controller_command(0xa8) {
+        return false;
+    }
 
     if !mouse_command(0xf6) {
         return false; // set defaults
@@ -340,13 +268,8 @@ pub fn init(width: u32, height: u32) {
         *QUEUE.0.get() = Queue::new();
         *MOUSE.0.get() = MouseState::new();
         (*MOUSE.0.get()).reset(width as i32, height as i32);
-        *MODIFIERS.0.get() = Modifiers {
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-        };
-        *EXTENDED.0.get() = false;
+        *KEYBOARD.0.get() = Keyboard::new();
+        *POINTER_EVENTS.0.get() = EventQueue::new();
     }
     let available = probe_mouse();
     // SAFETY: Still inside the interrupt guard and this is the only writer.
@@ -360,73 +283,62 @@ pub fn init(width: u32, height: u32) {
     }
 }
 
-fn current_modifiers() -> Modifiers {
-    // SAFETY: The caller holds interrupts or is in interrupt context.
-    unsafe { *MODIFIERS.0.get() }
-}
-
-fn set_modifier(code: u8, pressed: bool) {
-    // SAFETY: Interrupts are masked or this is IRQ context.
-    unsafe {
-        let modifiers = &mut *MODIFIERS.0.get();
-        match code {
-            0x2a | 0x36 => modifiers.shift = pressed,
-            0x1d => modifiers.ctrl = pressed,
-            0x38 => modifiers.alt = pressed,
-            0x5b | 0x5c => modifiers.super_key = pressed,
-            _ => {}
-        }
-    }
-}
-
 fn handle_scancode(scancode: u8) {
     // SAFETY: Interrupts are masked or this is IRQ context.
     unsafe {
-        if scancode == 0xe0 {
-            *EXTENDED.0.get() = true;
-            return;
+        if let Some(event) = (*KEYBOARD.0.get()).push(scancode) {
+            (*QUEUE.0.get()).push(event);
         }
-        if *EXTENDED.0.get() {
-            *EXTENDED.0.get() = false;
-            // Extended Control is the right-hand Ctrl key.
-            if scancode & 0x7f == 0x1d {
-                set_modifier(0x1d, scancode & 0x80 == 0);
+    }
+}
+
+fn handle_mouse(byte: u8) {
+    // SAFETY: Interrupts are masked or this is IRQ context; the two globals
+    // have disjoint storage and no borrow escapes this function.
+    unsafe {
+        let mouse = &mut *MOUSE.0.get();
+        if mouse.push(byte) {
+            (*POINTER_EVENTS.0.get()).push(mouse.snapshot());
+        }
+    }
+}
+
+fn route_byte(status: u8, byte: u8) {
+    if status & 0xc0 != 0 {
+        // SAFETY: The caller masks interrupts or is an IRQ handler. A dropped
+        // byte invalidates partial packets and can include a modifier release.
+        unsafe {
+            if status & 0x20 != 0 {
+                (*MOUSE.0.get()).decoder.reset();
+            } else {
+                *KEYBOARD.0.get() = Keyboard::new();
             }
-            return;
         }
-    }
-    let released = scancode & 0x80 != 0;
-    let code = scancode & 0x7f;
-    if matches!(code, 0x2a | 0x36 | 0x1d | 0x38 | 0x5b | 0x5c) {
-        set_modifier(code, !released);
-        return;
-    }
-    if released {
-        return;
-    }
-    if let Some(key) = decode(code) {
-        let event = KeyEvent {
-            key,
-            modifiers: current_modifiers(),
-        };
-        // SAFETY: Interrupts are masked or this is IRQ context.
-        unsafe { (*QUEUE.0.get()).push(event) };
+    } else if status & 0x20 != 0 {
+        handle_mouse(byte);
+    } else {
+        handle_scancode(byte);
     }
 }
 
-/// IRQ1 handler: consumes the controller's output buffer.
+/// IRQ1 handler: drains bounded output using the controller's source bit.
 pub fn on_irq() {
-    // SAFETY: IRQ1 is only delivered while the controller and IDT are ready.
-    let scancode = unsafe { inb(PS2_DATA) };
-    handle_scancode(scancode);
+    // IRQ1 and IRQ12 can be pending together. The vector alone does not tell
+    // which device currently owns the shared output register.
+    for _ in 0..QUEUE_LEN {
+        // SAFETY: Fixed ports, accessed only in interrupt context.
+        let status = unsafe { inb(PS2_STATUS) };
+        if status & 1 == 0 {
+            break;
+        }
+        // SAFETY: A byte is available according to the status just read.
+        route_byte(status, unsafe { inb(PS2_DATA) });
+    }
 }
 
-/// IRQ12 handler: consumes one mouse packet byte.
+/// IRQ12 handler: shares the source-checked drain path with IRQ1.
 pub fn on_mouse_irq() {
-    // SAFETY: IRQ12 is only delivered while the controller and IDT are ready.
-    let byte = unsafe { inb(PS2_DATA) };
-    // SAFETY: This is interrupt context and the state is interrupt-safe.
-    unsafe { (*MOUSE.0.get()).push(byte) };
+    on_irq();
 }
 
 /// Drains the next key event.
@@ -451,14 +363,26 @@ pub fn poll() {
 pub fn mouse() -> MouseSnapshot {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the read.
-    let mouse = unsafe { &*MOUSE.0.get() };
-    MouseSnapshot {
-        x: mouse.x,
-        y: mouse.y,
-        buttons: mouse.buttons,
-        packets: mouse.packets,
-        available: mouse.available,
+    unsafe { (*MOUSE.0.get()).snapshot() }
+}
+
+/// Atomically drains a bounded batch and captures the final pointer state.
+/// The final snapshot reconciles overflow without reordering a later IRQ batch.
+pub fn drain_mouse_events() -> ([Option<MouseSnapshot>; QUEUE_LEN], MouseSnapshot) {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for both the drain and matching snapshot.
+    unsafe {
+        let events = core::array::from_fn(|_| (*POINTER_EVENTS.0.get()).pop());
+        (events, (*MOUSE.0.get()).snapshot())
     }
+}
+
+/// Returns the number of pointer events dropped on queue exhaustion.
+#[must_use]
+pub fn pointer_dropped() -> u32 {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the read.
+    unsafe { (*POINTER_EVENTS.0.get()).dropped() }
 }
 
 /// Returns the number of decoded keys received.
@@ -466,7 +390,7 @@ pub fn mouse() -> MouseSnapshot {
 pub fn received() -> u32 {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the read.
-    unsafe { (*QUEUE.0.get()).received }
+    unsafe { (*QUEUE.0.get()).received() }
 }
 
 /// Returns the number of dropped keys.
@@ -474,55 +398,20 @@ pub fn received() -> u32 {
 pub fn dropped() -> u32 {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the read.
-    unsafe { (*QUEUE.0.get()).dropped }
+    unsafe { (*QUEUE.0.get()).dropped() }
 }
 
 /// Injects a make or break scancode. Used by the boot self-test.
 pub fn inject(scancode: u8) {
+    let _guard = InterruptGuard::enter();
     handle_scancode(scancode);
 }
 
 /// Injects a three-byte PS/2 mouse packet. Used by the boot self-test.
 pub fn inject_mouse_packet(packet: [u8; 3]) {
     let _guard = InterruptGuard::enter();
-    // SAFETY: Interrupts are masked for the state update.
-    unsafe {
-        for byte in packet {
-            (*MOUSE.0.get()).push(byte);
-        }
-    }
-}
-
-/// Decodes a set-1 make scancode.
-#[must_use]
-pub fn decode(scancode: u8) -> Option<Key> {
-    match scancode {
-        0x01 => Some(Key::Escape),
-        0x0e => Some(Key::Backspace),
-        0x0f => Some(Key::Tab),
-        0x1c => Some(Key::Enter),
-        0x48 => Some(Key::Up),
-        0x50 => Some(Key::Down),
-        0x4b => Some(Key::Left),
-        0x4d => Some(Key::Right),
-        0x3b..=0x44 => Some(Key::Function(scancode - 0x3a)),
-        0x02..=0x0b => Some(Key::Char(b"1234567890"[(scancode - 0x02) as usize])),
-        0x0c => Some(Key::Char(b'-')),
-        0x0d => Some(Key::Char(b'=')),
-        0x10..=0x19 => Some(Key::Char(b"qwertyuiop"[(scancode - 0x10) as usize])),
-        0x1a => Some(Key::Char(b'[')),
-        0x1b => Some(Key::Char(b']')),
-        0x1e..=0x26 => Some(Key::Char(b"asdfghjkl"[(scancode - 0x1e) as usize])),
-        0x27 => Some(Key::Char(b';')),
-        0x28 => Some(Key::Char(b'\'')),
-        0x29 => Some(Key::Char(b'`')),
-        0x2b => Some(Key::Char(b'\\')),
-        0x2c..=0x32 => Some(Key::Char(b"zxcvbnm"[(scancode - 0x2c) as usize])),
-        0x33 => Some(Key::Char(b',')),
-        0x34 => Some(Key::Char(b'.')),
-        0x35 => Some(Key::Char(b'/')),
-        0x39 => Some(Key::Char(b' ')),
-        _ => None,
+    for byte in packet {
+        handle_mouse(byte);
     }
 }
 
@@ -554,11 +443,11 @@ pub fn self_test() {
 
     for scancode in [
         0x0f, // Tab
-        0x4d, // Right
-        0x50, // Down
+        0xe0, 0x4d, 0xe0, 0xcd, // dedicated Right, make/break
+        0xe0, 0x50, 0xe0, 0xd0, // dedicated Down, make/break
         0x1c, // Enter
-        0x1d, 0x4d, 0x9d, // Ctrl+Right: next workspace
-        0x1d, 0x4b, 0x9d, // Ctrl+Left: previous workspace
+        0x1d, 0xe0, 0x4d, 0xe0, 0xcd, 0x9d, // Ctrl+Right
+        0xe0, 0x1d, 0xe0, 0x4b, 0xe0, 0xcb, 0xe0, 0x9d, // right Ctrl+Left
         0x3d, // F3: overview
         0x01, // Escape: close overview
     ] {
@@ -570,6 +459,10 @@ pub fn self_test() {
         crate::desktop::on_key(event.key, event.modifiers);
     }
     crate::desktop::restore_default_view();
+    if decoded != 8 || dropped() != 0 {
+        serial_line!("AETHER_INPUT_FAILED keys={} dropped={}", decoded, dropped());
+        return;
+    }
     serial_line!(
         "AETHER_INPUT_OK keys={} dropped={} queue={} mouse={}",
         decoded,

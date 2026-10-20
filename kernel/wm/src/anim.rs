@@ -42,11 +42,11 @@ impl Anim {
         }
     }
 
-    /// Creates an animation at zero that will move to [`COMPLETE`].
+    /// Creates an animation toward [`COMPLETE`]; zero duration completes now.
     #[must_use]
     pub const fn starting(duration_ticks: u16) -> Self {
         Self {
-            value: 0,
+            value: if duration_ticks == 0 { COMPLETE } else { 0 },
             target: COMPLETE,
             rate: rate_for(duration_ticks),
         }
@@ -92,9 +92,7 @@ impl Anim {
 
     /// Resets to zero and animates to completion.
     pub fn restart(&mut self, duration_ticks: u16) {
-        self.value = 0;
-        self.target = COMPLETE;
-        self.rate = rate_for(duration_ticks);
+        *self = Self::starting(duration_ticks);
     }
 
     /// Advances the animation by one tick. Returns `true` when it moved.
@@ -142,7 +140,7 @@ pub const fn ease_out_cubic(value: u16) -> u16 {
     eased as u16
 }
 
-/// Cubic ease-in-out scaled to 0..=256.
+/// Quadratic ease-in-out scaled to 0..=256.
 #[must_use]
 pub const fn ease_in_out(value: u16) -> u16 {
     let value = clamp(value) as u32;

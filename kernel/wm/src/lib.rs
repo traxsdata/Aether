@@ -4,7 +4,8 @@
 //! This crate contains the parts of the desktop that benefit from deterministic
 //! host tests: geometry, window and workspace state, focus and z-order rules,
 //! hit testing, menus, dock layout, and integer animation. It contains no
-//! framebuffer, device, filesystem, or capability code. The kernel renders the
+//! hardware I/O, ambient service access, or capability handling. Files requests
+//! go through an explicitly supplied service adapter. The kernel renders the
 //! state through its own graphics service and remains the only component that
 //! touches the display.
 //!
@@ -16,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod anim;
+pub mod browser;
 pub mod geometry;
 pub mod layout;
 pub mod model;

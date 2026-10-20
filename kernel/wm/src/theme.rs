@@ -83,6 +83,13 @@ impl GlassLevel {
         }
     }
 
+    /// Slightly more opaque drop-down menus, without overflowing an 8-bit alpha.
+    #[must_use]
+    pub const fn menu_alpha(self) -> u8 {
+        let alpha = self.panel_alpha().saturating_add(20);
+        if alpha > 250 { 250 } else { alpha }
+    }
+
     /// Alpha for window shells.
     #[must_use]
     pub const fn window_alpha(self) -> u8 {

@@ -7,10 +7,10 @@
 //! Spotlight-style search. Those are design principles, not Apple code or
 //! assets: every glyph, icon, palette, and animation is defined in this tree.
 //!
-//! The desktop owns no authority. Files are read through the filesystem
-//! service, grants through the portal, and service state through the
-//! supervisor. A compromised compositor could lie about pixels, but it cannot
-//! mint a file capability or bypass a root check.
+//! The pure window-manager model has no authority. This adapter still runs in
+//! ring 0 and is part of the trusted computing base; its service-only access is
+//! a coding rule, not containment of a compromised compositor. Ring-3 migration
+//! is required to enforce the specification's desktop security boundary.
 
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::graphics;
@@ -19,6 +19,7 @@ use crate::input::{self, Key};
 use crate::serial_line;
 use crate::{fs, packaging, portal, recovery, scheduler, supervisor, syscall};
 use aether_packaging::manifest::Version;
+use aether_wm::browser::{Browser, BrowserLayout, LOCATIONS};
 use aether_wm::layout::{self, DOCK_SLOTS, DockSlot};
 use aether_wm::{
     Command, GlassLevel, Key as WmKey, MenuKind, Modifiers, Rect, Settings, WORKSPACES, Window,
@@ -38,6 +39,15 @@ struct DesktopState {
     last_second: u64,
     last_buttons: u8,
     last_paint: u64,
+    painted: Option<Wm>,
+    wallpaper_high_contrast: Option<bool>,
+    browser: Browser,
+    files_dirty: bool,
+    live_dirty: bool,
+    scene_paints: u64,
+    cursor_paints: u64,
+    last_paint_ticks: u64,
+    max_paint_ticks: u64,
 }
 
 impl DesktopState {
@@ -48,6 +58,15 @@ impl DesktopState {
             last_second: 0,
             last_buttons: 0,
             last_paint: 0,
+            painted: None,
+            wallpaper_high_contrast: None,
+            browser: Browser::new(),
+            files_dirty: true,
+            live_dirty: true,
+            scene_paints: 0,
+            cursor_paints: 0,
+            last_paint_ticks: 0,
+            max_paint_ticks: 0,
         }
     }
 }
@@ -70,6 +89,8 @@ pub fn init() {
     wm.seed();
     let now = scheduler::ticks();
     let mouse = input::mouse();
+    let mut browser = Browser::new();
+    browser.refresh(&mut fs::BrowserFiles);
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked and boot is single-threaded.
     unsafe {
@@ -79,6 +100,8 @@ pub fn init() {
             last_second: now / 100,
             last_buttons: mouse.buttons,
             last_paint: now,
+            browser,
+            ..DesktopState::new()
         };
     }
     drop(_guard);
@@ -98,7 +121,7 @@ fn current() -> Option<Wm> {
     unsafe { (*DESKTOP.0.get()).wm }
 }
 
-fn store(wm: Wm, ticks: u64, second: u64, buttons: u8, paint: u64) {
+fn store(wm: Wm, ticks: u64, second: u64, buttons: u8) {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the state update.
     unsafe {
@@ -106,7 +129,20 @@ fn store(wm: Wm, ticks: u64, second: u64, buttons: u8, paint: u64) {
         (*DESKTOP.0.get()).last_ticks = ticks;
         (*DESKTOP.0.get()).last_second = second;
         (*DESKTOP.0.get()).last_buttons = buttons;
-        (*DESKTOP.0.get()).last_paint = paint;
+    }
+}
+
+fn with_browser<R>(f: impl FnOnce(&mut Browser) -> R) -> R {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Short, interrupt-serialized access from the idle/boot context.
+    unsafe { f(&mut (*DESKTOP.0.get()).browser) }
+}
+
+fn mark_files_dirty() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
+    unsafe {
+        (*DESKTOP.0.get()).files_dirty = true;
     }
 }
 
@@ -118,25 +154,95 @@ pub fn redraw() {
     let Some(wm) = current() else {
         return;
     };
+    paint_frame(&wm, wm.screen());
+}
+
+fn paint_frame(wm: &Wm, mut damage: Rect) {
+    let started = scheduler::ticks();
     let palette = wm.palette();
     let glass = effective_glass(wm.settings());
     let screen = wm.screen();
-
-    paint_wallpaper(screen, palette, wm.settings().high_contrast);
-    paint_windows(&wm, palette);
-    if wm.overview_open() || wm.overview_progress() > 0 {
-        paint_overview(&wm, palette);
+    graphics::clear_clip();
+    graphics::clear_damage();
+    let old_cursor = graphics::restore_cursor_background();
+    // SAFETY: The idle task is the only painter; no mutable reference escapes.
+    let theme = unsafe { (*DESKTOP.0.get()).wallpaper_high_contrast };
+    if theme != Some(wm.settings().high_contrast)
+        || !graphics::restore_wallpaper(damage.x, damage.y, damage.width, damage.height)
+    {
+        damage = screen;
+        paint_wallpaper(screen, palette, wm.settings().high_contrast);
+        graphics::cache_wallpaper();
     }
-    paint_dock(&wm, palette, glass);
-    paint_menu_bar(&wm, palette, glass);
+    graphics::set_damage(damage.x, damage.y, damage.width, damage.height);
+    paint_windows(wm, palette);
+    if wm.overview_open() || wm.overview_progress() > 0 {
+        paint_overview(wm, palette);
+    }
+    paint_dock(wm, palette, glass);
+    paint_menu_bar(wm, palette, glass);
     if wm.menu_state().is_some() {
-        paint_menu(&wm, palette, glass);
+        paint_menu(wm, palette, glass);
     }
     if wm.spotlight_open() {
-        paint_spotlight(&wm, palette, glass);
+        paint_spotlight(wm, palette, glass);
     }
+    graphics::clear_damage();
+    graphics::save_cursor_background(wm.cursor().x, wm.cursor().y);
     paint_cursor(wm.cursor(), palette);
-    graphics::present();
+    if damage == screen {
+        graphics::present();
+    } else {
+        graphics::present_region(damage.x, damage.y, damage.width, damage.height);
+        if let Some((x, y, width, height)) = old_cursor {
+            graphics::present_region(x, y, width, height);
+        }
+        graphics::present_region(
+            wm.cursor().x,
+            wm.cursor().y,
+            graphics::CURSOR_WIDTH,
+            graphics::CURSOR_HEIGHT,
+        );
+    }
+    let finished = scheduler::ticks();
+    let _guard = InterruptGuard::enter();
+    // SAFETY: No rendering or service borrow is live during this state update.
+    unsafe {
+        let state = &mut *DESKTOP.0.get();
+        state.painted = Some(*wm);
+        state.wallpaper_high_contrast = Some(wm.settings().high_contrast);
+        state.files_dirty = false;
+        state.live_dirty = false;
+        // Pace frame starts, not frame completions: painting already consumes
+        // the frame budget and must not be followed by an extra 30 ms delay.
+        state.last_paint = started;
+        state.scene_paints = state.scene_paints.saturating_add(1);
+        state.last_paint_ticks = finished.saturating_sub(started);
+        state.max_paint_ticks = state.max_paint_ticks.max(state.last_paint_ticks);
+    }
+}
+
+fn move_cursor_only(wm: &Wm) {
+    let Some((x, y, width, height)) = graphics::restore_cursor_background() else {
+        redraw();
+        return;
+    };
+    graphics::save_cursor_background(wm.cursor().x, wm.cursor().y);
+    paint_cursor(wm.cursor(), wm.palette());
+    graphics::present_region(x, y, width, height);
+    graphics::present_region(
+        wm.cursor().x,
+        wm.cursor().y,
+        graphics::CURSOR_WIDTH,
+        graphics::CURSOR_HEIGHT,
+    );
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Short update from the only desktop owner.
+    unsafe {
+        (*DESKTOP.0.get()).cursor_paints = (*DESKTOP.0.get()).cursor_paints.saturating_add(1);
+        // Keep the last painted scene state, not unpresented animation state.
+        (*DESKTOP.0.get()).painted = Some(*wm);
+    }
 }
 
 /// Advances animations and routes pointer state into the window manager.
@@ -144,12 +250,13 @@ pub fn redraw() {
 /// The idle loop calls this after every interrupt. Work is proportional to
 /// actual change: a static desktop with no animation is not repainted.
 pub fn tick() {
-    let (wm, last_ticks, last_second, last_buttons, last_paint) = {
+    let (wm, painted, last_ticks, last_second, mut last_buttons, last_paint) = {
         let _guard = InterruptGuard::enter();
         // SAFETY: Interrupts are masked for the snapshot.
         let state = unsafe { &*DESKTOP.0.get() };
         (
             state.wm,
+            state.painted,
             state.last_ticks,
             state.last_second,
             state.last_buttons,
@@ -160,43 +267,90 @@ pub fn tick() {
         return;
     };
     let now = scheduler::ticks();
-    let elapsed = now.saturating_sub(last_ticks).min(8) as u16;
-    let mut changed = wm.tick(elapsed);
-    let mut interactive = false;
-
-    let mouse = input::mouse();
-    let point = aether_wm::Point::new(mouse.x, mouse.y);
-    let pressed = mouse.buttons & 1 != 0;
-    let was_pressed = last_buttons & 1 != 0;
-    if pressed != was_pressed {
-        if pressed {
-            wm.pointer_down(point, now);
-        } else {
-            wm.pointer_moved(point);
-            wm.pointer_up();
-        }
-        changed = true;
-        interactive = true;
-    } else if point.x != wm.cursor().x || point.y != wm.cursor().y {
-        let moved = wm.pointer_moved(point);
-        changed |= moved;
-        interactive |= moved;
+    let elapsed = now.saturating_sub(last_ticks).min(u64::from(u16::MAX)) as u16;
+    wm.tick(elapsed);
+    let (events, mouse) = input::drain_mouse_events();
+    for event in events.into_iter().flatten().chain(core::iter::once(mouse)) {
+        route_pointer(&mut wm, &mut last_buttons, event, now);
     }
 
     let second = now / 100;
     let clock_changed = second != last_second;
     if clock_changed {
-        changed = true;
+        // SAFETY: Only the idle task writes desktop state.
+        unsafe {
+            (*DESKTOP.0.get()).live_dirty = true;
+        }
     }
-    // Animate at roughly 33 fps on a 100 Hz tick. Pointer, keyboard, and clock
-    // events still present immediately; state advances every tick regardless.
-    let animation_due = !wm.is_animating() || now.saturating_sub(last_paint) >= 3;
-    if changed && (interactive || clock_changed || animation_due) {
-        store(wm, now, second, mouse.buttons, now);
-        redraw();
+    store(wm, now, second, last_buttons);
+    let mut damage = painted.map_or(Some(wm.screen()), |before| wm.damage_since(&before));
+    let mut include = |rect: Rect| {
+        damage = Some(damage.map_or(rect, |old| old.union(rect)));
+    };
+    // SAFETY: Only the idle task writes desktop state; IRQs only enqueue input.
+    let (files_dirty, live_dirty) = unsafe {
+        (
+            (*DESKTOP.0.get()).files_dirty,
+            (*DESKTOP.0.get()).live_dirty,
+        )
+    };
+    if files_dirty
+        && let Some(id) = wm.window_id(WindowKind::Files)
+        && let Some(frame) = wm.window_frame(id)
+    {
+        include(frame);
+    }
+    if live_dirty {
+        include(layout::menu_bar(wm.screen()));
+        for kind in [WindowKind::Security, WindowKind::Portal, WindowKind::Log] {
+            if let Some(id) = wm.window_id(kind)
+                && let Some(frame) = wm.window_frame(id)
+            {
+                include(frame);
+            }
+        }
+    }
+    // Batch all queued keys and pointer events into at most one scene frame per
+    // three ticks. A fast click's press/release is still processed in order.
+    if let Some(damage) = damage.and_then(|rect| rect.intersection(wm.screen())) {
+        if now.saturating_sub(last_paint) >= 3 {
+            paint_frame(&wm, damage);
+        }
+    } else if painted.is_some_and(|before| before.cursor() != wm.cursor()) {
+        move_cursor_only(&wm);
+    }
+}
+
+fn route_pointer(wm: &mut Wm, last_buttons: &mut u8, mouse: input::MouseSnapshot, now: u64) {
+    let point = aether_wm::Point::new(mouse.x, mouse.y);
+    let pressed = mouse.buttons & 1 != 0;
+    let was_pressed = *last_buttons & 1 != 0;
+    if pressed && !was_pressed {
+        let hit = wm.hit_test(point);
+        wm.pointer_down(point, now);
+        if let aether_wm::Hit::Window(id) = hit
+            && wm
+                .window(id)
+                .is_some_and(|window| window.kind == WindowKind::Files)
+            && let Some(frame) = wm.window_frame(id)
+        {
+            with_browser(|browser| {
+                browser.pointer(
+                    BrowserLayout::new(layout::content_rect(frame)),
+                    point,
+                    now,
+                    &mut fs::BrowserFiles,
+                )
+            });
+            mark_files_dirty();
+        }
     } else {
-        store(wm, now, last_second, mouse.buttons, last_paint);
+        wm.pointer_moved(point);
+        if !pressed && was_pressed {
+            wm.pointer_up();
+        }
     }
+    *last_buttons = mouse.buttons;
 }
 
 /// Handles a decoded physical key.
@@ -216,11 +370,26 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
         Key::Right => WmKey::Right,
         Key::Function(number) => WmKey::Function(number),
     };
+    let files_active = wm
+        .focused_window()
+        .is_some_and(|window| window.kind == WindowKind::Files)
+        && !wm.overview_open()
+        && !wm.spotlight_open()
+        && wm.menu_state().is_none()
+        && !modifiers.command()
+        && !modifiers.shift;
+    if files_active && with_browser(|browser| browser.key(translated, &mut fs::BrowserFiles)) {
+        mark_files_dirty();
+        return;
+    }
     let outcome = wm.key(translated, modifiers);
     if outcome.changed {
-        let now = scheduler::ticks();
-        store(wm, now, now / 100, input::mouse().buttons, now);
-        redraw();
+        let _guard = InterruptGuard::enter();
+        // SAFETY: Preserve timing/button state so keyboard input cannot swallow
+        // pointer edges or reset elapsed animation time. The next tick paints.
+        unsafe {
+            (*DESKTOP.0.get()).wm = Some(wm);
+        }
     }
     if let Some(label) = outcome.announce {
         if translated == WmKey::Enter {
@@ -240,9 +409,14 @@ pub fn restore_default_view() {
         return;
     };
     if let Some(id) = wm.window_id(WindowKind::Welcome) {
+        with_browser(|browser| {
+            *browser = Browser::new();
+            browser.refresh(&mut fs::BrowserFiles);
+        });
         wm.focus_window(id);
+        wm.finish_animations();
         let now = scheduler::ticks();
-        store(wm, now, now / 100, input::mouse().buttons, now);
+        store(wm, now, now / 100, input::mouse().buttons);
         redraw();
     }
 }
@@ -259,6 +433,26 @@ pub fn self_test() {
     };
     let initial = wm.window_count();
     let mut failures = 0usize;
+
+    let mut browser = Browser::new();
+    browser.refresh(&mut fs::BrowserFiles);
+    let folders = browser.entries().len();
+    let opened = browser.navigate("/home", &mut fs::BrowserFiles);
+    browser.open_selected(&mut fs::BrowserFiles);
+    let preview = browser.preview_open() && browser.preview_bytes() == b"welcome to aether\n";
+    browser.parent(&mut fs::BrowserFiles);
+    browser.parent(&mut fs::BrowserFiles);
+    let parent = browser.path() == "/";
+    let denied = !browser.navigate("/apps/other/private", &mut fs::BrowserFiles);
+    if folders > 0 && opened && preview && parent && denied {
+        serial_line!(
+            "AETHER_FILES_OK folders={} navigation=1 preview=1 private_denied=1",
+            folders
+        );
+    } else {
+        serial_line!("AETHER_FILES_FAILED reason=navigation-or-scope");
+        failures += 1;
+    }
 
     let portal_id = wm.open(WindowKind::Portal);
     if portal_id.is_none() {
@@ -371,6 +565,24 @@ pub fn print_state() {
             );
         }
     }
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Read-only snapshot while interrupts are masked.
+    let state = unsafe { &*DESKTOP.0.get() };
+    serial_line!(
+        "desktop: render scene={} cursor={} last_ms={} max_ms={}",
+        state.scene_paints,
+        state.cursor_paints,
+        state.last_paint_ticks * 10,
+        state.max_paint_ticks * 10
+    );
+    serial_line!(
+        "desktop: files path={} entries={} selected={} preview={} error={:?}",
+        state.browser.path(),
+        state.browser.entries().len(),
+        state.browser.selected(),
+        state.browser.preview_open(),
+        state.browser.error()
+    );
 }
 
 /// Returns a short mode label for the shell.
@@ -449,14 +661,16 @@ fn paint_wallpaper(screen: Rect, palette: aether_wm::Palette, high_contrast: boo
 
 fn paint_windows(wm: &Wm, palette: aether_wm::Palette) {
     let screen = wm.screen();
+    for id in wm.order() {
+        let Some(window) = wm.window(*id) else {
+            continue;
+        };
+        let Some(frame) = wm.window_frame(*id) else {
+            continue;
+        };
+        paint_window(wm, window, frame, wm.focus_id() == Some(*id), palette);
+    }
     if wm.transition().active {
-        let transition = wm.transition();
-        let progress = i32::from(transition.anim.eased());
-        let direction = i32::from(transition.direction);
-        let away = -direction * progress * screen.width / 256;
-        let enter = direction * (256 - progress) * screen.width / 256;
-        paint_workspace(wm, palette, transition.from, away);
-        paint_workspace(wm, palette, transition.to, enter);
         let label = workspace_label(wm.workspace());
         draw_pill(
             screen.x + screen.width / 2 - 50,
@@ -467,37 +681,7 @@ fn paint_windows(wm: &Wm, palette: aether_wm::Palette) {
             label,
             palette.accent,
         );
-    } else {
-        paint_workspace(wm, palette, wm.workspace(), 0);
     }
-}
-
-fn paint_workspace(wm: &Wm, palette: aether_wm::Palette, workspace: u8, offset_x: i32) {
-    let icons = layout::dock_icon_rects(wm.screen(), wm.dock_hover());
-    for id in wm.order().iter() {
-        let Some(window) = wm.window(*id) else {
-            continue;
-        };
-        if window.workspace != workspace || !window.is_visible() {
-            continue;
-        }
-        let minimize_target = dock_target(window.kind, &icons).unwrap_or(window.frame);
-        let frame = window
-            .animated_frame(minimize_target)
-            .translate(offset_x, 0);
-        let focused = wm.focus_id() == Some(window.id);
-        paint_window(wm, window, frame, focused, palette);
-    }
-}
-
-fn dock_target(kind: WindowKind, icons: &[Rect; layout::DOCK_ITEMS]) -> Option<Rect> {
-    DOCK_SLOTS
-        .iter()
-        .position(|slot| match slot {
-            DockSlot::App(slot_kind) => *slot_kind == kind,
-            DockSlot::Overview => false,
-        })
-        .map(|index| icons[index])
 }
 
 fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: aether_wm::Palette) {
@@ -587,17 +771,18 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
     );
 
     let content = layout::content_rect(frame);
-    graphics::blend_rect(
+    graphics::set_round_clip(frame.x, frame.y, frame.width, frame.height, radius);
+    graphics::fill_rect(
         content.x,
         content.y,
         content.width,
         content.height,
         palette.window,
-        if settings.high_contrast { 255 } else { 248 },
     );
     graphics::set_clip(content.x, content.y, content.width, content.height);
     paint_content(wm, window, content, focused, palette);
     graphics::clear_clip();
+    graphics::clear_round_clip();
 
     let lights = layout::traffic_lights(frame);
     paint_traffic_lights(wm, &lights, focused, palette);
@@ -689,9 +874,13 @@ fn paint_content(
 }
 
 fn paint_files(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
+    let layout = BrowserLayout::new(content);
+    let browser = with_browser(|browser| {
+        browser.set_visible_rows(layout.visible_rows());
+        *browser
+    });
     let glass = effective_glass(wm.settings());
-    let sidebar_width = (content.width / 3).clamp(92, 138);
-    let sidebar = Rect::new(content.x, content.y, sidebar_width, content.height);
+    let sidebar = layout.sidebar;
     graphics::blend_rect(
         sidebar.x,
         sidebar.y,
@@ -715,100 +904,152 @@ fn paint_files(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
     );
     draw_text(sidebar.x + 40, sidebar.y + 17, "AETHER", palette.text, 1);
 
-    let items = [
-        ("Home", palette.accent),
-        ("Applications", palette.success),
-        ("Portal", palette.warning),
-        ("System", palette.muted),
-    ];
-    for (index, (label, color)) in items.iter().enumerate() {
-        let y = sidebar.y + 50 + index as i32 * 26;
-        if y + 20 > sidebar.bottom() {
+    for (index, (label, path)) in LOCATIONS.iter().enumerate() {
+        let rect = layout.sidebar_row(index);
+        if rect.bottom() > sidebar.bottom() - 24 {
             break;
         }
-        if index == 0 {
+        if browser.path() == *path {
             graphics::fill_round_rect(
-                sidebar.x + 6,
-                y - 4,
-                sidebar.width - 12,
-                22,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
                 6,
                 palette.accent_dim,
             );
         }
-        graphics::fill_circle(sidebar.x + 17, y + 6, 3, *color);
-        draw_text(sidebar.x + 28, y + 3, label, palette.text, 1);
+        graphics::fill_circle(rect.x + 11, rect.y + 11, 3, palette.accent);
+        draw_text(rect.x + 22, rect.y + 8, label, palette.text, 1);
     }
     let foot_y = sidebar.bottom() - 22;
     draw_text(sidebar.x + 12, foot_y, "RAM DISK", palette.faint, 1);
 
-    let pane = Rect::new(
-        sidebar.right(),
-        content.y,
-        content.width - sidebar.width,
-        content.height,
-    );
-    draw_text(pane.x + 14, pane.y + 11, "AETHERFS", palette.text, 1);
-    draw_text_right(pane.right() - 14, pane.y + 11, "VOLATILE", palette.faint, 1);
-    graphics::fill_rect(
-        pane.x + 14,
-        pane.y + 25,
-        pane.width - 28,
+    let pane = layout.pane;
+    for (rect, label) in [(layout.parent, "<"), (layout.refresh, "R")] {
+        graphics::fill_round_rect(
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            5,
+            palette.card_hover,
+        );
+        draw_text_centered(rect.x, rect.right(), rect.y + 8, label, palette.accent, 1);
+    }
+    draw_text_fit(
+        layout.parent.right() + 8,
+        pane.y + 14,
+        browser.path(),
+        layout.refresh.x - layout.parent.right() - 16,
+        palette.text,
         1,
-        palette.divider,
     );
-
-    let mut entries = [0u8; 640];
-    let length = fs::list_path("/", &mut entries).unwrap_or(0);
-    let mut y = pane.y + 34;
-    let row_height = 24;
-    for line in entries[..length].split(|byte| *byte == b'\n') {
-        if line.is_empty() || y + row_height > pane.bottom() - 18 {
-            break;
-        }
-        let mut parts = line.split(|byte| *byte == b'\t');
-        let name = parts.next().unwrap_or(b"?");
-        let kind = parts.next().unwrap_or(b"f");
-        let size = parts.next().unwrap_or(b"0");
-        let is_dir = kind == b"d";
-        if y == pane.y + 34 {
-            graphics::fill_round_rect(
-                pane.x + 8,
-                y - 2,
-                pane.width - 16,
-                row_height - 2,
-                6,
-                palette.accent_dim,
+    graphics::fill_rect(pane.x + 8, pane.y + 34, pane.width - 16, 1, palette.divider);
+    if browser.preview_open() {
+        draw_text_fit(
+            layout.body.x + 4,
+            layout.body.y + 2,
+            browser.preview_name(),
+            layout.body.width - 8,
+            palette.accent,
+            1,
+        );
+        let max_columns = ((layout.body.width - 8) / 6).max(1) as usize;
+        let mut column = 0;
+        let mut y = layout.body.y + 18;
+        for byte in browser.preview_bytes() {
+            if *byte == b'\n' || column >= max_columns {
+                column = 0;
+                y += 12;
+                if *byte == b'\n' {
+                    continue;
+                }
+            }
+            if y + 7 > layout.body.bottom() {
+                break;
+            }
+            let character = if byte.is_ascii_graphic() || *byte == b' ' {
+                char::from(*byte)
+            } else {
+                '.'
+            };
+            graphics::draw_char(
+                layout.body.x + 4 + column as i32 * 6,
+                y,
+                character,
+                palette.text,
+                1,
             );
+            column += 1;
         }
-        if is_dir {
-            icons::app_icon(
-                WindowKind::Files,
-                Rect::new(pane.x + 16, y + 2, 16, 16),
-                palette,
+    } else {
+        for (index, entry) in browser.entries().iter().enumerate().skip(browser.first()) {
+            let Some(rect) = layout.row(index - browser.first()) else {
+                break;
+            };
+            if index == browser.selected() {
+                graphics::fill_round_rect(
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    6,
+                    palette.accent_dim,
+                );
+            }
+            if entry.directory {
+                icons::app_icon(
+                    WindowKind::Files,
+                    Rect::new(rect.x + 6, rect.y + 3, 16, 16),
+                    palette,
+                );
+            } else {
+                graphics::fill_round_rect(rect.x + 8, rect.y + 4, 12, 14, 2, palette.muted);
+            }
+            draw_text_fit(
+                rect.x + 28,
+                rect.y + 8,
+                entry.name(),
+                rect.width - 42,
+                palette.text,
+                1,
             );
-        } else {
-            graphics::fill_round_rect(pane.x + 16, y + 4, 12, 14, 2, palette.muted);
+            if entry.directory {
+                draw_text(rect.right() - 10, rect.y + 8, ">", palette.muted, 1);
+            }
         }
-        let name_text = core::str::from_utf8(name).unwrap_or("?");
-        draw_text(pane.x + 40, y + 6, name_text, palette.text, 1);
-        if !is_dir {
-            let size_text = core::str::from_utf8(size).unwrap_or("0");
-            let mut buffer = [0u8; 16];
-            let label = append_bytes(&mut buffer, size_text.as_bytes(), b" B");
-            draw_text_right(
-                pane.right() - 16,
-                y + 6,
-                core::str::from_utf8(label).unwrap_or("0 B"),
+        if browser.entries().is_empty() {
+            draw_text(
+                layout.body.x + 4,
+                layout.body.y + 8,
+                "EMPTY FOLDER",
                 palette.faint,
                 1,
             );
         }
-        y += row_height;
     }
-    if y == pane.y + 34 {
-        draw_text(pane.x + 16, y + 8, "NO ENTRIES", palette.faint, 1);
-    }
+    let footer = if let Some(error) = browser.error() {
+        error.message()
+    } else if browser.preview_truncated() && browser.preview_open() {
+        "PREVIEW TRUNCATED - BACKSPACE TO CLOSE"
+    } else if browser.preview_open() {
+        "READ ONLY - BACKSPACE TO CLOSE"
+    } else {
+        "ENTER / DOUBLE CLICK OPEN - F5 REFRESH"
+    };
+    draw_text_fit(
+        pane.x + 10,
+        pane.bottom() - 16,
+        footer,
+        pane.width - 20,
+        if browser.error().is_some() {
+            palette.warning
+        } else {
+            palette.faint
+        },
+        1,
+    );
 }
 
 fn paint_security(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
@@ -835,7 +1076,7 @@ fn paint_security(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
         banner.x + 30,
         banner.y + 9,
         if healthy {
-            "SYSTEM PROTECTED"
+            "NO TASK/SERVICE ALERTS"
         } else {
             "ATTENTION NEEDED"
         },
@@ -845,7 +1086,7 @@ fn paint_security(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
     draw_text(
         banner.x + 30,
         banner.y + 21,
-        "POLICY ENFORCED BELOW THE DESKTOP",
+        "PROTOTYPE - TRUSTED RING-0 DESKTOP",
         palette.muted,
         1,
     );
@@ -1344,7 +1585,7 @@ fn paint_menu(wm: &Wm, palette: aether_wm::Palette, glass: GlassLevel) {
     let alpha = if wm.settings().high_contrast {
         255
     } else {
-        (glass.panel_alpha() + 20).min(250)
+        glass.menu_alpha()
     };
     graphics::blend_round_rect(
         panel.x + 3,

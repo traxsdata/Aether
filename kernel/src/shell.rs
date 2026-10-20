@@ -106,13 +106,14 @@ fn execute_line() {
         "input" => {
             let mouse = crate::input::mouse();
             serial_line!(
-                "input: dropped={} received={} mouse={} packets={} cursor={},{}",
+                "input: dropped={} received={} mouse={} packets={} cursor={},{} pointer_dropped={}",
                 crate::input::dropped(),
                 crate::input::received(),
                 if mouse.available { "ps2" } else { "synthetic" },
                 mouse.packets,
                 mouse.x,
-                mouse.y
+                mouse.y,
+                crate::input::pointer_dropped()
             );
         }
         "mem" => memory(),
@@ -121,7 +122,12 @@ fn execute_line() {
         "packages" => crate::packaging::print_status(),
         "runtime" => crate::runtime::print_status(),
         "updates" => crate::updates::print_status(),
-        "desktop" => desktop(),
+        "desktop" => {
+            if argument == "redraw" {
+                crate::desktop::redraw();
+            }
+            desktop();
+        }
         "clear" => serial::write_str("\x1b[2J\x1b[H"),
         _ => serial_line!("shell: unknown command '{command}'"),
     }
@@ -145,7 +151,7 @@ fn print_help() {
     serial_line!("  packages         installed package and verification status");
     serial_line!("  runtime          per-application runtime profiles");
     serial_line!("  updates          signed update and rollback status");
-    serial_line!("  desktop          compositor, spaces, and window status");
+    serial_line!("  desktop [redraw] compositor state and rendering timings");
     serial_line!("  clear            clear the terminal");
 }
 
@@ -261,7 +267,6 @@ fn recovery() {
 }
 
 fn desktop() {
-    crate::desktop::redraw();
     crate::desktop::print_state();
     let mouse = crate::input::mouse();
     serial_line!(

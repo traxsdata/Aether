@@ -10,6 +10,7 @@ use crate::anim::Anim;
 use crate::geometry::{Point, Rect};
 use crate::layout::{self, DOCK_ITEMS, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 use crate::theme::{GlassLevel, Palette, ThemeKind};
+pub use aether_input::{Key, Modifiers};
 
 /// Maximum number of simultaneously allocated window slots.
 pub const MAX_WINDOWS: usize = 10;
@@ -124,6 +125,7 @@ pub struct Window {
     pub restore_frame: Rect,
     /// Lifecycle state.
     pub state: WindowState,
+    state_before_minimize: WindowState,
     /// Open animation progress.
     pub open: Anim,
     /// Minimize animation progress, where 256 is fully collapsed.
@@ -144,7 +146,8 @@ impl Window {
     /// Returns `true` when the window should be painted.
     #[must_use]
     pub fn is_visible(self) -> bool {
-        !self.closing && !(self.state == WindowState::Minimized && self.minimize.is_complete())
+        !(self.closing && self.close.is_complete()
+            || self.state == WindowState::Minimized && self.minimize.is_complete())
     }
 
     /// Returns the frame to paint, after open, close, and minimize motion.
@@ -271,52 +274,6 @@ impl Default for Settings {
     }
 }
 
-/// Keyboard modifiers captured with a key event.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Modifiers {
-    /// Control is held.
-    pub ctrl: bool,
-    /// Alt is held.
-    pub alt: bool,
-    /// Shift is held.
-    pub shift: bool,
-    /// The platform/super key is held.
-    pub super_key: bool,
-}
-
-impl Modifiers {
-    /// Returns `true` when any command modifier is held.
-    #[must_use]
-    pub const fn command(self) -> bool {
-        self.ctrl || self.alt || self.super_key
-    }
-}
-
-/// A decoded key used by window-manager policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Key {
-    /// Printable character, lowercase where applicable.
-    Char(u8),
-    /// Enter or Return.
-    Enter,
-    /// Escape.
-    Escape,
-    /// Tab.
-    Tab,
-    /// Backspace.
-    Backspace,
-    /// Arrow up.
-    Up,
-    /// Arrow down.
-    Down,
-    /// Arrow left.
-    Left,
-    /// Arrow right.
-    Right,
-    /// Function key number, one-based.
-    Function(u8),
-}
-
 /// A top-level menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuKind {
@@ -335,6 +292,15 @@ pub enum MenuKind {
 }
 
 impl MenuKind {
+    /// All menus in keyboard navigation order.
+    pub const ALL: [Self; 6] = [
+        Self::System,
+        Self::App,
+        Self::File,
+        Self::View,
+        Self::Window,
+        Self::Help,
+    ];
     /// Menu titles displayed after the application name.
     pub const BAR: [Self; 5] = [Self::App, Self::File, Self::View, Self::Window, Self::Help];
 
@@ -632,7 +598,7 @@ const APP_ITEMS: [MenuItem; 8] = [
 
 const FILE_ITEMS: [MenuItem; 5] = [
     MenuItem {
-        label: "New Files Window",
+        label: "Open Files",
         shortcut: "Ctrl+N",
         command: Command::Open(WindowKind::Files),
     },
@@ -1155,6 +1121,10 @@ impl Wm {
     /// If an instance already exists on another workspace, the manager switches
     /// to that workspace instead of silently creating a second instance.
     pub fn open(&mut self, kind: WindowKind) -> Option<u8> {
+        self.menu = None;
+        self.spotlight_open = false;
+        self.overview_open = false;
+        self.overview.retarget(0, 0);
         if let Some(id) = self.find_kind(kind) {
             let workspace = self.window(id).map(|window| window.workspace)?;
             if workspace != self.workspace {
@@ -1173,12 +1143,12 @@ impl Wm {
             return Some(id);
         }
         let slot = self.windows.iter().position(Option::is_none)?;
-        let id = self.next_id;
-        self.next_id = if self.next_id == u8::MAX {
-            1
-        } else {
-            self.next_id + 1
-        };
+        // IDs wrap in a long session. Never alias a still-live window.
+        let id = (0..=MAX_WINDOWS).find_map(|_| {
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1).max(1);
+            self.window(id).is_none().then_some(id)
+        })?;
         let cascade = i32::from(id % 5) * 16;
         let frame = layout::default_window_frame(kind, self.screen, cascade);
         let mut open = Anim::starting(OPEN_TICKS);
@@ -1192,6 +1162,7 @@ impl Wm {
             frame,
             restore_frame: frame,
             state: WindowState::Normal,
+            state_before_minimize: WindowState::Normal,
             open,
             minimize: Anim::at(0),
             close: Anim::at(0),
@@ -1221,7 +1192,10 @@ impl Wm {
         }
         if self.focus == Some(id) {
             self.focus = None;
-            self.focus_next(1);
+            self.focus_topmost();
+        }
+        if self.dragging.is_some_and(|drag| drag.id == id) {
+            self.dragging = None;
         }
     }
 
@@ -1231,9 +1205,10 @@ impl Wm {
             return;
         };
         if let Some(window) = &mut self.windows[index] {
-            if window.state == WindowState::Minimized && !window.closing {
+            if window.state == WindowState::Minimized || window.closing {
                 return;
             }
+            window.state_before_minimize = window.state;
             window.state = WindowState::Minimized;
             window.minimize.retarget(
                 256,
@@ -1246,7 +1221,10 @@ impl Wm {
         }
         if self.focus == Some(id) {
             self.focus = None;
-            self.focus_next(1);
+            self.focus_topmost();
+        }
+        if self.dragging.is_some_and(|drag| drag.id == id) {
+            self.dragging = None;
         }
     }
 
@@ -1256,7 +1234,10 @@ impl Wm {
             return;
         };
         if let Some(window) = &mut self.windows[index] {
-            window.state = WindowState::Normal;
+            if window.state != WindowState::Minimized || window.closing {
+                return;
+            }
+            window.state = window.state_before_minimize;
             window.minimize.retarget(
                 0,
                 if self.settings.reduce_motion {
@@ -1270,6 +1251,7 @@ impl Wm {
 
     /// Toggles a window between floating and the work area.
     pub fn zoom_window(&mut self, id: u8) {
+        self.restore_window(id);
         let area = layout::work_area(self.screen).inset(6);
         let Some(index) = self.window_index(id) else {
             return;
@@ -1290,21 +1272,14 @@ impl Wm {
 
     /// Focuses a window and raises it to the front.
     pub fn focus_window(&mut self, id: u8) {
-        if self.window(id).is_none() {
+        let Some(window) = self.window(id).copied() else {
+            return;
+        };
+        if window.closing {
             return;
         }
-        if let Some(index) = self.window_index(id)
-            && let Some(window) = &mut self.windows[index]
-        {
-            window.state = if window.state == WindowState::Minimized {
-                WindowState::Normal
-            } else {
-                window.state
-            };
-            window
-                .minimize
-                .retarget(0, if self.settings.reduce_motion { 0 } else { 10 });
-        }
+        self.switch_workspace(window.workspace);
+        self.restore_window(id);
         self.focus = Some(id);
         self.bring_to_front(Some(id));
         self.menu = None;
@@ -1317,17 +1292,17 @@ impl Wm {
             self.focus = None;
             return;
         }
-        let current_position = self.focus.and_then(|id| {
-            self.order[..self.order_len]
-                .iter()
-                .position(|item| *item == id)
-        });
-        let len = self.order_len as i32;
+        // Cycle stable allocation slots, not z-order: raising the selected
+        // window must not make reverse cycling bounce between just two windows.
+        let current_position = self.focus.and_then(|id| self.window_index(id));
+        let len = MAX_WINDOWS as i32;
         let step = if direction >= 0 { 1 } else { -1 };
         let start = current_position.map_or(if step > 0 { -1 } else { 0 }, |value| value as i32);
         for offset in 1..=len {
             let position = (start + step * offset).rem_euclid(len) as usize;
-            let id = self.order[position];
+            let Some(id) = self.windows[position].map(|window| window.id) else {
+                continue;
+            };
             if self.is_eligible(id) {
                 self.focus = Some(id);
                 self.bring_to_front(Some(id));
@@ -1353,6 +1328,165 @@ impl Wm {
         }
     }
 
+    /// Resizes the focused floating window, with the same bounds as a drag.
+    pub fn resize_focused(&mut self, dx: i32, dy: i32) {
+        let Some(window) = self.focused_window().copied() else {
+            return;
+        };
+        if window.state != WindowState::Normal || window.closing {
+            return;
+        }
+        self.apply_drag(
+            Drag {
+                id: window.id,
+                resize: true,
+                origin: Point::default(),
+                frame: window.frame,
+            },
+            Point::new(dx, dy),
+        );
+    }
+
+    /// Returns whether a pointer move is changing window geometry.
+    #[must_use]
+    pub const fn is_dragging(&self) -> bool {
+        self.dragging.is_some()
+    }
+
+    /// Returns the frame actually painted, including workspace and window motion.
+    #[must_use]
+    pub fn window_frame(&self, id: u8) -> Option<Rect> {
+        let window = *self.window(id)?;
+        if !window.is_visible() {
+            return None;
+        }
+        let offset = if self.transition.active {
+            let progress = i32::from(self.transition.anim.eased());
+            let direction = i32::from(self.transition.direction);
+            if window.workspace == self.transition.from {
+                -direction * progress * self.screen.width / 256
+            } else if window.workspace == self.transition.to {
+                direction * (256 - progress) * self.screen.width / 256
+            } else {
+                return None;
+            }
+        } else if window.workspace == self.workspace {
+            0
+        } else {
+            return None;
+        };
+        let icons = layout::dock_icon_rects(self.screen, &self.dock_hover);
+        let target = layout::DOCK_SLOTS
+            .iter()
+            .position(|slot| *slot == layout::DockSlot::App(window.kind))
+            .map_or(window.frame, |index| icons[index]);
+        Some(window.animated_frame(target).translate(offset, 0))
+    }
+
+    /// Bounds of scene changes, excluding the cursor. Shadows are included.
+    ///
+    /// Repaint all intersecting layers inside these bounds, not just the window
+    /// that moved. Overlays/workspace transitions conservatively damage all.
+    #[must_use]
+    pub fn damage_since(&self, before: &Self) -> Option<Rect> {
+        if self.screen != before.screen
+            || self.settings != before.settings
+            || self.transition.active
+            || before.transition.active
+            || self.overview_progress() != before.overview_progress()
+            || self.overview_open != before.overview_open
+            || self.overview_selected != before.overview_selected
+            || (self.overview_open
+                && (self.windows != before.windows || self.order != before.order))
+            || self.spotlight_open != before.spotlight_open
+            || self.spotlight_query != before.spotlight_query
+            || self.spotlight_len != before.spotlight_len
+            || self.spotlight_selected != before.spotlight_selected
+        {
+            return Some(self.screen);
+        }
+        let mut damage: Option<Rect> = None;
+        let mut include = |rect: Rect| {
+            damage = Some(damage.map_or(rect, |old| old.union(rect)));
+        };
+        for id in self.order().iter().chain(before.order()) {
+            if self.window(*id) != before.window(*id)
+                || (self.focus != before.focus
+                    && (self.focus == Some(*id) || before.focus == Some(*id)))
+                || self.workspace != before.workspace
+            {
+                if let Some(frame) = before.window_frame(*id) {
+                    include(frame.inset(-24));
+                }
+                if let Some(frame) = self.window_frame(*id) {
+                    include(frame.inset(-24));
+                }
+            }
+        }
+        if self.focus != before.focus
+            || self.workspace != before.workspace
+            || self.menu != before.menu
+        {
+            include(layout::menu_bar(self.screen));
+        }
+        if self.menu != before.menu {
+            if let Some(panel) = before.menu_panel() {
+                include(panel.inset(-10));
+            }
+            if let Some(panel) = self.menu_panel() {
+                include(panel.inset(-10));
+            }
+        }
+        if self.dock_hover != before.dock_hover
+            || self.window_count() != before.window_count()
+            || self.focus != before.focus
+        {
+            let dock = layout::dock_panel(self.screen);
+            include(Rect::new(
+                dock.x - 20,
+                dock.y - 52,
+                dock.width + 40,
+                dock.height + 72,
+            ));
+        }
+        let previous_hit = before.hit_test(before.cursor);
+        let hit = self.hit_test(self.cursor);
+        if previous_hit != hit {
+            for (wm, hit) in [(before, previous_hit), (self, hit)] {
+                match hit {
+                    Hit::Close(id)
+                    | Hit::Minimize(id)
+                    | Hit::Zoom(id)
+                    | Hit::SettingsRow(id, _) => {
+                        if let Some(frame) = wm.window_frame(id) {
+                            include(frame);
+                        }
+                    }
+                    Hit::MenuTitle(_) | Hit::MenuLogo => include(layout::menu_bar(self.screen)),
+                    Hit::MenuItem(_) | Hit::MenuPanel => {
+                        if let Some(panel) = wm.menu_panel() {
+                            include(panel.inset(-10));
+                        }
+                    }
+                    Hit::SpotlightResult(_) | Hit::SpotlightPanel | Hit::SpotlightField => {
+                        include(layout::spotlight_panel(self.screen).inset(-16))
+                    }
+                    Hit::DockIcon(_) | Hit::DockPanel => {
+                        let dock = layout::dock_panel(self.screen);
+                        include(Rect::new(
+                            dock.x - 20,
+                            dock.y - 52,
+                            dock.width + 40,
+                            dock.height + 72,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        damage.and_then(|rect| rect.intersection(self.screen))
+    }
+
     /// Switches to a workspace, sliding the window layers.
     pub fn switch_workspace(&mut self, target: u8) {
         let target = target.min(WORKSPACES - 1);
@@ -1365,6 +1499,8 @@ impl Wm {
         let direction = if target > self.workspace { 1 } else { -1 };
         let from = self.workspace;
         self.workspace = target;
+        self.dragging = None;
+        self.menu = None;
         self.overview_open = false;
         self.spotlight_open = false;
         self.overview.retarget(0, 0);
@@ -1474,10 +1610,8 @@ impl Wm {
             2 => self.settings.glass = self.settings.glass.next(),
             3 => {
                 self.settings.magnify_dock = !self.settings.magnify_dock;
-                if !self.settings.magnify_dock {
-                    self.dock_hover = [0; DOCK_ITEMS];
-                    self.dock_target = None;
-                }
+                self.dock_target = layout::dock_slot_at(self.cursor, self.screen);
+                self.dock_hover = [0; DOCK_ITEMS];
             }
             _ => {}
         }
@@ -1490,7 +1624,7 @@ impl Wm {
         if window.kind != WindowKind::Settings || row >= Settings::row_count() {
             return None;
         }
-        let content = layout::content_rect(window.frame);
+        let content = layout::content_rect(self.window_frame(id)?);
         let width = content.width - 32;
         let y = content.y + 54 + row as i32 * 32;
         let height = 30;
@@ -1561,9 +1695,13 @@ impl Wm {
                 0
             };
             if *hover != target {
-                let amount = ((256 / DOCK_TICKS).max(1)).saturating_mul(ticks);
+                let amount = if self.settings.reduce_motion {
+                    256
+                } else {
+                    ((256 / DOCK_TICKS).max(1)).saturating_mul(ticks)
+                };
                 if *hover < target {
-                    *hover = (*hover + amount).min(target);
+                    *hover = hover.saturating_add(amount).min(target);
                 } else {
                     *hover = hover.saturating_sub(amount).max(target);
                 }
@@ -1586,8 +1724,13 @@ impl Wm {
                 window.close.finish();
             }
         }
-        self.dock_hover = [0; DOCK_ITEMS];
-        self.dock_target = None;
+        self.dock_hover = core::array::from_fn(|index| {
+            if self.settings.magnify_dock && self.dock_target == Some(index) {
+                256
+            } else {
+                0
+            }
+        });
     }
 
     /// Returns `true` while any animation is running.
@@ -1598,7 +1741,14 @@ impl Wm {
             || self.windows.iter().flatten().any(|window| {
                 window.open.is_active() || window.minimize.is_active() || window.close.is_active()
             })
-            || self.dock_hover.iter().any(|value| *value != 0)
+            || self.dock_hover.iter().enumerate().any(|(index, value)| {
+                *value
+                    != if self.settings.magnify_dock && self.dock_target == Some(index) {
+                        256
+                    } else {
+                        0
+                    }
+            })
     }
 
     /// Updates the pointer position. Returns `true` when a repaint is needed.
@@ -1615,6 +1765,15 @@ impl Wm {
             self.apply_drag(drag, point);
         }
         self.dock_target = layout::dock_slot_at(point, self.screen);
+        if self.settings.reduce_motion {
+            self.dock_hover = core::array::from_fn(|index| {
+                if self.settings.magnify_dock && self.dock_target == Some(index) {
+                    256
+                } else {
+                    0
+                }
+            });
+        }
         true
     }
 
@@ -1624,40 +1783,36 @@ impl Wm {
         let point = self.cursor;
 
         if self.spotlight_open {
-            let panel = layout::spotlight_panel(self.screen);
-            if panel.contains(point) {
-                let results = self.search_result_count();
-                let row = ((point.y - panel.y - 54) / 28).max(0) as usize;
-                if row < results
-                    && let Some(item) = self.search_result(row)
-                {
-                    let command = item.command;
-                    let label = item.label;
+            match self.hit_test(point) {
+                Hit::SpotlightResult(row) => {
+                    let command = self.search_result(row).map(|item| item.command);
                     self.spotlight_open = false;
-                    self.execute(command);
-                    self.menu = None;
-                    let _ = label;
+                    if let Some(command) = command {
+                        self.execute(command);
+                    }
                 }
-                return;
+                Hit::SpotlightField | Hit::SpotlightPanel
+                    if layout::spotlight_panel(self.screen).contains(point) => {}
+                _ => self.spotlight_open = false,
             }
-            self.spotlight_open = false;
             return;
         }
 
         if let Some(menu) = self.menu {
-            let panel = self.menu_panel().unwrap_or(Rect::new(0, 0, 0, 0));
-            if panel.contains(point) {
-                let row = ((point.y - panel.y - 5) / 24).max(0) as usize;
-                if row < menu.kind.items().len() {
+            match self.hit_test(point) {
+                Hit::MenuItem(row) => {
                     let item = menu.kind.items()[row];
                     if !item.is_separator() {
                         self.menu = None;
                         self.execute(item.command);
                     }
                 }
-                return;
+                Hit::MenuLogo => self.toggle_menu(MenuKind::System),
+                Hit::MenuTitle(kind) => self.toggle_menu(kind),
+                Hit::MenuPanel => {}
+                _ => self.menu = None,
             }
-            self.menu = None;
+            return;
         }
 
         if self.overview_open {
@@ -1709,17 +1864,7 @@ impl Wm {
                 };
                 match slot {
                     layout::DockSlot::App(kind) => {
-                        if self.find_kind(kind).is_some_and(|id| {
-                            self.window(id)
-                                .is_some_and(|window| window.state == WindowState::Minimized)
-                        }) {
-                            if let Some(id) = self.find_kind(kind) {
-                                self.restore_window(id);
-                                self.focus_window(id);
-                            }
-                        } else {
-                            self.open(kind);
-                        }
+                        self.open(kind);
                     }
                     layout::DockSlot::Overview => self.toggle_overview(),
                 }
@@ -1780,6 +1925,7 @@ impl Wm {
             }
         }
     }
+    /// Ends the current drag or resize gesture.
     pub fn pointer_up(&mut self) {
         self.dragging = None;
     }
@@ -1859,6 +2005,27 @@ impl Wm {
                         keyboard: true,
                         ..menu
                     });
+                    outcome.changed = true;
+                    return outcome;
+                }
+                Key::Left | Key::Right => {
+                    let index = MenuKind::ALL
+                        .iter()
+                        .position(|kind| *kind == menu.kind)
+                        .unwrap_or(0);
+                    let next = (index as isize + if key == Key::Left { -1 } else { 1 })
+                        .rem_euclid(MenuKind::ALL.len() as isize)
+                        as usize;
+                    self.menu = None;
+                    self.toggle_menu(MenuKind::ALL[next]);
+                    if let Some(menu) = &mut self.menu {
+                        menu.keyboard = true;
+                    }
+                    outcome.changed = true;
+                    return outcome;
+                }
+                Key::Function(10) => {
+                    self.menu = None;
                     outcome.changed = true;
                     return outcome;
                 }
@@ -2007,6 +2174,21 @@ impl Wm {
             }
         }
 
+        if modifiers.shift && !command {
+            let delta = match key {
+                Key::Left => Some((-8, 0)),
+                Key::Right => Some((8, 0)),
+                Key::Up => Some((0, -8)),
+                Key::Down => Some((0, 8)),
+                _ => None,
+            };
+            if let Some((dx, dy)) = delta {
+                self.resize_focused(dx, dy);
+                outcome.changed = true;
+                return outcome;
+            }
+        }
+
         match key {
             Key::Tab => {
                 self.focus_next(if modifiers.shift { -1 } else { 1 });
@@ -2039,6 +2221,13 @@ impl Wm {
                 self.toggle_overview();
                 outcome.changed = true;
             }
+            Key::Function(10) => {
+                self.toggle_menu(MenuKind::System);
+                if let Some(menu) = &mut self.menu {
+                    menu.keyboard = true;
+                }
+                outcome.changed = true;
+            }
             Key::Function(_) | Key::Char(_) | Key::Backspace => {}
         }
         outcome
@@ -2065,8 +2254,9 @@ impl Wm {
                 if layout::spotlight_field(panel).contains(point) {
                     return Hit::SpotlightField;
                 }
-                let row = ((point.y - panel.y - 54) / 28).max(0) as usize;
-                if row < self.search_result_count() {
+                if let Some(row) = (0..self.search_result_count())
+                    .find(|row| layout::spotlight_result_rect(panel, *row).contains(point))
+                {
                     return Hit::SpotlightResult(row);
                 }
                 return Hit::SpotlightPanel;
@@ -2078,8 +2268,9 @@ impl Wm {
             && let Some(panel) = self.menu_panel()
             && panel.contains(point)
         {
-            let row = ((point.y - panel.y - 5) / 24).max(0) as usize;
-            if row < menu.kind.items().len() {
+            if let Some(row) = (0..menu.kind.items().len())
+                .find(|row| layout::menu_item_rect(panel, *row).contains(point))
+            {
                 return Hit::MenuItem(row);
             }
             return Hit::MenuPanel;
@@ -2110,7 +2301,7 @@ impl Wm {
         }
 
         let icons = layout::dock_icon_rects(self.screen, &self.dock_hover);
-        for (index, rect) in icons.iter().enumerate() {
+        for (index, rect) in icons.iter().enumerate().rev() {
             if rect.contains(point) {
                 return Hit::DockIcon(index);
             }
@@ -2133,10 +2324,16 @@ impl Wm {
             let Some(window) = self.window(*id) else {
                 continue;
             };
-            if window.workspace != self.workspace || !window.is_visible() {
+            if window.workspace != self.workspace
+                || window.closing
+                || window.state == WindowState::Minimized
+            {
                 continue;
             }
-            let lights = layout::traffic_lights(window.frame);
+            let Some(frame) = self.window_frame(window.id) else {
+                continue;
+            };
+            let lights = layout::traffic_lights(frame);
             if lights.close.contains(point) {
                 return Hit::Close(window.id);
             }
@@ -2151,13 +2348,14 @@ impl Wm {
             {
                 return Hit::SettingsRow(window.id, row);
             }
-            if layout::resize_grip(window.frame).contains(point) {
+            if window.state != WindowState::Maximized && layout::resize_grip(frame).contains(point)
+            {
                 return Hit::Resize(window.id);
             }
-            if layout::title_bar(window.frame).contains(point) {
+            if layout::title_bar(frame).contains(point) {
                 return Hit::TitleBar(window.id);
             }
-            if window.frame.contains(point) {
+            if frame.contains(point) {
                 return Hit::Window(window.id);
             }
         }
@@ -2203,7 +2401,7 @@ impl Wm {
         self.window(id).is_some_and(|window| {
             window.workspace == self.workspace
                 && !window.closing
-                && !(window.state == WindowState::Minimized && window.minimize.is_complete())
+                && window.state != WindowState::Minimized
         })
     }
 
