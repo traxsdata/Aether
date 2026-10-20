@@ -57,6 +57,7 @@ GATE4_RUNTIME_MANIFEST := $(BUILD)/gate4-runtime.manifest
 GATE4_RUNTIME_TAMPERED := $(BUILD)/gate4-runtime-tampered.sqfs
 GATE4_EXTRA_ROOT := $(BUILD)/gate4-runtime-extra
 GATE4_APPIMAGE_RECORD := $(BUILD)/gridcraft.import
+GATE4_BRIDGE_BUILD := $(BUILD)/gate4-bridge
 # The Gate 4 GUI launch is a later slice. This boot smoke test runs the real
 # AppImage's CLI through the Gate 4 rootfs and verifies its version.
 GATE4_APP_PROGRAM ?= /usr/bin/gridcraft-cli
@@ -227,10 +228,15 @@ gate4-portal-test:
 	AETHER_EXTRA_MARKERS=AETHER_GATE4_PORTAL_OK,AETHER_GATE4_SAVE_OK,AETHER_GATE4_REVOKE_OK \
 	AETHER_REQUIRE_TEXT='AETHER_GATE4_PORTAL_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx bytes=58 staging=sctmp+rename temp_bytes=58 staged_bytes=87 renames=1|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|portal: audit revoked' \
 	$(PYTHON) tools/test-boot.py
+# Build the in-app libwayland-client bridge (client ABI -> /dev/aether-display).
+gate4-bridge:
+	@mkdir -p $(GATE4_BRIDGE_BUILD)
+	$(MAKE) -C runtime/wayland BUILD=$(abspath $(GATE4_BRIDGE_BUILD))
+
 # Build the Gate 4 Mesa/lavapipe runtime rootfs, sign it, and verify the
 # manifest, every file digest, the loader closure, and the signed record on
 # the host. This does not boot.
-gate4-runtime: linux-fixture
+gate4-runtime: linux-fixture gate4-bridge
 	@rm -rf $(GATE4_EXTRA_ROOT)
 	@mkdir -p $(GATE4_EXTRA_ROOT)/lib $(GATE4_EXTRA_ROOT)/usr/bin $(GATE4_EXTRA_ROOT)/etc
 	cp $(LINUX_INTERP_ELF) $(GATE4_EXTRA_ROOT)/lib/ld-aether.so
@@ -239,7 +245,8 @@ gate4-runtime: linux-fixture
 	cp $(LINUX_DYN_EXEC_ELF) $(GATE4_EXTRA_ROOT)/usr/bin/dynamic-exec
 	printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\nAETHER_GATE4_RUNTIME_ROOT_OK source=/etc/motd\n' \
 		> $(GATE4_EXTRA_ROOT)/etc/motd
-	sh tools/build-gate4-runtime.sh $(GATE4_RUNTIME_ROOTFS) \
+	AETHER_WAYLAND_BRIDGE_DIR=$(abspath $(GATE4_BRIDGE_BUILD)) \
+		sh tools/build-gate4-runtime.sh $(GATE4_RUNTIME_ROOTFS) \
 		$(GATE4_RUNTIME_RECORD) $(GATE4_RUNTIME_PIN) \
 		$(GATE4_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED) $(GATE4_EXTRA_ROOT)
 	sh tools/build-gate3-appimage.sh $(GATECRAFT_APPIMAGE) \
