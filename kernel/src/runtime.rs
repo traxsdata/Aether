@@ -9,7 +9,7 @@
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::serial_line;
 use aether_packaging::manifest::Permissions;
-use aether_services::runtime::{RuntimeError, RuntimeTable, isolated};
+use aether_services::runtime::{RuntimeError, RuntimeProfile, RuntimeTable, isolated};
 use core::cell::UnsafeCell;
 
 struct Global<T>(UnsafeCell<T>);
@@ -48,7 +48,10 @@ pub fn init() -> Result<(), RuntimeError> {
         return Err(RuntimeError::PrefixEscape);
     }
     checks += 1;
-    if profile.allows(Permissions::PORTAL_READ) || profile.allows(Permissions::INPUT_READ) {
+    // The fixture package declares the portal contract (and not input access),
+    // and the file service enforces that declaration before any portal grant
+    // is honored.
+    if !profile.allows(Permissions::PORTAL_READ) || profile.allows(Permissions::INPUT_READ) {
         return Err(RuntimeError::NotPermitted);
     }
     checks += 1;
@@ -97,4 +100,17 @@ pub fn print_status() {
             profile.shared_prefix
         );
     }
+}
+
+/// Returns the registered runtime profile for a private application root.
+///
+/// The file service matches the kernel-owned task root against the derived
+/// prefixes in this table. A task cannot choose the profile that gates it;
+/// roots without a registered profile have no declared limits.
+#[must_use]
+pub fn profile_for(root: &str) -> Option<RuntimeProfile<'static>> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the read.
+    let table = unsafe { &*PROFILES.0.get() };
+    table.find_by_prefix(root)
 }

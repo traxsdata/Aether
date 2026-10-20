@@ -149,7 +149,7 @@ def main() -> int:
             ("help", "commands:"),
             ("ls /", "system\td"),
             ("cat /system/policy.txt", "aether policy v1"),
-            ("apps", "app demo"),
+            ("apps", "app org.aether.demo pid=4"),
             ("security", "security: open_files="),
             ("services", "service storaged"),
             ("portal", "portal: grants=1"),

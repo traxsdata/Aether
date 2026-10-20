@@ -215,6 +215,21 @@ impl<'a, const N: usize> RuntimeTable<'a, N> {
             .find(|profile| profile.id == id)
     }
 
+    /// Returns the profile registered for `prefix`.
+    ///
+    /// The file service matches the kernel-owned process root of a task
+    /// against the derived prefix to find the application's declared limits
+    /// and permissions. The lookup is by exact prefix, not by id supplied by
+    /// the task.
+    #[must_use]
+    pub fn find_by_prefix(&self, prefix: &str) -> Option<RuntimeProfile<'a>> {
+        self.profiles
+            .iter()
+            .flatten()
+            .find(|profile| profile.prefix == prefix)
+            .copied()
+    }
+
     /// Number of profiles.
     #[must_use]
     pub const fn len(&self) -> usize {

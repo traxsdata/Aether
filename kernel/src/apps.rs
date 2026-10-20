@@ -22,8 +22,14 @@ pub fn init() {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked and this runs once during boot.
     let apps = unsafe { &mut *APPS.0.get() };
+    // The sandbox demo task runs under the installed package's identity:
+    // its private root, declared permissions, and limits are the ones the
+    // verified package declared (the file service reads them from the
+    // runtime profile table). If no package is installed, the demo still
+    // runs under the bare demo root.
+    let name = crate::packaging::installed().map_or("demo", |installed| installed.id);
     let _ = apps.register(AppSpec {
-        name: "demo",
+        name,
         root: crate::fs::DEMO_ROOT,
         pid: crate::scheduler::USER_TASK,
     });

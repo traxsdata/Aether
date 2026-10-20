@@ -107,6 +107,25 @@ fn table_rejects_duplicate_prefixes_and_keeps_profiles_distinct() {
 }
 
 #[test]
+fn prefixes_look_up_the_registered_profile() {
+    let mut table = RuntimeTable::<4>::new();
+    assert_eq!(table.register(profile("org.aether.demo")), Ok(0));
+
+    // The kernel-owned root must match the derived prefix exactly; another
+    // application's root yields no profile and therefore no declared limits.
+    let found = table.find_by_prefix("/apps/org.aether.demo");
+    assert_eq!(found.map(|profile| profile.id), Some("org.aether.demo"));
+    assert_eq!(found.map(|profile| profile.limits.open_files), Some(4));
+    assert!(table.find_by_prefix("/apps/org.aether.other").is_none());
+    assert!(table.find_by_prefix("/apps").is_none());
+    assert!(
+        table
+            .find_by_prefix("/apps/org.aether.demo/extra")
+            .is_none()
+    );
+}
+
+#[test]
 fn table_reports_a_full_registry() {
     let mut table = RuntimeTable::<1>::new();
     assert!(table.register(profile("org.aether.demo")).is_ok());
