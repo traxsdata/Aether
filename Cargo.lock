@@ -121,6 +121,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-squashfs"
+version = "0.1.0"
+dependencies = [
+ "aether-appimage",
+ "ruzstd",
+]
+
+[[package]]
 name = "aether-update"
 version = "0.1.0"
 dependencies = [
@@ -134,3 +142,9 @@ version = "0.1.0"
 dependencies = [
  "aether-input",
 ]
+
+[[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"

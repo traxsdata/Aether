@@ -96,7 +96,9 @@ exact AppImage digest, and the runtime version.
 ## Current state
 
 - AppImage container inspection: implemented in `apps/linux/appimage`, with
-  host tests and the `appimage-inspect` diagnostic.
+  host tests, pinned digest verification, and the `appimage-inspect` diagnostic.
+- SquashFS/zstd import: implemented in `apps/linux/squashfs`, with a synthetic
+  fixture, a real-AppImage host extraction, and `squashfs-extract`.
 - Linux ELF loading into a private PML4: implemented for the boot test fixture.
 - Linux `syscall` entry: implemented, with `write`, `exit`/`exit_group`,
   `mmap`, `mprotect`, `brk`, `arch_prctl` FS base, single-task futex,
@@ -109,7 +111,10 @@ exact AppImage digest, and the runtime version.
   `AETHER_LINUX_ROOT_OK` and `AETHER_LINUX_OK`. Anonymous memory comes from a
   boot-reserved arena; there is no runtime frame allocator or VMA table yet.
   The root is embedded and read-only; it is not yet an AppImage import.
-- SquashFS/zstd extraction and writable overlay: not implemented.
+- SquashFS/zstd reader and extraction: implemented in `apps/linux/squashfs`
+  (metadata, file data, fragments, directories, symlinks, extraction limits,
+  host extractor). gzip/xz/lz4, xattrs, hardlink policy, in-OS integration, and
+  the writable overlay remain missing.
 - Dynamic glibc libraries, threads, real futex waiting, signals, file-backed
   mappings, and memory reclaim: not implemented.
 - Wayland bridge and software renderer: not implemented.

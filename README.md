@@ -114,6 +114,9 @@ grants, and the desktop is not a security authority.
   SquashFS bounds, compression, and table-offset validation, with a host
   diagnostic. It does not execute or mount the image; see
   [`docs/specifications/linux-compatibility.md`](docs/specifications/linux-compatibility.md).
+- A bounded SquashFS 4 reader (`aether-squashfs`) with zstd decompression and a
+  host extractor. It extracts the real GridCraft AppImage tree; gzip/xz/lz4,
+  xattrs, and in-OS mounting remain pending.
 - A first Linux ABI slice: a static freestanding x86-64 Linux ELF is loaded
   into its own PML4, enters through the `syscall` instruction, writes through a
   validated user pointer, and exits cleanly (`AETHER_LINUX_OK`). Dynamic
@@ -300,6 +303,7 @@ make unittest      # host unit tests (ABI, ELF, filesystem, services, IPC,
                    # compatibility)
 make compat-test   # compatibility database and classification rules
 make appimage-test # AppImage container inspection tests
+make squashfs-test # SquashFS importer and real-image structure tests
 make update-test   # package and update policy crates
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
 make shell-test    # drive the console shell over a QEMU serial socket
@@ -361,6 +365,7 @@ kernel/              Aether kernel (no_std, target x86_64-unknown-none)
 sdk/                 native application SDK
 tests/fixtures/      test keys and signed package/update fixtures
 apps/linux/appimage/ AppImage container inspector for the Linux layer
+apps/linux/squashfs/ SquashFS 4 reader and host extractor for AppImage import
 tests/compatibility/ compatibility database and classification harness
 tests/rendering/     host harness for the actual kernel graphics module
 tools/               boot, shell, ISO, release, and qualification harnesses

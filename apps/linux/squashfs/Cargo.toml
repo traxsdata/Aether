@@ -1,0 +1,20 @@
+[package]
+name = "aether-squashfs"
+description = "Bounded SquashFS 4 reader for Aether's Linux AppImage import"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aether-appimage = { path = "../appimage" }
+ruzstd = { version = "0.9.1", default-features = false }
+
+[[bin]]
+name = "squashfs-extract"
+path = "src/bin/extract.rs"
+
+[lints.rust]
+unsafe_code = "forbid"

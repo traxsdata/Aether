@@ -12,6 +12,7 @@ make license-check
 make unittest
 make compat-test
 make appimage-test
+make squashfs-test
 make update-test
 make test
 make iso-test

@@ -109,6 +109,9 @@ compat-test:
 appimage-test:
 	$(CARGO) test --locked -p aether-appimage
 
+squashfs-test:
+	$(CARGO) test --locked -p aether-squashfs
+
 # Package and update policy tests share the signed test fixtures under
 # tests/fixtures; run both crates together.
 update-test:

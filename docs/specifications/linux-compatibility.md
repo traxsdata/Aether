@@ -60,7 +60,7 @@ implemented only when a tested Aether interface exists and the runtime uses it.
 
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
-| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection and pinned digest implemented**; signatures, SquashFS/zstd extraction missing |
+| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, and SquashFS/zstd extraction implemented**; signatures, overlay, gzip/xz/lz4 missing |
 | ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static `PT_LOAD` execution works; interpreter and shared libraries missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: one fixed boot process, no creation |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `arch_prctl` FS base and context-switched TLS pointer; no threads |
@@ -118,9 +118,11 @@ private read-only root + private writable overlay
 Parse the container without executing it, validate ELF/SquashFS structure and
 bounds, report compression and offsets, and fail closed on malformed input.
 
-**Evidence:** `apps/linux/appimage`, host tests, and `appimage-inspect` on the
-tested artifact. **Implemented.** Extraction and digest/publisher policy remain
-follow-up work.
+**Evidence:** `apps/linux/appimage` validates the container; `apps/linux/squashfs`
+reads zstd SquashFS metadata, file data, fragments, directories, and symlinks,
+with extraction limits and a host `squashfs-extract` tool. It extracts all 16
+files (48,350,419 bytes) from the tested AppImage. Publisher signatures,
+writable overlay, and gzip/xz/lz4 remain follow-up work.
 
 ### Gate 1 — Host-interface inventory
 

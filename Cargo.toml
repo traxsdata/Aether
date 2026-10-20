@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "abi",
     "apps/linux/appimage",
+    "apps/linux/squashfs",
     "boot/common",
     "crypto",
     "boot/loader",
@@ -26,6 +27,7 @@ members = [
 default-members = [
     "abi",
     "apps/linux/appimage",
+    "apps/linux/squashfs",
     "boot/common",
     "crypto",
     "kernel/fs",
