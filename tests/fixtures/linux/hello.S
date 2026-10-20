@@ -129,6 +129,134 @@ _start:
     mov %r13, %rdi
     syscall
 
+    /* File-backed mmap: map /etc/motd and check the first eight bytes. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea motd_path(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_vma
+    mov %rax, %r13
+
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $1, %rdx                /* PROT_READ */
+    mov $2, %r10                /* MAP_PRIVATE */
+    mov %r13, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_vma
+    mov %rax, %r15
+    movabs $0x4c5f524548544541, %rax  /* "AETHER_L" */
+    cmp %rax, (%r15)
+    jne fail_vma
+
+    /* munmap the file mapping, then MAP_FIXED an anonymous page over it. */
+    mov $11, %rax
+    mov %r15, %rdi
+    mov $4096, %rsi
+    syscall
+    test %rax, %rax
+    js fail_vma
+
+    mov $9, %rax
+    mov %r15, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx                /* PROT_READ|PROT_WRITE */
+    mov $0x32, %r10             /* PRIVATE|ANONYMOUS|FIXED */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    cmp %r15, %rax
+    jne fail_vma
+    movq $0x5a, (%rax)
+    cmpq $0x5a, (%rax)
+    jne fail_vma
+    mov %rax, %rdi
+    mov $4096, %rsi
+    mov $11, %rax
+    syscall
+    test %rax, %rax
+    js fail_vma
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+
+    /* Writable+executable anonymous memory must be rejected. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $7, %rdx                /* PROT_READ|PROT_WRITE|PROT_EXEC */
+    mov $0x22, %r10             /* PRIVATE|ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    jns fail_vma
+
+    /* A file mapping may be executable, but mprotect cannot add write. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea motd_path(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_vma
+    mov %rax, %r13
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $5, %rdx                /* PROT_READ|PROT_EXEC */
+    mov $2, %r10
+    mov %r13, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_vma
+    mov %rax, %r15
+    mov $10, %rax
+    mov %r15, %rdi
+    mov $4096, %rsi
+    mov $6, %rdx                /* PROT_WRITE|PROT_EXEC */
+    syscall
+    test %rax, %rax
+    jns fail_vma
+    mov $11, %rax
+    mov %r15, %rdi
+    mov $4096, %rsi
+    syscall
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+
+    /* The break grows inside the heap window and the new page is writable. */
+    mov $12, %rax
+    xor %rdi, %rdi
+    syscall
+    test %rax, %rax
+    jle fail_vma
+    mov %rax, %r14
+    lea 8192(%r14), %r15
+    mov $12, %rax
+    mov %r15, %rdi
+    syscall
+    cmp %r15, %rax
+    jne fail_vma
+    movb $0x5a, 8191(%r14)
+    cmpb $0x5a, 8191(%r14)
+    jne fail_vma
+
+    mov $1, %rax                /* write */
+    mov $1, %rdi                /* stdout */
+    lea vma_message(%rip), %rsi
+    mov $vma_message_len, %rdx
+    syscall
+
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea message(%rip), %rsi
@@ -156,6 +284,10 @@ fail_file:
 fail_overlay:
     lea overlay_failure(%rip), %rsi
     mov $overlay_failure_len, %rdx
+    jmp report_failure
+fail_vma:
+    lea vma_failure(%rip), %rsi
+    mov $vma_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -170,6 +302,12 @@ report_failure:
 message:
     .ascii "AETHER_LINUX_EXEC_OK source=static-linux-elf mmap=ok fs=ok overlay=ok\n"
     .set message_len, . - message
+vma_message:
+    .ascii "AETHER_LINUX_VMA_OK file=ok fixed=ok wx=deny brk=ok\n"
+    .set vma_message_len, . - vma_message
+vma_failure:
+    .ascii "AETHER_LINUX_VMA_FAIL\n"
+    .set vma_failure_len, . - vma_failure
 mmap_failure:
     .ascii "AETHER_LINUX_EXEC_FAIL stage=mmap\n"
     .set mmap_failure_len, . - mmap_failure

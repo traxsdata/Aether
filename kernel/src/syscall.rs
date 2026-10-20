@@ -156,11 +156,17 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         8 => scheduler::linux_lseek(first, second as i64, third),
         17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
         21 => linux_access(pml4, first, second),
-        9 => linux_mmap(first, second, third, unsafe { (*frame).r10 }, unsafe {
-            (*frame).r8
-        }),
+        9 => linux_mmap(
+            pml4,
+            first,
+            second,
+            third,
+            unsafe { (*frame).r10 },
+            unsafe { (*frame).r8 },
+            unsafe { (*frame).r9 },
+        ),
         10 => linux_mprotect(pml4, first, second, third),
-        11 => 0,
+        11 => linux_munmap(pml4, first, second),
         12 => scheduler::linux_brk(first) as i64,
         39 | 186 => scheduler::current_task() as i64,
         63 => linux_uname(pml4, first),
@@ -185,9 +191,10 @@ const LINUX_EINVAL: i64 = -22;
 const LINUX_ENOSYS: i64 = -38;
 
 const LINUX_ENOMEM: i64 = -12;
-const LINUX_EPERM: i64 = -1;
 const LINUX_ENOENT: i64 = -2;
 const LINUX_EACCES: i64 = -13;
+const LINUX_EBADF: i64 = -9;
+const LINUX_EEXIST: i64 = -17;
 
 fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i64 {
     let Some(path) = user_cstr(pml4, pointer, 256) else {
@@ -252,38 +259,211 @@ fn user_cstr<'a>(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<&'a str>
     core::str::from_utf8(&bytes[..end]).ok()
 }
 
-fn linux_mmap(address: u64, length: u64, protections: u64, flags: u64, fd: u64) -> i64 {
-    // Anonymous private memory only. File mappings need a filesystem service
-    // and a VMA table, which the layer does not have yet.
-    if flags & 0x20 == 0 || flags & 0x10 != 0 || fd != u64::MAX {
+const LINUX_MAP_SHARED: u64 = 0x01;
+const LINUX_MAP_PRIVATE: u64 = 0x02;
+const LINUX_MAP_FIXED: u64 = 0x10;
+const LINUX_MAP_ANONYMOUS: u64 = 0x20;
+const LINUX_MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
+
+fn linux_mmap(
+    pml4: PhysFrame,
+    address: u64,
+    length: u64,
+    protections: u64,
+    flags: u64,
+    fd: u64,
+    offset: u64,
+) -> i64 {
+    if length == 0 || length > paging::LINUX_ARENA_PAGES * aether_memory::PAGE_SIZE {
+        return LINUX_EINVAL;
+    }
+    let Some(length) = length.checked_add(0xfff).map(|value| value & !0xfff) else {
+        return LINUX_EINVAL;
+    };
+    if flags & LINUX_MAP_SHARED != 0 || flags & LINUX_MAP_PRIVATE == 0 {
         return LINUX_ENOSYS;
     }
-    if protections & 4 != 0 {
-        // The boot arena is non-executable; do not silently weaken W^X.
-        return LINUX_EPERM;
+    if protections & !7 != 0 || protections & 6 == 6 {
+        return LINUX_EINVAL;
     }
-    let _ = address;
-    scheduler::linux_mmap(length).map_or(LINUX_ENOMEM, |address| address as i64)
+    let anonymous = flags & LINUX_MAP_ANONYMOUS != 0;
+    if anonymous {
+        if fd != u64::MAX || offset != 0 {
+            return LINUX_EINVAL;
+        }
+    } else {
+        if fd == u64::MAX || !offset.is_multiple_of(aether_memory::PAGE_SIZE) {
+            return LINUX_EINVAL;
+        }
+        if scheduler::linux_file_len(fd).is_err() {
+            return LINUX_EBADF;
+        }
+    }
+    let fixed = flags & LINUX_MAP_FIXED != 0;
+    let no_replace = flags & LINUX_MAP_FIXED_NOREPLACE != 0;
+    let start = match scheduler::linux_vma_insert(
+        length,
+        protections as u32,
+        address,
+        fixed || no_replace,
+        no_replace,
+    ) {
+        Ok(start) => start,
+        Err(aether_memory::vma::VmaError::Overlap) if no_replace => return LINUX_EEXIST,
+        Err(error) => return vma_errno(error),
+    };
+    // The arena pages may carry read-only permissions from a previous
+    // mapping. Make them writable while the kernel zero-fills and copies.
+    let writable = aether_memory::paging::PageFlags::PRESENT
+        | aether_memory::paging::PageFlags::USER
+        | aether_memory::paging::PageFlags::WRITABLE
+        | aether_memory::paging::PageFlags::NO_EXECUTE;
+    if paging::protect_user_range(pml4, start, length, writable).is_err()
+        || !zero_user_range(pml4, start, length)
+    {
+        let _ = scheduler::linux_vma_remove(start, length);
+        return LINUX_EFAULT;
+    }
+    if !anonymous && let Err(error) = copy_file_range(pml4, fd, offset, start, length) {
+        let _ = scheduler::linux_vma_remove(start, length);
+        return error;
+    }
+    let Some(page_flags) = linux_page_flags(protections) else {
+        let _ = scheduler::linux_vma_remove(start, length);
+        return LINUX_EINVAL;
+    };
+    if paging::protect_user_range(pml4, start, length, page_flags).is_err() {
+        let _ = scheduler::linux_vma_remove(start, length);
+        return LINUX_EINVAL;
+    }
+    start as i64
+}
+
+fn linux_munmap(pml4: PhysFrame, address: u64, length: u64) -> i64 {
+    if length == 0 {
+        return 0;
+    }
+    let Some(length) = length.checked_add(0xfff).map(|value| value & !0xfff) else {
+        return LINUX_EINVAL;
+    };
+    if !address.is_multiple_of(aether_memory::PAGE_SIZE) {
+        return LINUX_EINVAL;
+    }
+    // Require a fully mapped range so clearing pages cannot reach the heap or
+    // an untracked hole. Partial munmap is a later refinement.
+    if !scheduler::linux_vma_covers(address, length) {
+        return 0;
+    }
+    match scheduler::linux_vma_remove(address, length) {
+        // Unmapping an unmapped range is not an error in Linux.
+        Ok(false) | Err(_) => return 0,
+        Ok(true) => {}
+    }
+    // Keep the pre-mapped arena pages, but clear their contents and leave
+    // them non-writable so a later reuse cannot read the previous mapping.
+    let writable = aether_memory::paging::PageFlags::PRESENT
+        | aether_memory::paging::PageFlags::USER
+        | aether_memory::paging::PageFlags::WRITABLE
+        | aether_memory::paging::PageFlags::NO_EXECUTE;
+    if paging::protect_user_range(pml4, address, length, writable).is_err() {
+        return 0;
+    }
+    if !zero_user_range(pml4, address, length) {
+        return LINUX_EFAULT;
+    }
+    let read_only = aether_memory::paging::PageFlags::PRESENT
+        | aether_memory::paging::PageFlags::USER
+        | aether_memory::paging::PageFlags::NO_EXECUTE;
+    let _ = paging::protect_user_range(pml4, address, length, read_only);
+    0
 }
 
 fn linux_mprotect(pml4: PhysFrame, address: u64, length: u64, protections: u64) -> i64 {
-    let executable = protections & 4 != 0;
-    let writable = protections & 2 != 0;
-    if executable && writable {
+    if length == 0 {
+        return 0;
+    }
+    let Some(length) = length.checked_add(0xfff).map(|value| value & !0xfff) else {
         return LINUX_EINVAL;
-    }
-    let mut flags =
-        aether_memory::paging::PageFlags::PRESENT | aether_memory::paging::PageFlags::USER;
-    if writable {
-        flags = flags | aether_memory::paging::PageFlags::WRITABLE;
-    }
-    if !executable {
-        flags = flags | aether_memory::paging::PageFlags::NO_EXECUTE;
+    };
+    let Some(flags) = linux_page_flags(protections) else {
+        return LINUX_EINVAL;
+    };
+    if let Err(error) = scheduler::linux_vma_protect(address, length, protections as u32) {
+        return vma_errno(error);
     }
     match paging::protect_user_range(pml4, address, length, flags) {
         Ok(()) => 0,
         Err(_) => LINUX_EINVAL,
     }
+}
+
+fn vma_errno(error: aether_memory::vma::VmaError) -> i64 {
+    use aether_memory::vma::VmaError;
+    match error {
+        VmaError::InvalidRange
+        | VmaError::OutsideWindow
+        | VmaError::InvalidProtection
+        | VmaError::Overlap => LINUX_EINVAL,
+        VmaError::OutOfSpace | VmaError::NotFound => LINUX_ENOMEM,
+    }
+}
+
+fn linux_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags> {
+    if protections & !7 != 0 || protections & 6 == 6 {
+        return None;
+    }
+    let mut flags =
+        aether_memory::paging::PageFlags::PRESENT | aether_memory::paging::PageFlags::USER;
+    if protections & 2 != 0 {
+        flags = flags | aether_memory::paging::PageFlags::WRITABLE;
+    }
+    if protections & 4 == 0 {
+        flags = flags | aether_memory::paging::PageFlags::NO_EXECUTE;
+    }
+    Some(flags)
+}
+
+fn zero_user_range(pml4: PhysFrame, address: u64, length: u64) -> bool {
+    let mut offset = 0u64;
+    while offset < length {
+        let chunk = (length - offset).min(MAX_SYSCALL_IO as u64);
+        // SAFETY: The range is inside the Linux task's mapped arena and the
+        // syscall path has interrupts masked.
+        let Some(buffer) = (unsafe { user_bytes_mut(pml4, address + offset, chunk) }) else {
+            return false;
+        };
+        buffer.fill(0);
+        offset += chunk;
+    }
+    true
+}
+
+fn copy_file_range(
+    pml4: PhysFrame,
+    fd: u64,
+    file_offset: u64,
+    address: u64,
+    length: u64,
+) -> Result<(), i64> {
+    let mut offset = 0u64;
+    while offset < length {
+        let chunk = (length - offset).min(MAX_SYSCALL_IO as u64);
+        // SAFETY: The range is inside the Linux task's mapped arena and the
+        // syscall path has interrupts masked.
+        let Some(buffer) = (unsafe { user_bytes_mut(pml4, address + offset, chunk) }) else {
+            return Err(LINUX_EFAULT);
+        };
+        let Some(position) = file_offset.checked_add(offset) else {
+            return Err(LINUX_EINVAL);
+        };
+        let read = scheduler::linux_file_read_at(fd, position, buffer)?;
+        if read < chunk as usize {
+            // The file ended early; the remaining bytes stay zero-filled.
+            break;
+        }
+        offset += chunk;
+    }
+    Ok(())
 }
 
 fn linux_arch_prctl(pml4: PhysFrame, code: u64, value: u64) -> i64 {

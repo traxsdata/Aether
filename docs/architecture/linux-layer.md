@@ -105,18 +105,22 @@ exact AppImage digest, and the runtime version.
   fixture, a real-AppImage host extraction, and `squashfs-extract`.
 - Linux ELF loading into a private PML4: implemented for the boot test fixture.
 - Linux `syscall` entry: implemented, with `write`, `exit`/`exit_group`,
-  `mmap`, `mprotect`, `brk`, `arch_prctl` FS base, single-task futex,
+  `mmap`, `munmap`, `mprotect`, `brk`, `arch_prctl` FS base, single-task futex,
   `clock_gettime`, `getrandom`, `uname`, `getpid`/`gettid`, and
   `set_tid_address`, and a read-only root with `openat`, `read`, `pread64`,
   `close`, `lseek`, and `access`. The static fixture
   `tests/fixtures/linux/hello.S` runs at CPL3, allocates and writes anonymous
-  memory, sets FS-based TLS, opens and reads `/etc/motd`, writes through a
-  validated user pointer, exits cleanly, and gates the boot with
-  `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`, and `AETHER_LINUX_OK`.
-  Anonymous memory comes from a boot-reserved arena; there is no runtime frame
-  allocator or VMA table yet. The root is embedded and read-only; `/tmp` writes
-  go to a bounded per-task overlay that is cleared on exit/fault. This is not
-  yet an AppImage import or a persistent per-application store.
+  memory, maps `/etc/motd` through file-backed `mmap`, releases it with
+  `munmap`, reuses the address with `MAP_FIXED`, grows the break, sets FS-based
+  TLS, opens and reads `/etc/motd`, writes through a validated user pointer,
+  exits cleanly, and gates the boot with `AETHER_LINUX_ROOT_OK`,
+  `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, and `AETHER_LINUX_OK`.
+  A fixed per-task VMA table tracks ranges and rejects writable+executable
+  mappings. Memory still comes from a boot-reserved arena: there is no runtime
+  frame allocator and `munmap` does not return page-table frames yet. The root
+  is embedded and read-only; `/tmp` writes go to a bounded per-task overlay
+  that is cleared on exit/fault. This is not yet an AppImage import or a
+  persistent per-application store.
 - Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
   a zstd SquashFS image and signs it as a `linux-rootfs` record. The populated
   glibc/Mesa/Wayland rootfs remains missing.

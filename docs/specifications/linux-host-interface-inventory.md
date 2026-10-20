@@ -88,7 +88,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 |---|---|---|---|---|---|
 | HI-08 | Metadata and directories: `stat64`, `statx`, `fstat64`, `readlink`, `mkdir`, `unlink`, `rename`, `opendir`, `readdir64`, `closedir`, `dirfd` | Filesystem service operations with per-domain roots | `kernel/fs`, `kernel/src/fs.rs` | HI-T08 | missing |
 | HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Portal grant handles and `/run/aether/portal/<grant>` paths; `/home/user` is the private overlay | `kernel/src/portal.rs`, planned `user/portald` | HI-T09 | missing |
-| HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `posix_memalign`, `malloc`; file mappings; W^X | Memory-object capabilities and validated mapping syscalls | `kernel/src/memory`, `kernel/src/syscall.rs` | HI-T10 | partial |
+| HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `brk`, file mappings, W^X | Per-task VMA table over the boot arena; file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk` | `kernel/src/memory`, `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T10 | partial |
 | HI-11 | Synchronization: `futex`, pthread mutex/condition variables, robust lists, `eventfd` | Futex wait/wake queues with timeouts | `kernel/src/scheduler.rs`, `kernel/src/ipc.rs` | HI-T11 | partial |
 | HI-12 | Signals: `sigaction`, `signal`, `sigemptyset`, `sigaddset`, `sigaltstack`, `kill`, `pause` | Fault-to-signal delivery and per-thread masks | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T12 | missing |
 | HI-13 | Time and waits: `clock_gettime`, `clock_nanosleep`, `poll` timeouts, `timerfd` | Time service plus a blocking wait queue | `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T13 | partial |
@@ -138,7 +138,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T07 | planned `make linux-fd-test` | Read/write/seek/dup/pipe/poll on read-only root and overlay; bad descriptor rejection | planned |
 | HI-T08 | planned `make linux-fs-test` | Stat/readdir/readlink/mkdir/unlink/rename within the domain root; outside paths denied | planned |
 | HI-T09 | planned `make linux-portal-test` | File chooser grant, exact-file open, revocation, denial, and no ambient home | planned |
-| HI-T10 | planned `make linux-mem-test` | Anonymous and file-backed maps, protect, unmap, W^X, and out-of-quota failure | planned |
+| HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixture maps a file, unmaps and reuses an address, grows `brk`, and denies W+X; runtime frame allocation and PTE reclaim still outstanding | partial |
 | HI-T11 | planned `make linux-sync-test` | Futex wait/wake, timeout, robust list, eventfd, and thread wake ordering | planned |
 | HI-T12 | planned `make linux-signal-test` | Handler delivery, alt stack, mask, fault-to-signal, and no delivery across domains | planned |
 | HI-T13 | planned `make linux-time-test` | Monotonic/realtime clocks, sleep, poll timeout, and timer cancellation | planned |

@@ -358,6 +358,12 @@ fn ensure_user_table(
 pub const LINUX_ARENA_BASE: u64 = USER_BASE + 16 * 1024 * 1024;
 /// Number of pages in the Linux arena (32 MiB).
 pub const LINUX_ARENA_PAGES: u64 = 8192;
+/// Pages reserved for the Linux `brk` heap at the start of the arena (1 MiB).
+pub const LINUX_HEAP_PAGES: u64 = 256;
+/// First address available to Linux `mmap` after the heap window.
+pub const LINUX_MMAP_BASE: u64 = LINUX_ARENA_BASE + LINUX_HEAP_PAGES * PAGE_SIZE;
+/// Exclusive end of the Linux arena.
+pub const LINUX_ARENA_END: u64 = LINUX_ARENA_BASE + LINUX_ARENA_PAGES * PAGE_SIZE;
 
 /// Maps the Linux anonymous-memory arena into `pml4`.
 pub fn map_user_arena(

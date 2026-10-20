@@ -141,8 +141,10 @@ user space. It is not a VM. The target and security gates are in
   network. Gate 1 is not an implementation gate: the missing ELF loader,
   process/thread, signal, Wayland, and Vulkan interfaces remain Gate 2 work.
 - [ ] Gate 2 — interface mapping and prototype: **partial**. A static Linux ELF
-  runs at CPL3, but the dynamic loader, glibc, user-space `linuxd`, threads,
-  signals, and file mappings remain missing.
+  runs at CPL3 with a per-task VMA table, file-backed `mmap`, `munmap` reuse,
+  `mprotect`, growing `brk`, and W^X denial, but the dynamic loader, glibc,
+  user-space `linuxd`, runtime frame allocation, threads, and signals remain
+  missing.
 - [ ] Gate 3 — headless GridCraft: import
   `gridcraft-0.8.0-linux-x86_64.AppImage` and run its `gridcraft-cli`
   (`eval`, CSV import/export) with a read-only root and private overlay.
@@ -284,10 +286,12 @@ been smoke-tested.
 
 The Linux track has completed the Gate 1 inventory and has partial Gate 2
 evidence: the kernel verifies and imports an embedded signed rootfs, a static
-Linux ELF runs at CPL3 through the Linux `syscall` path with anonymous memory,
-FS-based TLS, read-only root files, and a bounded `/tmp` overlay
+Linux ELF runs at CPL3 through the Linux `syscall` path with a per-task VMA
+table, file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, FS-based
+TLS, read-only root files, and a bounded `/tmp` overlay
 (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
-`AETHER_LINUX_OK`), and the native ABI is denied to Linux tasks. This is a test
+`AETHER_LINUX_VMA_OK`, `AETHER_LINUX_OK`), and the native ABI is denied to
+Linux tasks. This is a test
 fixture, not an AppImage: the dynamic loader, glibc/`ld.so`, threads, signals,
 Wayland, software Vulkan, and a user-supplied import path are still missing.
 

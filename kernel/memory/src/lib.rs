@@ -14,6 +14,7 @@
 
 pub mod frame;
 pub mod paging;
+pub mod vma;
 
 /// Size of an x86-64 page in bytes.
 pub const PAGE_SIZE: u64 = 4096;

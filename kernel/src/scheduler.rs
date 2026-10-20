@@ -22,6 +22,7 @@ use aether_fs::FsError;
 use aether_ipc::{CapError, CapHandle, CapTable, IpcError, ObjectType, Rights};
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, PhysFrame};
+use aether_memory::vma::{VmaError, VmaTable};
 use aether_services::ServiceError;
 use aether_services::runtime::RuntimeError;
 use core::cell::UnsafeCell;
@@ -128,8 +129,7 @@ struct Task {
     root: &'static str,
     caps: CapTable,
     handles: TaskHandles,
-    mmap_next: u64,
-    mmap_end: u64,
+    vmas: VmaTable,
     brk: u64,
     fs_base: u64,
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
@@ -153,8 +153,7 @@ impl Task {
                 ep_b_send: None,
                 ep_b_recv: None,
             },
-            mmap_next: 0,
-            mmap_end: 0,
+            vmas: VmaTable::new(paging::LINUX_MMAP_BASE, paging::LINUX_ARENA_END),
             brk: 0,
             fs_base: 0,
             linux_fds: [None; crate::linux::MAX_FDS],
@@ -490,8 +489,6 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     linux.pml4 = linux_pml4.start_address();
     linux.kernel_stack_top = linux_kernel_top;
     linux.root = crate::fs::DEMO_ROOT;
-    linux.mmap_next = paging::LINUX_ARENA_BASE;
-    linux.mmap_end = paging::LINUX_ARENA_BASE + paging::LINUX_ARENA_PAGES * PAGE_SIZE;
     linux.brk = paging::LINUX_ARENA_BASE;
     tasks[LINUX_TASK] = linux;
 
@@ -1160,35 +1157,121 @@ pub fn linux_access(path: &str) -> bool {
     crate::linux::lookup(path).is_some()
 }
 
-/// Reserves anonymous memory from the Linux task's pre-mapped arena.
-pub fn linux_mmap(length: u64) -> Result<u64, ()> {
-    if length == 0 {
-        return Err(());
-    }
-    let length = length.checked_add(PAGE_SIZE - 1).ok_or(())? & !(PAGE_SIZE - 1);
+/// Reserves a range in the Linux task's VMA window.
+///
+/// The pages live in the pre-mapped arena, so this does not allocate frames.
+/// `hint` is honoured when free; `fixed` requires the exact address and
+/// `no_replace` rejects an overlap instead of replacing it.
+pub fn linux_vma_insert(
+    length: u64,
+    prot: u32,
+    hint: u64,
+    fixed: bool,
+    no_replace: bool,
+) -> Result<u64, VmaError> {
     let tasks = unsafe { &mut *TASKS.0.get() };
-    let current = CURRENT.load(Ordering::Relaxed);
-    let task = &mut tasks[current];
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
     if task.abi != TaskAbi::Linux {
-        return Err(());
+        return Err(VmaError::InvalidRange);
     }
-    let end = task.mmap_next.checked_add(length).ok_or(())?;
-    if end > task.mmap_end {
-        return Err(());
+    if hint != 0 && hint.is_multiple_of(PAGE_SIZE) {
+        match task.vmas.insert_at(hint, length, prot) {
+            Ok(()) => return Ok(hint),
+            Err(VmaError::Overlap) if !fixed && !no_replace => {}
+            Err(error) => return Err(error),
+        }
+    } else if fixed {
+        return Err(VmaError::InvalidRange);
     }
-    let address = task.mmap_next;
-    task.mmap_next = end;
-    Ok(address)
+    task.vmas.insert(length, prot)
 }
 
-/// Returns the Linux program break. Growth is not implemented yet; the
-/// pre-mapped arena is reached through `mmap`, so a failed `brk` is recoverable.
+/// Returns `true` when every page in a Linux range is mapped.
+pub fn linux_vma_covers(address: u64, length: u64) -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    task.abi == TaskAbi::Linux && task.vmas.covers(address, length)
+}
+
+/// Releases a range from the Linux task's VMA table.
+///
+/// Returns `true` when at least one tracked area overlapped the range.
+pub fn linux_vma_remove(address: u64, length: u64) -> Result<bool, VmaError> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(VmaError::NotFound);
+    }
+    task.vmas.remove(address, length)
+}
+
+/// Changes protections for a mapped Linux range.
+pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), VmaError> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(VmaError::NotFound);
+    }
+    task.vmas.protect(address, length, prot)
+}
+
+/// Returns the bytes in a Linux file descriptor, independent of its offset.
+pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get(fd as usize).and_then(Option::as_ref) else {
+        return Err(LINUX_EBADF);
+    };
+    match slot.source {
+        LinuxFileSource::Root(file) => crate::linux::file(file)
+            .map(|file| file.data.len() as u64)
+            .ok_or(LINUX_EBADF),
+        LinuxFileSource::Overlay(index) => task
+            .linux_overlay
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|entry| entry.len as u64)
+            .ok_or(LINUX_EBADF),
+    }
+}
+
+/// Reads a Linux file at `offset` without changing the descriptor offset.
+pub fn linux_file_read_at(fd: u64, offset: u64, out: &mut [u8]) -> Result<usize, i64> {
+    linux_pread(fd, out, offset)
+}
+
+/// Returns the Linux program break.
+///
+/// The break has a fixed 1 MiB window at the start of the arena; the mmap
+/// window begins after it. Growth is zero-filled. A request outside the window
+/// leaves the break unchanged, matching Linux `brk` failure semantics.
 pub fn linux_brk(request: u64) -> u64 {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    if request != 0 && request <= task.brk {
-        task.brk = request;
+    if task.abi != TaskAbi::Linux {
+        return 0;
     }
+    let base = paging::LINUX_ARENA_BASE;
+    let limit = paging::LINUX_MMAP_BASE;
+    if request == 0 {
+        return task.brk;
+    }
+    if request < base || request > limit {
+        return task.brk;
+    }
+    if request > task.brk {
+        let mut page = task.brk & !(PAGE_SIZE - 1);
+        while page < request {
+            // SAFETY: The heap window is inside the current Linux address
+            // space, pre-mapped writable at boot, and the syscall path has
+            // interrupts masked.
+            unsafe {
+                core::ptr::write_bytes(page as *mut u8, 0, PAGE_SIZE as usize);
+            }
+            page += PAGE_SIZE;
+        }
+    }
+    task.brk = request;
     task.brk
 }
 
@@ -1219,6 +1302,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].state = TaskState::Done;
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     tasks[current].linux_overlay = [None; OVERLAY_FILES];
+    tasks[current].vmas.reset();
     LINUX_EXITS.fetch_add(1, Ordering::Release);
     let result = if status == 0 {
         UserTestResult::Passed
@@ -1250,6 +1334,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     if linux {
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
+        tasks[current].vmas.reset();
         LINUX_FAULTS.fetch_add(1, Ordering::Release);
         LINUX_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
     } else {
