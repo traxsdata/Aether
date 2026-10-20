@@ -95,25 +95,31 @@ It is a planning model, not a delivery promise.
 
 ## Phase 5 — Compatibility and developer alpha
 
+This phase has two compatibility tracks. Windows compatibility is the target in
+technical specification §7; the Linux AppImage layer was added by
+[ADR-015](decisions/ADR-015-linux-app-runtime.md) and is specified in
+[Linux compatibility](specifications/linux-compatibility.md). The Linux track
+does not replace Windows work, give native Aether applications a second ABI, or
+change the Phase 4 exit criterion.
+
+A checked box means the slice is implemented in this tree; behaviour changes
+also have a named test or boot marker. Partial work stays unchecked and names
+what is missing.
+
+### Native packaging and documentation
+
 - [x] Signed application package format, verifier, installation, and runtime
   profiles ([package format](specifications/package-format.md)).
 - [x] Initial compatibility test suite and database with named-test evidence
   ([compatibility](specifications/compatibility.md)).
-- [x] Windows host-interface inventory and feasibility report
+- [x] Developer documentation for packaging, updates, hardware, and recovery.
+
+### Windows compatibility
+
+- [x] Host-interface inventory and feasibility report
   ([report](specifications/windows-host-interface-report.md)). The feasibility
   gate is not met, so no runtime is promised.
-- [x] Developer documentation for packaging, updates, hardware, and recovery.
 - [ ] Windows compatibility prototype and per-application prefixes.
-- [x] Linux AppImage container inspection (Gate 0): validated ELF/SquashFS
-  bounds, compression, table offsets, and pinned SHA-256 digest
-  ([plan](specifications/linux-compatibility.md)).
-- [x] Linux ABI entry slice: static ELF loading, validated Linux `syscall`
-  entry, `write`/`exit`, and a boot gate (`AETHER_LINUX_OK`).
-- [x] Linux memory and TLS slice: boot-reserved anonymous arena, `mmap`,
-  `mprotect`, `brk`, `arch_prctl` FS base, single-task futex, time, and random.
-- [x] Linux read-only root and file slice: validated paths, `openat`, `read`,
-  `pread64`, `close`, `lseek`, and `access`; no writable root.
-- [ ] Linux compatibility layer: complete the steps below.
 
 ### Linux application layer
 
@@ -123,10 +129,37 @@ user space. It is not a VM. The target and security gates are in
 [ADR-015](decisions/ADR-015-linux-app-runtime.md) and
 [the Linux layer](architecture/linux-layer.md).
 
+#### Gates
+
+- [x] Gate 0 — AppImage import inspection: validate the container without
+  executing it, with bounds, compression, table offsets, pinned SHA-256, and
+  signed import records.
+- [ ] Gate 1 — host-interface inventory: documented in the compatibility plan,
+  but **not met** because the ELF loader, process/thread APIs, file-backed
+  mappings, real futex waiting, signals, Wayland, and Vulkan interfaces do not
+  yet exist.
+- [ ] Gate 2 — interface mapping and prototype: **partial**. A static Linux ELF
+  runs at CPL3, but the dynamic loader, glibc, user-space `linuxd`, threads,
+  signals, and file mappings remain missing.
+- [ ] Gate 3 — headless GridCraft: import
+  `gridcraft-0.8.0-linux-x86_64.AppImage` and run its `gridcraft-cli`
+  (`eval`, CSV import/export) with a read-only root and private overlay.
+- [ ] Gate 4 — windowed GridCraft: run `usr/bin/gridcraft` with Wayland,
+  software rendering, keyboard/pointer input, and workbook open/save through
+  the portal.
+- [ ] Move the GridCraft record above `unsupported` only after the relevant
+  gate has a completed run, named tests, the exact AppImage digest, the runtime
+  version, and the platform/date.
+
 #### Import and runtime root
 
 - [x] Validate AppImage type 2, ELF runtime, SquashFS bounds, and table offsets.
-- [x] Pin and verify the artifact SHA-256 before parsing.
+- [x] Pin and verify the artifact SHA-256 before parsing; a mismatch is rejected
+  before the container is handed to a parser.
+- [x] Signed import records binding identity, version, runtime, digest, and
+  publisher with Ed25519, verified against a trust store, plus
+  `appimage-manifest sign|verify`. The same record type covers
+  `runtime=linux-rootfs`.
 - [x] Bounded SquashFS 4 reader with zstd, gzip, lz4, lzo, xz, and lzma
   metadata/data/fragment decompression in `no_std`, inode and directory
   parsing, extraction limits, and a real-AppImage host extractor
@@ -137,37 +170,36 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Add explicit xattr policy controls beyond count-and-drop.
 - [x] Import into a private read-only root; reject symlink escapes, hardlinks
   outside the root, duplicate paths, and oversized files.
-- [x] In-OS rootfs import from an embedded signed image with a bounded bootstrap
-  heap; the Linux fixture reads `/etc/motd` from the imported tree.
+- [x] In-OS import of an embedded signed rootfs: the kernel verifies the test
+  `linux-rootfs` record, imports the SquashFS tree with a bounded bootstrap
+  heap, and serves Linux file opens from that tree
+  (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`).
 - [x] Per-task writable overlay prototype: bounded entries under `/tmp`,
   created/truncated/read/written through the Linux file descriptors, cleared on
-  exit and fault.
+  exit and fault (`AETHER_LINUX_OVERLAY_OK`).
 - [ ] Extend the overlay to settings/logs paths, persistent per-application
   storage, user-visible erasure, and quotas that survive a crash.
-- [x] Signed import records with pinned digest, identity, version, runtime, and
-  publisher; Ed25519 verification against a trust store, plus
-  `appimage-manifest sign|verify`. The same record type covers
-  `runtime=linux-rootfs`.
 - [x] Runtime rootfs host packaging: `tools/build-runtime-rootfs.sh` builds a
   zstd SquashFS rootfs and signs it as a `linux-rootfs` import record.
-- [ ] Populate and pin the actual glibc/Mesa/Wayland runtime rootfs, record its
-  version in the compatibility database, and consume the signed image in the
-  Linux layer.
-- [x] Runtime rootfs packaging and signing path (zstd SquashFS + signed
-  `linux-rootfs` record).
-- [x] In-OS consumption of an embedded signed rootfs: the kernel verifies the
-  test `linux-rootfs` record, imports the SquashFS tree with a bounded
-  bootstrap heap, and Linux file opens read from that tree
-  (`AETHER_LINUX_IMPORT_OK`).
-- [ ] Populate the signed runtime rootfs with pinned glibc, `ld.so`,
-  Mesa/lavapipe, and Wayland client libraries, install it as an Aether runtime
-  package, and import user-supplied AppImages instead of the embedded fixture.
+- [ ] Populate and pin the actual glibc/`ld.so`/Mesa/lavapipe/Wayland runtime
+  rootfs, record its version in the compatibility database, install it as an
+  Aether runtime package, and import user-supplied AppImages instead of the
+  embedded fixture.
 
 #### Linux ABI
 
+- [x] Static ELF loading into a private PML4, architectural `syscall` entry,
+  validated user pointers, `write`/`exit`, and the `AETHER_LINUX_OK` boot gate.
+  Linux tasks are denied the native `int 0x80` ABI.
+- [x] Anonymous memory and TLS: boot-reserved arena, `mmap`, `mprotect`, `brk`,
+  `arch_prctl` FS base with context switching, `clock_gettime`, `getrandom`,
+  `uname`, `getpid`/`gettid`, `set_tid_address`, and a single-task futex.
+- [x] Read-only root file syscalls: validated absolute paths,
+  `openat`/`read`/`pread64`/`close`/`lseek`/`access`, and a per-task descriptor
+  table cleared on exit and fault.
 - [ ] Runtime frame allocator and per-task VMA table.
-- [ ] File-backed `mmap`, `munmap` reclaim, `mprotect`, `mremap`, and page-fault
-  handling; preserve W^X.
+- [ ] File-backed `mmap`, `munmap` reclaim, `mremap`, and page-fault handling;
+  keep `mprotect` within the existing arena and preserve W^X.
 - [ ] Dynamic ELF loader: `PT_INTERP`, auxv, `ld.so`, relocations, library
   search, TLS, and `LD_LIBRARY_PATH` restrictions.
 - [ ] File syscalls: `stat`/`fstat`/`statx`, `readlink`, `getdents64`, `fcntl`,
@@ -199,18 +231,14 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Accelerated GPU service is a later optimization, not a dependency for the
   first GridCraft run.
 
-#### Application milestones
+#### Application and denial tests
 
-- [ ] Gate 3: import `gridcraft-0.8.0-linux-x86_64.AppImage` and run its
-  `gridcraft-cli` headlessly (`eval`, CSV import/export) with a read-only root
-  and private overlay.
-- [ ] Gate 4: run `usr/bin/gridcraft` windowed with Wayland, software rendering,
-  keyboard/pointer input, and workbook open/save through the portal.
 - [ ] Test security denials: no ambient files, network, devices, sibling app
   roots, or native ABI from the Linux domain; crash containment and quotas.
-- [ ] Update the compatibility database to `limited`, `compatible`, or
-  `verified` only with named tests, exact AppImage digest, runtime version,
-  platform, date, and documented limitations.
+- [ ] Test the Linux layer as an application domain: a crash retires only that
+  domain, and the layer cannot mint capabilities or see another app's root.
+
+### Platform follow-ups
 
 - [ ] Better storage (persistent block device), networking, audio, and
   accelerated graphics.
@@ -248,12 +276,20 @@ installs a signed package, derives an isolated runtime profile, verifies a
 signed update while rejecting replay, downgrade, and an unknown publisher,
 starts supervised services, paints a double-buffered desktop with a tested
 window manager, accepts keyboard and PS/2 mouse input, grants one file through
-the portal, runs a static Linux ELF through the Linux ABI entry and a read-only
-root, boots the UEFI ISO under OVMF, and verifies the current/previous
+the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
 image records without touching user data. VMware Workstation itself has not yet
 been smoke-tested.
 
+The Linux track has partial Gate 2 evidence while Gate 1 remains unmet: the
+kernel verifies and imports an embedded signed rootfs, a static Linux ELF runs
+at CPL3 through the Linux `syscall` path with anonymous memory, FS-based TLS,
+read-only root files, and a bounded `/tmp` overlay
+(`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
+`AETHER_LINUX_OK`), and the native ABI is denied to Linux tasks. This is a test
+fixture, not an AppImage: the dynamic loader, glibc/`ld.so`, threads, signals,
+Wayland, software Vulkan, and a user-supplied import path are still missing.
+
 The remaining Phase 5/6 work is blocked on user-space process creation, a
-persistent store, network/audio services, an installer, and external review.
-Persistent storage, interactive consent, SMP, blocking IPC, and capability
-revocation remain follow-up work.
+persistent store, network/audio services, an installer, the Linux runtime
+interfaces above, and external review. Persistent storage, interactive consent,
+SMP, blocking IPC, and capability revocation remain follow-up work.
