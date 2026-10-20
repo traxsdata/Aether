@@ -3365,13 +3365,21 @@ g2_block_joined:
     test %rax, %rax
     js g2_fail_quota
     mov %rax, %r12
+    mov $16, %r13
+g2_overlay_quota_loop:
     mov $1, %rax
     mov %r12, %rdi
     mov %rsp, %rsi
     mov $600, %rdx
     syscall
     cmp $-28, %rax              /* -ENOSPC */
+    je g2_overlay_quota_hit
+    cmp $600, %rax
     jne g2_fail_quota
+    dec %r13
+    jnz g2_overlay_quota_loop
+    jmp g2_fail_quota
+g2_overlay_quota_hit:
     mov $3, %rax
     mov %r12, %rdi
     syscall

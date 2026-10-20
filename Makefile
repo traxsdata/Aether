@@ -37,7 +37,7 @@ LINUX_APPIMAGE_ARGS ?=
 # Experimental Gate 3 headless GridCraft run.
 GATECRAFT_APPIMAGE ?= /tmp/opencode/gridcraft.AppImage
 GATE3_APP_PROGRAM ?= /usr/bin/gridcraft-cli
-GATE3_APP_ARGS ?= eval|=SUM(B2:B3)|--in|/usr/share/gridcraft/gate3-in.csv
+GATE3_APP_ARGS ?= run|--in|/usr/share/gridcraft/gate3-in.csv|--cmd|formulas.evaluate={"formula":"=1+1"}|--cmd|cell.set={"cell":"A4","input":"total"}|--cmd|cell.set={"cell":"B4","input":"=SUM(B2:B3)"}|--out|/tmp/gate3-out.csv|--print|A1:B4|--csv
 GATE3_RUNTIME_VERSION ?= $(shell getconf GNU_LIBC_VERSION | tr ' ' '-')
 LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
 LINUX_DYN_PATH ?= /usr/bin/dynamic
@@ -106,7 +106,7 @@ kernel: user linux-fixture
 	AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 	AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
 	AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
-	AETHER_LINUX_APPIMAGE_ARGS="$(LINUX_APPIMAGE_ARGS)" \
+	AETHER_LINUX_APPIMAGE_ARGS='$(LINUX_APPIMAGE_ARGS)' \
 	AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
@@ -178,11 +178,13 @@ gate3-test:
 		$(BUILD)/gridcraft.import $(LINUX_RUNTIME_SEED)
 	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
 		LINUX_APPIMAGE_PROGRAM=$(GATE3_APP_PROGRAM) \
-		LINUX_APPIMAGE_ARGS="$(GATE3_APP_ARGS)" \
+		LINUX_APPIMAGE_ARGS='$(GATE3_APP_ARGS)' \
 		STAGED_APPIMAGE=$(GATECRAFT_APPIMAGE) \
 		STAGED_APPIMAGE_RECORD=$(BUILD)/gridcraft.import image
 	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
-	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK $(PYTHON) tools/test-boot.py
+	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK,AETHER_GATE3_DENIAL_OK \
+	AETHER_REQUIRE_TEXT='AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=19024376|AETHER_GATE3_APP_OK|AETHER_GATE3_DENIAL_OK|wrote /tmp/gate3-out.csv|item,value|alpha,1|beta,2|total,3|{"command":"formulas.evaluate","result":2.0}|{"command":"cell.set","result":{"cell":"B4","value":"3"}}' \
+	$(PYTHON) tools/test-boot.py
 
 shell-test: image
 	$(PYTHON) tools/test-shell.py
@@ -271,7 +273,7 @@ lint: kernel
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 		AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
 		AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
-		AETHER_LINUX_APPIMAGE_ARGS="$(LINUX_APPIMAGE_ARGS)" \
+		AETHER_LINUX_APPIMAGE_ARGS='$(LINUX_APPIMAGE_ARGS)' \
 		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
@@ -282,7 +284,7 @@ lint: kernel
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 		AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
 		AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
-		AETHER_LINUX_APPIMAGE_ARGS="$(LINUX_APPIMAGE_ARGS)" \
+		AETHER_LINUX_APPIMAGE_ARGS='$(LINUX_APPIMAGE_ARGS)' \
 		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
 			--features fault-selftest --locked -- -D warnings

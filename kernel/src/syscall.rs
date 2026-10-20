@@ -263,6 +263,9 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         62 => linux_kill(pml4, first, second),
         234 => linux_tgkill(pml4, first, second, third),
         72 => linux_fcntl(first, second, third),
+        79 => linux_getcwd(pml4, first, second),
+        82 => linux_rename(pml4, first, second),
+        87 => linux_unlink(pml4, first),
         89 => linux_readlink(pml4, first, second, third, 0),
         204 => linux_sched_getaffinity(pml4, first, second, third),
         217 => linux_getdents(pml4, first, second, third),
@@ -353,6 +356,7 @@ const LINUX_EBADF: i64 = -9;
 const LINUX_EEXIST: i64 = -17;
 const LINUX_E2BIG: i64 = -7;
 const LINUX_ENAMETOOLONG: i64 = -36;
+const LINUX_ERANGE: i64 = -34;
 
 fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i64 {
     let Some(path) = user_cstr(pml4, pointer, 256) else {
@@ -383,6 +387,37 @@ fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i6
     scheduler::linux_open_read(path).map_or_else(|error| error, |fd| fd as i64)
 }
 
+/// Reports the application root, which is always `/` in this prototype.
+///
+/// Relative paths are rejected by the overlay and imported-root lookups, so
+/// there is no per-process working directory to track. The buffer must hold the
+/// two-byte `"/\0"` path; a smaller buffer fails with `ERANGE` like Linux.
+fn linux_getcwd(pml4: PhysFrame, pointer: u64, size: u64) -> i64 {
+    if size < 2 {
+        return LINUX_ERANGE;
+    }
+    write_user_bytes(pml4, pointer, b"/\0").map_or(LINUX_EFAULT, |()| 2)
+}
+
+/// Renames one entry inside the current task's private overlay.
+fn linux_rename(pml4: PhysFrame, old_pointer: u64, new_pointer: u64) -> i64 {
+    let Some(old) = user_cstr(pml4, old_pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    let Some(new) = user_cstr(pml4, new_pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    scheduler::linux_overlay_rename(old, new).map_or_else(|error| error, |()| 0)
+}
+
+/// Removes one entry from the current task's private overlay.
+fn linux_unlink(pml4: PhysFrame, pointer: u64) -> i64 {
+    let Some(path) = user_cstr(pml4, pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    scheduler::linux_overlay_unlink(path).map_or_else(|error| error, |()| 0)
+}
+
 fn linux_read(
     frame: *mut InterruptFrame,
     pml4: PhysFrame,
@@ -391,9 +426,9 @@ fn linux_read(
     length: u64,
 ) -> *mut InterruptFrame {
     let _ = scheduler::linux_take_restart(0);
-    if length as usize > MAX_SYSCALL_IO {
-        return linux_result(frame, LINUX_EINVAL);
-    }
+    // Clamp instead of rejecting: callers such as glibc may ask for a whole
+    // buffer, and a short read is the normal Linux response to an I/O cap.
+    let length = length.min(MAX_SYSCALL_IO as u64);
     if length == 0 {
         return linux_result(frame, 0);
     }
@@ -430,9 +465,8 @@ fn linux_read(
 }
 
 fn linux_pread(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64, offset: u64) -> i64 {
-    if length as usize > MAX_SYSCALL_IO {
-        return LINUX_EINVAL;
-    }
+    // A short count is allowed; only one bounce-buffer-sized chunk is copied.
+    let length = length.min(MAX_SYSCALL_IO as u64);
     // SAFETY: The range is validated and the syscall path is non-preemptible.
     let Some(buffer) = (unsafe { user_bytes_mut(pml4, pointer, length) }) else {
         return LINUX_EFAULT;
@@ -1010,20 +1044,31 @@ fn linux_statx(
     pml4: PhysFrame,
     directory: u64,
     path_pointer: u64,
-    _flags: u64,
+    flags: u64,
     _mask: u64,
     statx_pointer: u64,
 ) -> i64 {
+    // `AT_EMPTY_PATH` makes an empty path mean "the descriptor in dirfd".
+    // glibc uses this form for fstat-like probes on an open file.
+    const AT_EMPTY_PATH: u64 = 0x1000;
     let mut buffer = [0u8; 256];
-    let (size, inode, mode, uid, gid) = if path_pointer == 0 {
+    let mut use_fd = path_pointer == 0;
+    let mut path = "";
+    if !use_fd {
+        let Some(value) = user_cstr(pml4, path_pointer, 256) else {
+            return LINUX_EFAULT;
+        };
+        path = value;
+        if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
+            use_fd = true;
+        }
+    }
+    let (size, inode, mode, uid, gid) = if use_fd {
         let Ok((size, inode, mode)) = scheduler::linux_stat_fd(directory) else {
             return LINUX_EBADF;
         };
         (size, inode, mode, 1000u32, 1000u32)
     } else {
-        let Some(path) = user_cstr(pml4, path_pointer, 256) else {
-            return LINUX_EFAULT;
-        };
         let Some((size, inode, mode)) = scheduler::linux_stat_path(path) else {
             return LINUX_ENOENT;
         };
@@ -2279,9 +2324,9 @@ fn linux_write(
     length: u64,
 ) -> *mut InterruptFrame {
     let _ = scheduler::linux_take_restart(1);
-    if length as usize > MAX_SYSCALL_IO {
-        return linux_result(frame, LINUX_EINVAL);
-    }
+    // Short write: never copy more than one bounce buffer, even when the
+    // caller's iovec or buffer is larger.
+    let length = length.min(MAX_SYSCALL_IO as u64);
     let Some(bytes) = user_bytes(pml4, pointer, length, false) else {
         return linux_result(frame, LINUX_EFAULT);
     };

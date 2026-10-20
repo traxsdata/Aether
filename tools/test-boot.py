@@ -39,6 +39,14 @@ SKIP_MARKERS = {
 SUCCESS_MARKERS = tuple(
     marker for marker in BASE_MARKERS + EXTRA_MARKERS if marker not in SKIP_MARKERS
 )
+# Additional literal serial text a successful boot must contain. The `|`
+# separator allows substrings that themselves contain commas (for example the
+# Gate 3 CSV line `total,3`). This checks output content, not only markers.
+REQUIRE_TEXT = tuple(
+    text.strip()
+    for text in os.environ.get("AETHER_REQUIRE_TEXT", "").split("|")
+    if text.strip()
+)
 FAULT_MARKERS = ("KERNEL EXCEPTION: breakpoint (3)", "AETHER_BOOT_FAILED")
 FAILURES = (
     "AETHER_LOADER_FAILED",
@@ -142,18 +150,30 @@ def main() -> int:
                     print(log)
                     print("FAIL: boot reported an error", file=sys.stderr)
                     return 1
-                if all(marker in log for marker in SUCCESS_MARKERS):
+                if all(marker in log for marker in SUCCESS_MARKERS) and all(
+                    text in log for text in REQUIRE_TEXT
+                ):
                     print(log)
                     print(f"PASS: {' '.join(SUCCESS_MARKERS)}")
+                    if REQUIRE_TEXT:
+                        print(f"PASS: required text {REQUIRE_TEXT!r}")
                     return 0
             time.sleep(0.25)
-        print(read_serial())
+        log = read_serial()
+        print(log)
+        if not EXPECT_FAULT and not EXPECT_BOOT_FAILURE:
+            missing = [marker for marker in SUCCESS_MARKERS if marker not in log]
+            if missing:
+                print(f"missing markers: {missing}", file=sys.stderr)
+            missing = [text for text in REQUIRE_TEXT if text not in log]
+            if missing:
+                print(f"missing required text: {missing}", file=sys.stderr)
         if EXPECT_FAULT:
             expected = FAULT_MARKERS
         elif EXPECT_BOOT_FAILURE:
             expected = "a boot failure marker"
         else:
-            expected = SUCCESS_MARKERS
+            expected = (SUCCESS_MARKERS, REQUIRE_TEXT)
         print(f"FAIL: timed out after {TIMEOUT}s waiting for {expected}", file=sys.stderr)
         return 1
     finally:

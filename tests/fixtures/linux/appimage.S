@@ -57,7 +57,7 @@ _start:
     mov %r12, %rdi
     syscall
 
-    /* A third 400-byte file would exceed the 1024-byte app quota. */
+    /* Grow one file until the 4 KiB per-file quota denies a write. */
     mov $257, %rax
     mov $-100, %rdi
     lea large_path(%rip), %rsi
@@ -68,14 +68,21 @@ _start:
     js fail
     mov %rax, %r12
 
+    mov $12, %r13
+1:
     mov $1, %rax
     mov %r12, %rdi
     lea payload400(%rip), %rsi
     mov $400, %rdx
     syscall
     cmp $-28, %rax                 /* -ENOSPC from the quota */
+    je 2f
+    cmp $400, %rax
     jne fail
-
+    dec %r13
+    jnz 1b
+    jmp fail
+2:
     mov $3, %rax
     mov %r12, %rdi
     syscall

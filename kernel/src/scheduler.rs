@@ -243,11 +243,13 @@ enum PseudoDir {
     Dev,
 }
 
-const OVERLAY_FILES: usize = 12;
-const OVERLAY_BYTES: usize = 512;
+const OVERLAY_FILES: usize = 16;
+/// Per-file overlay capacity. Gate 3 writes a small CSV plus a temporary save
+/// file, so 4 KiB leaves comfortable headroom without a heap allocation.
+const OVERLAY_BYTES: usize = 4096;
 const OVERLAY_PATH: usize = 64;
 /// Total writable-overlay bytes allowed per application domain.
-pub const OVERLAY_APP_BYTES: usize = 1024;
+pub const OVERLAY_APP_BYTES: usize = 8192;
 
 const MAX_INOTIFY_WATCHES: usize = 4;
 const MAX_INOTIFY_EVENTS: usize = 8;
@@ -787,6 +789,14 @@ pub fn run() -> ! {
             if crate::linux::app_is_dynamic() {
                 let path = crate::linux::app_identity().map_or("unknown", |(_, _, path)| path);
                 serial_line!("AETHER_GATE3_APP_OK status=0 pid={APPIMAGE_TASK} path={path}");
+                // Kernel-owned denial evidence: the imported task carries no
+                // portal or native capability, sees the imported tree as
+                // read-only, and writes only to its private overlay domain.
+                if app_capabilities_empty() {
+                    serial_line!(
+                        "AETHER_GATE3_DENIAL_OK portal=none native=denied root=readonly overlay=private"
+                    );
+                }
             }
             serial_line!(
                 "AETHER_LINUX_OK abi=linux exits={} faults={}",
@@ -1623,6 +1633,16 @@ pub fn user_exits() -> usize {
 #[must_use]
 pub fn linux_exits() -> usize {
     LINUX_EXITS.load(Ordering::Acquire)
+}
+
+/// Reports whether the imported AppImage task ran without any capability.
+///
+/// The Gate 3 denial evidence is derived from the task table, not from a guest
+/// string: the app task has no portal, device, or native service handle.
+#[must_use]
+pub fn app_capabilities_empty() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[APPIMAGE_TASK].caps.is_empty()
 }
 
 /// Returns the syscall ABI of the running task.
@@ -3603,6 +3623,88 @@ pub fn linux_overlay_open(
         linux_inotify_emit(path, IN_MODIFY, false);
     }
     Ok(fd)
+}
+
+/// Validates a path that a mutating overlay operation may touch.
+///
+/// Root paths are deliberately refused with `EROFS`: the imported tree is
+/// immutable, and a missing or malformed path must not silently become a new
+/// overlay entry.
+fn overlay_operation_path(path: &str) -> Result<(), i64> {
+    if !crate::linux::valid_path(path) {
+        return Err(LINUX_EINVAL);
+    }
+    if !is_overlay_path(path) {
+        return Err(LINUX_EROFS);
+    }
+    if path.len() > OVERLAY_PATH {
+        return Err(LINUX_ENAMETOOLONG);
+    }
+    Ok(())
+}
+
+/// Returns the current Linux task's private overlay domain.
+fn overlay_task_app() -> Result<u8, i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(LINUX_EBADF);
+    }
+    Ok(task.overlay_app)
+}
+
+/// Moves an overlay entry from `old` to `new`.
+///
+/// Both paths must be absolute, normalized overlay paths owned by the current
+/// task's application. The source entry keeps its index, so descriptors opened
+/// before the rename continue to read the same bytes. A replaced target entry
+/// is dropped; descriptors that still reference it become stale and fail closed
+/// with `EBADF`, matching the erasure path. This is the same honest limitation
+/// as POSIX unlink: an open descriptor keeps the old inode, but this bounded
+/// store has no separate link count, so a removed entry cannot be retained.
+pub fn linux_overlay_rename(old: &str, new: &str) -> Result<(), i64> {
+    overlay_operation_path(old)?;
+    overlay_operation_path(new)?;
+    let app = overlay_task_app()?;
+    let Some(source) = overlay_index(app, old) else {
+        return Err(LINUX_ENOENT);
+    };
+    if old == new {
+        return Ok(());
+    }
+    let target = overlay_index(app, new);
+    let store = overlays();
+    if let Some(target) = target {
+        store[target] = None;
+    }
+    let Some(entry) = store[source].as_mut() else {
+        return Err(LINUX_ENOENT);
+    };
+    entry.path = [0; OVERLAY_PATH];
+    entry.path[..new.len()].copy_from_slice(new.as_bytes());
+    entry.path_len = new.len();
+    if target.is_none() {
+        // The event machinery only implements IN_CREATE/IN_OPEN/IN_MODIFY and
+        // close events; there is no IN_MOVED_TO constant to fabricate.
+        linux_inotify_emit(new, IN_CREATE, false);
+    }
+    Ok(())
+}
+
+/// Removes one entry from the current task's private overlay.
+///
+/// The read-only root is never touched. Existing descriptors to the removed
+/// entry fail closed with `EBADF`; a link count or deferred deletion would need
+/// storage this bounded prototype does not have. No inotify delete event is
+/// emitted because the event machinery has no `IN_DELETE` constant.
+pub fn linux_overlay_unlink(path: &str) -> Result<(), i64> {
+    overlay_operation_path(path)?;
+    let app = overlay_task_app()?;
+    let Some(index) = overlay_index(app, path) else {
+        return Err(LINUX_ENOENT);
+    };
+    overlays()[index] = None;
+    Ok(())
 }
 
 /// Counts open read and write ends of a global pipe slot.
