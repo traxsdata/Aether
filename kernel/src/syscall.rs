@@ -158,6 +158,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         5 => linux_fstat(pml4, first, second),
         13 | 14 | 131 => 0,
         17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
+        20 => linux_writev(pml4, first, second, third),
         21 => linux_access(pml4, first, second),
         28 => 0,
         32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
@@ -308,11 +309,16 @@ fn linux_mmap(
     }
     let anonymous = flags & LINUX_MAP_ANONYMOUS != 0;
     if anonymous {
-        if fd != u64::MAX || offset != 0 {
+        // The fd argument is ignored for MAP_ANONYMOUS. glibc passes -1 as a
+        // 32-bit value, so do not require the full 64-bit all-ones pattern.
+        if offset != 0 {
             return LINUX_EINVAL;
         }
     } else {
-        if fd == u64::MAX || !offset.is_multiple_of(aether_memory::PAGE_SIZE) {
+        if fd == u64::MAX
+            || fd == u64::from(u32::MAX)
+            || !offset.is_multiple_of(aether_memory::PAGE_SIZE)
+        {
             return LINUX_EINVAL;
         }
         if scheduler::linux_file_len(fd).is_err() {
@@ -321,6 +327,15 @@ fn linux_mmap(
     }
     let fixed = flags & LINUX_MAP_FIXED != 0;
     let no_replace = flags & LINUX_MAP_FIXED_NOREPLACE != 0;
+    if fixed && !no_replace && address != 0 {
+        // MAP_FIXED replaces an existing mapping. Drop the old ranges and
+        // frames before installing the new one.
+        if scheduler::linux_vma_remove(address, length).unwrap_or(false) {
+            let _ = crate::memory::with_frame_allocator(|allocator| {
+                paging::unmap_user_range(allocator, pml4, address, length)
+            });
+        }
+    }
     let start = match scheduler::linux_vma_insert(
         length,
         protections as u32,
@@ -330,7 +345,9 @@ fn linux_mmap(
     ) {
         Ok(start) => start,
         Err(aether_memory::vma::VmaError::Overlap) if no_replace => return LINUX_EEXIST,
-        Err(error) => return vma_errno(error),
+        Err(error) => {
+            return vma_errno(error);
+        }
     };
     // Map fresh zeroed frames writable while the kernel copies file data.
     let writable = aether_memory::paging::PageFlags::PRESENT
@@ -420,6 +437,42 @@ fn linux_stat(pml4: PhysFrame, path_pointer: u64, stat_pointer: u64) -> i64 {
         return LINUX_ENOENT;
     };
     write_stat(pml4, stat_pointer, size, inode, mode)
+}
+
+fn linux_writev(pml4: PhysFrame, descriptor: u64, iovec_pointer: u64, count: u64) -> i64 {
+    if count == 0 {
+        return 0;
+    }
+    if count > 16 {
+        return LINUX_EINVAL;
+    }
+    let Some(iovecs) = user_bytes(pml4, iovec_pointer, count * 16, false) else {
+        return LINUX_EFAULT;
+    };
+    let mut total = 0i64;
+    for index in 0..count as usize {
+        let offset = index * 16;
+        let base = u64::from_ne_bytes(iovecs[offset..offset + 8].try_into().unwrap_or([0; 8]));
+        let length =
+            u64::from_ne_bytes(iovecs[offset + 8..offset + 16].try_into().unwrap_or([0; 8]));
+        if length == 0 {
+            continue;
+        }
+        let Some(bytes) = user_bytes(pml4, base, length, false) else {
+            return LINUX_EFAULT;
+        };
+        if descriptor == 1 || descriptor == 2 {
+            serial::write_bytes(bytes);
+            total += length as i64;
+        } else {
+            let written = scheduler::linux_write_file(descriptor, bytes);
+            match written {
+                Ok(count) => total += count as i64,
+                Err(error) => return error,
+            }
+        }
+    }
+    total
 }
 
 fn linux_fstat(pml4: PhysFrame, fd: u64, stat_pointer: u64) -> i64 {

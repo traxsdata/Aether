@@ -56,8 +56,8 @@ acceptance checklist are recorded below. Implementation status is uneven:
 | Status | Meaning | Facilities |
 |---|---|---:|
 | Existing | A tested interface exists and can be used by the runtime | 2 |
-| Partial | Some interface or host tests exist; the runtime cannot use it yet | 9 |
-| Missing | No interface exists | 16 |
+| Partial | Some interface or host tests exist; the runtime cannot use it yet | 11 |
+| Missing | No interface exists | 14 |
 | Denied | Deliberate absence; the runtime must fail closed | 2 |
 | Deferred | Not required for Gate 3 or Gate 4 | 3 |
 
@@ -75,11 +75,11 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | ID | Facility and artifact evidence | Aether interface | Owner | Test | Status |
 |---|---|---|---|---|---|
 | HI-01 | AppImage container, digest, signed record, SquashFS import; `appimage-inspect`, `squashfs-extract` | `aether-appimage` + `aether-squashfs` + trust store | `apps/linux/*`, `aether-packaging` | HI-T01 | existing (fixture only) |
-| HI-02 | Runtime rootfs: glibc 2.35, `ld.so`, `libm`, `libgcc_s`, Mesa, Wayland, D-Bus, X11 libraries | Signed runtime image installed as a package; version recorded in the database | `aether-packaging`, `tools/build-runtime-rootfs.sh` | HI-T02 | missing |
-| HI-03 | Dynamic ELF loading: `PT_INTERP`, `ET_DYN`, auxv, `ld-linux`, `dlopen`, `dlsym`, `dlclose`, `dl_iterate_phdr`, `__tls_get_addr` | Kernel image loader maps main and interpreter, builds auxv, and enters the interpreter; a shared-library service over a read-only root is still missing | `kernel/src/linux_loader.rs`, `apps/linux/elf`, planned `user/linuxd` | HI-T03 | partial |
+| HI-02 | Runtime rootfs: glibc, `ld.so`, `libm`, `libgcc_s`, Mesa, Wayland, D-Bus, X11 libraries | Signed runtime rootfs built and imported through the test trust store; loader resolves `PT_INTERP` from it. The pinned production glibc/Mesa/Wayland image and package channel are missing | `aether-packaging`, `tools/build-runtime-rootfs.sh`, `tools/build-glibc-rootfs.sh` | HI-T02 | partial |
+| HI-03 | Dynamic ELF loading: `PT_INTERP`, `ET_DYN`, auxv, `ld-linux`, `dlopen`, `dlsym`, `dlclose`, `dl_iterate_phdr`, `__tls_get_addr` | Kernel loader resolves the interpreter through the verified rootfs, maps main/interpreter, builds auxv, and enters `ld.so`; a host-glibc hello links and runs. A user-space `linuxd` library service and broader `dlopen` coverage are missing | `kernel/src/linux_loader.rs`, `apps/linux/elf`, planned `user/linuxd` | HI-T03 | partial |
 | HI-04 | Process creation: `fork`, `execvp`, `posix_spawnp`, `posix_spawn_file_actions_*`, `waitpid`, `waitid`, `pidfd_spawnp`, `setsid`, `setpgid` | Domain-scoped process API over the kernel task model | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T04 | missing |
 | HI-05 | Threads: `pthread_create`, `pthread_join`, `pthread_detach`, `pthread_setname_np`, `sched_getaffinity`, `set_tid_address`, `rseq` | Thread primitive with per-thread kernel state | `kernel/src/scheduler.rs` | HI-T05 | missing |
-| HI-06 | Environment and identity: `environ`, `getenv`, `getauxval`, `uname`, `sysconf`, `gnu_get_libc_version`, `getpwuid_r`, `getgrouplist`, `setlocale`, `realpath`, `getcwd` | Synthetic environment from the verified runtime profile; no ambient passwd or host paths | planned `user/linuxd` | HI-T06 | missing |
+| HI-06 | Environment and identity: `environ`, `getenv`, `getauxval`, `uname`, `sysconf`, `gnu_get_libc_version`, `getpwuid_r`, `getgrouplist`, `setlocale`, `realpath`, `getcwd` | Fixed `LD_LIBRARY_PATH` and auxv are supplied; broader environment, passwd, locale, and `getcwd` policy are missing | `kernel/src/linux_loader.rs`, planned `user/linuxd` | HI-T06 | partial |
 | HI-07 | Descriptor I/O: `open`/`open64`/`openat`, `read`, `write`, `writev`, `close`, `lseek64`, `dup`, `dup2`, `fcntl`, `ftruncate64`, `pipe2`, `poll` | Per-domain descriptor table over native file handles | `kernel/src/linux.rs`, `kernel/src/fs.rs` | HI-T07 | partial |
 
 ### Files, memory, and kernel primitives
@@ -130,11 +130,11 @@ planned test is not evidence until it runs in `make ci`.
 | ID | Harness | What must pass | Status |
 |---|---|---|---|
 | HI-T01 | `make appimage-test`, `make squashfs-test` | Container and rootfs parsing, digest/signature checks, extraction limits, hostile archives | existing |
-| HI-T02 | `make test`, `tools/build-runtime-rootfs.sh` | Signed rootfs packaging and import markers; the current run covers the embedded fixture, not the populated glibc/Mesa image | existing (fixture) |
-| HI-T03 | `make test`; planned `make linux-abi-test` | Boot fixture maps an `ET_DYN` main image through `PT_INTERP`, builds auxv, enters the test interpreter, and hands off to the main entry; `ld.so` relocations, shared libraries, and `dlopen` remain planned | partial |
+| HI-T02 | `make test`, `make glibc-test` | Builds, signs, imports, and consumes a runtime rootfs; the opt-in target packages host glibc and resolves `PT_INTERP` from it | partial |
+| HI-T03 | `make test`, `make glibc-test` | The default fixture maps a test `ET_DYN` image through `PT_INTERP`; the opt-in target runs a host-glibc hello through `ld.so`, relocations, and shared `libc` (`AETHER_GLIBC_OK`). Broader `dlopen` coverage remains planned | partial |
 | HI-T04 | planned `make linux-proc-test` | Spawn, wait, exit status, descriptor inheritance, and denied spawn outside the domain | planned |
 | HI-T05 | planned `make linux-thread-test` | Create/join/detach, per-thread TLS, affinity mask, timeout, and clean domain exit | planned |
-| HI-T06 | planned `make linux-env-test` | Synthetic environment, auxv, `uname`, passwd substitute, and no host path leakage | planned |
+| HI-T06 | `make test`, `make glibc-test`; planned `make linux-env-test` | Auxv and a fixed library path reach `ld.so`; host path leakage, passwd, locale, and `getcwd` tests remain planned | partial |
 | HI-T07 | `make test`; planned `make linux-fd-test` | Boot fixture exercises open/read/seek/dup/fcntl/close; pipe/poll and bad-descriptor matrices remain planned | partial |
 | HI-T08 | `make test`; planned `make linux-fs-test` | Boot fixture exercises newfstatat/fstat/statx/readlink; readdir/mkdir/unlink/rename and outside-path denial remain planned | partial |
 | HI-T09 | planned `make linux-portal-test` | File chooser grant, exact-file open, revocation, denial, and no ambient home | planned |

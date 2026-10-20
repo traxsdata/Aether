@@ -24,8 +24,8 @@ pub const MAX_PATH: usize = 256;
 /// Maximum open files per Linux task.
 pub const MAX_FDS: usize = 8;
 
-const ROOTFS: &[u8] = include_bytes!("../../apps/linux/squashfs/tests/fixtures/root.sqfs");
-const ROOTFS_RECORD: &[u8] = include_bytes!("../../tests/fixtures/linux-rootfs.import");
+const ROOTFS: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS"));
+const ROOTFS_RECORD: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS_RECORD"));
 const TRUST_PUBLIC_KEY: &str = include_str!("../../tests/fixtures/keys/test.pub");
 const TRUST_PUBLISHER: &str = "Aether Test Publisher";
 
@@ -113,6 +113,16 @@ pub fn valid_path(path: &str) -> bool {
         .skip(1)
         .all(|component| !component.is_empty() && component != "." && component != "..")
         && path != "/"
+}
+
+/// Returns the bytes of a regular file in the imported root.
+///
+/// The imported table is immutable after boot, so the slice is valid for the
+/// rest of the boot. Directories and missing paths return `None`.
+#[must_use]
+pub fn file_data(path: &str) -> Option<&'static [u8]> {
+    let index = lookup(path)?;
+    file(index).map(|file| file.data.as_slice())
 }
 
 /// Returns file metadata by index.

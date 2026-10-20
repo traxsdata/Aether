@@ -31,7 +31,14 @@ EXTRA_MARKERS = tuple(
     for marker in os.environ.get("AETHER_EXTRA_MARKERS", "").split(",")
     if marker.strip()
 )
-SUCCESS_MARKERS = BASE_MARKERS + EXTRA_MARKERS
+SKIP_MARKERS = {
+    marker.strip()
+    for marker in os.environ.get("AETHER_SKIP_MARKERS", "").split(",")
+    if marker.strip()
+}
+SUCCESS_MARKERS = tuple(
+    marker for marker in BASE_MARKERS + EXTRA_MARKERS if marker not in SKIP_MARKERS
+)
 FAULT_MARKERS = ("KERNEL EXCEPTION: breakpoint (3)", "AETHER_BOOT_FAILED")
 FAILURES = (
     "AETHER_LOADER_FAILED",

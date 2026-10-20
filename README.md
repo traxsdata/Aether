@@ -132,9 +132,13 @@ grants, and the desktop is not a security authority.
   on unmap or task exit. File metadata (`stat`/`fstat`/`newfstatat`/`statx`),
   `readlink`, `fcntl`, and descriptor duplication are implemented
   (`AETHER_LINUX_FILEMETA_OK`). A dynamic `ET_DYN`/`PT_INTERP` loader maps a
-  main image and its interpreter, builds auxv, and hands control from the
-  interpreter to the main entry (`AETHER_LINUX_DYN_*`). glibc/`ld.so`, threads,
-  Wayland, and Vulkan are still missing.
+  main image and its interpreter from the verified runtime rootfs, builds
+  auxv, and hands control from the interpreter to the main entry
+  (`AETHER_LINUX_DYN_*`). `make glibc-test` packages the host glibc in a signed
+  runtime rootfs and runs a dynamically linked hello through `ld.so`,
+  relocations, and shared `libc` (`AETHER_GLIBC_OK`). That is an opt-in host-ABI
+  smoke test, not the pinned production runtime. Threads, Wayland, and Vulkan
+  are still missing.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,
@@ -293,6 +297,8 @@ Prerequisites on a Linux host:
   (pinned by `rust-toolchain.toml`).
 - `mtools` (`mformat`, `mmd`, `mcopy`).
 - QEMU (`qemu-system-x86_64`) and OVMF firmware for `make test`.
+- `mksquashfs` (`squashfs-tools`) to build the signed Linux runtime rootfs.
+- A host C compiler and glibc only for the opt-in `make glibc-test`.
 - GNU Make and Python 3.11 or later.
 - `xorriso` for `make iso`.
 
@@ -323,6 +329,7 @@ make appimage-test # AppImage container inspection tests
 make squashfs-test # SquashFS importer and real-image structure tests
 make update-test   # package and update policy crates
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
+make glibc-test    # opt-in host-glibc rootfs + dynamically linked hello boot
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # exception-path test: int3 after paging must reach the IDT
 make rollback-test # recovery rollback branch test with its own marker

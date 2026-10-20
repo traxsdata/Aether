@@ -69,25 +69,39 @@ pub enum VmaError {
 /// Fixed-size virtual-memory-area table.
 #[derive(Clone, Copy, Debug)]
 pub struct VmaTable {
+    window_start: u64,
     base: u64,
     limit: u64,
     entries: [Option<Vma>; MAX_VMAS],
 }
 
 impl VmaTable {
-    /// Creates an empty table covering `base..limit`.
+    /// Creates an empty table whose allocation cursor and window both start at
+    /// `base`.
     ///
     /// Both bounds must be page-aligned and `base < limit`.
     #[must_use]
     pub const fn new(base: u64, limit: u64) -> Self {
+        Self::with_window(base, base, limit)
+    }
+
+    /// Creates an empty table that can describe mappings anywhere in
+    /// `window_start..limit`, while [`Self::insert`] starts searching at
+    /// `allocation_base`.
+    ///
+    /// The Linux layer uses this to keep kernel-loaded program images above
+    /// the mmap arena while still tracking them for `mprotect` and `munmap`.
+    #[must_use]
+    pub const fn with_window(window_start: u64, allocation_base: u64, limit: u64) -> Self {
         Self {
-            base,
+            window_start,
+            base: allocation_base,
             limit,
             entries: [None; MAX_VMAS],
         }
     }
 
-    /// Window base.
+    /// Allocation cursor base.
     #[must_use]
     pub const fn base(&self) -> u64 {
         self.base
@@ -180,7 +194,7 @@ impl VmaTable {
     pub fn insert_at(&mut self, start: u64, length: u64, prot: u32) -> Result<(), VmaError> {
         let length = checked_length(length)?;
         validate_protection(prot)?;
-        if !start.is_multiple_of(PAGE_SIZE) || start < self.base {
+        if !start.is_multiple_of(PAGE_SIZE) || start < self.window_start {
             return Err(VmaError::InvalidRange);
         }
         let end = start.checked_add(length).ok_or(VmaError::InvalidRange)?;

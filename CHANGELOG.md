@@ -73,6 +73,12 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Linux runtime-rootfs and glibc proof: the build stages a signed runtime
+  rootfs, imports it at boot, and the loader resolves `PT_INTERP` through it
+  instead of embedded interpreter bytes. `make glibc-test` packages the host
+  glibc and a dynamically linked hello, then boots it through `ld.so`,
+  relocations, and shared `libc` (`AETHER_GLIBC_OK`). This is an opt-in
+  host-ABI smoke test; the pinned production runtime rootfs is still missing.
 - Linux file-metadata and descriptor slice: `stat`, `fstat`, `newfstatat`,
   `statx`, `readlink` for `/proc/self/{exe,cwd}`, `fcntl`, `dup`, and `dup2`,
   plus signal/affinity/limit stubs needed by a dynamic loader. The boot fixture

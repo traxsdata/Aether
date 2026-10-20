@@ -14,6 +14,12 @@ LOADER_EFI := $(BUILD)/BOOTX64.EFI
 LINUX_ELF := $(BUILD)/linux-hello.elf
 LINUX_DYN_ELF := $(BUILD)/linux-dynamic.elf
 LINUX_INTERP_ELF := $(BUILD)/linux-interp.elf
+LINUX_RUNTIME_DIR := $(BUILD)/linux-runtime
+LINUX_ROOTFS := $(BUILD)/linux-runtime.sqfs
+LINUX_ROOTFS_RECORD := $(BUILD)/linux-runtime.import
+LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
+LINUX_DYN_PATH ?= /usr/bin/dynamic
+LINUX_RUNTIME_PREBUILT ?= 0
 IMAGE := $(BUILD)/aether.img
 
 KERNEL_TARGET := x86_64-unknown-none
@@ -30,7 +36,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-test vmware-vmx test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test shell-test fault-test rollback-test \
 	negative-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	release-check qualify ci clean
 
@@ -52,13 +58,24 @@ linux-fixture:
 		$(BUILD)/linux-dynamic.o -o $(LINUX_DYN_ELF)
 	$(AS) --64 tests/fixtures/linux/interp.S -o $(BUILD)/linux-interp.o
 	$(LD) -shared -e _start $(BUILD)/linux-interp.o -o $(LINUX_INTERP_ELF)
+	if [ "$(LINUX_RUNTIME_PREBUILT)" = "0" ]; then \
+		rm -rf $(LINUX_RUNTIME_DIR); \
+		mkdir -p $(LINUX_RUNTIME_DIR)/etc $(LINUX_RUNTIME_DIR)/lib $(LINUX_RUNTIME_DIR)/usr/bin; \
+		printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\n' > $(LINUX_RUNTIME_DIR)/etc/motd; \
+		cp $(LINUX_INTERP_ELF) $(LINUX_RUNTIME_DIR)/lib/ld-aether.so; \
+		cp $(LINUX_DYN_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/dynamic; \
+		sh tools/build-runtime-rootfs.sh $(LINUX_RUNTIME_DIR) $(LINUX_ROOTFS) \
+			$(LINUX_RUNTIME_SEED) org.aether.linux-runtime 0.1.0 \
+			"Aether Test Publisher" $(LINUX_ROOTFS_RECORD); \
+	fi
 
 kernel: user linux-fixture
 	@mkdir -p $(BUILD)
 	AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 	AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
-	AETHER_LINUX_DYN_ELF=$(abspath $(LINUX_DYN_ELF)) \
-	AETHER_LINUX_INTERP_ELF=$(abspath $(LINUX_INTERP_ELF)) \
+	AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
+	AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
+	AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
 
@@ -76,6 +93,16 @@ image: loader
 
 test: image
 	$(PYTHON) tools/test-boot.py
+
+# Opt-in host-ABI smoke test: package the host glibc and a dynamically linked
+# hello, then boot it through the same loader. This is not the pinned runtime
+# rootfs and is not part of `make ci`.
+glibc-test:
+	sh tools/build-glibc-rootfs.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
+		$(LINUX_RUNTIME_SEED)
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 LINUX_DYN_PATH=/usr/bin/hello image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_DYN_INTERP_OK,AETHER_LINUX_DYN_MAIN_OK \
+	AETHER_EXTRA_MARKERS=AETHER_GLIBC_OK $(PYTHON) tools/test-boot.py
 
 shell-test: image
 	$(PYTHON) tools/test-shell.py
@@ -138,14 +165,16 @@ lint: kernel
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
-		AETHER_LINUX_DYN_ELF=$(abspath $(LINUX_DYN_ELF)) \
-		AETHER_LINUX_INTERP_ELF=$(abspath $(LINUX_INTERP_ELF)) \
+		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
+		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
+		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
-		AETHER_LINUX_DYN_ELF=$(abspath $(LINUX_DYN_ELF)) \
-		AETHER_LINUX_INTERP_ELF=$(abspath $(LINUX_INTERP_ELF)) \
+		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
+		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
+		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
 			--features fault-selftest --locked -- -D warnings
 	RUSTFLAGS="$(USER_RUSTFLAGS)" \

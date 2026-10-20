@@ -16,7 +16,7 @@ use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::{halt, timer};
 use crate::memory::paging::{self, PagingError};
 use crate::serial_line;
-use aether_abi::user::{USER_STACK_TOP, UserTestResult};
+use aether_abi::user::{USER_BASE, USER_LIMIT, USER_STACK_PAGES, USER_STACK_TOP, UserTestResult};
 use aether_boot_common::elf;
 use aether_fs::FsError;
 use aether_ipc::{CapError, CapHandle, CapTable, IpcError, ObjectType, Rights};
@@ -48,9 +48,11 @@ const MAGIC_PREFIX: u64 = 0xa5a5_0000_0000_0000;
 static USER_ELF: &[u8] = include_bytes!(env!("AETHER_USER_ELF"));
 /// Static Linux program used to exercise the Linux syscall entry.
 static LINUX_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_ELF"));
-/// Dynamic Linux program and its interpreter for the loader boot test.
-static LINUX_DYN_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_DYN_ELF"));
-static LINUX_INTERP_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_INTERP_ELF"));
+/// Path of the dynamic test image inside the imported runtime rootfs.
+const LINUX_DYN_PATH: &str = match option_env!("AETHER_LINUX_DYN_PATH") {
+    Some(path) => path,
+    None => "/usr/bin/dynamic",
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TaskState {
@@ -158,7 +160,7 @@ impl Task {
                 ep_b_send: None,
                 ep_b_recv: None,
             },
-            vmas: VmaTable::new(paging::LINUX_MMAP_BASE, paging::LINUX_ARENA_END),
+            vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
             brk: 0,
             fs_base: 0,
             linux_fds: [None; crate::linux::MAX_FDS],
@@ -530,8 +532,17 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // PT_INTERP resolution, auxv construction, and interpreter-to-main
     // control transfer. The interpreter is embedded for now; resolving its
     // path through the verified rootfs is follow-up work.
-    let dynamic = crate::linux_loader::load(allocator, LINUX_DYN_ELF, LINUX_INTERP_ELF)
-        .map_err(|_| SchedulerError::LinuxImage)?;
+    let dynamic_main = crate::linux::file_data(LINUX_DYN_PATH).ok_or(SchedulerError::LinuxImage)?;
+    let dynamic_image =
+        aether_linux_elf::parse(dynamic_main).map_err(|_| SchedulerError::LinuxImage)?;
+    let interpreter_path = dynamic_image
+        .interpreter()
+        .ok_or(SchedulerError::LinuxImage)?;
+    let dynamic_interp =
+        crate::linux::file_data(interpreter_path).ok_or(SchedulerError::LinuxImage)?;
+    let dynamic =
+        crate::linux_loader::load(allocator, dynamic_main, dynamic_interp, LINUX_DYN_PATH)
+            .map_err(|_| SchedulerError::LinuxImage)?;
     let dynamic_kernel_top = stack_top(&kernel_stacks.0[LINUX_DYN_TASK]);
     let dynamic_saved_rsp =
         prepare_user_stack(dynamic_kernel_top, dynamic.entry, dynamic.stack_pointer);
@@ -544,6 +555,23 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     dynamic_task.kernel_stack_top = dynamic_kernel_top;
     dynamic_task.root = crate::fs::DEMO_ROOT;
     dynamic_task.brk = paging::LINUX_ARENA_BASE;
+    let dynamic_interpreter =
+        aether_linux_elf::parse(dynamic_interp).map_err(|_| SchedulerError::LinuxImage)?;
+    seed_linux_vmas(
+        &mut dynamic_task,
+        &dynamic_image,
+        crate::linux_loader::MAIN_BASE,
+    );
+    seed_linux_vmas(
+        &mut dynamic_task,
+        &dynamic_interpreter,
+        crate::linux_loader::INTERP_BASE,
+    );
+    let _ = dynamic_task.vmas.insert_at(
+        USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE,
+        USER_STACK_PAGES * PAGE_SIZE,
+        aether_memory::vma::PROT_READ | aether_memory::vma::PROT_WRITE,
+    );
     tasks[LINUX_DYN_TASK] = dynamic_task;
     serial_line!(
         "sched: linux dynamic task ready pid={} pml4={:#018x} entry={:#018x}",
@@ -583,6 +611,40 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     );
 
     Ok(())
+}
+
+fn seed_linux_vmas(task: &mut Task, image: &aether_linux_elf::Image<'_>, bias: u64) {
+    for segment in image.segments() {
+        let Some(start) = bias.checked_add(segment.vaddr) else {
+            continue;
+        };
+        let Some(end) = start.checked_add(segment.memory_size) else {
+            continue;
+        };
+        let page_start = start & !(PAGE_SIZE - 1);
+        let Some(page_end) = end
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+        else {
+            continue;
+        };
+        if page_end <= page_start {
+            continue;
+        }
+        let mut prot = 0u32;
+        if segment.flags & aether_linux_elf::PF_R != 0 {
+            prot |= aether_memory::vma::PROT_READ;
+        }
+        if segment.flags & aether_linux_elf::PF_W != 0 {
+            prot |= aether_memory::vma::PROT_WRITE;
+        }
+        if segment.flags & aether_linux_elf::PF_X != 0 {
+            prot |= aether_memory::vma::PROT_EXEC;
+        }
+        // Adjacent ELF segments may share a page; the existing area already
+        // covers it, so an overlap is not fatal.
+        let _ = task.vmas.insert_at(page_start, page_end - page_start, prot);
+    }
 }
 
 fn stack_top(stack: &[u8; KERNEL_STACK_SIZE]) -> u64 {

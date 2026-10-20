@@ -14,7 +14,7 @@ Debian/Ubuntu:
 ```sh
 sudo apt update
 sudo apt install build-essential curl git make python3 qemu-system-x86 \
-    ovmf mtools dosfstools xorriso
+    ovmf mtools dosfstools xorriso squashfs-tools
 ```
 
 The first Cargo invocation downloads Rust 1.99.1 and the
@@ -26,6 +26,7 @@ The first Cargo invocation downloads Rust 1.99.1 and the
 make unittest      # Rust host tests (including input/browser/actual renderer)
                    # and Python build-tooling tests
 make test          # build the image and boot it under QEMU/OVMF
+make glibc-test    # opt-in: package host glibc + hello and boot through ld.so
 make iso-test      # UEFI ISO, VGA/SVGA, actual PS/2 windows and Files workflows
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # boot a kernel that executes int3 after paging is enabled

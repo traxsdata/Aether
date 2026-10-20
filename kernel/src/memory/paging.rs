@@ -495,8 +495,6 @@ pub const LINUX_ARENA_PAGES: u64 = 8192;
 pub const LINUX_HEAP_PAGES: u64 = 256;
 /// First address available to Linux `mmap` after the heap window.
 pub const LINUX_MMAP_BASE: u64 = LINUX_ARENA_BASE + LINUX_HEAP_PAGES * PAGE_SIZE;
-/// Exclusive end of the Linux arena.
-pub const LINUX_ARENA_END: u64 = LINUX_ARENA_BASE + LINUX_ARENA_PAGES * PAGE_SIZE;
 
 /// Changes permissions on an existing user range.
 pub fn protect_user_range(

@@ -7,9 +7,9 @@
 //! and shared-library loading; the kernel only supplies the mapped images and
 //! the ABI stack.
 //!
-//! This is the loader skeleton for the Linux layer. The interpreter bytes are
-//! supplied by the caller for now; resolving a `PT_INTERP` path through the
-//! verified runtime rootfs is follow-up work.
+//! The caller resolves the `PT_INTERP` path through the verified runtime rootfs
+//! and supplies the interpreter bytes; the loader validates that the main image
+//! names an interpreter and maps both images.
 
 use crate::memory::paging;
 use aether_abi::user::{USER_BASE, USER_LIMIT, USER_STACK_TOP};
@@ -23,8 +23,6 @@ use core::ptr;
 pub const MAIN_BASE: u64 = USER_BASE + 80 * 1024 * 1024;
 /// Load bias for the interpreter.
 pub const INTERP_BASE: u64 = USER_BASE + 96 * 1024 * 1024;
-/// Expected interpreter path for the test fixture.
-pub const INTERP_PATH: &str = "/lib/ld-aether.so";
 
 /// A loaded Linux process image.
 #[derive(Clone, Copy, Debug)]
@@ -60,15 +58,24 @@ impl From<paging::PagingError> for LoadError {
     }
 }
 
-/// Loads `main` and `interpreter` and returns the entry state.
+/// Loads `main` and its resolved `interpreter`.
+///
+/// `executable_path` is the path the application was launched as; it becomes
+/// `argv[0]` and `AT_EXECFN`. The interpreter path itself is taken from the
+/// main image's `PT_INTERP` entry and must have been used to resolve
+/// `interpreter`.
 pub fn load(
     allocator: &mut FrameAllocator<'_>,
     main: &[u8],
     interpreter: &[u8],
+    executable_path: &str,
 ) -> Result<Loaded, LoadError> {
+    if executable_path.len() + 1 > 256 {
+        return Err(LoadError::Stack);
+    }
     let main = aether_linux_elf::parse(main).map_err(LoadError::Main)?;
     let interp = aether_linux_elf::parse(interpreter).map_err(LoadError::Interpreter)?;
-    if main.interpreter() != Some(INTERP_PATH) {
+    if main.interpreter().is_none() {
         return Err(LoadError::NoInterpreter);
     }
 
@@ -88,7 +95,14 @@ pub fn load(
 
     let old_pml4 = paging::current_pml4().ok_or(LoadError::Paging)?;
     paging::activate(pml4);
-    let result = write_images_and_stack(pml4, &main, main_bias, &interp, interp_bias);
+    let result = write_images_and_stack(
+        pml4,
+        &main,
+        main_bias,
+        &interp,
+        interp_bias,
+        executable_path,
+    );
     paging::activate(old_pml4);
     let stack_pointer = result?;
 
@@ -159,6 +173,7 @@ fn write_images_and_stack(
     main_bias: u64,
     interp: &Image<'_>,
     interp_bias: u64,
+    executable_path: &str,
 ) -> Result<u64, LoadError> {
     copy_image(main, main_bias)?;
     copy_image(interp, interp_bias)?;
@@ -168,7 +183,7 @@ fn write_images_and_stack(
     for segment in interp.segments() {
         protect(pml4, interp_bias, *segment)?;
     }
-    build_stack(main, main_bias, interp_bias)
+    build_stack(main, main_bias, interp_bias, executable_path)
 }
 
 fn copy_image(image: &Image<'_>, bias: u64) -> Result<(), LoadError> {
@@ -220,12 +235,16 @@ fn protect(pml4: PhysFrame, bias: u64, segment: Segment) -> Result<(), LoadError
     Ok(())
 }
 
-fn build_stack(main: &Image<'_>, main_bias: u64, interp_bias: u64) -> Result<u64, LoadError> {
+fn build_stack(
+    main: &Image<'_>,
+    main_bias: u64,
+    interp_bias: u64,
+    executable_path: &str,
+) -> Result<u64, LoadError> {
     const STACK_PAGE_BASE: u64 = USER_STACK_TOP - PAGE_SIZE;
     let mut page = [0u8; PAGE_SIZE as usize];
 
-    let path = main.interpreter().ok_or(LoadError::NoInterpreter)?;
-    let path = path.as_bytes();
+    let path = executable_path.as_bytes();
     if path.len() + 1 > 256 {
         return Err(LoadError::Stack);
     }
@@ -241,6 +260,10 @@ fn build_stack(main: &Image<'_>, main_bias: u64, interp_bias: u64) -> Result<u64
     }
     let random_pointer = STACK_PAGE_BASE + 272;
 
+    let environment = b"LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64\0";
+    page[320..320 + environment.len()].copy_from_slice(environment);
+    let environment_pointer = STACK_PAGE_BASE + 320;
+
     let mut offset = 1024usize;
     let mut push = |value: u64| -> Result<(), LoadError> {
         let end = offset.checked_add(8).ok_or(LoadError::Stack)?;
@@ -253,6 +276,7 @@ fn build_stack(main: &Image<'_>, main_bias: u64, interp_bias: u64) -> Result<u64
     push(1)?; // argc
     push(path_pointer)?; // argv[0]
     push(0)?; // argv terminator
+    push(environment_pointer)?; // envp[0]
     push(0)?; // envp terminator
     let auxv = [
         (3u64, main.program_header_address(main_bias)), // AT_PHDR

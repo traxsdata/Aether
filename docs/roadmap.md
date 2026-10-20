@@ -143,8 +143,9 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Gate 2 — interface mapping and prototype: **partial**. A static Linux ELF
   runs at CPL3 with a per-task VMA table, runtime frame allocation and reclaim,
   file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, W^X denial,
-  and a dynamic `ET_DYN`/`PT_INTERP` loader with auxv and interpreter handoff,
-  but glibc/`ld.so`, user-space `linuxd`, threads, and signals remain missing.
+  and a dynamic `ET_DYN`/`PT_INTERP` loader with auxv, runtime-rootfs
+  interpreter resolution, and a host-glibc hello through `ld.so`, but a pinned
+  runtime rootfs, user-space `linuxd`, threads, and signals remain missing.
 - [ ] Gate 3 — headless GridCraft: import
   `gridcraft-0.8.0-linux-x86_64.AppImage` and run its `gridcraft-cli`
   (`eval`, CSV import/export) with a read-only root and private overlay.
@@ -208,10 +209,14 @@ user space. It is not a VM. The target and security gates are in
 - [ ] `mremap`, page-fault handling, and shared mappings; preserve W^X and
   account every mapping against the domain limit.
 - [x] Dynamic ELF slice: `ET_DYN` and `PT_INTERP` parsing, image mapping,
-  auxv construction, and interpreter-to-main handoff with a test interpreter
-  (`AETHER_LINUX_DYN_*`).
-- [ ] `ld.so`/glibc, relocations, shared-library search, and
-  `LD_LIBRARY_PATH` restrictions.
+  auxv construction, runtime-rootfs interpreter resolution, and
+  interpreter-to-main handoff (`AETHER_LINUX_DYN_*`).
+- [x] Host-glibc proof: `make glibc-test` builds a signed runtime rootfs from
+  the host glibc and runs a dynamically linked hello through `ld.so`,
+  relocations, and shared `libc` (`AETHER_GLIBC_OK`). This is not the pinned
+  production runtime.
+- [ ] Pinned glibc/Mesa/Wayland runtime rootfs, package channel, broader
+  `dlopen`/library coverage, and `LD_LIBRARY_PATH` policy.
 - [x] File metadata and descriptor calls: `stat`/`fstat`/`newfstatat`/`statx`,
   `readlink`, `fcntl`, `dup`, `dup2`, and descriptor table cleanup.
 - [ ] Remaining file calls: `getdents64`, `pipe`, `poll`/`epoll`, `eventfd`,
@@ -301,8 +306,9 @@ descriptor duplication, and a dynamic `ET_DYN`/`PT_INTERP` loader with auxv
 (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 `AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`,
 `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
-`AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`), and the native ABI is denied to
-Linux tasks. This is a test
+`AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`), and the opt-in `make glibc-test`
+runs a host-glibc hello through `ld.so` (`AETHER_GLIBC_OK`). The native ABI is
+denied to Linux tasks. This is a test
 fixture, not an AppImage: the dynamic loader, glibc/`ld.so`, threads, signals,
 Wayland, software Vulkan, and a user-supplied import path are still missing.
 

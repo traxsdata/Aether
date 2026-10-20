@@ -129,8 +129,12 @@ exact AppImage digest, and the runtime version.
   exit/fault. This is not yet an AppImage import or a persistent
   per-application store.
 - Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
-  a zstd SquashFS image and signs it as a `linux-rootfs` record. The populated
-  glibc/Mesa/Wayland rootfs remains missing.
+  a zstd SquashFS image and signs it as a `linux-rootfs` record. The build now
+  stages a runtime rootfs, imports it at boot, and resolves `PT_INTERP` from
+  it. `tools/build-glibc-rootfs.sh` plus `make glibc-test` package the host
+  glibc and run a dynamically linked hello through `ld.so`, relocations, and
+  shared `libc` (`AETHER_GLIBC_OK`). The pinned production glibc/Mesa/Wayland
+  rootfs remains missing.
 - In-OS import: the kernel embeds a small signed `linux-rootfs` SquashFS image,
   verifies it against the test trust store, imports it with a 4 MiB bootstrap
   bump heap, and the Linux file syscalls read from the imported table

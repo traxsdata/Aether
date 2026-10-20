@@ -11,7 +11,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const HEAP_BYTES: usize = 4 * 1024 * 1024;
+const HEAP_BYTES: usize = 64 * 1024 * 1024;
 
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 static OFFSET: AtomicUsize = AtomicUsize::new(0);
