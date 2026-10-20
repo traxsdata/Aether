@@ -45,6 +45,52 @@ pub enum Error {
     InvalidSquashfs,
     /// The SquashFS compression method is not recognised.
     UnsupportedCompression,
+    /// The container digest does not match the pinned expected value.
+    DigestMismatch,
+}
+
+/// A SHA-256 digest pinned by the runtime profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Digest([u8; 32]);
+
+impl Digest {
+    /// Computes the digest of an untrusted container.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(aether_crypto::sha256(bytes))
+    }
+
+    /// Parses a 64-character hexadecimal digest.
+    #[must_use]
+    pub fn from_hex(text: &[u8]) -> Option<Self> {
+        let mut digest = [0u8; 32];
+        let length = aether_crypto::from_hex(text, &mut digest)?;
+        (length == 32).then_some(Self(digest))
+    }
+
+    /// Returns the raw digest bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Compares this pinned digest with the bytes.
+    #[must_use]
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        aether_crypto::sha256(bytes) == self.0
+    }
+}
+
+/// Verifies a pinned digest before parsing the container.
+///
+/// The digest check is not a substitute for signature verification: it pins
+/// one exact artifact. The publisher signature and trust store remain the
+/// runtime manager's decision.
+pub fn parse_verified(bytes: &[u8], expected: Digest) -> Result<Info, Error> {
+    if !expected.matches(bytes) {
+        return Err(Error::DigestMismatch);
+    }
+    parse(bytes)
 }
 
 /// SquashFS compression method.

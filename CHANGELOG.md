@@ -24,6 +24,10 @@ versioning scheme until the kernel ABI stabilises.
   switching, single-task futex, `clock_gettime`, `getrandom`, and `uname`. The
   boot fixture now exercises allocation, TLS, write, and exit in one run.
   File-backed mappings, reclaim, and real threads remain missing.
+- Pinned SHA-256 verification for AppImage import (`Digest`,
+  `parse_verified`) and an optional digest argument to `appimage-inspect`.
+  A mismatch is rejected before the container is parsed. Publisher signatures
+  and the trust store remain runtime-manager work.
 - `docs/decisions/ADR-015-linux-app-runtime.md`,
   `docs/specifications/linux-compatibility.md`, and
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,

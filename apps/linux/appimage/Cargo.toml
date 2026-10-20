@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+aether-crypto = { path = "../../../crypto" }
 
 [features]
 # Builds the host-only diagnostic binary. The library remains no_std.

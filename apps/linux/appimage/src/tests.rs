@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Host tests for the AppImage container inspector.
 
-use crate::{Compression, Error, RuntimeElf, parse};
+use crate::{Compression, Digest, Error, RuntimeElf, parse, parse_verified};
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -140,6 +140,25 @@ fn rejects_unknown_compression() {
     let mut bytes = image();
     put_u16(&mut bytes, 1024 + 20, 99);
     assert_eq!(parse(&bytes), Err(Error::UnsupportedCompression));
+}
+
+#[test]
+fn digest_pins_one_exact_artifact() {
+    let bytes = image();
+    let digest = Digest::of(&bytes);
+    assert!(digest.matches(&bytes));
+    assert_eq!(
+        parse_verified(&bytes, digest).unwrap().squashfs_offset,
+        1024
+    );
+
+    let mut other = bytes.clone();
+    other.push(0);
+    assert_eq!(
+        Digest::from_hex(b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        Some(Digest::of(b"abc"))
+    );
+    assert_eq!(parse_verified(&other, digest), Err(Error::DigestMismatch));
 }
 
 #[test]
