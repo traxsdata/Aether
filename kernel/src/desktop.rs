@@ -542,11 +542,12 @@ pub fn print_state() {
         return;
     };
     serial_line!(
-        "desktop: state space={} focus={:?} mode={} order={:?}",
+        "desktop: state space={} focus={:?} mode={} order={:?} transition_active={}",
         wm.workspace(),
         wm.focus_id(),
         mode(),
-        wm.order()
+        wm.order(),
+        wm.transition().active
     );
     for id in wm.order().iter() {
         if let Some(window) = wm.window(*id) {

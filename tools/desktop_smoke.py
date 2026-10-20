@@ -36,7 +36,7 @@ def connect(path: Path, process: subprocess.Popen, timeout: float = 15) -> socke
 
 
 def parse_state(text: str) -> dict:
-    state = re.search(r"desktop: state space=(\d+) focus=(Some\((\d+)\)|None) mode=(\w+)", text)
+    state = re.search(r"desktop: state space=(\d+) focus=(Some\((\d+)\)|None) mode=(\w+)[^\r\n]* transition_active=(true|false)", text)
     render = re.search(r"desktop: render scene=(\d+) cursor=(\d+) last_ms=(\d+) max_ms=(\d+)", text)
     files = re.search(r"desktop: files path=(\S+) entries=(\d+) selected=(\d+) preview=(true|false) error=([^\r\n]+)", text)
     if not state or not render or not files:
@@ -45,7 +45,7 @@ def parse_state(text: str) -> dict:
     for match in re.finditer(r"desktop: w(\d+) k=(\w+) ws(\d+) (\w+) v\w+ m\d+ (-?\d+),(-?\d+),(\d+),(\d+)", text):
         windows[match[2]] = {"id": int(match[1]), "workspace": int(match[3]), "state": match[4], "frame": tuple(map(int, match.groups()[4:]))}
     return {"workspace": int(state[1]), "focus": int(state[3]) if state[3] else None,
-            "mode": state[4], "windows": windows, "scene_paints": int(render[1]),
+            "mode": state[4], "transition_active": state[5] == "true", "windows": windows, "scene_paints": int(render[1]),
             "cursor_paints": int(render[2]), "last_ms": int(render[3]), "max_ms": int(render[4]),
             "path": files[1], "entries": int(files[2]), "selected": int(files[3]),
             "preview": files[4] == "true", "files_error": files[5]}
@@ -231,9 +231,12 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
         vm.key("right")  # E0 dedicated arrow, not the old keypad-only self-test
         state = vm.wait(lambda value: value["windows"]["Welcome"]["frame"][0] == x + 8, "move with the dedicated Right key")
         vm.key("ctrl-right")
-        vm.wait(lambda value: value["workspace"] == 1, "switch to Space 2")
+        vm.wait(lambda value: value["workspace"] == 1 and not value["transition_active"], "finish switching to Space 2")
         vm.key("ctrl-left")
-        vm.wait(lambda value: value["workspace"] == 0, "return to Space 1")
+        # Logical workspace/focus changes precede the slide animation. Wait for
+        # the guest's actual transition state, not an arbitrary host delay,
+        # before clicking coordinates from the final logical window frames.
+        vm.wait(lambda value: value["workspace"] == 0 and not value["transition_active"], "finish returning to Space 1")
 
         # Drag and resize use actual IRQ12 packets and IRQ1 modifier scancodes.
         state = vm.state()

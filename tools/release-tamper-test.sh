@@ -53,7 +53,10 @@ cp "$BUNDLE"/* "$TAMPERED"/
 # different from the original, otherwise a digest that already starts with
 # the replacement character would not change at all and the verify step
 # would correctly accept it.
-ORIGINAL=$(cut -c1 "$TAMPERED/SHA256SUMS")
+# SHA256SUMS has multiple records. Read only the first line: `cut -c1` on the
+# whole file yields several characters separated by newlines, so even a leading
+# zero would miss the `0)` case and be replaced with itself.
+ORIGINAL=$(head -n 1 "$TAMPERED/SHA256SUMS" | cut -c1)
 case "$ORIGINAL" in
     0) REPLACEMENT=a ;;
     *) REPLACEMENT=0 ;;

@@ -229,6 +229,12 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Fixed
 
+- ISO pointer assertions wait for the guest's workspace slide to finish instead
+  of treating logical workspace selection as completed on-screen movement.
+- The release-tamper harness reads the first checksum record only, ensuring a
+  zero-prefixed image digest is actually changed. A regression exercises all
+  16 hexadecimal prefixes with a multiline `SHA256SUMS`; verification policy is
+  unchanged and both real bundle mutations must still be rejected.
 - Full-screen redraw on every pointer/key event no longer stalls the normal
   interaction path; rendering caches, clipping, damage and event batching have
   regression coverage and live timings.
