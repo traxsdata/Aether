@@ -7,9 +7,10 @@ when they preserve the project's security model and can be reviewed.
 
 - Read the [technical specification](Technical%20Specification%20and%20Initial%20Development%20Backlog.txt),
   especially the security architecture and backlog execution rule.
-- Check whether the change belongs to the current phase. The first sprint
-  intentionally excludes schedulers, filesystems, graphics, and Windows
-  runtimes; adding them early makes review harder, not progress faster.
+- Check [`docs/roadmap.md`](docs/roadmap.md) and the technical-spec backlog for
+  the active milestone. The repository is now an early OS/desktop prototype;
+  keep work aligned with the backlog dependency order and avoid starting
+  unrelated epics concurrently.
 - For a substantial design change, open an issue or draft ADR first.
 
 ## Development workflow

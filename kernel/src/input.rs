@@ -137,6 +137,12 @@ impl MouseState {
     }
 
     fn push(&mut self, byte: u8) {
+        // Bit 3 is fixed in every PS/2 packet's first byte. Use it to recover
+        // packet boundaries after a lost/stray byte instead of permanently
+        // grouping the stream into the wrong triples.
+        if self.index == 0 && byte & 0x08 == 0 {
+            return;
+        }
         self.packet[self.index] = byte;
         self.index += 1;
         if self.index < 3 {
@@ -157,9 +163,15 @@ impl MouseState {
         } else {
             i16::from(self.packet[2])
         };
-        self.x = (self.x + i32::from(dx)).clamp(0, self.width - 1);
+        // The device marks an overflowing axis in the header; its movement
+        // byte is then saturated and must not be interpreted as a real delta.
+        if flags & 0x40 == 0 {
+            self.x = (self.x + i32::from(dx)).clamp(0, self.width - 1);
+        }
         // PS/2 reports positive Y upward; screen coordinates grow downward.
-        self.y = (self.y - i32::from(dy)).clamp(0, self.height - 1);
+        if flags & 0x80 == 0 {
+            self.y = (self.y - i32::from(dy)).clamp(0, self.height - 1);
+        }
         self.buttons = flags & 0x07;
         self.packets = self.packets.saturating_add(1);
     }
@@ -521,12 +533,15 @@ pub fn decode(scancode: u8) -> Option<Key> {
 /// one with no overlay open.
 pub fn self_test() {
     let before = mouse();
+    let decoder_ok = mouse_decoder_self_test();
     // Synthetic motion proves the packet decode path. The controller probe is
     // reported separately because a machine without an auxiliary port must not
     // fail boot.
     inject_mouse_packet([0x08, 12, 2]);
     let after = mouse();
-    if after.x != before.x || after.y != before.y {
+    if !decoder_ok {
+        serial_line!("AETHER_POINTER_FAILED reason=decoder-self-test");
+    } else if after.x != before.x || after.y != before.y {
         serial_line!(
             "AETHER_POINTER_OK dx={} dy={} packets={}",
             after.x - before.x,
@@ -566,4 +581,26 @@ pub fn self_test() {
             "synthetic"
         }
     );
+}
+
+fn mouse_decoder_self_test() -> bool {
+    let mut mouse = MouseState::new();
+    mouse.reset(100, 100);
+    let start = (mouse.x, mouse.y);
+
+    // A stray byte must not start a packet; a valid header must still decode.
+    for byte in [0x00, 0x08, 12, 2] {
+        mouse.push(byte);
+    }
+    if (mouse.x, mouse.y) != (start.0 + 12, start.1 - 2) {
+        return false;
+    }
+
+    // Overflow flags invalidate movement on their respective axes, but the
+    // packet remains valid for button-state updates.
+    let position = (mouse.x, mouse.y);
+    for byte in [0xc9, 0x7f, 0x7f] {
+        mouse.push(byte);
+    }
+    (mouse.x, mouse.y) == position && mouse.buttons == 1 && mouse.packets == 2
 }
