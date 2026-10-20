@@ -13,6 +13,13 @@ aether-appimage = { path = "../appimage" }
 ruzstd = { version = "0.9.1", default-features = false }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-decode"] }
+lzma-rs = { version = "0.3", optional = true }
+
+[features]
+default = ["std"]
+# Host import support for SquashFS xz/lzma blocks. The in-OS reader will need a
+# no_std decoder or build this feature into the runtime rootfs service.
+std = ["dep:lzma-rs"]
 
 [[bin]]
 name = "squashfs-extract"

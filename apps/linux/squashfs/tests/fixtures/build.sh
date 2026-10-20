@@ -11,7 +11,7 @@ printf 'AETHER_SQUASHFS_OK source=/etc/motd\n' > "$ROOT/etc/motd"
 printf 'hello from squashfs\n' > "$ROOT/hello.txt"
 ln "$ROOT/hello.txt" "$ROOT/hard.txt"
 ln -s etc/motd "$ROOT/link"
-for compression in zstd gzip lz4; do
+for compression in zstd gzip lz4 xz; do
     mksquashfs "$ROOT" "root-$compression.sqfs" \
         -comp "$compression" -noappend -all-root -no-xattrs -no-progress
 done
