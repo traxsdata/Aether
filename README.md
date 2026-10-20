@@ -25,9 +25,11 @@ grants, and the desktop is not a security authority.
 > Ed25519 update verification with rollback protection, and a signed release
 > bundle plus qualification report.
 >
-> Windows compatibility, networking, persistent storage, audio, GPU
-> acceleration, a general installer, Secure Boot, and an external security
-> review are not implemented. Do not use this tree for real data.
+> Windows compatibility, the Linux AppImage layer, networking, persistent
+> storage, audio, GPU acceleration, a general installer, Secure Boot, and an
+> external security review are not implemented. The Linux work is at Gate 0:
+> the AppImage container inspector exists, but no Linux binary can run yet. Do
+> not use this tree for real data.
 
 ## What works today
 
@@ -107,6 +109,10 @@ grants, and the desktop is not a security authority.
 - Per-application runtime profiles (`aether-services::runtime`) with derived
   prefixes, declared permissions and limits, path containment, and explicit
   consent for prefix sharing (`AETHER_RUNTIME_OK`).
+- A bounded AppImage type 2 container inspector (`aether-appimage`): ELF and
+  SquashFS bounds, compression, and table-offset validation, with a host
+  diagnostic. It does not execute or mount the image; see
+  [`docs/specifications/linux-compatibility.md`](docs/specifications/linux-compatibility.md).
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,
@@ -286,6 +292,7 @@ make unittest      # host unit tests (ABI, ELF, filesystem, services, IPC,
                    # memory, window manager, crypto, packages, updates,
                    # compatibility)
 make compat-test   # compatibility database and classification rules
+make appimage-test # AppImage container inspection tests
 make update-test   # package and update policy crates
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
 make shell-test    # drive the console shell over a QEMU serial socket
@@ -346,6 +353,7 @@ kernel/              Aether kernel (no_std, target x86_64-unknown-none)
   src/recovery.rs    current/previous image selection
 sdk/                 native application SDK
 tests/fixtures/      test keys and signed package/update fixtures
+apps/linux/appimage/ AppImage container inspector for the Linux layer
 tests/compatibility/ compatibility database and classification harness
 tests/rendering/     host harness for the actual kernel graphics module
 tools/               boot, shell, ISO, release, and qualification harnesses
@@ -468,6 +476,8 @@ Further reading: [memory and paging](docs/architecture/memory.md),
 [package format](docs/specifications/package-format.md),
 [signed updates](docs/architecture/updates.md),
 [compatibility database](docs/specifications/compatibility.md),
+[Linux application compatibility](docs/specifications/linux-compatibility.md),
+[Linux layer](docs/architecture/linux-layer.md),
 [supported hardware](docs/reference/supported-hardware.md),
 [VMware Workstation](docs/reference/vmware-workstation.md),
 [installer and recovery](docs/reference/installer-and-recovery.md),

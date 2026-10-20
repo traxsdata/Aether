@@ -7,6 +7,17 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- `aether-appimage`: a `no_std`, `unsafe`-free, allocation-free AppImage type 2
+  container inspector. It validates the ELF runtime, locates a structurally
+  valid SquashFS 4 superblock (rejecting false magic in runtime code), and
+  checks compression, block geometry, filesystem size, and table offsets. A
+  host `appimage-inspect` binary reports the metadata without executing the
+  image. This is Gate 0 of the Linux layer; no Linux binary runs yet.
+- `docs/decisions/ADR-015-linux-app-runtime.md`,
+  `docs/specifications/linux-compatibility.md`, and
+  `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
+  host-interface inventory for GridCraft 0.8.0, security controls, and staged
+  gates. GridCraft is recorded as `unsupported`.
 - `aether-wm`, a `no_std`, `unsafe`-free, allocation-free window-manager crate:
   geometry, responsive layout, window and workspace state, focus and z-order,
   menus, dock targeting, Spotlight-style search, settings, hit testing, and

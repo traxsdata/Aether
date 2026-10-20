@@ -10,7 +10,7 @@ fn shipped_database_is_consistent() {
     let database = shipped_database().expect("shipped database parses");
     assert!(database.len() >= 3);
     assert_eq!(database.count(Classification::Verified), 3);
-    assert_eq!(database.count(Classification::Unsupported), 1);
+    assert_eq!(database.count(Classification::Unsupported), 2);
     assert!(database.get("org.aether.demo").is_some());
     for entry in database.entries() {
         match entry.classification {

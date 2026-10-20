@@ -1,0 +1,105 @@
+# Linux compatibility layer
+
+Aether's Linux layer runs unmodified Linux x86-64 applications, including
+AppImages, without a virtual machine. It is a user-space compatibility service,
+not a Linux kernel and not a second operating system. The goal is to provide
+Linux semantics to the application while Aether keeps its own capability,
+filesystem, lifecycle, and compositor boundaries.
+
+The architectural decision is recorded in
+[ADR-015](../decisions/ADR-015-linux-app-runtime.md); the requirement inventory
+and gates are in
+[Linux application compatibility](../specifications/linux-compatibility.md).
+
+## Layers
+
+```text
+ application (unmodified Linux ELF / AppImage payload)
+        |
+        v
+ linuxd  ── ELF loader, libc ABI, /proc, signals, threads, Wayland client side
+        |
+        +── IPC ──> fsd / portal / waylandd / input / software renderer
+        |
+        v
+ narrow Aether kernel primitives
+ address space · thread create · futex wait/wake · fault delivery · syscall trap
+```
+
+### Application domain
+
+Each application gets its own address space, private application root, writable
+overlay, runtime profile, and capability table. The layer cannot see another
+application's root or capabilities. A crash retires the domain, not the desktop.
+
+### `linuxd`
+
+`linuxd` is the Linux personality. It owns:
+
+- AppImage import and the read-only application root;
+- ELF and shared-library loading, `ld.so` interaction, TLS, and environment;
+- Linux syscalls that can be emulated in user space;
+- a bounded synthetic `/proc`, `/dev/null`, `/dev/urandom`, and similar nodes;
+- thread creation requests, `futex` policy, and signal delivery;
+- the client side of the Wayland protocol used by `winit`.
+
+It never receives ambient filesystem, network, or device authority. It asks
+`fsd` and the portal for handles, exactly like a native application.
+
+### Kernel primitives
+
+The kernel must expose a small set of operations that cannot be implemented
+safely in user space: map/unmap/protect user pages, create and schedule
+threads in an address space, wait and wake on a futex word with a timeout,
+deliver faults as signals, and enter the Linux syscall path. These are
+validated primitives, not Linux semantics. They are security-critical and need
+their own threat-model review before they land.
+
+### Wayland bridge
+
+`waylandd` is an Aether service that speaks the subset of Wayland used by
+`winit`/`egui`: registry, compositor, shared memory, xdg-shell, seat, output,
+and clipboard. Buffers are validated for size, stride, format, and lifetime
+before the Aether compositor presents them. The application does not receive a
+framebuffer, a DRM device, or a GPU command stream.
+
+### Graphics
+
+The first GUI target uses a bundled software Vulkan (lavapipe) or software GL
+path selected explicitly by the runtime profile. It is slow but reviewable and
+does not require a GPU service. Accelerated graphics is a later service with
+its own capability and device model. A missing renderer is a clean failure, not
+an attempt to open a host device.
+
+## Security controls
+
+| Control | How it applies to the Linux layer |
+|---|---|
+| Capability model | The domain receives only the endpoints and handles named in its runtime profile. The layer cannot mint capabilities. |
+| Application identity | The domain identity is derived from the verified package/AppImage, never from an application-provided string. |
+| Private storage | The imported root is read-only; writes go to a per-application overlay. Other app roots are denied by `fsd`. |
+| File portal | User files are opened through explicit grants. A Linux path such as `/home/user/file.xlsx` is a runtime mapping, not host authority. |
+| Network | Denied by default. Sockets fail with a clear error unless a network capability is granted. |
+| Devices | No `/dev/dri`, `/dev/input`, block devices, or raw PCI access. Input and display are service protocols. |
+| Resource limits | Address-space, thread, file, and CPU limits are enforced per domain; exhaustion retires the domain. |
+| Update integrity | AppImages and runtime packages are digest- and publisher-verified before import. |
+| Crash containment | A fault in the layer or application terminates only that domain; unrelated apps and the desktop continue. |
+
+## Compatibility boundary
+
+The layer is deliberately incomplete. Unsupported Linux behaviour must fail
+closed with `ENOSYS` or the nearest Linux error, be recorded in the
+compatibility database, and never be silently approximated in a way that grants
+authority. A compatibility claim needs a completed run, a named test suite, the
+exact AppImage digest, and the runtime version.
+
+## Current state
+
+- AppImage container inspection: implemented in `apps/linux/appimage`, with
+  host tests and the `appimage-inspect` diagnostic.
+- SquashFS/zstd extraction: not implemented.
+- Linux ELF loader, syscall personality, threads, signals: not implemented.
+- Wayland bridge and software renderer: not implemented.
+
+The compatibility database records GridCraft 0.8.0 as `unsupported` until these
+gates pass.

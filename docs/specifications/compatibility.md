@@ -68,6 +68,7 @@ ledger, not a security boundary.
 | Aether Other | native | verified | Sibling-root denial test passes. |
 | Aether Package Verifier | native | verified | Signature, digest, and publisher tests pass on host and in the boot self-test. |
 | Notepad (Win32) | none | unsupported | No Windows runtime exists; the package verifier rejects `runtime=windows`. |
+| GridCraft 0.8.0 (AppImage) | none | unsupported | No Linux layer exists; the payload needs glibc 2.35, Wayland, and Vulkan. See [Linux compatibility](linux-compatibility.md). |
 
 ## Test suite
 

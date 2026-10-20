@@ -96,6 +96,9 @@ unittest:
 compat-test:
 	$(CARGO) test --locked -p aether-compat
 
+appimage-test:
+	$(CARGO) test --locked -p aether-appimage
+
 # Package and update policy tests share the signed test fixtures under
 # tests/fixtures; run both crates together.
 update-test:

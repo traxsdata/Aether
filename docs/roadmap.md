@@ -104,6 +104,11 @@ It is a planning model, not a delivery promise.
   gate is not met, so no runtime is promised.
 - [x] Developer documentation for packaging, updates, hardware, and recovery.
 - [ ] Windows compatibility prototype and per-application prefixes.
+- [x] Linux AppImage container inspection (Gate 0): validated ELF/SquashFS
+  bounds, compression, and table offsets
+  ([plan](specifications/linux-compatibility.md)). No Linux binary runs yet.
+- [ ] Linux compatibility layer: ELF loader, syscall/thread/futex/signal
+  personality, SquashFS import, Wayland bridge, and software renderer.
 - [ ] Better storage (persistent block device), networking, audio, and
   accelerated graphics.
 - [ ] Interactive permission consent and grant revocation UI.

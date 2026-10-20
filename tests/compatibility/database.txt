@@ -17,3 +17,4 @@ org.aether.demo | Aether Demo | 0.2.0 | native | qemu-q35-ovmf | 2026-10-19 | ve
 org.aether.other | Aether Other | 0.2.0 | native | qemu-q35-ovmf | 2026-10-19 | verified | security.file.sibling,functional.startup | none
 org.aether.package-verifier | Aether Package Verifier | 0.2.0 | native | qemu-q35-ovmf | 2026-10-19 | verified | security.package.signature,security.package.digest,security.package.publisher | none
 org.example.win32-notepad | Notepad (Win32) | 10.0.19045 | none | qemu-q35-ovmf | 2026-10-19 | unsupported | none | No Windows compatibility runtime exists; the package verifier rejects runtime=windows.
+org.artcraft.gridcraft | GridCraft | 0.8.0 | none | qemu-q35-ovmf | 2026-10-20 | unsupported | none | No Linux layer; needs glibc 2.35, Wayland and Vulkan
