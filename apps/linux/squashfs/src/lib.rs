@@ -4,20 +4,17 @@
 //! The reader validates every offset and length before reading, decompresses
 //! only the metadata and data blocks it needs, and rejects unsupported inode
 //! types instead of guessing. It supports zstd (the GridCraft AppImage), gzip,
-//! lz4, lzo, and xz/lzma (host `std` feature). No_std xz/lzma decoders remain
-//! tracked in the roadmap.
+//! lz4, lzo, xz, and lzma. All decoders work in `no_std` with `alloc`.
 //!
 //! The API is deliberately small: parse a raw SquashFS image or an AppImage,
 //! walk the tree, read regular files, and extract into memory with limits.
 //! Filesystem mounting, writable overlays, and signature policy are separate
 //! layers.
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
+#![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
-#[cfg(feature = "std")]
-extern crate std;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -242,9 +239,7 @@ impl<'a> Image<'a> {
         {
             return Err(Error::BadSuperblock);
         }
-        let supported = matches!(compression, 1 | 3 | 5 | 6)
-            || (cfg!(feature = "std") && matches!(compression, 2 | 4));
-        if !supported {
+        if !matches!(compression, 1..=6) {
             return Err(Error::UnsupportedCompression);
         }
         let base = offset as u64;
@@ -729,17 +724,9 @@ impl<'a> Image<'a> {
             1 => miniz_oxide::inflate::decompress_to_vec_zlib(input)
                 .map_err(|_| Error::Decompress)?,
             2 => {
-                #[cfg(feature = "std")]
-                {
-                    let mut out = Vec::new();
-                    lzma_rs::lzma_decompress(&mut &input[..], &mut out)
-                        .map_err(|_| Error::Decompress)?;
-                    out
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    return Err(Error::UnsupportedCompression);
-                }
+                let mut reader = lzma_rust2::LzmaReader::new_mem_limit(input, u32::MAX, None)
+                    .map_err(|_| Error::Decompress)?;
+                read_all(&mut reader, maximum)?
             }
             3 => {
                 let mut out = vec![0u8; maximum];
@@ -749,17 +736,8 @@ impl<'a> Image<'a> {
                 out
             }
             4 => {
-                #[cfg(feature = "std")]
-                {
-                    let mut out = Vec::new();
-                    lzma_rs::xz_decompress(&mut &input[..], &mut out)
-                        .map_err(|_| Error::Decompress)?;
-                    out
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    return Err(Error::UnsupportedCompression);
-                }
+                let mut reader = lzma_rust2::XzReader::new(input, false);
+                read_all(&mut reader, maximum)?
             }
             5 => lz4_flex::block::decompress(input, maximum).map_err(|_| Error::Decompress)?,
             6 => {
@@ -798,6 +776,21 @@ struct WalkState {
     paths: BTreeMap<String, ()>,
     inodes: BTreeMap<u32, ()>,
     tree: Vec<TreeEntry>,
+}
+
+fn read_all(reader: &mut impl lzma_rust2::Read, maximum: usize) -> Result<Vec<u8>, Error> {
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let count = reader.read(&mut chunk).map_err(|_| Error::Decompress)?;
+        if count == 0 {
+            return Ok(out);
+        }
+        out.extend_from_slice(&chunk[..count]);
+        if out.len() > maximum {
+            return Err(Error::Decompress);
+        }
+    }
 }
 
 fn safe_symlink(target: &[u8]) -> bool {

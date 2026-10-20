@@ -60,7 +60,7 @@ implemented only when a tested Aether interface exists and the runtime uses it.
 
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
-| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed import records, and SquashFS/zstd/gzip/lz4/lzo/host-xz-lzma extraction implemented**; overlay, runtime-rootfs signatures, no_std xz/lzma missing |
+| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed import records, and SquashFS/zstd/gzip/lz4/lzo/xz/lzma extraction implemented**; runtime-rootfs signatures, packaging, in-OS import missing |
 | ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static `PT_LOAD` execution works; interpreter and shared libraries missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: one fixed boot process, no creation |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `arch_prctl` FS base and context-switched TLS pointer; no threads |
@@ -127,7 +127,7 @@ reads zstd/gzip/lz4/lzo/xz/lzma SquashFS metadata, file data, fragments, directo
 symlinks, with extraction limits, symlink/hardlink policy, and a host
 `squashfs-extract` tool. It extracts all 16 files (48,350,419 bytes) and two
 symlinks from the tested AppImage. Publisher signatures, writable overlay, and
-no_std xz/lzma remain follow-up work.
+remaining follow-up work is runtime-rootfs signing/packaging and in-OS import.
 
 ### Gate 1 — Host-interface inventory
 

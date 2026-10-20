@@ -116,10 +116,10 @@ exact AppImage digest, and the runtime version.
   go to a bounded per-task overlay that is cleared on exit/fault. This is not
   yet an AppImage import or a persistent per-application store.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
-  zstd, gzip, lz4, lzo, and host xz/lzma (metadata, file data, fragments,
-  directories, symlinks, hardlink marking, xattr dropping, extraction limits,
-  host extractor). No_std xz/lzma, in-OS integration, and the writable overlay
-  remain missing.
+  zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
+  fragments, directories, symlinks, hardlink marking, xattr dropping,
+  extraction limits, host extractor). In-OS integration and persistent overlay
+  storage remain missing.
 - Dynamic glibc libraries, threads, real futex waiting, signals, file-backed
   mappings, and memory reclaim: not implemented.
 - Wayland bridge and software renderer: not implemented.
