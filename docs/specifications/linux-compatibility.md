@@ -1,7 +1,7 @@
 # Linux application compatibility
 
 **Document ID:** AETHER-LINUX-001
-**Status:** Gate 3 headless CLI run is implemented at QEMU prototype scope; the GUI and general application compatibility are not claimed
+**Status:** Gate 3 headless CLI run and the Gate 4 runtime rootfs packaging slice are implemented at QEMU prototype scope; the GUI and general application compatibility are not claimed
 **Related:** [ADR-017](../decisions/ADR-017-linux-app-runtime.md), technical
 specification §7 (compatibility)
 
@@ -62,8 +62,8 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
-| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, pinned host-glibc root profile, embedded signed-rootfs in-OS import, loader-staged signed AppImage import, and the real GridCraft 0.8.0 import and launch implemented**; the populated Mesa/Wayland rootfs, a cross-host reproducible pin, a merged per-app root, and user-selected AppImage import are missing |
-| ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static and dynamic exec fixtures propagate bounded argv/envp; a `PT_INTERP` fixture, opt-in host-glibc hello, a host-derived pinned glibc/loader profile, and the dynamically linked GridCraft CLI run; Mesa/Wayland libraries and a cross-host reproducible pin remain missing |
+| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, pinned host-glibc and host-lavapipe root profiles, embedded and loader-staged signed-rootfs import, loader-staged signed AppImage import, and the real GridCraft 0.8.0 import and launch implemented**; a cross-host reproducible pin, a merged per-app root, and user-selected AppImage import are missing |
+| ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static and dynamic exec fixtures propagate bounded argv/envp; a `PT_INTERP` fixture, opt-in host-glibc hello, host-derived glibc/loader profiles, and the dynamically linked GridCraft CLI run; the Gate 4 profile packages Mesa lavapipe, LLVM, Wayland client libraries, and the Vulkan loader with a complete `ldd` closure. A cross-host reproducible pin remains missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: eager-copy fork, blocking `wait4` with nonchild/selector checks, bounded same-session process groups with `setpgid`/`getpgid`/`getsid`/`setsid` validation, static/dynamic exec, and bounded `clone3` thread creation; stopped/continued waits and group selectors return `ENOSYS`/`EINVAL` |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `clone` and `clone3` threads, per-thread stacks/TLS, clear-child-tid join, and bounded `rseq` registration/validation (CPU id always 0, no abort notifications); detach and affinity remain |
 | Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: bounded demand paging for private anonymous mappings; `MAP_SHARED|MAP_ANONYMOUS` uses a reference-counted physical-frame registry, so contents survive `fork` and are visible to parent and child while private mappings stay private. A bounded in-memory page cache backs read-shared file mappings keyed by rootfs/overlay inode and page offset, including aliasing across unrelated processes; writes are never persisted to the read-only root and `msync` returns `EOPNOTSUPP`. Shared mappings are limited to 16 VMA entries and 256 physical pages per application domain, with `ENOMEM` on exhaustion. `mremap` of a shared mapping returns `EOPNOTSUPP`. |
@@ -73,8 +73,8 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | Files | `openat`, `statx`, `readlink`, `rename`, `unlink`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root, per-application `/tmp`, `/settings`, and `/logs` overlays with bounded `rename`/`unlink` confined to the current application, exact-file portal grants exposed as `/run/aether/portal/<grant-id>/<file>` for read and read+write opens with revocation, and inotify with blocking or nonblocking instances, four watches, file and directory events (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`, `IN_IGNORED`), bounded-queue `IN_Q_OVERFLOW`, and thread wakeups. Recursive watches, move/delete/unmount events, `renameat`/`unlinkat`, cross-process watch sharing, and deferred deletion for open descriptors are unsupported |
 | Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Blocking/finite `poll`/`epoll_wait`, same-tgid thread-shared eventfd, blocking pipes, and blocking/nonblocking inotify | Partial: `poll` and `epoll_wait` support finite and infinite timeouts with scheduler parking and deadlines; `epoll` is level-triggered by default with a bounded `EPOLLET` transition slice and honest `EPOLLONESHOT` re-arm via `EPOLL_CTL_MOD`; pipes block on empty read/full write across `fork`-inherited descriptors; inotify is bounded to one instance, four watches, and eight queued events per process. Full inotify, nested epoll watches, and cross-process eventfd sharing remain unsupported |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/proc/self/status`, `/proc/self/fd`, `/dev/urandom`, `/dev/zero`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | **Implemented** in the kernel prototype through open/read/stat/readdir, plus a read-only `/proc/aether/syscalls` audit view. `/sys`, tty, input, and GPU nodes are absent. `/dev/random` and `/dev/urandom` return the same deterministic boot PRNG stream as `getrandom`, not host entropy |
-| Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
-| Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Not implemented; no GPU service |
+| Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Partial: `libwayland-client.so.0`/`libwayland-cursor.so.0` and `libxkbcommon.so.0` are packaged in the Gate 4 rootfs with a verified closure; the Aether Wayland bridge and compositor presentation are not implemented (host client library is still staged) |
+| Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Partial: the Gate 4 rootfs packages the Vulkan loader, Mesa lavapipe, `libvulkan_lvp.so`, the ICD, LLVM, and dependencies; there is no surface/Wayland WSI integration or GPU service yet |
 | Input | Pointer, keyboard, focus, cursor, keymap | Compositor input protocol | Partial: PS/2 keyboard and mouse in the desktop |
 | D-Bus / XDG portal | Session bus, file chooser portal | IPC bridge and portal integration | Not implemented |
 | Audio | ALSA/PipeWire | Audio service | Not implemented; not required for first milestone |
@@ -156,8 +156,9 @@ and symlinks, with extraction limits, symlink/hardlink policy, an explicit
 xattr allowlist/denylist, and a host `squashfs-extract` tool. It extracts all 16 files (48,350,419 bytes) and two
 symlinks from the tested AppImage. Runtime-rootfs packaging/signing and in-OS
 import of both the packed runtime rootfs and a separately identified signed
-AppImage are implemented. The runtime pin is host-derived (glibc only); Mesa
-and Wayland content are still absent.
+AppImage are implemented. The Gate 4 runtime profile packages Mesa lavapipe,
+LLVM, Wayland client libraries, and `libxkbcommon`; the Gate 3 profile remains
+glibc-only.
 
 ### Gate 1 — Host-interface inventory
 
@@ -201,7 +202,7 @@ manifest digest against the build pin and reports the exact glibc version
 `tools/build-appimage-fixture.sh`, copied to the boot volume as
 `\linux\app.AppImage` with its signed record at `\linux\app.import`, and read
 by the UEFI loader rather than embedded in the kernel. The loader publishes
-the physical extents in `BootInfo` v4 and retains the buffers; the kernel
+the physical extents in `BootInfo` v5 and retains the buffers; the kernel
 verifies the record and digest against the trust store before parsing,
 reports `AETHER_LINUX_APPIMAGE_STAGED_OK source=loader`, imports the payload,
 and launches `/usr/bin/app` (`AETHER_LINUX_APPIMAGE_OK`,
@@ -395,6 +396,47 @@ software Vulkan/GL, keyboard and pointer routing, the windowed
 desktop file chooser/D-Bus portal, and a compatibility record stronger than
 `limited`. None of the GUI claims are made here.
 
+**Runtime rootfs packaging: met at QEMU prototype scope.** `make gate4-runtime`
+assembles `tools/build-gate4-runtime.sh` from pinned host libraries:
+
+| Component | Packaged value |
+|---|---|
+| Profile | `gate4-host-lavapipe` |
+| glibc / loader | host glibc 2.43, `ld-linux-x86-64.so.2` |
+| Mesa | lavapipe 26.0.8-1ubuntu0.3 |
+| Wayland client | 1.24.0-2 (host `libwayland-client.so.0`; the bridge replaces it later at the same SONAME path) |
+| Vulkan | loader 1.4.341.0-1, `libvulkan_lvp.so`, `lvp_icd.json` |
+| LLVM | `libLLVM.so.21.1`, 138,567,144 bytes |
+| Files / bytes | 40 files, 164,543,720 uncompressed bytes |
+| SquashFS image | 45,268,992 bytes, zstd, signed `linux-rootfs` record |
+
+The rootfs carries the Vulkan ICD at `/usr/share/vulkan/icd.d/lvp_icd.json`,
+`/usr/share/doc/aether-runtime/provenance`, a test-only `/etc/motd`, and small
+Linux ABI fixtures used by the boot gate. It does not carry the GridCraft GUI
+binary or data; those come from the separately signed AppImage.
+
+The image is too large to embed in the kernel, so the loader stages it from
+`\linux\runtime.sqfs` with its record at `\linux\runtime.import`. `BootInfo` v5
+publishes both extents. The kernel verifies the signed record and the manifest
+pin, then verifies every `file_sha256` entry before importing the tree. The
+manifest digest is the build pin; a tampered image fails signature
+verification, and a missing image fails in the loader. `make gate4-runtime-test`
+boots the staged rootfs, requires
+`AETHER_GATE4_RUNTIME_OK profile=gate4-host-lavapipe
+mesa=lavapipe-26.0.8-1ubuntu0.3 wayland=1.24.0-2`, and runs the real AppImage's
+`/usr/bin/gridcraft-cli --version` through it (`gridcraft-cli 0.8.0`).
+
+**Measured limitation:** the allocation-only bootstrap importer needs about
+1.04 GiB for this 164 MiB tree because decompression scratch is never
+reclaimed. The Gate 4 profile therefore builds with a 1.5 GiB heap and a 3 GiB
+guest. This is a packaging/boot prototype, not a production runtime size.
+
+**Not yet met:** the GUI launch, Wayland bridge, compositor presentation,
+input, portal workbook open/save, pixel checksum, and compatibility upgrade.
+The runtime pin is derived from the build host and is not reproducible across
+hosts until a signed package channel exists. The rootfs still requires the
+kernel-side importer and has no user-selected AppImage installation path.
+
 ## Security acceptance criteria
 
 - The importer validates container bounds before reading a superblock or
@@ -410,9 +452,10 @@ desktop file chooser/D-Bus portal, and a compatibility record stronger than
 
 ## Current blockers
 
-1. The runtime pin is derived from the host glibc; Mesa and Wayland content are
-   absent, and the pin is not reproducible across hosts until a pinned artifact
-   channel exists.
+1. The runtime pin is derived from the host glibc and, for the Gate 4 profile,
+   host Mesa/LLVM/Wayland packages. It is not reproducible across hosts until a
+   pinned artifact channel exists; the Gate 4 image also needs a 1.5 GiB import
+   heap because the bootstrap allocator never reclaims.
 2. `linuxd` is a ring-3 launch-policy manager, but the Linux syscall
    dispatcher, ELF/library mapping, and VMA management remain in the kernel.
    The syscall-remoting ABI and removal of Linux dispatch from the kernel are
@@ -434,8 +477,10 @@ desktop file chooser/D-Bus portal, and a compatibility record stronger than
    are present for the tested same-task and pipe `fork` cases, and the
    implemented `siginfo`/`ucontext`, alt-stack, restart, robust-futex, and
    `clone3` thread subset is bounded and fixture-tested.
-5. The pinned runtime rootfs carries a host-derived glibc/loader profile; Mesa
-   and Wayland content, the Wayland service, and a software renderer are absent.
+5. The Gate 3 pinned runtime rootfs carries a host-derived glibc/loader
+   profile. The Gate 4 profile adds host-derived Mesa lavapipe/LLVM, Wayland
+   client libraries, `libxkbcommon`, and the Vulkan loader, but the Wayland
+   service/bridge and compositor presentation are still absent.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.
 7. No persistent storage; the RAM disk and the application overlay are
    volatile, so overlay persistence is limited to one boot.

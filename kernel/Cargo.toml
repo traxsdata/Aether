@@ -33,3 +33,6 @@ recovery-rollback-selftest = []
 # Boot the Gate 4 portal slice with a seeded workbook grant and a test-only
 # revocation control path. Not part of the normal kernel feature set.
 gate4-portal-test = []
+# Gate 4 staged Mesa/lavapipe rootfs needs more import heap than the embedded
+# Gate 3 fixture. The boot image also needs more guest RAM.
+gate4-runtime = []

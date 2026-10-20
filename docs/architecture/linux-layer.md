@@ -191,32 +191,40 @@ exact AppImage digest, and the runtime version.
   block device exists.
 - Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
   a zstd SquashFS image and signs it as a `linux-rootfs` record.
-  `tools/build-pinned-runtime.sh` plus `make runtime-rootfs-pinned` now produce
-  the profile the boot test consumes. It is a **host-derived pin**: the host's
-  x86-64 glibc and loader are copied, their SHA-256 values and version are
-  recorded in `etc/aether-runtime.manifest`, and the manifest digest is written
-  to a build pin. The kernel recomputes the digest and refuses to boot on a
-  mismatch (`AETHER_RUNTIME_ROOT_OK`). Mesa and Wayland are recorded as absent;
-  no unpinned download is used. A different host produces a different pin.
+  `tools/build-pinned-runtime.sh` plus `make runtime-rootfs-pinned` produce the
+  Gate 3 profile, and `tools/build-gate4-runtime.sh` plus `make gate4-runtime`
+  produce the Gate 4 GUI profile. Both are **host-derived pins**: every
+  packaged file is hashed into `etc/aether-runtime.manifest`, the manifest
+  digest is written to a build pin, and the kernel verifies the signed image,
+  the pin, and every `file_sha256` entry (`AETHER_RUNTIME_ROOT_OK`). The Gate 4
+  profile is staged by the loader in `BootInfo` v5 rather than embedded: 40
+  files, 164,543,720 bytes uncompressed and 45,268,992 bytes compressed, with
+  host glibc 2.43, Mesa lavapipe 26.0.8-1ubuntu0.3, Wayland client 1.24.0-2,
+  `libxkbcommon`, the Vulkan loader, `libvulkan_lvp.so`, `libLLVM.so.21.1`, and
+  the full `ldd` closure. The kernel emits
+  `AETHER_GATE4_RUNTIME_OK profile=gate4-host-lavapipe mesa=... wayland=...`.
+  The allocation-only importer needs a 1.5 GiB heap and a 3 GiB guest for this
+  tree. A different host produces a different pin, so the image is not
+  reproducible across hosts until a signed package channel exists.
   `tools/build-glibc-rootfs.sh` plus `make glibc-test` remain the opt-in
   host-glibc hello smoke test.
-- In-OS import: the kernel embeds a small signed `linux-rootfs` SquashFS image,
-  verifies it against the test trust store, imports it with a 4 MiB bootstrap
-  bump heap, and the Linux file syscalls read from the imported table
-  (`AETHER_LINUX_IMPORT_OK`). A second, differently identified AppImage is
-  staged by the UEFI loader, not embedded in the kernel: the loader reads
-  `\linux\app.AppImage` and `\linux\app.import` from the boot volume, retains
-  the buffers below 4 GiB, and publishes their physical extents in `BootInfo`
-  v4 (`linux_appimage`, `linux_appimage_record`). The kernel verifies the
-  signed `linux-appimage` record and image digest against the trust store
-  before the container parser or SquashFS importer sees them, then imports the
-  payload and launches `/usr/bin/app`
+- In-OS import: the Gate 3 profile still embeds a small signed `linux-rootfs`
+  SquashFS image as a fallback and the normal boot stages the same image from
+  the boot volume. The Gate 4 profile is loader-staged only: the loader reads
+  `\linux\runtime.sqfs` and `\linux\runtime.import`, retains the pages below
+  4 GiB, and publishes their physical extents in `BootInfo` v5. The kernel
+  verifies the signed `linux-rootfs` record, the manifest pin, and every
+  `file_sha256` entry before importing the tree
+  (`AETHER_RUNTIME_ROOT_OK`, `AETHER_GATE4_RUNTIME_OK`). A missing image fails
+  in the loader; a tampered image fails signature verification. The user
+  AppImage follows the same loader path (`\linux\app.AppImage`,
+  `\linux\app.import`), is verified before the container parser or SquashFS
+  importer sees it, and launches `/usr/bin/app` or the selected Gate 4 program
   (`AETHER_LINUX_APPIMAGE_STAGED_OK source=loader`,
   `AETHER_LINUX_APPIMAGE_OK`, `AETHER_LINUX_APPIMAGE_EXEC_OK`). The identity
   and version come from the signed record, not kernel constants, and the
-  AppImage runtime is never executed. A missing or tampered file fails closed
-  before parsing or launch. This is still a boot-volume artifact with no
-  user-facing file picker or persistent block device.
+  AppImage runtime is never executed. This is still a boot-volume artifact with
+  no user-facing file picker or persistent block device.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
   fragments, directories, symlinks, hardlink marking, xattr policy and
@@ -236,8 +244,11 @@ exact AppImage digest, and the runtime version.
   no file, device, portal, or endpoint-creation capability. Linux syscall
   dispatch, ELF mapping, and library loading are still kernel-side; syscall
   remoting is not implemented and is not claimed.
-- Wayland bridge, software renderer, and Mesa/Wayland runtime content: not
-  implemented.
+- Wayland bridge, compositor presentation, and GUI rendering are not
+  implemented. The Gate 4 runtime packages host `libwayland-client`/cursor,
+  `libxkbcommon`, the Vulkan loader, and Mesa lavapipe, but the bridge that
+  replaces the client library and presents frames in the Aether compositor is
+  the next Gate 4 slice.
 
 The compatibility database records GridCraft 0.8.0 as `unsupported` until these
 gates pass. A static test program is not an ArtCraft application.

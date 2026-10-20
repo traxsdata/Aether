@@ -1224,7 +1224,13 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     // headers are not covered by a PT_LOAD), so a parse failure falls back to
     // the existing static loader rather than becoming a hard error. A malformed
     // image is still rejected when both parsers fail.
-    let linux_image = aether_linux_elf::parse(program).ok();
+    let linux_image = match aether_linux_elf::parse(program) {
+        Ok(image) => Some(image),
+        Err(error) => {
+            serial_line!("sched: appimage ELF parse failed: {error:?}");
+            None
+        }
+    };
     let tasks = unsafe { &mut *TASKS.0.get() };
     if tasks[APPIMAGE_TASK].state != TaskState::Empty || !tasks[APPIMAGE_TASK].reserved {
         return Err(SchedulerError::Linuxd);
@@ -1233,13 +1239,19 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     // A dynamically linked image is entered through the interpreter named by
     // PT_INTERP. The interpreter and its shared libraries come from the
     // verified runtime rootfs; the AppImage supplies only the main program.
-    let dynamic = if let Some(image) = linux_image
-        && let Some(interpreter_path) = image.interpreter()
-    {
-        let interpreter =
-            crate::linux::file_data(interpreter_path).ok_or(SchedulerError::LinuxAppImage)?;
-        let interpreter_image =
-            aether_linux_elf::parse(interpreter).map_err(|_| SchedulerError::LinuxAppImage)?;
+    let dynamic = if let Some(image) = linux_image {
+        let Some(interpreter_path) = image.interpreter() else {
+            serial_line!("sched: appimage has no PT_INTERP");
+            return Err(SchedulerError::LinuxImage);
+        };
+        let interpreter = crate::linux::file_data(interpreter_path).ok_or_else(|| {
+            serial_line!("sched: appimage interpreter missing: {interpreter_path}");
+            SchedulerError::LinuxAppImage
+        })?;
+        let interpreter_image = aether_linux_elf::parse(interpreter).map_err(|error| {
+            serial_line!("sched: appimage interpreter parse failed: {error:?}");
+            SchedulerError::LinuxAppImage
+        })?;
         let program_path = crate::linux::app_identity()
             .map(|(_, _, path)| path)
             .ok_or(SchedulerError::LinuxAppImage)?;
@@ -1278,9 +1290,12 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             )
         })
         .ok_or(SchedulerError::OutOfMemory)?
-        .map_err(|error| match error {
-            crate::linux_loader::LoadError::Stack => SchedulerError::LinuxAppArguments,
-            _ => SchedulerError::LinuxAppImage,
+        .map_err(|error| {
+            serial_line!("sched: appimage loader failed: {error:?}");
+            match error {
+                crate::linux_loader::LoadError::Stack => SchedulerError::LinuxAppArguments,
+                _ => SchedulerError::LinuxAppImage,
+            }
         })?;
         Some((loaded, image, interpreter_image))
     } else {

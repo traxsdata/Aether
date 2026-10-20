@@ -214,6 +214,22 @@ user space. It is not a VM. The target and security gates are in
     `usr/bin/gridcraft` run, and a pixel/checksum plus input-trace record have
     not been implemented. The workbook does not yet travel through a desktop
     file chooser or D-Bus portal.
+  - [x] Gate 4 runtime rootfs packaging (QEMU prototype scope): `make
+    gate4-runtime` assembles and signs a host-derived rootfs with glibc,
+    libwayland-client/cursor, libxkbcommon, the Vulkan loader, Mesa lavapipe,
+    LLVM and the full dynamic-library closure. `make gate4-runtime-test` boots
+    it from the loader through a `BootInfo` v5 runtime-rootfs extent, verifies
+    the manifest and all 40 file digests in the kernel, emits
+    `AETHER_GATE4_RUNTIME_OK profile=gate4-host-lavapipe
+    mesa=lavapipe-26.0.8-1ubuntu0.3 wayland=1.24.0-2`, and runs the real
+    GridCraft AppImage's `/usr/bin/gridcraft-cli --version` (`gridcraft-cli
+    0.8.0`) through that rootfs. The compressed image is 45,268,992 bytes
+    (164,543,720 bytes imported). Tampered and missing runtime images fail
+    closed.
+  - [ ] The Gate 4 GUI launch, Wayland bridge, compositor presentation, input,
+    portal workbook open/save, and pixel/checksum evidence remain open. The
+    in-tree `libwayland-client.so.0` is the host library until the bridge
+    replaces it at the same SONAME path.
 - [x] Moved the GridCraft record from `unsupported` to `limited` after the
   Gate 3 run, with the exact digest, runtime profile, named tests, platform,
   and date.
@@ -481,8 +497,10 @@ without touching user data. VMware Workstation itself has not yet been
 smoke-tested.
 
 The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
-(QEMU scope), the **Gate 3 headless GridCraft run** (QEMU prototype scope), and
-the **Gate 4 portal slice** (QEMU prototype scope). Boot markers cover signed
+The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
+(QEMU scope), the **Gate 3 headless GridCraft run** (QEMU prototype scope), the
+**Gate 4 portal slice** (QEMU prototype scope), and the **Gate 4 runtime rootfs
+packaging slice** (QEMU prototype scope). Boot markers cover signed
 embedded-rootfs and loader-staged AppImage import, the pinned host-glibc runtime
 manifest, ring-3 `linuxd` launch approval and denial, demand paging,
 cross-process shared anonymous mappings, read-shared rootfs mappings,
@@ -491,11 +509,13 @@ sleeps/timerfds, blocking and directory inotify, pseudo-files/devices,
 default-deny syscall policy, `clone3`/robust futex/`rseq`,
 `siginfo`/`ucontext`/alt-stack/`SA_RESTART`, process groups, blocking `wait4`,
 static/dynamic exec, the `PT_INTERP` loader, and the real GridCraft CLI CSV
-round trip. `make gate3-test` passes with the pinned 19 MiB AppImage, and
-`make ci` (including lint, unit/tooling tests, QEMU boot, ISO/desktop/Files,
-fault/rollback/negative paths, release checks, and the runtime-packaging tests)
-passes at the commit that adds this run. The exact commit and marker transcript
-belong in the PR, not this planning file.
+round trip. The Gate 4 runtime slice adds a loader-staged `BootInfo` v5 rootfs
+with Mesa lavapipe, LLVM, Wayland client libraries, `libxkbcommon`, and a
+kernel-verified 40-file manifest. `make gate3-test` passes with the pinned
+19 MiB AppImage, and `make ci` (including lint, unit/tooling tests, QEMU boot,
+ISO/desktop/Files, fault/rollback/negative paths, release checks, and the
+runtime-packaging tests) passes at the commit that adds this run. The exact
+commit and marker transcript belong in the PR, not this planning file.
 
 `make gate4-portal-test` covers the portal half of Gate 4: a Linux AppImage
 fixture opens a seeded workbook through
@@ -509,16 +529,21 @@ bytes in its filesystem, and the denials. The GUI, Wayland bridge, software
 renderer, input routing, and a real windowed GridCraft run remain open; the
 compatibility record stays `limited`.
 
-Neither the Gate 2 prototype nor the Gate 3 run is a production compatibility
-claim. Linux syscall dispatch, ELF/library mapping, and VMA management remain in
-the kernel, so `linuxd` is a ring-3 launch-policy manager rather than the full
-ABI service described by the architecture. The imported AppImage tree is not yet
-merged into a per-application visible root, and the runtime pin is host-derived.
-Mesa/lavapipe/Wayland runtime content, durable storage, a user-installed
-AppImage picker, complete inotify/signal/epoll semantics, and the Wayland
-portal/renderer stack remain open. These are tracked as the Gate 2 production
-follow-up and Gate 4 work; Gate 3's prototype scope does not make the GUI or
-arbitrary Linux applications compatible.
+Neither the Gate 2 prototype, the Gate 3 run, the Gate 4 portal slice, nor
+the Gate 4 runtime packaging slice is a production compatibility claim. Linux
+syscall dispatch, ELF/library mapping, and VMA management remain in the kernel,
+so `linuxd` is a ring-3 launch-policy manager rather than the full ABI service
+described by the architecture. The imported AppImage tree is not yet merged
+into a per-application visible root, and the runtime pin is host-derived: the
+Gate 4 rootfs bundles the build host's Mesa/LLVM/Wayland libraries and is not
+reproducible across hosts until a signed package channel exists. The Gate 4
+import is also allocation-heavy (a 1.5 GiB boot heap and 3 GiB guest for the
+164 MiB uncompressed tree) because the bootstrap allocator never reclaims.
+Durable storage, a user-installed AppImage picker, complete
+inotify/signal/epoll semantics, the Wayland bridge/portal/renderer integration,
+and GUI evidence remain open. These are tracked as the Gate 2 production
+follow-up and Gate 4 work; the packaged runtime and portal do not make the GUI
+or arbitrary Linux applications compatible.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
 durable block store, network/audio services, the Wayland/software-renderer

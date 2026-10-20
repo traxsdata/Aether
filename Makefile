@@ -32,6 +32,10 @@ LINUX_APPIMAGE_RECORD := $(BUILD)/linux-user.import
 # AppImage is not embedded in the kernel; the loader reads these paths.
 STAGED_APPIMAGE ?= $(LINUX_APPIMAGE)
 STAGED_APPIMAGE_RECORD ?= $(LINUX_APPIMAGE_RECORD)
+# The runtime rootfs is staged too. Gate 3 stages the same image it used to
+# embed; Gate 4 overrides these with the Mesa/lavapipe rootfs.
+STAGED_RUNTIME_ROOTFS ?= $(LINUX_ROOTFS)
+STAGED_RUNTIME_RECORD ?= $(LINUX_ROOTFS_RECORD)
 TAMPERED_APPIMAGE := $(BUILD)/linux-user-tampered.AppImage
 LINUX_APPIMAGE_PROGRAM ?= /usr/bin/app
 # Optional | separated argv for the selected AppImage program. The default is
@@ -45,6 +49,19 @@ GATE3_RUNTIME_VERSION ?= $(shell getconf GNU_LIBC_VERSION | tr ' ' '-')
 LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
 LINUX_DYN_PATH ?= /usr/bin/dynamic
 LINUX_RUNTIME_PREBUILT ?= 0
+# Gate 4 GUI runtime rootfs and boot smoke test.
+GATE4_RUNTIME_ROOTFS := $(BUILD)/gate4-runtime.sqfs
+GATE4_RUNTIME_RECORD := $(BUILD)/gate4-runtime.import
+GATE4_RUNTIME_PIN := $(BUILD)/gate4-runtime.pin
+GATE4_RUNTIME_MANIFEST := $(BUILD)/gate4-runtime.manifest
+GATE4_RUNTIME_TAMPERED := $(BUILD)/gate4-runtime-tampered.sqfs
+GATE4_EXTRA_ROOT := $(BUILD)/gate4-runtime-extra
+GATE4_APPIMAGE_RECORD := $(BUILD)/gridcraft.import
+# The Gate 4 GUI launch is a later slice. This boot smoke test runs the real
+# AppImage's CLI through the Gate 4 rootfs and verifies its version.
+GATE4_APP_PROGRAM ?= /usr/bin/gridcraft-cli
+GATE4_APP_ARGS ?= --version
+IMAGE_SIZE ?= 64M
 IMAGE := $(BUILD)/aether.img
 
 KERNEL_TARGET := x86_64-unknown-none
@@ -61,7 +78,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test shell-test fault-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -123,13 +140,15 @@ loader: kernel
 	cp target/$(LOADER_TARGET)/release/aether-bootloader.efi $(LOADER_EFI)
 
 image: loader
-	truncate -s 64M $(IMAGE)
+	truncate -s $(IMAGE_SIZE) $(IMAGE)
 	mformat -i $(IMAGE) -F -v AETHER ::
 	mmd -i $(IMAGE) ::/EFI ::/EFI/BOOT
 	mcopy -i $(IMAGE) $(LOADER_EFI) ::/EFI/BOOT/BOOTX64.EFI
 	mmd -i $(IMAGE) ::/linux
 	mcopy -i $(IMAGE) $(STAGED_APPIMAGE) ::/linux/app.AppImage
 	mcopy -i $(IMAGE) $(STAGED_APPIMAGE_RECORD) ::/linux/app.import
+	mcopy -i $(IMAGE) $(STAGED_RUNTIME_ROOTFS) ::/linux/runtime.sqfs
+	mcopy -i $(IMAGE) $(STAGED_RUNTIME_RECORD) ::/linux/runtime.import
 	@echo "built $(IMAGE)"
 
 test: image
@@ -208,6 +227,75 @@ gate4-portal-test:
 	AETHER_EXTRA_MARKERS=AETHER_GATE4_PORTAL_OK,AETHER_GATE4_SAVE_OK,AETHER_GATE4_REVOKE_OK \
 	AETHER_REQUIRE_TEXT='AETHER_GATE4_PORTAL_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx bytes=58 staging=sctmp+rename temp_bytes=58 staged_bytes=87 renames=1|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|portal: audit revoked' \
 	$(PYTHON) tools/test-boot.py
+# Build the Gate 4 Mesa/lavapipe runtime rootfs, sign it, and verify the
+# manifest, every file digest, the loader closure, and the signed record on
+# the host. This does not boot.
+gate4-runtime: linux-fixture
+	@rm -rf $(GATE4_EXTRA_ROOT)
+	@mkdir -p $(GATE4_EXTRA_ROOT)/lib $(GATE4_EXTRA_ROOT)/usr/bin $(GATE4_EXTRA_ROOT)/etc
+	cp $(LINUX_INTERP_ELF) $(GATE4_EXTRA_ROOT)/lib/ld-aether.so
+	cp $(LINUX_DYN_ELF) $(GATE4_EXTRA_ROOT)/usr/bin/dynamic
+	cp $(LINUX_EXEC_ELF) $(GATE4_EXTRA_ROOT)/usr/bin/exec
+	cp $(LINUX_DYN_EXEC_ELF) $(GATE4_EXTRA_ROOT)/usr/bin/dynamic-exec
+	printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\nAETHER_GATE4_RUNTIME_ROOT_OK source=/etc/motd\n' \
+		> $(GATE4_EXTRA_ROOT)/etc/motd
+	sh tools/build-gate4-runtime.sh $(GATE4_RUNTIME_ROOTFS) \
+		$(GATE4_RUNTIME_RECORD) $(GATE4_RUNTIME_PIN) \
+		$(GATE4_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED) $(GATE4_EXTRA_ROOT)
+	sh tools/build-gate3-appimage.sh $(GATECRAFT_APPIMAGE) \
+		$(GATE4_APPIMAGE_RECORD) $(LINUX_RUNTIME_SEED)
+	$(PYTHON) tools/test-gate4-runtime.py \
+		--root $(BUILD)/gate4-runtime-root \
+		--manifest $(GATE4_RUNTIME_MANIFEST) \
+		--rootfs $(GATE4_RUNTIME_ROOTFS) \
+		--record $(GATE4_RUNTIME_RECORD) --pin $(GATE4_RUNTIME_PIN)
+
+# Rebuild the boot image with the Gate 4 artifacts already on disk.
+gate4-image-only:
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		KERNEL_FEATURES=gate4-runtime \
+		LINUX_RUNTIME_PIN=$(GATE4_RUNTIME_PIN) \
+		STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_ROOTFS) \
+		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+		LINUX_APPIMAGE_PROGRAM=$(GATE4_APP_PROGRAM) \
+		LINUX_APPIMAGE_ARGS='$(GATE4_APP_ARGS)' \
+		STAGED_APPIMAGE=$(GATECRAFT_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) \
+		IMAGE_SIZE=128M image
+
+gate4-runtime-image: gate4-runtime
+	$(MAKE) gate4-image-only
+
+# Boot the staged Gate 4 runtime rootfs and require the kernel-owned marker,
+# then prove tampered and missing runtime images fail closed.
+gate4-runtime-test: gate4-runtime-image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_EXTRA_MARKERS=AETHER_GATE4_RUNTIME_OK \
+	AETHER_BOOT_TIMEOUT=240 \
+	AETHER_MEMORY=3G \
+	AETHER_REQUIRE_TEXT='AETHER_GATE4_RUNTIME_OK|profile=gate4-host-lavapipe|mesa=lavapipe-|wayland=|AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=19024376|gridcraft-cli 0.8.0|AETHER_LINUX_IMPORT_OK' \
+	$(PYTHON) tools/test-boot.py
+	@set -e; trap '$(MAKE) gate4-image-only >/dev/null' EXIT; \
+		cp $(GATE4_RUNTIME_ROOTFS) $(GATE4_RUNTIME_TAMPERED); \
+		$(PYTHON) -c 'import sys; p=sys.argv[1]; d=bytearray(open(p,"rb").read()); d[-1]^=0xff; open(p,"wb").write(d)' $(GATE4_RUNTIME_TAMPERED); \
+		$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+			KERNEL_FEATURES=gate4-runtime \
+			LINUX_RUNTIME_PIN=$(GATE4_RUNTIME_PIN) \
+			STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_TAMPERED) \
+			STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+			LINUX_APPIMAGE_PROGRAM=$(GATE4_APP_PROGRAM) \
+			LINUX_APPIMAGE_ARGS='$(GATE4_APP_ARGS)' \
+			STAGED_APPIMAGE=$(GATECRAFT_APPIMAGE) \
+			STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) \
+			IMAGE_SIZE=128M image >/dev/null; \
+		AETHER_EXPECT_BOOT_FAILURE=1 \
+		AETHER_EXPECT_FAILURE_TEXT='linux: rootfs signature or digest verification failed' \
+		AETHER_MEMORY=3G AETHER_BOOT_TIMEOUT=240 $(PYTHON) tools/test-boot.py; \
+		$(MAKE) gate4-image-only >/dev/null; \
+		mdel -i $(IMAGE) ::/linux/runtime.sqfs; \
+		AETHER_EXPECT_BOOT_FAILURE=1 \
+		AETHER_EXPECT_FAILURE_TEXT='AETHER_LOADER_FAILED error=staged boot file' \
+		AETHER_MEMORY=3G AETHER_BOOT_TIMEOUT=240 $(PYTHON) tools/test-boot.py
 
 shell-test: image
 	$(PYTHON) tools/test-shell.py

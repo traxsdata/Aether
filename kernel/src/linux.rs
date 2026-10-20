@@ -74,6 +74,23 @@ struct StagedApp {
 
 static STAGED: Global<Option<StagedApp>> = Global(UnsafeCell::new(None));
 
+/// Physical extents published by the loader for the staged runtime rootfs.
+struct StagedRootfs {
+    image: BootArtifact,
+    record: BootArtifact,
+}
+
+static STAGED_ROOTFS: Global<Option<StagedRootfs>> = Global(UnsafeCell::new(None));
+
+/// Records the loader-staged runtime rootfs and its signed import record.
+///
+/// The Gate 4 Mesa/lavapipe rootfs is too large to embed in the kernel image.
+/// Nothing here is trusted until [`init`] verifies the record and digest.
+pub fn stage_runtime_rootfs(image: BootArtifact, record: BootArtifact) {
+    // SAFETY: Boot is single-threaded and this is the only write to STAGED_ROOTFS.
+    unsafe { *STAGED_ROOTFS.0.get() = Some(StagedRootfs { image, record }) };
+}
+
 /// Records the loader-staged AppImage and its signed import record.
 ///
 /// Called once from the kernel entry point after `BootInfo` validation. The
@@ -132,11 +149,14 @@ fn trust() -> Option<TrustStore<'static>> {
 /// Returns `(files, bytes)` on success. Diagnostics are printed by the caller.
 pub fn init() -> Result<(usize, usize), ()> {
     let trust = trust().ok_or(())?;
-    if manifest::verify_image(ROOTFS_RECORD, &trust, ROOTFS).is_err() {
+    let (rootfs, record) = runtime_rootfs().ok_or_else(|| {
+        serial_line!("linux: runtime rootfs is missing");
+    })?;
+    if manifest::verify_image(record, &trust, rootfs).is_err() {
         serial_line!("linux: rootfs signature or digest verification failed");
         return Err(());
     }
-    let image = Image::from_squashfs(ROOTFS).map_err(|error| {
+    let image = Image::from_squashfs(rootfs).map_err(|error| {
         serial_line!("linux: rootfs parse failed: {error:?}");
     })?;
     let tree = image.import(Limits::default()).map_err(|error| {
@@ -160,8 +180,38 @@ pub fn init() -> Result<(usize, usize), ()> {
     let count = files.len();
     // SAFETY: Boot is single-threaded and this is the only write to ROOT.
     unsafe { *ROOT.0.get() = Some(Root { files }) };
+    serial_line!(
+        "linux: runtime rootfs imported files={count} bytes={bytes} heap={}",
+        crate::memory::heap_used_bytes()
+    );
     install_runtime_profile()?;
     Ok((count, bytes))
+}
+
+/// Returns the loader-staged rootfs pair, or the embedded Gate 3 fixture.
+///
+/// A present staged descriptor is authoritative: a malformed extent or a
+/// missing record fails closed instead of silently falling back to the small
+/// embedded image.
+fn runtime_rootfs() -> Option<(&'static [u8], &'static [u8])> {
+    // SAFETY: STAGED_ROOTFS is written once during boot and immutable afterwards.
+    if let Some(staged) = unsafe { (*STAGED_ROOTFS.0.get()).as_ref() } {
+        if !staged.image.is_present() || !staged.record.is_present() {
+            serial_line!("linux: staged runtime rootfs is incomplete");
+            return None;
+        }
+        let image = staged_bytes(staged.image).inspect_err(|()| {
+            serial_line!("linux: staged runtime rootfs extent is invalid");
+        });
+        let record = staged_bytes(staged.record).inspect_err(|()| {
+            serial_line!("linux: staged runtime rootfs record extent is invalid");
+        });
+        return match (image, record) {
+            (Ok(image), Ok(record)) => Some((image, record)),
+            _ => None,
+        };
+    }
+    Some((ROOTFS, ROOTFS_RECORD))
 }
 
 /// Verifies the packaged runtime manifest against the build-time pin.
@@ -192,6 +242,7 @@ fn install_runtime_profile() -> Result<(), ()> {
     let mut glibc = None;
     let mut mesa = None;
     let mut wayland = None;
+    let mut files = 0usize;
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -201,6 +252,10 @@ fn install_runtime_profile() -> Result<(), ()> {
             "glibc" => glibc = Some(value),
             "mesa" => mesa = Some(value),
             "wayland" => wayland = Some(value),
+            "file_sha256" => {
+                verify_manifest_file(value)?;
+                files += 1;
+            }
             _ => {}
         }
     }
@@ -213,12 +268,13 @@ fn install_runtime_profile() -> Result<(), ()> {
     let length = aether_crypto::to_hex(&digest, &mut hex).ok_or(())?;
     let digest_hex = core::str::from_utf8(&hex[..length]).map_err(|_| ())?;
     serial_line!(
-        "AETHER_RUNTIME_ROOT_OK profile={} glibc={} mesa={} wayland={} pin={}",
+        "AETHER_RUNTIME_ROOT_OK profile={} glibc={} mesa={} wayland={} pin={} files={}",
         profile,
         glibc,
         mesa.unwrap_or("unknown"),
         wayland.unwrap_or("unknown"),
-        digest_hex
+        digest_hex,
+        files
     );
     // SAFETY: Boot is single-threaded and this is the only write to RUNTIME.
     unsafe {
@@ -227,6 +283,37 @@ fn install_runtime_profile() -> Result<(), ()> {
             glibc: String::from(glibc),
         })
     };
+    if profile.starts_with("gate4-") {
+        serial_line!(
+            "AETHER_GATE4_RUNTIME_OK profile={} mesa={} wayland={} files={}",
+            profile,
+            mesa.unwrap_or("unknown"),
+            wayland.unwrap_or("unknown"),
+            files
+        );
+    }
+    Ok(())
+}
+
+/// Verifies one `file_sha256=<absolute path>:<hex>` manifest entry.
+///
+/// The manifest digest is pinned at build time, so these entries bind every
+/// packaged file the runtime depends on. A missing file or a mismatched digest
+/// fails the boot instead of importing a partially verified tree.
+fn verify_manifest_file(value: &str) -> Result<(), ()> {
+    let (path, expected) = value.split_once(':').ok_or(())?;
+    let data = file_data(path).ok_or_else(|| {
+        serial_line!("linux: runtime manifest names a missing file: {path}");
+    })?;
+    let mut expected_digest = [0u8; 32];
+    if aether_crypto::from_hex(expected.as_bytes(), &mut expected_digest) != Some(32) {
+        serial_line!("linux: runtime manifest has a malformed file digest: {path}");
+        return Err(());
+    }
+    if aether_crypto::sha256(data) != expected_digest {
+        serial_line!("linux: runtime manifest file digest mismatch: {path}");
+        return Err(());
+    }
     Ok(())
 }
 
@@ -286,6 +373,10 @@ pub fn import_appimage() -> Result<(), ()> {
     let tree = image.import(Limits::default()).map_err(|error| {
         serial_line!("linux: AppImage import failed: {error:?}");
     })?;
+    serial_line!(
+        "linux: AppImage imported heap={}",
+        crate::memory::heap_used_bytes()
+    );
     let program_path = APPIMAGE_PROGRAM.trim_start_matches('/');
     let mut program = None;
     for entry in tree.entries {

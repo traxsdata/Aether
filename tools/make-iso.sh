@@ -35,6 +35,8 @@ mcopy -i "$EFI_IMAGE" "$BUILD/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
 mmd -i "$EFI_IMAGE" ::/linux
 mcopy -i "$EFI_IMAGE" "$BUILD/linux-user.AppImage" ::/linux/app.AppImage
 mcopy -i "$EFI_IMAGE" "$BUILD/linux-user.import" ::/linux/app.import
+mcopy -i "$EFI_IMAGE" "$BUILD/linux-runtime.sqfs" ::/linux/runtime.sqfs
+mcopy -i "$EFI_IMAGE" "$BUILD/linux-runtime.import" ::/linux/runtime.import
 cp "$EFI_IMAGE" "$STAGE/efiboot.img"
 
 xorriso -as mkisofs \

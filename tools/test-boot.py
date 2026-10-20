@@ -71,7 +71,7 @@ def qemu_command(code: Path, variables: Path | None) -> list[str]:
         "-cpu",
         "max",
         "-m",
-        "1024M",
+        os.environ.get("AETHER_MEMORY", "1024M"),
         "-display",
         "vnc=127.0.0.1:9",
         "-device",

@@ -14,7 +14,7 @@ mod uefi;
 
 use aether_abi::{
     BootArtifact, BootInfo, FramebufferInfo, MAX_MEMORY_REGIONS, MAX_STAGED_APPIMAGE_BYTES,
-    MAX_STAGED_RECORD_BYTES, MemoryKind, MemoryRegion,
+    MAX_STAGED_RECORD_BYTES, MAX_STAGED_RUNTIME_ROOTFS_BYTES, MemoryKind, MemoryRegion,
 };
 use aether_boot_common::elf;
 use aether_boot_common::{PAGE_SIZE, memory, pages_for};
@@ -48,6 +48,22 @@ const APPIMAGE_RECORD_PATH: &[u16] = &[
     0x006d, 0x0070, 0x006f, 0x0072, 0x0074, 0x0000,
 ];
 const APPIMAGE_RECORD_PATH_NAME: &str = "\\linux\\app.import";
+
+/// Boot-volume paths of the staged runtime rootfs.
+///
+/// Unlike the Gate 3 embedded fixture, the Gate 4 Mesa/lavapipe rootfs is too
+/// large to embed in the kernel image. The loader retains these pages and the
+/// kernel verifies the signed record before importing the tree.
+const RUNTIME_ROOTFS_PATH: &[u16] = &[
+    0x005c, 0x006c, 0x0069, 0x006e, 0x0075, 0x0078, 0x005c, 0x0072, 0x0075, 0x006e, 0x0074, 0x0069,
+    0x006d, 0x0065, 0x002e, 0x0073, 0x0071, 0x0066, 0x0073, 0x0000,
+];
+const RUNTIME_ROOTFS_PATH_NAME: &str = "\\linux\\runtime.sqfs";
+const RUNTIME_ROOTFS_RECORD_PATH: &[u16] = &[
+    0x005c, 0x006c, 0x0069, 0x006e, 0x0075, 0x0078, 0x005c, 0x0072, 0x0075, 0x006e, 0x0074, 0x0069,
+    0x006d, 0x0065, 0x002e, 0x0069, 0x006d, 0x0070, 0x006f, 0x0072, 0x0074, 0x0000,
+];
+const RUNTIME_ROOTFS_RECORD_PATH_NAME: &str = "\\linux\\runtime.import";
 
 /// Fixed buffer for the firmware file-info record. File names on the boot
 /// volume are short, so this comfortably exceeds the variable-length header.
@@ -279,6 +295,33 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
         linux_appimage_record.address,
         linux_appimage_record.length
     );
+    // SAFETY: Boot services are active and `handle` is this image's handle.
+    let linux_runtime_rootfs = unsafe {
+        load_staged_file(
+            services,
+            handle,
+            RUNTIME_ROOTFS_PATH,
+            RUNTIME_ROOTFS_PATH_NAME,
+            MAX_STAGED_RUNTIME_ROOTFS_BYTES,
+        )?
+    };
+    // SAFETY: Same contract as the AppImage read.
+    let linux_runtime_rootfs_record = unsafe {
+        load_staged_file(
+            services,
+            handle,
+            RUNTIME_ROOTFS_RECORD_PATH,
+            RUNTIME_ROOTFS_RECORD_PATH_NAME,
+            MAX_STAGED_RECORD_BYTES,
+        )?
+    };
+    serial_line!(
+        "loader: staged runtime rootfs address={:#x} length={} record_address={:#x} record_length={}",
+        linux_runtime_rootfs.address,
+        linux_runtime_rootfs.length,
+        linux_runtime_rootfs_record.address,
+        linux_runtime_rootfs_record.length
+    );
 
     let boot_info_page = unsafe { allocate_below_4g(services, 1)? };
     let map_page =
@@ -321,6 +364,8 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
                 framebuffer,
                 linux_appimage,
                 linux_appimage_record,
+                linux_runtime_rootfs,
+                linux_runtime_rootfs_record,
                 reserved: [0; 4],
             },
         );
