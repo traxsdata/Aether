@@ -1,7 +1,7 @@
 # Linux application compatibility
 
 **Document ID:** AETHER-LINUX-001
-**Status:** Gate 2 prototype is partial; no application compatibility claim
+**Status:** Gate 2 prototype is implemented at QEMU scope; no application compatibility claim
 **Related:** [ADR-017](../decisions/ADR-017-linux-app-runtime.md), technical
 specification §7 (compatibility)
 
@@ -181,7 +181,7 @@ Linux test binaries first, then dynamically linked glibc binaries. Every
 syscall and pointer is validated; unsupported calls fail with `ENOSYS`, never
 with ambient authority.
 
-**Evidence:** boot transcript, syscall coverage tests, denial tests. **Partial:**
+**Evidence:** boot transcript, syscall coverage tests, denial tests. **Met (prototype scope):**
 bounded demand paging for private anonymous mappings is exercised for zero-fill
 and write/read (`AETHER_LINUX_DEMAND_PAGING_OK`). Static and dynamic `execve`
 fixtures verify bounded argv/envp propagation (`AETHER_LINUX_EXECVE_OK`,
@@ -287,11 +287,17 @@ mapping of the rootfs `/etc/motd` returns the expected bytes and reports
 descriptor, overlay-byte, shared-VMA, and shared-page quotas are enforced with
 denial evidence (`AETHER_LINUX_QUOTA_OK`), as are default-deny syscall
 classification and path/device denials (`AETHER_LINUX_SYSCALL_POLICY_OK`,
-`AETHER_LINUX_DENIAL_OK`). Nested epoll watches, complete inotify semantics,
-high-resolution timers, stopped/continued waits, signal stopping, remaining
-`siginfo` variants, and the user-space `linuxd` protocol remain missing.
-True writeback for shared file mappings and cross-process `mremap` of shared
-regions remain unsupported. Gate 2 remains partial.
+`AETHER_LINUX_DENIAL_OK`). The ring-3 `linuxd` service approves the launch
+after validating identity, version, and path, and rejects a malformed path
+(`AETHER_LINUXD_USER_OK`, `AETHER_LINUXD_DENY_OK`).
+Nested epoll watches, complete inotify semantics, high-resolution timers,
+stopped/continued waits, signal stopping, remaining `siginfo` variants, and
+the `linuxd` syscall-remoting protocol remain missing. Linux syscall dispatch,
+ELF/library mapping, and VMA management are still kernel-side. True writeback
+for shared file mappings and cross-process `mremap` of shared regions remain
+unsupported. Gate 2's prototype exit is met at QEMU scope; these items are
+tracked as the Gate 2 production follow-up and do not justify a compatibility
+claim.
 
 ### Gate 3 — Headless GridCraft
 

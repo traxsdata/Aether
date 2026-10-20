@@ -140,16 +140,28 @@ user space. It is not a VM. The target and security gates are in
   decisions for X11, D-Bus, process spawning, clipboard, paths, locale, GPU, and
   network. Gate 1 is not an implementation gate: remaining ELF/runtime,
   process/thread, signal, Wayland, and Vulkan interfaces remain Gate 2 work.
-- [ ] Gate 2 — interface mapping and prototype: **partial**. Evidence includes
-  bounded demand paging for private anonymous mappings, file-backed `mmap`,
-  `munmap` reclaim, `mprotect`, growing `brk`, W^X denial, static and dynamic
-   `execve` with bounded argv/envp, blocking `wait4` with nonchild/selector
-   checks, bounded same-session process groups, and cross-process SIGUSR1. The
-   dynamic `ET_DYN`/`PT_INTERP` path has a fixture and an opt-in host-glibc hello
-   through `ld.so`. `MAP_SHARED|MAP_ANONYMOUS` is tested within one `CLONE_VM`
-   thread group; `fork()` is rejected while such a mapping exists. Cross-process
-   shared-frame ownership is still missing. A pinned production runtime rootfs
-   and user-space `linuxd` remain missing; Gate 2 is not complete.
+- [x] Gate 2 — interface mapping and prototype (QEMU prototype scope): the
+  kernel primitives, signed import path, and ring-3 `linuxd` launch policy are
+  boot-tested. Evidence includes demand paging, cross-process shared anonymous
+  mappings, read-shared rootfs mappings with per-domain quotas, `mremap`, W^X
+  denial, static and dynamic `execve` with argv/envp, blocking `wait4` and
+  process groups, `siginfo`/`ucontext`/alt-stack/`SA_RESTART`, robust futex,
+  `clone3`/`rseq`, blocking and finite `poll`/`epoll_wait`, cross-process pipes,
+  `nanosleep`/`timerfd`, bounded pseudo-files and synthetic devices, inotify
+  with directory watches and overflow, a default-deny syscall classifier with
+  denial/audit evidence, a digest-pinned host-glibc runtime rootfs, a signed
+  AppImage staged through the boot loader, and a ring-3 `linuxd` that must
+  approve the launch. The dynamic `ET_DYN`/`PT_INTERP` path and an opt-in
+  host-glibc `ld.so` hello also pass. This is a prototype, not production
+  compatibility: Linux syscall dispatch, ELF/library mapping, and VMA
+  management remain in the kernel, Mesa/Wayland content is absent, the overlay
+  is RAM-backed, and an installed AppImage cannot yet be selected from a
+  persistent device.
+- [ ] Gate 2 production follow-up: move Linux ABI emulation, ELF/library
+  loading, and syscall remoting into the ring-3 `linuxd`, pin a
+  Mesa/lavapipe/Wayland runtime rootfs, and make AppImage installation and the
+  overlay durable on a persistent block device. These are prerequisites for a
+  production compatibility claim and for Gate 3's application run.
 - [ ] Gate 3 — headless GridCraft: import
   `gridcraft-0.8.0-linux-x86_64.AppImage` and run its `gridcraft-cli`
   (`eval`, CSV import/export) with a read-only root and private overlay.
@@ -174,26 +186,43 @@ user space. It is not a VM. The target and security gates are in
   parsing, extraction limits, and a real-AppImage host extractor
   (`aether-squashfs`). Unsupported inode types are rejected.
 - [x] Import policy: relative symlinks only, duplicate-path rejection, hardlinks
-  marked and copied per path, setuid/setgid/sticky stripped, xattrs counted and
-  dropped, extraction limits.
-- [ ] Add explicit xattr policy controls beyond count-and-drop.
+  marked and copied per path, setuid/setgid/sticky stripped, and extraction
+  limits.
+- [x] Explicit xattr policy: SquashFS xattrs are parsed with a `user.*`
+  allowlist and a `security.*`/`trusted.*`/`system.*` denylist
+  (`security.capability` in particular is never imported); retained and dropped
+  values are reported and covered by host tests.
 - [x] Import into a private read-only root; reject symlink escapes, hardlinks
   outside the root, duplicate paths, and oversized files.
 - [x] In-OS import of an embedded signed rootfs: the kernel verifies the test
   `linux-rootfs` record, imports the SquashFS tree with a bounded bootstrap
   heap, and serves Linux file opens from that tree
   (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`).
-- [x] Per-task writable overlay prototype: bounded entries under `/tmp`,
-  created/truncated/read/written through the Linux file descriptors, cleared on
-  exit and fault (`AETHER_LINUX_OVERLAY_OK`).
-- [ ] Extend the overlay to settings/logs paths, persistent per-application
-  storage, user-visible erasure, and quotas that survive a crash.
+- [x] Writable overlay: bounded entries under `/tmp`, created/truncated/read/
+  written through the Linux file descriptors, with fault cleanup
+  (`AETHER_LINUX_OVERLAY_OK`).
+- [x] Overlay settings/logs paths, per-application quota, erasure, and
+  persistence across task exit within one boot (`/tmp`, `/settings`, `/logs`;
+  `linux-erase`; `AETHER_LINUX_OVERLAY_PERSIST_OK`,
+  `AETHER_LINUX_OVERLAY_ERASE_OK`).
+- [ ] Durable overlay across power loss. The filesystem service is still a RAM
+  disk; this is blocked on the persistent block device in Platform follow-ups.
 - [x] Runtime rootfs host packaging: `tools/build-runtime-rootfs.sh` builds a
   zstd SquashFS rootfs and signs it as a `linux-rootfs` import record.
-- [ ] Populate and pin the actual glibc/`ld.so`/Mesa/lavapipe/Wayland runtime
-  rootfs, record its version in the compatibility database, install it as an
-  Aether runtime package, and import user-supplied AppImages instead of the
-  embedded fixture.
+- [x] Pinned runtime rootfs: `make runtime-rootfs-pinned` packages the
+  host-derived glibc/`ld.so` profile with a SHA-256 version/build manifest and a
+  signed `linux-rootfs` record; the kernel recomputes the manifest digest and
+  reports the exact glibc version (`AETHER_RUNTIME_ROOT_OK`). The compatibility
+  database records the profile. Mesa/lavapipe/Wayland content is still absent.
+- [x] Loader-staged signed AppImage: the UEFI loader reads a distinct
+  `\linux\app.AppImage` and its import record from the boot volume, publishes
+  them through the boot ABI, and the kernel verifies digest and publisher
+  before parsing or launch (`AETHER_LINUX_APPIMAGE_STAGED_OK`,
+  `AETHER_LINUX_APPIMAGE_OK`, `AETHER_LINUX_APPIMAGE_EXEC_OK`). Missing and
+  tampered staged files fail closed.
+- [ ] User-installed AppImage selection: no file picker, package channel, or
+  writable install location exists yet; the AppImage is staged on the boot
+  volume at build time.
 
 #### Linux ABI
 
@@ -214,9 +243,14 @@ user space. It is not a VM. The target and security gates are in
 - [x] Bounded demand paging for private anonymous mappings, with zero-fill and
   write/read fixture coverage (`AETHER_LINUX_DEMAND_PAGING_OK`), plus
   `MAP_SHARED|MAP_ANONYMOUS` visibility between `CLONE_VM` threads
-  (`AETHER_LINUX_SHARED_MMAP_OK`). Cross-process shared mappings and per-domain
-  mapping quotas remain missing; `fork()` returns `ENOSYS` while a shared VMA
-  exists rather than silently copy it.
+  (`AETHER_LINUX_SHARED_MMAP_OK`). Reference-counted shared frames survive
+  `fork` and are visible across processes (`AETHER_LINUX_SHARED_FORK_OK`);
+  read-shared rootfs mappings alias a bounded page cache
+  (`AETHER_LINUX_MAP_SHARED_FILE_OK`). Shared VMA and page quotas return
+  `ENOMEM` and are reclaimed on unmap and task exit.
+- [ ] File-backed shared writeback and shared `mremap`: writes affect the
+  in-memory cache only, `msync` returns `EOPNOTSUPP`, and shared `mremap` is
+  rejected.
 - [x] Dynamic ELF slice: `ET_DYN` and `PT_INTERP` parsing, image mapping,
   auxv construction, runtime-rootfs interpreter resolution, and
   interpreter-to-main handoff (`AETHER_LINUX_DYN_*`).
@@ -224,24 +258,33 @@ user space. It is not a VM. The target and security gates are in
   the host glibc and runs a dynamically linked hello through `ld.so`,
   relocations, and shared `libc` (`AETHER_GLIBC_OK`). This is not the pinned
   production runtime.
-- [ ] Pinned glibc/Mesa/Wayland runtime rootfs, package channel, broader
-  `dlopen`/library coverage, and `LD_LIBRARY_PATH` policy.
+- [ ] Mesa/lavapipe/Wayland runtime content, package channel, broader
+  `dlopen`/library coverage, and `LD_LIBRARY_PATH` policy. The pinned
+  host-glibc runtime itself is implemented.
 - [x] File metadata and descriptor calls: `stat`/`fstat`/`newfstatat`/`statx`,
   `readlink`, `getdents64`, `fcntl`, `dup`, `dup2`, `pipe2`, non-blocking
   `poll`, and descriptor table cleanup.
 - [x] Notification calls: non-blocking `poll`, `eventfd2`, and basic
   `epoll_create1`/`epoll_ctl`/`epoll_wait`.
 - [x] Futex timed wait: the fixture verifies timeout with `ETIMEDOUT`
-  (`AETHER_LINUX_FUTEX_TIMEOUT_OK`). Robust lists, condition variables, and
-  semaphores remain missing.
-- [ ] Blocking or finite `poll`/`epoll_wait` (both are timeout-zero only;
-  nonzero timeouts return `-EOPNOTSUPP`), pipe/cross-process waits, and
-  edge-triggered epoll semantics remain unsupported. Eventfd counters are shared
-  across threads in one tgid; fork retains a process-private counter snapshot.
-- [x] Narrow inotify: `IN_NONBLOCK` is required and one exact existing overlay
-  file can be watched for `IN_MODIFY` (`AETHER_LINUX_INOTIFY_OK`).
-- [ ] Default blocking `inotify_init1(0)`, blocking reads, directory/rootfs
-  watches, other events, overflow, and full inotify remain unsupported.
+  (`AETHER_LINUX_FUTEX_TIMEOUT_OK`).
+- [x] Robust futex lists: `set/get_robust_list` and owner-died wakeup on thread
+  exit (`AETHER_LINUX_ROBUST_FUTEX_OK`). Condition variables and semaphores are
+  user-space patterns over the implemented futex primitive; broader stress
+  remains open.
+- [x] Blocking and finite `poll`/`epoll_wait` over pipes, eventfds, and
+  timerfds, including level-triggered re-reporting, a bounded edge-triggered
+  slice, and one-shot re-arm (`AETHER_LINUX_POLL_BLOCK_OK`,
+  `AETHER_LINUX_EPOLL_BLOCK_OK`). Cross-process pipe blocking read/write and EOF
+  are covered (`AETHER_LINUX_PIPE_BLOCK_OK`). Eventfd counters are shared across
+  threads in one tgid; fork retains a process-private counter snapshot.
+- [ ] Nested epoll watches and complete cross-process edge refresh.
+- [x] inotify: nonblocking and default-blocking instances, file and directory
+  watches over the overlay and read-only root, `IN_MODIFY`/`IN_ATTRIB`/`IN_OPEN`/
+  `IN_CLOSE_WRITE`/`IN_IGNORED`, bounded overflow, and a blocking read woken by
+  a thread (`AETHER_LINUX_INOTIFY_OK`, `AETHER_LINUX_INOTIFY_BLOCK_OK`).
+- [ ] Recursive watches, move/delete/unmount event families, cross-process watch
+  sharing, and complete inotify semantics.
 - [x] Thread creation: `clone` with `CLONE_VM|CLONE_THREAD`, per-thread
   kernel stacks, TLS, tgid/tid, and clear-child-tid join.
 - [x] Process creation: eager-copy `fork`, blocking `wait4` with nonchild and
@@ -250,23 +293,43 @@ user space. It is not a VM. The target and security gates are in
   enter its entry point.
 - [x] Dynamic `execve` with bounded argv/envp propagation through a `PT_INTERP`
   fixture; bounded process groups within the same session.
-- [ ] `clone3`, cross-session/process-group edge cases, `set_robust_list`, and
-  `rseq` details.
-- [x] Synchronization: futex wait/wake queues and clear-child-tid join; thread
-  wake ordering.
-- [ ] Robust lists, condition variables, and semaphores; futex timeout is
-  implemented and boot-tested (`AETHER_LINUX_FUTEX_TIMEOUT_OK`).
+- [x] Bounded `clone3`, `set/get_robust_list`, and `rseq` registration with
+  explicit `ENOSYS`/`EINVAL` for unsupported layouts
+  (`AETHER_LINUX_CLONE3_OK`, `AETHER_LINUX_ROBUST_FUTEX_OK`,
+  `AETHER_LINUX_RSEQ_OK`). Cross-session and process-group validation is
+  covered (`AETHER_LINUX_PROCESS_GROUP_KILL_OK`).
+- [ ] Stopped/continued process waits (`WUNTRACED`/`WCONTINUED`), signal
+  stop/resume, queued real-time signals, pidfds, and cgroup/namespace `clone3`
+  flags.
+- [x] Synchronization: futex wait/wake queues, timeout, robust owner-died
+  handling, clear-child-tid join, thread wake ordering, and eventfd/timerfd
+  readiness; condition variables and semaphores are user-space patterns over
+  this primitive and broader stress remains open.
 - [x] Signals: `rt_sigaction`/`rt_sigprocmask`/`sigaltstack`, self/group
   `kill`/`tgkill`, handler frames, `rt_sigreturn`, and fault-to-signal delivery.
-- [ ] siginfo/ucontext completeness, alt-stack delivery, and signal-safe restart
-  semantics. A cross-process SIGUSR1 fixture passes; broader signal semantics
-  remain incomplete.
-- [ ] Time and scheduling: `nanosleep`, `clock_nanosleep`, `timerfd`,
-  `sched_getaffinity`, `prlimit64`, and bounded CPU/memory quotas.
-- [ ] Pseudo-files: `/proc/self/{exe,maps,status,fd}`, `/dev/{null,zero,random}`,
-  and a read-only `/sys` subset only where required.
-- [ ] Syscall policy: default-deny allowlist, `ENOSYS` for unsupported calls,
-  per-domain network/device denial, and an audit counter per syscall class.
+- [x] Bounded `siginfo`/`ucontext` delivery for SA_SIGINFO handlers, alternate
+  stack delivery with fallback, `SA_RESTART` versus `EINTR`, default `SIGTERM`/
+  `SIGKILL` behavior, and cross-process delivery
+  (`AETHER_LINUX_SIGINFO_OK`, `AETHER_LINUX_ALTSTACK_OK`,
+  `AETHER_LINUX_RESTART_OK`, `AETHER_LINUX_SIGNAL_DEFAULT_OK`,
+  `AETHER_LINUX_CROSS_PROCESS_SIGNAL_OK`).
+- [ ] Remaining `siginfo` variants, signal stop/resume, and queued real-time
+  signals.
+- [x] Time and scheduling: `nanosleep` and `clock_nanosleep` with absolute/
+  relative deadlines and `EINTR` (`AETHER_LINUX_NANOSLEEP_OK`), one-shot and
+  periodic `timerfd` through `poll`/`epoll` (`AETHER_LINUX_TIMERFD_OK`),
+  bounded affinity/rlimit queries, and descriptor/VMA/overlay/shared-page
+  quotas (`AETHER_LINUX_QUOTA_OK`). CPU time quotas and high-resolution clocks
+  remain open.
+- [x] Pseudo-files and synthetic devices: `/proc/self/{exe,maps,status,fd}`,
+  `/proc/aether/syscalls`, and `/dev/{null,zero,random,urandom}` through normal
+  descriptors (`AETHER_LINUX_PROC_OK`, `AETHER_LINUX_DEV_OK`).
+- [ ] Read-only `/sys` subset (none is required by the current fixture) and
+  `/proc/self/fd` alias details beyond the tested listing.
+- [x] Syscall policy: default-deny classification, `ENOSYS` for unknown calls,
+  per-domain network/device denial, path/read-only/device denial tests, and
+  per-class audit counters in `/proc/aether/syscalls`
+  (`AETHER_LINUX_SYSCALL_POLICY_OK`, `AETHER_LINUX_DENIAL_OK`).
 
 #### Display, input, and media
 
@@ -284,10 +347,15 @@ user space. It is not a VM. The target and security gates are in
 
 #### Application and denial tests
 
-- [ ] Test security denials: no ambient files, network, devices, sibling app
-  roots, or native ABI from the Linux domain; crash containment and quotas.
-- [ ] Test the Linux layer as an application domain: a crash retires only that
-  domain, and the layer cannot mint capabilities or see another app's root.
+- [x] Denial evidence: no ambient network/device authority, no writable
+  read-only root, no out-of-root paths, no native ABI from the Linux domain, and
+  bounded descriptor/VMA/overlay/shared-page quotas
+  (`AETHER_LINUX_SYSCALL_POLICY_OK`, `AETHER_LINUX_DENIAL_OK`,
+  `AETHER_LINUX_QUOTA_OK`, `AETHER_LINUXD_DENY_OK`).
+- [ ] Dedicated crash-containment test: a Linux application fault retires only
+  its domain and cannot mint capabilities or observe a sibling application root.
+  The scheduler already contains Linux fault retirement, but there is no named
+  Linux crash-domain boot test yet.
 
 ### Platform follow-ups
 
@@ -331,28 +399,28 @@ the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
 image records without touching user data. VMware Workstation itself has not yet
 been smoke-tested.
 
-The Linux track has completed the Gate 1 inventory and has **partial Gate 2**
-evidence only. Markers cover embedded signed-rootfs import, bounded
-private-anonymous demand paging, VMA/filesystem tests, nonblocking exact-file
-inotify, thread and futex join/timeout, self and cross-process signals, process
-groups, blocking `wait4`, static/dynamic exec argv/envp, a thread-group-only
-`MAP_SHARED|MAP_ANONYMOUS` proof (fork is rejected while shared mappings exist),
-and the `PT_INTERP` loader (`AETHER_LINUX_IMPORT_OK`,
-`AETHER_LINUX_DEMAND_PAGING_OK`,
-`AETHER_LINUX_INOTIFY_OK`, `AETHER_LINUX_CROSS_PROCESS_SIGNAL_OK`,
-`AETHER_LINUX_PROCESS_GROUP_OK`, `AETHER_LINUX_FUTEX_TIMEOUT_OK`,
-`AETHER_LINUX_SHARED_MMAP_OK`, `AETHER_LINUX_EXECVE_OK`,
-`AETHER_LINUX_EXECVE_DYN_OK`, plus the existing VMA/file/dynamic-loader markers).
-The opt-in `make glibc-test` is a separate host-glibc smoke test and is not the
-pinned production runtime. `make ci` and `make glibc-test` pass on the current
-uncommitted local candidate; those results must be tied to an exact commit and
-revalidated on the eventual PR head. The native ABI remains denied to Linux
-tasks. Cross-process shared mappings; blocking/finite `poll` and `epoll_wait`
-(nonzero timeouts return
-`-EOPNOTSUPP`); pipe/cross-process waits; full inotify; robust futex lists,
-siginfo/ucontext, `linuxd`, a pinned production rootfs, and user-supplied
-AppImage opening remain incomplete; this is not an AppImage compatibility
-claim and Gate 2 is not complete.
+The Linux track has completed the Gate 1 inventory and the **Gate 2 prototype**
+(QEMU scope). Boot markers cover signed embedded-rootfs and loader-staged
+AppImage import, the pinned host-glibc runtime manifest, ring-3 `linuxd` launch
+approval and denial, demand paging, cross-process shared anonymous mappings,
+read-shared rootfs mappings, per-domain quotas, blocking/finite
+`poll`/`epoll_wait`, cross-process pipes, sleeps/timerfds, blocking and
+directory inotify, pseudo-files/devices, default-deny syscall policy,
+`clone3`/robust futex/`rseq`, `siginfo`/`ucontext`/alt-stack/`SA_RESTART`,
+process groups, blocking `wait4`, static/dynamic exec, and the `PT_INTERP`
+loader. `make ci` and `make glibc-test` pass at the commit recorded for this
+roadmap; `make docs-check`, `make appimage-test`, and the runtime-packaging
+tests pass. The exact commit and marker transcript belong in the PR, not this
+planning file.
+
+The Gate 2 prototype is not a production compatibility claim. Linux syscall
+dispatch, ELF/library mapping, and VMA management remain in the kernel, so
+`linuxd` is a ring-3 launch-policy manager rather than the full ABI service
+described by the architecture. Mesa/lavapipe/Wayland runtime content, durable
+storage, a user-installed AppImage picker, complete inotify/signal/epoll
+semantics, and the Wayland portal/renderer stack remain open. These are tracked
+as the Gate 2 production follow-up and Gate 3/4 work; Gate 2's prototype scope
+does not make GridCraft compatible.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
 persistent store, network/audio services, an installer, the Linux runtime

@@ -7,6 +7,18 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Linux Gate 2 prototype: blocking/finite `poll`/`epoll_wait` and
+  cross-process pipes, `nanosleep`/`clock_nanosleep`/`timerfd`, full-enough
+  inotify (blocking mode, directory watches, overflow), `siginfo`/`ucontext`,
+  alternate stacks, `SA_RESTART`, `clone3`, robust futex lists, `rseq`,
+  pseudo-files and synthetic devices, a default-deny syscall classifier with
+  audit counters and quotas, cross-process shared anonymous and read-shared
+  rootfs mappings, a digest-pinned host-glibc runtime rootfs, a signed AppImage
+  staged through the UEFI loader, and a ring-3 `linuxd` launch-policy manager.
+  Linux syscall dispatch and ELF/library mapping remain kernel-side; Mesa/
+  Wayland content, durable storage, and user-installed AppImage selection
+  remain open. The boot gate now covers the new markers and a larger boot stack
+  for the deeper import path.
 - Added a narrow Linux inotify prototype: one nonblocking instance per task and
   one exact existing `/tmp` watch for `IN_MODIFY`. `inotify_init1` accepts only
   `IN_NONBLOCK`; default blocking mode and blocking reads are unsupported. The
