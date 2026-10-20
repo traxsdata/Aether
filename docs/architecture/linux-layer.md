@@ -134,13 +134,20 @@ exact AppImage digest, and the runtime version.
   edge-transition slice, and one-shot re-arm, and `nanosleep`/
   `clock_nanosleep` implement relative and absolute deadlines with `EINTR`.
   `timerfd_create`/`settime`/`gettime` provide one-shot and periodic monotonic
-  timers visible through `poll`/`epoll`. The inotify prototype requires
-  `IN_NONBLOCK` and supports `IN_MODIFY` on one exact existing overlay file;
-  default blocking init and blocking reads are unsupported. Named fixture
-  markers are enumerated in the roadmap and host-interface inventory. Shared
-  mappings, cross-process eventfd counters, nested epoll watches, full inotify,
-  high-resolution timers, stopped/continued `wait4`, and signal stopping remain
-  missing.
+  timers visible through `poll`/`epoll`. Inotify supports default blocking and
+  `IN_NONBLOCK` instances, up to four watches per process, events on exact
+  overlay files and on read-only/explicit `/tmp` directories (`IN_MODIFY`,
+  `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`,
+  `IN_IGNORED`), a bounded eight-event queue with `IN_Q_OVERFLOW`, and blocking
+  reads woken by another `CLONE_VM` thread. Threads share the per-tgid queue;
+  `fork` takes a snapshot, so cross-process sharing is not implemented. A
+  bounded synthetic `/proc/self/{exe,maps,status,fd}`, `/proc/aether/syscalls`,
+  and `/dev/{null,zero,random,urandom}` are served through
+  open/read/stat/readdir; `/sys` and other device nodes are absent. Named
+  fixture markers are enumerated in the roadmap and host-interface inventory.
+  Shared mappings, cross-process eventfd counters, nested epoll watches,
+  recursive/move/delete inotify events, high-resolution timers,
+  stopped/continued `wait4`, and signal stopping remain missing.
 - A fixed per-task VMA table tracks ranges and rejects writable+executable
   mappings. Anonymous private pages are faulted in on demand with bounded
   allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.
@@ -161,8 +168,11 @@ exact AppImage digest, and the runtime version.
   user-supplied AppImage.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, xz, and lzma in `no_std` (metadata, file data,
-  fragments, directories, symlinks, hardlink marking, xattr dropping,
-  extraction limits, host extractor). Embedded signed-rootfs in-OS import is
+  fragments, directories, symlinks, hardlink marking, xattr policy and
+  extraction limits, host extractor). The importer applies an explicit xattr
+  allowlist: only `user.*` is retained, while `security.capability`, other
+  `security.*`, `trusted.*`, `system.*`, and unknown namespaces are dropped and
+  counted. The host extractor does not apply retained attributes. Embedded signed-rootfs in-OS import is
   implemented; user-supplied AppImage import/opening and persistent overlay
   storage remain missing.
 - `linuxd`, pinned production glibc/Mesa/Wayland rootfs, Wayland bridge, and

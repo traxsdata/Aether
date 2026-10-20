@@ -94,6 +94,8 @@ enum LinuxFileSource {
     Epoll { index: usize },
     TimerFd { index: usize },
     Inotify,
+    Pseudo(PseudoFile),
+    PseudoDir(PseudoDir),
 }
 
 const PIPE_BYTES: usize = 512;
@@ -205,11 +207,41 @@ impl LinuxPipe {
 struct LinuxFile {
     source: LinuxFileSource,
     offset: usize,
+    /// Set for overlay descriptors opened through a write-capable `openat`.
+    writable: bool,
+}
+
+/// Pseudo-file content synthesized by the kernel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PseudoFile {
+    ProcExe,
+    ProcMaps,
+    ProcStatus,
+    SyscallAudit,
+    DevNull,
+    DevZero,
+    DevRandom,
+}
+
+/// Pseudo-directory enumerated by `getdents64`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PseudoDir {
+    Proc,
+    ProcSelf,
+    ProcSelfFd,
+    Dev,
 }
 
 const OVERLAY_FILES: usize = 4;
 const OVERLAY_BYTES: usize = 512;
 const OVERLAY_PATH: usize = 64;
+/// Total writable-overlay bytes allowed per Linux domain.
+const OVERLAY_QUOTA_BYTES: usize = 1024;
+
+const MAX_INOTIFY_WATCHES: usize = 4;
+const MAX_INOTIFY_EVENTS: usize = 8;
+const INOTIFY_NAME_BYTES: usize = 64;
+const IN_WATCH_PATH_BYTES: usize = 64;
 
 #[derive(Clone, Copy)]
 struct LinuxOverlay {
@@ -220,20 +252,85 @@ struct LinuxOverlay {
 }
 
 #[derive(Clone, Copy)]
-struct LinuxInotify {
-    path: [u8; OVERLAY_PATH],
+struct InotifyWatch {
+    wd: i32,
+    path: [u8; IN_WATCH_PATH_BYTES],
     path_len: usize,
-    watched: bool,
-    pending_modify: bool,
+    mask: u32,
+}
+
+#[derive(Clone, Copy)]
+struct InotifyEvent {
+    wd: i32,
+    mask: u32,
+    cookie: u32,
+    name: [u8; INOTIFY_NAME_BYTES],
+    name_len: usize,
+}
+
+/// One bounded inotify instance.
+///
+/// Instances are keyed by process (tgid), so `CLONE_VM` threads share the
+/// queue and watches. `fork` snapshots the parent's instance into the child's
+/// own tgid slot; neither direction observes later changes. One instance and
+/// four watches per process are supported.
+#[derive(Clone, Copy)]
+struct LinuxInotify {
+    watches: [Option<InotifyWatch>; MAX_INOTIFY_WATCHES],
+    events: [Option<InotifyEvent>; MAX_INOTIFY_EVENTS],
+    event_head: usize,
+    event_len: usize,
+    overflow: bool,
+    next_wd: i32,
+    blocking: bool,
 }
 
 impl LinuxInotify {
     const EMPTY: Self = Self {
-        path: [0; OVERLAY_PATH],
-        path_len: 0,
-        watched: false,
-        pending_modify: false,
+        watches: [None; MAX_INOTIFY_WATCHES],
+        events: [None; MAX_INOTIFY_EVENTS],
+        event_head: 0,
+        event_len: 0,
+        overflow: false,
+        next_wd: 1,
+        blocking: true,
     };
+
+    fn has_data(&self) -> bool {
+        self.event_len != 0 || self.overflow
+    }
+
+    fn find_path(&self, path: &str) -> Option<usize> {
+        self.watches.iter().position(|watch| {
+            watch
+                .as_ref()
+                .is_some_and(|watch| watch_path(watch) == path)
+        })
+    }
+
+    fn enqueue(&mut self, event: InotifyEvent) {
+        if self.event_len == MAX_INOTIFY_EVENTS {
+            self.overflow = true;
+            return;
+        }
+        let index = (self.event_head + self.event_len) % MAX_INOTIFY_EVENTS;
+        self.events[index] = Some(event);
+        self.event_len += 1;
+    }
+
+    fn dequeue(&mut self) -> Option<InotifyEvent> {
+        if self.event_len == 0 {
+            return None;
+        }
+        let event = self.events[self.event_head].take();
+        self.event_head = (self.event_head + 1) % MAX_INOTIFY_EVENTS;
+        self.event_len -= 1;
+        event
+    }
+}
+
+fn watch_path(watch: &InotifyWatch) -> &str {
+    core::str::from_utf8(&watch.path[..watch.path_len]).unwrap_or("")
 }
 
 impl LinuxOverlay {
@@ -383,7 +480,8 @@ struct Task {
     clear_child_tid: u64,
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
     linux_overlay: [Option<LinuxOverlay>; OVERLAY_FILES],
-    linux_inotify: Option<LinuxInotify>,
+    inotify_wait_pointer: u64,
+    inotify_wait_length: usize,
     // Descriptor-local allocation map; counters live in EVENTFD_COUNTERS and
     // are addressed by (tgid, slot), so cloned threads share them.
     linux_eventfds: [Option<()>; MAX_EVENTFDS],
@@ -442,7 +540,8 @@ impl Task {
             clear_child_tid: 0,
             linux_fds: [None; crate::linux::MAX_FDS],
             linux_overlay: [None; OVERLAY_FILES],
-            linux_inotify: None,
+            inotify_wait_pointer: 0,
+            inotify_wait_length: 0,
             linux_eventfds: [None; MAX_EVENTFDS],
             linux_epolls: [None; MAX_EPOLLS],
             linux_timerfds: [None; MAX_TIMERFDS],
@@ -486,6 +585,9 @@ static EVENTFD_COUNTERS: Global<[[Option<u64>; MAX_EVENTFDS]; MAX_TASKS]> =
 /// Pipe storage is global so `fork`-inherited descriptors share one buffer.
 /// A slot is freed once no task references either end.
 static PIPES: Global<[Option<LinuxPipe>; MAX_PIPES]> = Global(UnsafeCell::new([None; MAX_PIPES]));
+/// One inotify instance per process id (tgid). Threads share it; fork copies it.
+static INOTIFY: Global<[Option<LinuxInotify>; MAX_TASKS]> =
+    Global(UnsafeCell::new([None; MAX_TASKS]));
 #[repr(align(16))]
 struct WorkerStacks([[u8; STACK_SIZE]; WORKER_COUNT]);
 
@@ -1335,7 +1437,6 @@ pub fn linux_clone(
         parent_tgid,
         parent_fds,
         parent_overlay,
-        parent_inotify,
         parent_eventfds,
         parent_epolls,
         parent_timerfds,
@@ -1354,7 +1455,6 @@ pub fn linux_clone(
             parent.tgid,
             parent.linux_fds,
             parent.linux_overlay,
-            parent.linux_inotify,
             parent.linux_eventfds,
             parent.linux_epolls,
             parent.linux_timerfds,
@@ -1399,7 +1499,6 @@ pub fn linux_clone(
     thread.rseq_len = 0;
     thread.linux_fds = parent_fds;
     thread.linux_overlay = parent_overlay;
-    thread.linux_inotify = parent_inotify;
     thread.linux_eventfds = parent_eventfds;
     thread.linux_epolls = parent_epolls;
     thread.linux_timerfds = parent_timerfds;
@@ -1462,7 +1561,6 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         fs_base,
         fds,
         overlay,
-        inotify,
         eventfds,
         parent_tgid,
         epolls,
@@ -1482,7 +1580,6 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
             parent.fs_base,
             parent.linux_fds,
             parent.linux_overlay,
-            parent.linux_inotify,
             parent.linux_eventfds,
             parent.tgid,
             parent.linux_epolls,
@@ -1513,13 +1610,15 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.parent = current;
     child.linux_fds = fds;
     child.linux_overlay = overlay;
-    child.linux_inotify = inotify;
     child.linux_eventfds = eventfds;
     // fork gets a process-private snapshot; threads continue to address the
     // parent's counters via their shared tgid.
     if parent_tgid < MAX_TASKS {
         let counters = unsafe { &mut *EVENTFD_COUNTERS.0.get() };
         counters[slot] = counters[parent_tgid];
+        // Inotify is shared by threads but snapshotted by fork.
+        let inotify = unsafe { &mut *INOTIFY.0.get() };
+        inotify[slot] = inotify[parent_tgid];
     }
     child.linux_epolls = epolls;
     child.linux_timerfds = timerfds;
@@ -2112,6 +2211,10 @@ fn interrupt_blocked(index: usize) {
     if task.state != TaskState::Blocked || task.saved_rsp == 0 {
         return;
     }
+    // A blocked inotify read has no rewound syscall instruction; clear its
+    // waiter record so a later readiness event cannot overwrite the result.
+    task.inotify_wait_pointer = 0;
+    task.inotify_wait_length = 0;
     if task.futex_address != 0 {
         // Futex waits are not restartable: POSIX defines EINTR here.
         task.futex_address = 0;
@@ -2741,13 +2844,6 @@ pub fn linux_send_signal_group(pgid: usize, signal: u64) -> i64 {
             }
         }
     }
-    for index in 0..tasks.len() {
-        if targets[index] && index != current && tasks[index].signal_exit != 0 {
-            let signum = tasks[index].signal_exit as u64;
-            tasks[index].signal_exit = 0;
-            terminate_thread_group(index, signum);
-        }
-    }
     0
 }
 
@@ -2841,6 +2937,7 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
 }
 
 const LINUX_EBADF: i64 = -9;
+const LINUX_EACCES: i64 = -13;
 const LINUX_ECHILD: i64 = -10;
 const LINUX_EEXIST: i64 = -17;
 const LINUX_EAGAIN: i64 = -11;
@@ -2873,6 +2970,77 @@ pub fn linux_open(path: &str) -> Result<u64, i64> {
             *slot = Some(LinuxFile {
                 source: LinuxFileSource::Root(file),
                 offset: 0,
+                writable: false,
+            });
+            linux_inotify_emit(path, IN_OPEN, false);
+            return Ok(descriptor as u64);
+        }
+    }
+    Err(LINUX_EMFILE)
+}
+
+/// Maps a synthetic runtime path to a pseudo-file kind.
+fn pseudo_file(path: &str) -> Option<PseudoFile> {
+    match path {
+        "/proc/self/exe" | "/proc/thread-self/exe" => Some(PseudoFile::ProcExe),
+        "/proc/self/maps" => Some(PseudoFile::ProcMaps),
+        "/proc/self/status" => Some(PseudoFile::ProcStatus),
+        "/proc/aether/syscalls" => Some(PseudoFile::SyscallAudit),
+        "/dev/null" => Some(PseudoFile::DevNull),
+        "/dev/zero" => Some(PseudoFile::DevZero),
+        "/dev/random" | "/dev/urandom" => Some(PseudoFile::DevRandom),
+        _ => None,
+    }
+}
+
+/// Maps a synthetic runtime path to a pseudo-directory kind.
+fn pseudo_dir(path: &str) -> Option<PseudoDir> {
+    match path {
+        "/proc" => Some(PseudoDir::Proc),
+        "/proc/self" | "/proc/thread-self" => Some(PseudoDir::ProcSelf),
+        "/proc/self/fd" | "/proc/thread-self/fd" => Some(PseudoDir::ProcSelfFd),
+        "/dev" => Some(PseudoDir::Dev),
+        _ => None,
+    }
+}
+
+fn pseudo_stat(kind: PseudoFile) -> (u64, u64, u32) {
+    match kind {
+        PseudoFile::ProcExe => (LINUX_ELF.len() as u64, 3, 0o100555),
+        PseudoFile::DevNull | PseudoFile::DevZero => (0, 4, 0o020666),
+        PseudoFile::DevRandom => (0, 5, 0o020666),
+        PseudoFile::ProcMaps | PseudoFile::ProcStatus | PseudoFile::SyscallAudit => {
+            (0, 6, 0o100444)
+        }
+    }
+}
+
+/// Opens a read-only pseudo-file or pseudo-directory.
+pub fn linux_open_pseudo(path: &str, writable: bool) -> Result<u64, i64> {
+    let source = if let Some(kind) = pseudo_file(path) {
+        if writable && kind != PseudoFile::DevNull {
+            return Err(LINUX_EACCES);
+        }
+        LinuxFileSource::Pseudo(kind)
+    } else if let Some(kind) = pseudo_dir(path) {
+        if writable {
+            return Err(LINUX_EACCES);
+        }
+        LinuxFileSource::PseudoDir(kind)
+    } else {
+        return Err(LINUX_ENOENT);
+    };
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(LINUX_EBADF);
+    }
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile {
+                source,
+                offset: 0,
+                writable: false,
             });
             return Ok(descriptor as u64);
         }
@@ -2882,8 +3050,11 @@ pub fn linux_open(path: &str) -> Result<u64, i64> {
 
 /// Opens a read-only file, preferring an existing overlay entry.
 pub fn linux_open_read(path: &str) -> Result<u64, i64> {
+    if pseudo_file(path).is_some() || pseudo_dir(path).is_some() {
+        return linux_open_pseudo(path, false);
+    }
     if path.starts_with("/tmp/")
-        && let Ok(fd) = linux_overlay_open(path, false, false)
+        && let Ok(fd) = linux_overlay_open(path, false, false, false)
     {
         return Ok(fd);
     }
@@ -2895,7 +3066,7 @@ pub fn linux_open_read(path: &str) -> Result<u64, i64> {
 
 /// Opens a directory descriptor for `getdents64`.
 pub fn linux_open_directory(path: &str) -> Result<u64, i64> {
-    if path.len() > 64 || !crate::linux::is_dir(path) {
+    if path.len() > 64 || !(crate::linux::is_dir(path) || pseudo_dir(path).is_some()) {
         return Err(LINUX_ENOENT);
     }
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -2913,6 +3084,7 @@ pub fn linux_open_directory(path: &str) -> Result<u64, i64> {
                     len: path.len(),
                 },
                 offset: 0,
+                writable: false,
             });
             return Ok(descriptor as u64);
         }
@@ -2924,19 +3096,103 @@ pub fn linux_open_directory(path: &str) -> Result<u64, i64> {
 ///
 /// The returned count is bytes written; the descriptor cursor advances by the
 /// number of entries consumed. Entry names are bounded by the imported tree.
+fn pseudo_dir_entry(
+    directory: PseudoDir,
+    index: usize,
+    fd_mask: u16,
+) -> Option<([u8; 16], usize, u64, u8)> {
+    const DT_DIR: u8 = 4;
+    const DT_REG: u8 = 8;
+    const DT_LNK: u8 = 10;
+    let mut name = [0u8; 16];
+    let (text, kind): (&str, u8) = match (directory, index) {
+        (_, 0) => (".", DT_DIR),
+        (_, 1) => ("..", DT_DIR),
+        (PseudoDir::Proc, 2) => ("self", DT_DIR),
+        (PseudoDir::Proc, 3) => ("aether", DT_DIR),
+        (PseudoDir::ProcSelf, 2) => ("exe", DT_LNK),
+        (PseudoDir::ProcSelf, 3) => ("maps", DT_REG),
+        (PseudoDir::ProcSelf, 4) => ("status", DT_REG),
+        (PseudoDir::ProcSelf, 5) => ("fd", DT_DIR),
+        (PseudoDir::ProcSelf, 6) => ("cwd", DT_LNK),
+        (PseudoDir::Dev, 2) => ("null", DT_REG),
+        (PseudoDir::Dev, 3) => ("zero", DT_REG),
+        (PseudoDir::Dev, 4) => ("random", DT_REG),
+        (PseudoDir::Dev, 5) => ("urandom", DT_REG),
+        (PseudoDir::ProcSelfFd, _) => {
+            let descriptor = index - 2;
+            if descriptor >= 3
+                && (descriptor >= crate::linux::MAX_FDS || fd_mask & (1 << descriptor) == 0)
+            {
+                return None;
+            }
+            let mut value = descriptor;
+            let mut digits = [0u8; 8];
+            let mut length = 0usize;
+            loop {
+                digits[length] = b'0' + (value % 10) as u8;
+                length += 1;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            for position in 0..length {
+                name[position] = digits[length - position - 1];
+            }
+            return Some((name, length, 10 + descriptor as u64, DT_LNK));
+        }
+        _ => return None,
+    };
+    let length = text.len().min(name.len());
+    name[..length].copy_from_slice(&text.as_bytes()[..length]);
+    Some((name, length, 10 + index as u64, kind))
+}
+
 pub fn linux_getdents(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let fd_mask = task
+        .linux_fds
+        .iter()
+        .enumerate()
+        .fold(0u16, |mask, (index, slot)| {
+            if slot.is_some() && index < 16 {
+                mask | (1 << index)
+            } else {
+                mask
+            }
+        });
     let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
         return Err(LINUX_EBADF);
     };
-    let LinuxFileSource::Directory { path, len } = slot.source else {
+    let mut written = 0usize;
+    if let LinuxFileSource::Directory { path, len } = slot.source {
+        let path = core::str::from_utf8(&path[..len]).map_err(|_| LINUX_EBADF)?;
+        while let Some((name, inode, kind)) = crate::linux::dir_entry(path, slot.offset) {
+            let record_length = (19 + name.len() + 1 + 7) & !7;
+            if written + record_length > out.len() {
+                break;
+            }
+            let record = &mut out[written..written + record_length];
+            record.fill(0);
+            record[..8].copy_from_slice(&inode.to_le_bytes());
+            record[8..16].copy_from_slice(&((slot.offset + 1) as i64).to_le_bytes());
+            record[16..18].copy_from_slice(&(record_length as u16).to_le_bytes());
+            record[18] = kind;
+            record[19..19 + name.len()].copy_from_slice(name.as_bytes());
+            written += record_length;
+            slot.offset += 1;
+        }
+        return Ok(written);
+    }
+    let LinuxFileSource::PseudoDir(directory) = slot.source else {
         return Err(LINUX_ENOTDIR);
     };
-    let path = core::str::from_utf8(&path[..len]).map_err(|_| LINUX_EBADF)?;
-    let mut written = 0usize;
-    while let Some((name, inode, kind)) = crate::linux::dir_entry(path, slot.offset) {
-        let record_length = (19 + name.len() + 1 + 7) & !7;
+    while let Some((name, name_length, inode, kind)) =
+        pseudo_dir_entry(directory, slot.offset, fd_mask)
+    {
+        let record_length = (19 + name_length + 1 + 7) & !7;
         if written + record_length > out.len() {
             break;
         }
@@ -2946,7 +3202,7 @@ pub fn linux_getdents(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
         record[8..16].copy_from_slice(&((slot.offset + 1) as i64).to_le_bytes());
         record[16..18].copy_from_slice(&(record_length as u16).to_le_bytes());
         record[18] = kind;
-        record[19..19 + name.len()].copy_from_slice(name.as_bytes());
+        record[19..19 + name_length].copy_from_slice(&name[..name_length]);
         written += record_length;
         slot.offset += 1;
     }
@@ -2958,7 +3214,12 @@ pub fn linux_getdents(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
 /// The overlay is deliberately separate from the read-only root. Only `/tmp`
 /// paths are accepted, entries are bounded, and the overlay disappears with the
 /// task. This is the prototype of the per-application writable layer.
-pub fn linux_overlay_open(path: &str, create: bool, truncate: bool) -> Result<u64, i64> {
+pub fn linux_overlay_open(
+    path: &str,
+    create: bool,
+    truncate: bool,
+    writable: bool,
+) -> Result<u64, i64> {
     if !path.starts_with("/tmp/") || !crate::linux::valid_path(path) {
         return Err(LINUX_EROFS);
     }
@@ -2967,6 +3228,8 @@ pub fn linux_overlay_open(path: &str, create: bool, truncate: bool) -> Result<u6
     if task.abi != TaskAbi::Linux {
         return Err(LINUX_EBADF);
     }
+    let mut created = false;
+    let mut truncated = false;
     let mut overlay_index = None;
     for (index, entry) in task.linux_overlay.iter().enumerate() {
         if entry.as_ref().is_some_and(|entry| entry.path() == path) {
@@ -2991,21 +3254,37 @@ pub fn linux_overlay_open(path: &str, create: bool, truncate: bool) -> Result<u6
         entry.path_len = path.len();
         task.linux_overlay[index] = Some(entry);
         overlay_index = Some(index);
+        created = true;
     }
     let index = overlay_index.unwrap();
     if truncate && let Some(entry) = task.linux_overlay[index].as_mut() {
+        truncated = entry.len != 0;
         entry.len = 0;
     }
+    let mut assigned = None;
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
         if slot.is_none() {
             *slot = Some(LinuxFile {
                 source: LinuxFileSource::Overlay(index),
                 offset: 0,
+                writable,
             });
-            return Ok(descriptor as u64);
+            assigned = Some(descriptor as u64);
+            break;
         }
     }
-    Err(LINUX_EMFILE)
+    let Some(fd) = assigned else {
+        return Err(LINUX_EMFILE);
+    };
+    if created {
+        linux_inotify_emit(path, IN_CREATE, false);
+    }
+    linux_inotify_emit(path, IN_OPEN, false);
+    if truncated {
+        linux_inotify_emit(path, IN_ATTRIB, false);
+        linux_inotify_emit(path, IN_MODIFY, false);
+    }
+    Ok(fd)
 }
 
 /// Counts open read and write ends of a global pipe slot.
@@ -3081,12 +3360,14 @@ pub fn linux_pipe() -> Result<(u64, u64), i64> {
                     write: false,
                 },
                 offset: 0,
+                writable: false,
             });
             read_fd = Some(descriptor as u64);
         } else if write_fd.is_none() {
             *slot = Some(LinuxFile {
                 source: LinuxFileSource::Pipe { index, write: true },
                 offset: 0,
+                writable: true,
             });
             write_fd = Some(descriptor as u64);
             break;
@@ -3131,6 +3412,7 @@ pub fn linux_eventfd(initial: u64) -> Result<u64, i64> {
             *slot = Some(LinuxFile {
                 source: LinuxFileSource::EventFd { index },
                 offset: 0,
+                writable: true,
             });
             return Ok(descriptor as u64);
         }
@@ -3160,6 +3442,7 @@ pub fn linux_timerfd_create(clockid: u64, flags: u64) -> Result<u64, i64> {
             *slot = Some(LinuxFile {
                 source: LinuxFileSource::TimerFd { index },
                 offset: 0,
+                writable: false,
             });
             return Ok(descriptor as u64);
         }
@@ -3255,6 +3538,7 @@ pub fn linux_epoll_create() -> Result<u64, i64> {
             *slot = Some(LinuxFile {
                 source: LinuxFileSource::Epoll { index },
                 offset: 0,
+                writable: false,
             });
             return Ok(descriptor as u64);
         }
@@ -3530,13 +3814,141 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
             }
         }
         LinuxFileSource::Inotify => {
-            if events & POLL_IN != 0 && task.linux_inotify.is_some_and(|watch| watch.pending_modify)
+            if events & POLL_IN != 0
+                && inotify_state(task.tgid).is_some_and(|state| state.has_data())
             {
                 ready |= POLL_IN;
             }
         }
+        LinuxFileSource::Pseudo(_) | LinuxFileSource::PseudoDir(_) => {
+            ready = events & POLL_IN;
+        }
     }
     ready
+}
+
+struct PseudoText {
+    buffer: [u8; 4096],
+    length: usize,
+}
+
+impl core::fmt::Write for PseudoText {
+    fn write_str(&mut self, value: &str) -> core::fmt::Result {
+        let end = self
+            .length
+            .checked_add(value.len())
+            .ok_or(core::fmt::Error)?;
+        if end > self.buffer.len() {
+            return Err(core::fmt::Error);
+        }
+        self.buffer[self.length..end].copy_from_slice(value.as_bytes());
+        self.length = end;
+        Ok(())
+    }
+}
+
+fn proc_maps_text(vmas: &aether_memory::vma::VmaTable) -> PseudoText {
+    use core::fmt::Write as _;
+    let mut text = PseudoText {
+        buffer: [0; 4096],
+        length: 0,
+    };
+    for vma in vmas.iter() {
+        let read = if vma.prot & aether_memory::vma::PROT_READ != 0 {
+            'r'
+        } else {
+            '-'
+        };
+        let write = if vma.prot & aether_memory::vma::PROT_WRITE != 0 {
+            'w'
+        } else {
+            '-'
+        };
+        let exec = if vma.prot & aether_memory::vma::PROT_EXEC != 0 {
+            'x'
+        } else {
+            '-'
+        };
+        let _ = writeln!(
+            text,
+            "{:016x}-{:016x} {read}{write}{exec}p 00000000 00:00 0",
+            vma.start, vma.end
+        );
+    }
+    text
+}
+
+fn proc_status_text(vmas: &aether_memory::vma::VmaTable, tgid: usize, parent: usize) -> PseudoText {
+    use core::fmt::Write as _;
+    let mut text = PseudoText {
+        buffer: [0; 4096],
+        length: 0,
+    };
+    let memory: u64 = vmas.iter().map(|vma| vma.size()).sum();
+    let _ = writeln!(text, "Name:\taether-linux");
+    let _ = writeln!(text, "State:\tR (running)");
+    let _ = writeln!(text, "Tgid:\t{tgid}");
+    let _ = writeln!(text, "Pid:\t{tgid}");
+    let _ = writeln!(text, "PPid:\t{parent}");
+    let _ = writeln!(text, "Uid:\t1000\t1000\t1000\t1000");
+    let _ = writeln!(text, "Gid:\t1000\t1000\t1000\t1000");
+    let _ = writeln!(text, "VmSize:\t{} kB", memory / 1024);
+    let _ = writeln!(text, "VmRSS:\t{} kB", memory / 1024);
+    text
+}
+
+fn pseudo_read(
+    kind: PseudoFile,
+    offset: usize,
+    out: &mut [u8],
+    vmas: &aether_memory::vma::VmaTable,
+    tgid: usize,
+    parent: usize,
+) -> Result<usize, i64> {
+    if kind == PseudoFile::DevNull {
+        return Ok(0);
+    }
+    if kind == PseudoFile::DevZero {
+        out.fill(0);
+        return Ok(out.len());
+    }
+    if kind == PseudoFile::DevRandom {
+        let mut state = TICKS
+            .load(Ordering::Relaxed)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(tgid as u64)
+            | 1;
+        for byte in out.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *byte = state as u8;
+        }
+        return Ok(out.len());
+    }
+    if kind == PseudoFile::SyscallAudit {
+        return Ok(crate::linux_policy::audit_text(offset, out));
+    }
+    let text = match kind {
+        PseudoFile::ProcExe => None,
+        PseudoFile::ProcMaps => Some(proc_maps_text(vmas)),
+        PseudoFile::ProcStatus => Some(proc_status_text(vmas, tgid, parent)),
+        _ => None,
+    };
+    if let Some(text) = text.as_ref() {
+        if offset >= text.length {
+            return Ok(0);
+        }
+        let length = (text.length - offset).min(out.len());
+        out[..length].copy_from_slice(&text.buffer[offset..offset + length]);
+        return Ok(length);
+    }
+    if offset >= LINUX_ELF.len() {
+        return Ok(0);
+    }
+    let length = (LINUX_ELF.len() - offset).min(out.len());
+    out[..length].copy_from_slice(&LINUX_ELF[offset..offset + length]);
+    Ok(length)
 }
 
 /// Reads from a Linux file descriptor into a validated user buffer.
@@ -3662,19 +4074,20 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
                 out[..8].copy_from_slice(&count.to_le_bytes());
                 Ok(8)
             }
+            LinuxFileSource::Pseudo(kind) => {
+                let count =
+                    pseudo_read(kind, slot.offset, out, &task.vmas, task.tgid, task.parent)?;
+                slot.offset = slot.offset.saturating_add(count);
+                Ok(count)
+            }
+            LinuxFileSource::PseudoDir(_) => Err(LINUX_EISDIR),
             LinuxFileSource::Inotify => {
-                let watch = task.linux_inotify.as_mut().ok_or(LINUX_EBADF)?;
-                if !watch.pending_modify {
+                let tgid = task.tgid;
+                let state = inotify_state(tgid).ok_or(LINUX_EBADF)?;
+                if !state.has_data() {
                     return Err(LINUX_EAGAIN);
                 }
-                if out.len() < 16 {
-                    return Err(LINUX_EINVAL);
-                }
-                out[..16].fill(0);
-                out[..4].copy_from_slice(&1i32.to_ne_bytes());
-                out[4..8].copy_from_slice(&2u32.to_ne_bytes());
-                watch.pending_modify = false;
-                Ok(16)
+                inotify_pack(state, out)
             }
         }
     };
@@ -3703,6 +4116,13 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
         };
         match slot.source {
             LinuxFileSource::Overlay(index) => {
+                // Enforce the per-domain total as well as the per-file bound.
+                let used: usize = task
+                    .linux_overlay
+                    .iter()
+                    .flatten()
+                    .map(|entry| entry.len)
+                    .sum();
                 let Some(entry) = task.linux_overlay.get_mut(index).and_then(Option::as_mut) else {
                     return Err(LINUX_EBADF);
                 };
@@ -3710,16 +4130,20 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
                 if end > OVERLAY_BYTES {
                     return Err(LINUX_ENOSPC);
                 }
+                let base = used.saturating_sub(entry.len);
+                if base.saturating_add(end) > OVERLAY_QUOTA_BYTES {
+                    return Err(LINUX_ENOSPC);
+                }
                 entry.data[slot.offset..end].copy_from_slice(data);
                 entry.len = entry.len.max(end);
                 slot.offset = end;
-                let path = entry.path();
-                if let Some(watch) = task.linux_inotify.as_mut()
-                    && watch.watched
-                    && &watch.path[..watch.path_len] == path.as_bytes()
-                {
-                    watch.pending_modify = true;
-                }
+                let mut path = [0u8; OVERLAY_PATH];
+                path.copy_from_slice(&entry.path[..OVERLAY_PATH]);
+                let path_length = entry.path_len;
+                let Ok(path) = core::str::from_utf8(&path[..path_length]) else {
+                    return Ok(data.len());
+                };
+                linux_inotify_emit(path, IN_MODIFY, false);
                 Ok(data.len())
             }
             LinuxFileSource::Pipe { index, write: true } => {
@@ -3772,16 +4196,172 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
     result
 }
 
-/// Creates one inotify descriptor per task. Only `IN_NONBLOCK` is supported;
-/// flags 0 would request Linux's blocking behavior, which this prototype lacks.
+const IN_MODIFY: u32 = 0x2;
+const IN_ATTRIB: u32 = 0x4;
+const IN_CLOSE_WRITE: u32 = 0x8;
+const IN_CLOSE_NOWRITE: u32 = 0x10;
+const IN_OPEN: u32 = 0x20;
+const IN_CREATE: u32 = 0x100;
+const IN_IGNORED: u32 = 0x8000;
+const IN_Q_OVERFLOW: u32 = 0x4000;
+const IN_ISDIR: u32 = 0x4000_0000;
+const IN_MASK_ADD: u32 = 0x2000_0000;
+const IN_ONLYDIR: u32 = 0x0100_0000;
+const IN_NONBLOCK: u64 = 0x800;
+
+fn inotify_state(tgid: usize) -> Option<&'static mut LinuxInotify> {
+    if tgid >= MAX_TASKS {
+        return None;
+    }
+    // SAFETY: Inotify state is only touched from the syscall path with
+    // interrupts masked; the same pattern guards the task and eventfd tables.
+    unsafe { (*INOTIFY.0.get())[tgid].as_mut() }
+}
+
+fn inotify_fd(task: &Task, fd: u64) -> bool {
+    matches!(
+        task.linux_fds.get(fd as usize).and_then(Option::as_ref),
+        Some(LinuxFile {
+            source: LinuxFileSource::Inotify,
+            ..
+        })
+    )
+}
+
+/// Wakes one blocked reader in the process and completes its `read`.
+fn wake_inotify_reader(tgid: usize) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    for task in tasks.iter_mut() {
+        if task.tgid != tgid || task.state != TaskState::Blocked || task.inotify_wait_pointer == 0 {
+            continue;
+        }
+        let pointer = task.inotify_wait_pointer;
+        let capacity = task.inotify_wait_length.min(512);
+        let pml4 = task.pml4;
+        let mut buffer = [0u8; 512];
+        let Some(state) = inotify_state(tgid) else {
+            return;
+        };
+        let result = match inotify_pack(state, &mut buffer[..capacity]) {
+            Ok(count) => {
+                if PhysFrame::from_address(pml4)
+                    .is_some_and(|frame| paging::write_user_bytes(frame, pointer, &buffer[..count]))
+                {
+                    count as i64
+                } else {
+                    -14
+                }
+            }
+            Err(error) => error,
+        };
+        task.inotify_wait_pointer = 0;
+        task.inotify_wait_length = 0;
+        task.state = TaskState::Ready;
+        // SAFETY: saved_rsp points at the syscall frame retained on this
+        // task's private kernel stack when it blocked in the inotify read.
+        unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = result as u64 };
+        return;
+    }
+}
+
+fn inotify_pack(state: &mut LinuxInotify, out: &mut [u8]) -> Result<usize, i64> {
+    let mut written = 0usize;
+    while state.event_len != 0 {
+        let Some(event) = state.events[state.event_head] else {
+            break;
+        };
+        let record = (16 + event.name_len + 3) & !3;
+        if written + record > out.len() {
+            break;
+        }
+        let target = &mut out[written..written + record];
+        target.fill(0);
+        target[..4].copy_from_slice(&event.wd.to_ne_bytes());
+        target[4..8].copy_from_slice(&event.mask.to_ne_bytes());
+        target[8..12].copy_from_slice(&event.cookie.to_ne_bytes());
+        target[12..16].copy_from_slice(&(event.name_len as u32).to_ne_bytes());
+        target[16..16 + event.name_len].copy_from_slice(&event.name[..event.name_len]);
+        written += record;
+        state.dequeue();
+    }
+    if state.overflow {
+        if written + 16 > out.len() {
+            if written == 0 {
+                return Err(LINUX_EINVAL);
+            }
+        } else {
+            let target = &mut out[written..written + 16];
+            target.fill(0);
+            target[..4].copy_from_slice(&(-1i32).to_ne_bytes());
+            target[4..8].copy_from_slice(&IN_Q_OVERFLOW.to_ne_bytes());
+            written += 16;
+            state.overflow = false;
+        }
+    }
+    if written == 0 {
+        return Err(LINUX_EINVAL);
+    }
+    Ok(written)
+}
+
+fn parent_and_name(path: &str) -> (&str, &str) {
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+
+/// Emits one event to an exact-path watch and to the watch on the path's
+/// parent directory. Directory events carry the child's base name.
+pub fn linux_inotify_emit(path: &str, mask: u32, is_dir: bool) {
+    let tgid = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        tasks[CURRENT.load(Ordering::Relaxed)].tgid
+    };
+    let Some(state) = inotify_state(tgid) else {
+        return;
+    };
+    let (parent, name) = parent_and_name(path);
+    for index in 0..MAX_INOTIFY_WATCHES {
+        let Some(watch) = state.watches[index] else {
+            continue;
+        };
+        let watch_name = watch_path(&watch);
+        let event_mask = if watch_name == path {
+            mask & watch.mask
+        } else if watch_name == parent {
+            (mask | if is_dir { IN_ISDIR } else { 0 }) & watch.mask
+        } else {
+            0
+        };
+        if event_mask == 0 {
+            continue;
+        }
+        let mut event = InotifyEvent {
+            wd: watch.wd,
+            mask: event_mask,
+            cookie: 0,
+            name: [0; INOTIFY_NAME_BYTES],
+            name_len: 0,
+        };
+        if watch_name != path {
+            let length = name.len().min(INOTIFY_NAME_BYTES);
+            event.name[..length].copy_from_slice(&name.as_bytes()[..length]);
+            event.name_len = length;
+        }
+        state.enqueue(event);
+    }
+    if state.has_data() {
+        wake_inotify_reader(tgid);
+    }
+}
+
+/// Creates one inotify instance per process; `flags` 0 blocks on read.
 pub fn linux_inotify_init(flags: u64) -> Result<u64, i64> {
-    const IN_NONBLOCK: u64 = 0x800;
-    if flags != IN_NONBLOCK {
+    if flags != 0 && flags != IN_NONBLOCK {
         return Err(LINUX_EINVAL);
     }
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    if task.linux_inotify.is_some() {
+    let tgid = task.tgid;
+    if tgid >= MAX_TASKS {
         return Err(LINUX_EMFILE);
     }
     let Some((fd, _)) = task
@@ -3793,73 +4373,144 @@ pub fn linux_inotify_init(flags: u64) -> Result<u64, i64> {
     else {
         return Err(LINUX_EMFILE);
     };
-    task.linux_inotify = Some(LinuxInotify::EMPTY);
+    if inotify_state(tgid).is_some() {
+        return Err(LINUX_EMFILE);
+    }
+    let mut instance = LinuxInotify::EMPTY;
+    instance.blocking = flags != IN_NONBLOCK;
+    // SAFETY: The same single-CPU, interrupts-masked syscall serialization that
+    // guards the task table covers the inotify table.
+    unsafe { (*INOTIFY.0.get())[tgid] = Some(instance) };
     task.linux_fds[fd] = Some(LinuxFile {
         source: LinuxFileSource::Inotify,
         offset: 0,
+        writable: false,
     });
     Ok(fd as u64)
 }
 
-/// Installs one exact-path `/tmp` watch for IN_MODIFY only (mask 0x2).
+/// Installs or updates a watch. Four watches per process are supported.
 pub fn linux_inotify_add(fd: u64, path: &str, mask: u32) -> Result<i32, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    if !matches!(
-        task.linux_fds.get(fd as usize).and_then(Option::as_ref),
-        Some(LinuxFile {
-            source: LinuxFileSource::Inotify,
-            ..
-        })
-    ) {
+    if !inotify_fd(task, fd) {
         return Err(LINUX_EBADF);
     }
-    if mask != 2
-        || !path.starts_with("/tmp/")
+    if mask & 0x1fff == 0 {
+        return Err(LINUX_EINVAL);
+    }
+    if path.len() > IN_WATCH_PATH_BYTES
         || !crate::linux::valid_path(path)
-        || path.len() > OVERLAY_PATH
+        || path.starts_with("/proc")
+        || path.starts_with("/dev")
     {
         return Err(LINUX_EINVAL);
     }
-    if !task
-        .linux_overlay
-        .iter()
-        .flatten()
-        .any(|entry| entry.path() == path)
-    {
+    let exists = path == "/tmp"
+        || crate::linux::lookup(path).is_some()
+        || crate::linux::is_dir(path)
+        || task
+            .linux_overlay
+            .iter()
+            .flatten()
+            .any(|entry| entry.path() == path);
+    if !exists {
         return Err(LINUX_ENOENT);
     }
-    let watch = task.linux_inotify.as_mut().ok_or(LINUX_EBADF)?;
-    watch.path.fill(0);
-    watch.path[..path.len()].copy_from_slice(path.as_bytes());
-    watch.path_len = path.len();
-    watch.watched = true;
-    watch.pending_modify = false;
-    Ok(1)
+    let is_dir = crate::linux::is_dir(path) || path == "/tmp";
+    if mask & IN_ONLYDIR != 0 && !is_dir {
+        return Err(LINUX_ENOTDIR);
+    }
+    let requested = mask & 0x1fff;
+    let tgid = task.tgid;
+    let Some(state) = inotify_state(tgid) else {
+        return Err(LINUX_EBADF);
+    };
+    if let Some(index) = state.find_path(path) {
+        let Some(watch) = state.watches[index].as_mut() else {
+            return Err(LINUX_EBADF);
+        };
+        if mask & IN_MASK_ADD != 0 {
+            watch.mask |= requested;
+        } else {
+            watch.mask = requested;
+        }
+        return Ok(watch.wd);
+    }
+    let Some(slot) = state.watches.iter().position(Option::is_none) else {
+        return Err(LINUX_ENOSPC);
+    };
+    let mut storage = [0u8; IN_WATCH_PATH_BYTES];
+    storage[..path.len()].copy_from_slice(path.as_bytes());
+    let wd = state.next_wd.max(1);
+    state.next_wd = wd.saturating_add(1);
+    state.watches[slot] = Some(InotifyWatch {
+        wd,
+        path: storage,
+        path_len: path.len(),
+        mask: requested,
+    });
+    Ok(wd)
 }
 
 pub fn linux_inotify_remove(fd: u64, wd: u64) -> Result<(), i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    if !matches!(
-        task.linux_fds.get(fd as usize).and_then(Option::as_ref),
-        Some(LinuxFile {
-            source: LinuxFileSource::Inotify,
-            ..
-        })
-    ) {
+    if !inotify_fd(task, fd) {
         return Err(LINUX_EBADF);
     }
-    if wd != 1 {
+    let tgid = task.tgid;
+    let Some(state) = inotify_state(tgid) else {
+        return Err(LINUX_EBADF);
+    };
+    let Some(index) = state
+        .watches
+        .iter()
+        .position(|watch| watch.is_some_and(|watch| watch.wd as u64 == wd))
+    else {
         return Err(LINUX_EINVAL);
+    };
+    state.watches[index] = None;
+    state.enqueue(InotifyEvent {
+        wd: wd as i32,
+        mask: IN_IGNORED,
+        cookie: 0,
+        name: [0; INOTIFY_NAME_BYTES],
+        name_len: 0,
+    });
+    if state.has_data() {
+        wake_inotify_reader(tgid);
     }
-    let watch = task.linux_inotify.as_mut().ok_or(LINUX_EBADF)?;
-    if !watch.watched {
-        return Err(LINUX_EINVAL);
-    }
-    watch.watched = false;
-    watch.pending_modify = false;
     Ok(())
+}
+
+/// Returns whether an empty read should block on this descriptor.
+#[must_use]
+pub fn linux_inotify_blocks(fd: u64) -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    inotify_fd(task, fd) && inotify_state(task.tgid).is_some_and(|state| state.blocking)
+}
+
+/// Blocks the current task in an inotify read until an event arrives.
+///
+/// The waker writes the packed records into the waiting task's user buffer and
+/// completes the saved syscall frame with the byte count.
+pub fn linux_inotify_block(
+    frame: *mut InterruptFrame,
+    pointer: u64,
+    length: usize,
+) -> *mut InterruptFrame {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    tasks[current].inotify_wait_pointer = pointer;
+    tasks[current].inotify_wait_length = length;
+    tasks[current].state = TaskState::Blocked;
+    // A signal can wake a blocked task without an event; report EINTR unless
+    // the event waker overwrites this value first.
+    // SAFETY: The frame is live on this task's kernel stack.
+    unsafe { (*frame).rax = (-4i64) as u64 };
+    yield_current(frame)
 }
 
 /// Reads from a Linux file descriptor without changing its offset.
@@ -3898,6 +4549,11 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. }
         | LinuxFileSource::TimerFd { .. } => Err(LINUX_ESPIPE),
+        LinuxFileSource::Pseudo(kind) => {
+            let count = pseudo_read(kind, offset, out, &task.vmas, task.tgid, task.parent)?;
+            Ok(count)
+        }
+        LinuxFileSource::PseudoDir(_) => Err(LINUX_EISDIR),
         LinuxFileSource::Inotify => Err(LINUX_ESPIPE),
     }
 }
@@ -3912,6 +4568,7 @@ pub fn linux_close(fd: u64) -> i64 {
             return LINUX_EBADF;
         };
         let source = slot.as_ref().map(|file| file.source);
+        let writable = slot.as_ref().is_some_and(|file| file.writable);
         if slot.take().is_none() {
             return LINUX_EBADF;
         }
@@ -3958,7 +4615,26 @@ pub fn linux_close(fd: u64) -> i64 {
                     .flatten()
                     .any(|file| matches!(file.source, LinuxFileSource::Inotify)) =>
             {
-                task.linux_inotify = None;
+                let tgid = task.tgid;
+                if tgid < MAX_TASKS {
+                    // SAFETY: Single-CPU syscall serialization guards the table.
+                    unsafe { (*INOTIFY.0.get())[tgid] = None };
+                }
+            }
+            Some(LinuxFileSource::Overlay(index)) => {
+                if let Some(entry) = task.linux_overlay.get(index).and_then(Option::as_ref) {
+                    let mut path = [0u8; OVERLAY_PATH];
+                    path.copy_from_slice(&entry.path[..OVERLAY_PATH]);
+                    let path_length = entry.path_len;
+                    let mask = if writable {
+                        IN_CLOSE_WRITE
+                    } else {
+                        IN_CLOSE_NOWRITE
+                    };
+                    if let Ok(path) = core::str::from_utf8(&path[..path_length]) {
+                        linux_inotify_emit(path, mask, false);
+                    }
+                }
             }
             _ => {}
         }
@@ -4017,6 +4693,9 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. }
         | LinuxFileSource::TimerFd { .. } => 0,
+        LinuxFileSource::PseudoDir(_) => 0,
+        LinuxFileSource::Pseudo(PseudoFile::ProcExe) => LINUX_ELF.len(),
+        LinuxFileSource::Pseudo(_) => 0,
         LinuxFileSource::Inotify => 0,
     };
     let base = match whence {
@@ -4038,7 +4717,10 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
 /// Reports whether a path exists in the read-only root.
 #[must_use]
 pub fn linux_access(path: &str) -> bool {
-    crate::linux::lookup(path).is_some() || crate::linux::is_dir(path)
+    pseudo_file(path).is_some()
+        || pseudo_dir(path).is_some()
+        || crate::linux::lookup(path).is_some()
+        || crate::linux::is_dir(path)
 }
 
 /// Reserves a range in the Linux task's VMA window.
@@ -4292,6 +4974,12 @@ pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), Vma
 /// The root is a flat imported tree, so regular files have a stable inode
 /// derived from their index and a synthetic mode.
 pub fn linux_stat_path(path: &str) -> Option<(u64, u64, u32)> {
+    if let Some(kind) = pseudo_file(path) {
+        return Some(pseudo_stat(kind));
+    }
+    if pseudo_dir(path).is_some() {
+        return Some((0, 2, 0o040755));
+    }
     if crate::linux::is_dir(path) {
         return Some((0, 2, 0o040755));
     }
@@ -4320,7 +5008,8 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
                 .ok_or(LINUX_EBADF)?;
             Ok((entry.len as u64, index as u64 + 1, 0o100644))
         }
-        LinuxFileSource::Directory { .. } => Ok((0, 2, 0o040755)),
+        LinuxFileSource::Directory { .. } | LinuxFileSource::PseudoDir(_) => Ok((0, 2, 0o040755)),
+        LinuxFileSource::Pseudo(kind) => Ok(pseudo_stat(kind)),
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. }
@@ -4388,6 +5077,9 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. }
         | LinuxFileSource::TimerFd { .. } => Ok(0),
+        LinuxFileSource::PseudoDir(_) => Ok(0),
+        LinuxFileSource::Pseudo(PseudoFile::ProcExe) => Ok(LINUX_ELF.len() as u64),
+        LinuxFileSource::Pseudo(_) => Ok(0),
         LinuxFileSource::Inotify => Ok(0),
     }
 }
@@ -4524,6 +5216,11 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         robust_futex_cleanup(current);
         release_linux_mappings(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
+        let tgid = tasks[current].tgid;
+        if tgid < MAX_TASKS {
+            // SAFETY: Single-CPU exit path with interrupts masked.
+            unsafe { (*INOTIFY.0.get())[tgid] = None };
+        }
         tasks[current].futex_address = 0;
         tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
@@ -4563,6 +5260,11 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     robust_futex_cleanup(current);
     release_linux_mappings(current);
     let tasks = unsafe { &mut *TASKS.0.get() };
+    let tgid = tasks[current].tgid;
+    if tgid < MAX_TASKS {
+        // SAFETY: Single-CPU exit path with interrupts masked.
+        unsafe { (*INOTIFY.0.get())[tgid] = None };
+    }
     tasks[current].futex_address = 0;
     tasks[current].futex_deadline = 0;
     tasks[current].state = TaskState::Done;

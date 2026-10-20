@@ -5,6 +5,7 @@ use crate::{Error, Image, Kind, Limits};
 
 const IMAGE: &[u8] = include_bytes!("../tests/fixtures/root.sqfs");
 const UNSAFE: &[u8] = include_bytes!("../tests/fixtures/unsafe-symlink.sqfs");
+const XATTR_DENIED: &[u8] = include_bytes!("../tests/fixtures/xattr-denied.sqfs");
 const GZIP: &[u8] = include_bytes!("../tests/fixtures/root-gzip.sqfs");
 const LZ4: &[u8] = include_bytes!("../tests/fixtures/root-lz4.sqfs");
 const XZ: &[u8] = include_bytes!("../tests/fixtures/root-xz.sqfs");
@@ -83,7 +84,8 @@ fn import_marks_symlinks_and_hardlinks_and_strips_modes() {
     assert_eq!(tree.directories, 2);
     assert_eq!(tree.symlinks, 1);
     assert_eq!(tree.hardlinks, 1);
-    assert_eq!(tree.xattrs, 0);
+    assert_eq!(tree.xattrs, 2);
+    assert_eq!(tree.xattrs_dropped, 0);
     let link = tree
         .entries
         .iter()
@@ -101,6 +103,9 @@ fn import_marks_symlinks_and_hardlinks_and_strips_modes() {
         .find(|entry| entry.path == "hello.txt")
         .unwrap();
     assert_eq!(hard.inode, hello.inode);
+    assert_eq!(hello.xattrs.len(), 1);
+    assert_eq!(hello.xattrs[0].name, "user.allowed");
+    assert_eq!(hello.xattrs[0].value, b"yes");
     assert_eq!(
         tree.entries.iter().filter(|entry| entry.hardlink).count(),
         1
@@ -108,6 +113,30 @@ fn import_marks_symlinks_and_hardlinks_and_strips_modes() {
     for entry in &tree.entries {
         assert_eq!(entry.mode & 0o7000, 0, "setuid/setgid/sticky stripped");
     }
+}
+
+#[test]
+fn import_drops_security_capability_xattr() {
+    let image = Image::from_squashfs(XATTR_DENIED).expect("parse");
+    let tree = image.import(Limits::default()).expect("import");
+    assert_eq!(tree.xattrs, 0);
+    assert_eq!(tree.xattrs_dropped, 1);
+    let entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "secret.txt")
+        .unwrap();
+    assert!(entry.xattrs.is_empty());
+}
+
+#[test]
+fn xattr_policy_allows_user_and_drops_privileged_names() {
+    assert!(crate::xattr_allowed("user.allowed"));
+    assert!(!crate::xattr_allowed("security.capability"));
+    assert!(!crate::xattr_allowed("security.selinux"));
+    assert!(!crate::xattr_allowed("trusted.overlay.opaque"));
+    assert!(!crate::xattr_allowed("system.posix_acl_access"));
+    assert!(!crate::xattr_allowed("unknown.namespace"));
 }
 
 #[test]

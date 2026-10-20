@@ -9,6 +9,7 @@
 
 use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::serial;
+use crate::linux_policy;
 use crate::memory::paging;
 use crate::scheduler;
 use crate::serial_line;
@@ -149,6 +150,27 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         serial_line!("AETHER_BOOT_FAILED reason=linux syscall without pml4");
         crate::arch::x86_64::halt()
     };
+
+    // Default deny: classify before executing. Unknown numbers never reach a
+    // helper, and network/device groups fail with EACCES instead of falling
+    // through to an implementation that may not exist.
+    let class = linux_policy::classify(number);
+    match class {
+        linux_policy::Class::Unknown => {
+            linux_policy::record_unknown();
+            // SAFETY: The assembly stub passes a live frame on this task's
+            // kernel stack for the duration of the dispatcher call.
+            unsafe { (*frame).rax = LINUX_ENOSYS as u64 };
+            return frame;
+        }
+        linux_policy::Class::Network | linux_policy::Class::Device => {
+            linux_policy::record_denied(class);
+            // SAFETY: Same live-frame invariant as above.
+            unsafe { (*frame).rax = LINUX_EACCES as u64 };
+            return frame;
+        }
+        _ => linux_policy::record(class),
+    }
 
     let result = match number {
         0 => return linux_read(frame, pml4, first, second, third),
@@ -310,13 +332,22 @@ fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i6
     if path.as_bytes().first() != Some(&b'/') {
         return LINUX_ENOENT;
     }
+    // Device paths are denied unless they are one of the four synthetic nodes.
+    if let Some(rest) = path.strip_prefix("/dev/")
+        && !matches!(rest, "null" | "zero" | "random" | "urandom")
+    {
+        return LINUX_EACCES;
+    }
+    if path == "/dev/null" && flags & 0x3 != 0 {
+        return scheduler::linux_open_pseudo(path, true).map_or_else(|error| error, |fd| fd as i64);
+    }
     // Writable paths live in the per-task overlay; the imported root stays
     // read-only.
     const WRITE_FLAGS: u64 = 0x1 | 0x2 | 0x40 | 0x200 | 0x400;
     if flags & WRITE_FLAGS != 0 {
         let create = flags & 0x40 != 0;
         let truncate = flags & 0x200 != 0;
-        return scheduler::linux_overlay_open(path, create, truncate)
+        return scheduler::linux_overlay_open(path, create, truncate, true)
             .map_or_else(|error| error, |fd| fd as i64);
     }
     let _ = directory;
@@ -345,17 +376,25 @@ fn linux_read(
     match scheduler::linux_read(descriptor, buffer) {
         Ok(count) => linux_result(frame, count as i64),
         Err(LINUX_EAGAIN) => {
-            let Some((index, false)) = scheduler::linux_pipe_end(descriptor) else {
-                return linux_result(frame, LINUX_EAGAIN);
-            };
-            // An empty pipe with no writer is end-of-file, not a wait.
-            if scheduler::linux_pipe_writers(index) == 0 {
-                return linux_result(frame, 0);
+            if let Some((index, false)) = scheduler::linux_pipe_end(descriptor) {
+                // An empty pipe with no writer is end-of-file, not a wait.
+                if scheduler::linux_pipe_writers(index) == 0 {
+                    return linux_result(frame, 0);
+                }
+                if scheduler::linux_signal_pending() {
+                    return linux_result(frame, LINUX_EINTR);
+                }
+                return scheduler::linux_park(
+                    frame,
+                    0,
+                    scheduler::LinuxWait::PipeRead(index),
+                    None,
+                );
             }
-            if scheduler::linux_signal_pending() {
-                return linux_result(frame, LINUX_EINTR);
+            if scheduler::linux_inotify_blocks(descriptor) {
+                return scheduler::linux_inotify_block(frame, pointer, length as usize);
             }
-            scheduler::linux_park(frame, 0, scheduler::LinuxWait::PipeRead(index), None)
+            linux_result(frame, LINUX_EAGAIN)
         }
         Err(error) => linux_result(frame, error),
     }
