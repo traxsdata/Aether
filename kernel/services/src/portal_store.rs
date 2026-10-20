@@ -119,6 +119,13 @@ impl PortalGrant {
     }
 }
 
+/// Suffix of the bounded staging file used by an application save transaction.
+pub const TEMP_SUFFIX: &str = ".sctmp";
+/// Maximum bytes in one portal staging file (2 MiB).
+pub const MAX_TEMP_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum simultaneous staging files across all grants.
+pub const MAX_ACTIVE_TEMPS: usize = 2;
+
 /// A parsed Linux portal namespace path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortalPath<'a> {
@@ -126,6 +133,24 @@ pub struct PortalPath<'a> {
     pub grant_id: u64,
     /// Final file component named by the namespace path.
     pub file: &'a str,
+    /// Whether this component names the staging file for `file`.
+    pub temp: bool,
+}
+
+impl PortalPath<'_> {
+    /// Returns the granted file name, stripping the staging suffix when present.
+    ///
+    /// A bare `.sctmp` names no file and returns `None`.
+    #[must_use]
+    pub fn grant_file(&self) -> Option<&str> {
+        if self.temp {
+            self.file
+                .strip_suffix(TEMP_SUFFIX)
+                .filter(|file| !file.is_empty())
+        } else {
+            Some(self.file)
+        }
+    }
 }
 
 /// Portal namespace resolution failure.
@@ -139,6 +164,10 @@ pub enum PortalPathError {
     Revoked,
     /// The grant exists but does not contain the requested rights.
     Rights,
+    /// A staging operation was attempted on the wrong path kind.
+    WrongKind,
+    /// A rename crossed from one grant id to another.
+    CrossGrant,
 }
 
 /// One live grant-table slot, including its revocation tombstone.
@@ -158,6 +187,111 @@ impl PortalEntry {
     };
 }
 
+/// Stable key for one grant's staging slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TempKey {
+    /// Grant id used in the namespace.
+    pub grant_id: u64,
+    /// Hash of the backing path, so colliding grant ids stay distinct.
+    pub backing: u64,
+}
+
+impl TempKey {
+    /// Derives the staging key for a grant.
+    #[must_use]
+    pub fn new(grant: &PortalGrant) -> Self {
+        Self {
+            grant_id: grant_id(grant),
+            backing: hash_bytes(grant.path().as_bytes()),
+        }
+    }
+}
+
+/// Staging-file table failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TempError {
+    /// All bounded staging slots are in use.
+    Full,
+    /// The write would exceed [`MAX_TEMP_BYTES`].
+    Quota,
+}
+
+/// Host-testable one-temp-per-file staging ledger.
+pub struct TempLedger {
+    slots: [Option<TempKey>; MAX_ACTIVE_TEMPS],
+}
+
+impl TempLedger {
+    /// Creates an empty ledger.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; MAX_ACTIVE_TEMPS],
+        }
+    }
+
+    /// Reserves the staging slot for `key`.
+    ///
+    /// Returns `(slot, already_active)`. One key reuses its slot, so a second
+    /// open cannot create a second staging file for the same grant.
+    pub fn begin(&mut self, key: TempKey) -> Result<(usize, bool), TempError> {
+        if let Some(index) = self.slots.iter().position(|slot| *slot == Some(key)) {
+            return Ok((index, true));
+        }
+        let index = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(TempError::Full)?;
+        self.slots[index] = Some(key);
+        Ok((index, false))
+    }
+
+    /// Releases `key` after a commit or discard.
+    pub fn release(&mut self, key: TempKey) -> bool {
+        let Some(index) = self.slots.iter().position(|slot| *slot == Some(key)) else {
+            return false;
+        };
+        self.slots[index] = None;
+        true
+    }
+
+    /// Returns the active slot for `key`.
+    #[must_use]
+    pub fn active(&self, key: TempKey) -> Option<usize> {
+        self.slots.iter().position(|slot| *slot == Some(key))
+    }
+
+    /// Counts active staging files.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+}
+
+impl Default for TempLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Returns whether a staging write stays within [`MAX_TEMP_BYTES`].
+#[must_use]
+pub fn temp_write_fits(offset: usize, length: usize) -> bool {
+    offset
+        .checked_add(length)
+        .is_some_and(|end| end <= MAX_TEMP_BYTES)
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Derives the stable grant id used in the Linux portal namespace.
 ///
 /// The id is FNV-1a over `root`, a NUL separator, and the backing path. It does
@@ -165,13 +299,10 @@ impl PortalEntry {
 /// point the same namespace path at a different file.
 #[must_use]
 pub fn grant_id(grant: &PortalGrant) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in grant
-        .root()
-        .bytes()
-        .chain(core::iter::once(0))
-        .chain(grant.path().bytes())
-    {
+    let mut hash = hash_bytes(grant.root().as_bytes());
+    hash ^= 0;
+    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for byte in grant.path().bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -209,6 +340,10 @@ pub fn parse_namespace(path: &str) -> Result<PortalPath<'_>, PortalPathError> {
     {
         return Err(PortalPathError::Malformed);
     }
+    let temp = file.ends_with(TEMP_SUFFIX);
+    if temp && file.len() == TEMP_SUFFIX.len() {
+        return Err(PortalPathError::Malformed);
+    }
     let mut id = 0u64;
     for byte in id_text.bytes() {
         let digit = match byte {
@@ -218,10 +353,14 @@ pub fn parse_namespace(path: &str) -> Result<PortalPath<'_>, PortalPathError> {
         };
         id = (id << 4) | u64::from(digit);
     }
-    Ok(PortalPath { grant_id: id, file })
+    Ok(PortalPath {
+        grant_id: id,
+        file,
+        temp,
+    })
 }
 
-/// Resolves a namespace path against the live grant table.
+/// Resolves a direct namespace path against the live grant table.
 ///
 /// The caller root is always matched exactly. Directory grants do not exist,
 /// so the namespace file must equal the grant's final path component. A
@@ -233,7 +372,60 @@ pub fn resolve(
     namespace: &str,
     rights: u64,
 ) -> Result<PortalGrant, PortalPathError> {
+    resolve_kind(entries, root, namespace, rights, false)
+}
+
+/// Resolves the staging path `<file>.sctmp` for an active write grant.
+pub fn resolve_temp(
+    entries: &[PortalEntry],
+    root: &str,
+    namespace: &str,
+    rights: u64,
+) -> Result<PortalGrant, PortalPathError> {
+    resolve_kind(entries, root, namespace, rights, true)
+}
+
+/// Resolves a staging-to-final rename for one grant.
+///
+/// Both paths must be in the caller's namespace, the source must be the
+/// `.sctmp` staging component, the destination must be the direct granted
+/// file, and both must have the same grant id. The grant must still be active
+/// and hold write rights, so a revocation between write and rename fails
+/// without touching the backing file.
+pub fn resolve_commit(
+    entries: &[PortalEntry],
+    root: &str,
+    from: &str,
+    to: &str,
+) -> Result<PortalGrant, PortalPathError> {
+    let source = parse_namespace(from)?;
+    let target = parse_namespace(to)?;
+    if !source.temp || target.temp {
+        return Err(PortalPathError::WrongKind);
+    }
+    if source.grant_id != target.grant_id {
+        return Err(PortalPathError::CrossGrant);
+    }
+    if source.grant_file() != target.grant_file() {
+        return Err(PortalPathError::NotGranted);
+    }
+    resolve_kind(entries, root, to, WRITE, false)
+}
+
+fn resolve_kind(
+    entries: &[PortalEntry],
+    root: &str,
+    namespace: &str,
+    rights: u64,
+    expected_temp: bool,
+) -> Result<PortalGrant, PortalPathError> {
     let parsed = parse_namespace(namespace)?;
+    if parsed.temp != expected_temp {
+        return Err(PortalPathError::WrongKind);
+    }
+    let Some(file) = parsed.grant_file() else {
+        return Err(PortalPathError::Malformed);
+    };
     let mut matched = None;
     let mut saw_revoked = false;
     for entry in entries {
@@ -241,7 +433,7 @@ pub fn resolve(
         if grant.is_empty()
             || grant.root() != root
             || grant_id(&grant) != parsed.grant_id
-            || grant.path().rsplit('/').next() != Some(parsed.file)
+            || grant.path().rsplit('/').next() != Some(file)
         {
             continue;
         }
@@ -460,6 +652,7 @@ mod tests {
             Ok(PortalPath {
                 grant_id: grant_id(&grant),
                 file: "gate4.xlsx",
+                temp: false,
             })
         );
         for rejected in [
@@ -539,5 +732,136 @@ mod tests {
             resolve(&revoked, "/apps/org.aether.demo", namespace, WRITE),
             Err(PortalPathError::Revoked)
         );
+    }
+
+    #[test]
+    fn staging_temp_and_commit_policy_is_exact_and_revocable() {
+        let grant = PortalGrant::new("/apps/org.aether.demo", "/home/gate4.xlsx", READ | WRITE)
+            .expect("grant");
+        let other = PortalGrant::new("/apps/org.aether.demo", "/home/other.xlsx", READ | WRITE)
+            .expect("grant");
+        let mut id = [0u8; GRANT_ID_BYTES];
+        let id = write_grant_id(grant_id(&grant), &mut id);
+        let mut other_id = [0u8; GRANT_ID_BYTES];
+        let other_id = write_grant_id(grant_id(&other), &mut other_id);
+        let namespace = std::format!("{PORTAL_PREFIX}{id}/gate4.xlsx");
+        let temp = std::format!("{namespace}{TEMP_SUFFIX}");
+        let other_namespace = std::format!("{PORTAL_PREFIX}{other_id}/other.xlsx");
+        let other_temp = std::format!("{other_namespace}{TEMP_SUFFIX}");
+        assert_eq!(
+            parse_namespace(&temp),
+            Ok(PortalPath {
+                grant_id: grant_id(&grant),
+                file: "gate4.xlsx.sctmp",
+                temp: true,
+            })
+        );
+        assert_eq!(
+            parse_namespace(&std::format!("{PORTAL_PREFIX}{id}/.sctmp")),
+            Err(PortalPathError::Malformed)
+        );
+
+        let entries = [
+            PortalEntry {
+                grant,
+                revoked: false,
+            },
+            PortalEntry {
+                grant: other,
+                revoked: false,
+            },
+        ];
+        assert_eq!(
+            resolve_temp(&entries, "/apps/org.aether.demo", &temp, WRITE),
+            Ok(grant)
+        );
+        assert_eq!(
+            resolve(&entries, "/apps/org.aether.demo", &temp, READ),
+            Err(PortalPathError::WrongKind)
+        );
+        assert_eq!(
+            resolve(&entries, "/apps/org.aether.demo", &namespace, READ),
+            Ok(grant)
+        );
+        assert_eq!(
+            resolve_commit(&entries, "/apps/org.aether.demo", &temp, &namespace),
+            Ok(grant)
+        );
+        // Rename source must be the staging component and destination direct.
+        assert_eq!(
+            resolve_commit(&entries, "/apps/org.aether.demo", &namespace, &namespace),
+            Err(PortalPathError::WrongKind)
+        );
+        assert_eq!(
+            resolve_commit(&entries, "/apps/org.aether.demo", &temp, &temp),
+            Err(PortalPathError::WrongKind)
+        );
+        // Same grant id but a different final file is not a commit.
+        let wrong_final = std::format!("{PORTAL_PREFIX}{id}/other.xlsx");
+        assert_eq!(
+            resolve_commit(&entries, "/apps/org.aether.demo", &temp, &wrong_final),
+            Err(PortalPathError::NotGranted)
+        );
+        // A rename may not cross grants, even in the same caller root.
+        assert_eq!(
+            resolve_commit(&entries, "/apps/org.aether.demo", &temp, &other_namespace),
+            Err(PortalPathError::CrossGrant)
+        );
+        assert_eq!(
+            resolve_commit(&entries, "/apps/org.aether.demo", &other_temp, &namespace),
+            Err(PortalPathError::CrossGrant)
+        );
+        // Traversal and non-temp sources fail before any grant lookup.
+        let traversal = std::format!("{PORTAL_PREFIX}{id}/../gate4.xlsx{TEMP_SUFFIX}");
+        assert_eq!(
+            resolve_commit(&entries, "/apps/org.aether.demo", &traversal, &namespace),
+            Err(PortalPathError::Malformed)
+        );
+
+        let revoked = [
+            PortalEntry {
+                grant,
+                revoked: true,
+            },
+            PortalEntry {
+                grant: other,
+                revoked: false,
+            },
+        ];
+        assert_eq!(
+            resolve_temp(&revoked, "/apps/org.aether.demo", &temp, WRITE),
+            Err(PortalPathError::Revoked)
+        );
+        assert_eq!(
+            resolve_commit(&revoked, "/apps/org.aether.demo", &temp, &namespace),
+            Err(PortalPathError::Revoked)
+        );
+    }
+
+    #[test]
+    fn staging_quota_and_discard_are_bounded() {
+        assert!(temp_write_fits(0, MAX_TEMP_BYTES));
+        assert!(temp_write_fits(MAX_TEMP_BYTES - 1, 1));
+        assert!(!temp_write_fits(MAX_TEMP_BYTES - 1, 2));
+        assert!(!temp_write_fits(MAX_TEMP_BYTES, 1));
+        assert!(!temp_write_fits(usize::MAX, 1));
+
+        let first = PortalGrant::new("/apps/a", "/home/a.xlsx", WRITE).expect("grant");
+        let second = PortalGrant::new("/apps/b", "/home/b.xlsx", WRITE).expect("grant");
+        let third = PortalGrant::new("/apps/c", "/home/c.xlsx", WRITE).expect("grant");
+        let mut ledger = TempLedger::new();
+        let (slot, existing) = ledger.begin(TempKey::new(&first)).expect("begin");
+        assert!(!existing);
+        let (again, existing) = ledger.begin(TempKey::new(&first)).expect("reuse");
+        assert_eq!(again, slot);
+        assert!(existing);
+        ledger.begin(TempKey::new(&second)).expect("second");
+        assert_eq!(ledger.active_count(), 2);
+        assert_eq!(ledger.begin(TempKey::new(&third)), Err(TempError::Full));
+        assert_eq!(ledger.active(TempKey::new(&first)), Some(slot));
+        assert!(ledger.release(TempKey::new(&first)));
+        assert_eq!(ledger.active(TempKey::new(&first)), None);
+        assert!(!ledger.release(TempKey::new(&first)));
+        assert_eq!(ledger.active_count(), 1);
     }
 }

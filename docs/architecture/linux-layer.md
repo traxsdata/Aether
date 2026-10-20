@@ -98,7 +98,7 @@ an attempt to open a host device.
 | Application identity | The domain identity is derived from the verified package/AppImage, never from an application-provided string. |
 | Launch approval | The kernel creates the application task only after ring-3 `linuxd` approves the signed identity, version, and launch path over capability-scoped IPC. An invalid path or a missing approval cannot start the application. |
 | Private storage | The imported root is read-only; writes go to a per-application overlay. Other app roots are denied by `fsd`. |
-| File portal | User files are opened through explicit grants. A Linux path such as `/home/user/file.xlsx` is a runtime mapping, not host authority. Exact-file grants are exposed as `/run/aether/portal/<grant-id>/<file>`; the namespace path must match the caller root, grant id, final file component, and requested rights, and a revoked grant fails the next open. |
+| File portal | User files are opened through explicit grants. A Linux path such as `/home/user/file.xlsx` is a runtime mapping, not host authority. Exact-file grants are exposed as `/run/aether/portal/<grant-id>/<file>`; the namespace path must match the caller root, grant id, final file component, and requested rights, and a revoked grant fails the next open. A graphical save stages into a bounded `<file>.sctmp` slot that commits only by rename to the same granted file and is discarded by unlink. |
 | Network | Denied by default. Sockets fail with a clear error unless a network capability is granted. |
 | Devices | No `/dev/dri`, `/dev/input`, block devices, or raw PCI access. Input and display are service protocols. |
 | Resource limits | Address-space, thread, file, and CPU limits are enforced per domain; exhaustion retires the domain. |

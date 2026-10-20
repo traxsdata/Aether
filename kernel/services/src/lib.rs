@@ -8,6 +8,9 @@
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 pub mod portal_store;
 pub mod runtime;
 

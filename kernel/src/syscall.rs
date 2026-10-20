@@ -449,6 +449,11 @@ fn linux_rename(pml4: PhysFrame, old_pointer: u64, new_pointer: u64) -> i64 {
     let Some(new) = user_cstr(pml4, new_pointer, 256) else {
         return LINUX_EFAULT;
     };
+    if old.starts_with(aether_services::portal_store::PORTAL_PREFIX)
+        || new.starts_with(aether_services::portal_store::PORTAL_PREFIX)
+    {
+        return scheduler::linux_portal_rename(old, new).map_or_else(|error| error, |()| 0);
+    }
     scheduler::linux_overlay_rename(old, new).map_or_else(|error| error, |()| 0)
 }
 
@@ -457,6 +462,9 @@ fn linux_unlink(pml4: PhysFrame, pointer: u64) -> i64 {
     let Some(path) = user_cstr(pml4, pointer, 256) else {
         return LINUX_EFAULT;
     };
+    if path.starts_with(aether_services::portal_store::PORTAL_PREFIX) {
+        return scheduler::linux_portal_unlink(path).map_or_else(|error| error, |()| 0);
+    }
     scheduler::linux_overlay_unlink(path).map_or_else(|error| error, |()| 0)
 }
 

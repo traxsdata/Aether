@@ -196,16 +196,19 @@ user space. It is not a VM. The target and security gates are in
     seeds an exact-file read+write grant for
     `/run/aether/portal/dd8f879ba78d207c/gate4.xlsx`, launches a small static
     Linux AppImage fixture from the signed import path, reads the workbook
-    fixture, saves new bytes to the `/home/gate4.xlsx` backing file, revokes
-    the grant through a test-only kernel control path, and requires fresh read
-    and write opens to fail closed. The kernel emits
+    fixture, writes and renames a bounded `.sctmp` staging file to commit new
+    bytes to `/home/gate4.xlsx`, reads the committed bytes back, revokes the
+    grant through a test-only kernel control path, and requires fresh read and
+    write opens plus a post-revocation rename to fail closed. The kernel emits
     `AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_SAVE_OK`, and
-    `AETHER_GATE4_REVOKE_OK` only after validating the read, the saved bytes in
-    the kernel filesystem, and the two post-revocation denials. Path parsing
-    and grant resolution have host tests in `aether-services`; traversal,
-    duplicate slashes, extra components, overlong names, caller-root mismatch,
-    file mismatch, and revocation are covered. The launch environment also
-    carries `AETHER_PORTAL_WORKBOOK` for a future GUI launch.
+    `AETHER_GATE4_REVOKE_OK` only after validating the read, the staging write,
+    the single successful rename, the saved bytes in the kernel filesystem,
+    and the two post-revocation denials. Path parsing, temp/commit resolution,
+    and quota policy have host tests in `aether-services`; traversal, duplicate
+    slashes, extra components, overlong names, caller-root mismatch, file
+    mismatch, wrong temp suffix, cross-grant rename, revocation, and temp quota
+    are covered. The launch environment also carries `AETHER_PORTAL_WORKBOOK`
+    for a future GUI launch.
   - [ ] Gate 4 GUI remains open: the Wayland bridge, compositor presentation,
     software Vulkan/GL, keyboard/pointer input, the real windowed
     `usr/bin/gridcraft` run, and a pixel/checksum plus input-trace record have
@@ -496,14 +499,15 @@ belong in the PR, not this planning file.
 
 `make gate4-portal-test` covers the portal half of Gate 4: a Linux AppImage
 fixture opens a seeded workbook through
-`/run/aether/portal/<grant-id>/gate4.xlsx`, reads it, saves new bytes through
-the same exact-file grant, and then fails closed on a fresh read and write
-after the kernel revokes the grant. Kernel-owned markers
-`AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_SAVE_OK`, and
-`AETHER_GATE4_REVOKE_OK` are emitted after the kernel validates the read
-operation, the saved bytes in its filesystem, and both denials. The GUI,
-Wayland bridge, software renderer, input routing, and a real windowed GridCraft
-run remain open; the compatibility record stays `limited`.
+`/run/aether/portal/<grant-id>/gate4.xlsx`, reads it, writes a bounded
+`.sctmp` staging file, commits it with `rename`, reads the committed bytes
+back, and then fails closed on a fresh read, write, and rename after the kernel
+revokes the grant. Kernel-owned markers `AETHER_GATE4_PORTAL_OK`,
+`AETHER_GATE4_SAVE_OK`, and `AETHER_GATE4_REVOKE_OK` are emitted after the
+kernel validates the read operation, the staging/rename transaction, the saved
+bytes in its filesystem, and the denials. The GUI, Wayland bridge, software
+renderer, input routing, and a real windowed GridCraft run remain open; the
+compatibility record stays `limited`.
 
 Neither the Gate 2 prototype nor the Gate 3 run is a production compatibility
 claim. Linux syscall dispatch, ELF/library mapping, and VMA management remain in

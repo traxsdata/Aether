@@ -206,7 +206,7 @@ gate4-portal-test:
 		STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) image
 	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GATE4_PORTAL_OK,AETHER_GATE4_SAVE_OK,AETHER_GATE4_REVOKE_OK \
-	AETHER_REQUIRE_TEXT='AETHER_GATE4_PORTAL_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|portal: audit revoked' \
+	AETHER_REQUIRE_TEXT='AETHER_GATE4_PORTAL_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx bytes=58 staging=sctmp+rename temp_bytes=58 staged_bytes=87 renames=1|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx|portal: audit revoked' \
 	$(PYTHON) tools/test-boot.py
 
 shell-test: image

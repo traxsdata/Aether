@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Static Linux fixture for the Gate 4 file-portal slice.
  *
- * It opens the exact-file portal namespace, reads the workbook, saves new
- * bytes through the same grant, asks the test-only kernel path to revoke the
- * grant, and then proves that a fresh read and a fresh write both fail closed.
- * The kernel, not this program, emits the Gate 4 evidence markers after it
- * validates the read bytes, the saved bytes in the kernel filesystem, and the
- * two post-revocation denials.
+ * It reads the granted workbook, performs the same bounded staging sequence a
+ * real graphical save uses (`<file>.sctmp` write, close, rename to `<file>`),
+ * reads the final bytes back, revokes the grant through the test-only kernel
+ * path, and proves that fresh reads and writes fail closed. The kernel, not
+ * this program, emits the Gate 4 evidence markers after it validates the read
+ * bytes, the staging/rename transaction, the saved bytes in the kernel
+ * filesystem, and the two post-revocation denials.
  */
     .section .text
     .global _start
@@ -38,11 +39,11 @@ _start:
     mov %r12, %rdi
     syscall
 
-    /* openat(AT_FDCWD, portal_path, O_WRONLY|O_TRUNC, 0) */
+    /* openat(AT_FDCWD, temp_path, O_WRONLY|O_CREAT|O_TRUNC, 0) */
     mov $257, %rax
     mov $-100, %rdi
-    lea portal_path(%rip), %rsi
-    mov $0x201, %rdx
+    lea temp_path(%rip), %rsi
+    mov $0x241, %rdx
     xor %r10, %r10
     syscall
     test %rax, %rax
@@ -56,6 +57,60 @@ _start:
     mov $saved_len, %rdx
     syscall
     cmp $saved_len, %rax
+    jne fail
+
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+
+    /* rename(temp_path, portal_path): commit the staged bytes */
+    mov $82, %rax
+    lea temp_path(%rip), %rdi
+    lea portal_path(%rip), %rsi
+    syscall
+    test %rax, %rax
+    js fail
+
+    /* Re-open the final file and prove the committed byte count. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea portal_path(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail
+    mov %rax, %r12
+
+    mov $0, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $4096, %rdx
+    syscall
+    cmp $saved_len, %rax
+    jne fail
+
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+
+    /* Stage a second, different save that must never be committed. */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea temp_path(%rip), %rsi
+    mov $0x241, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail
+    mov %rax, %r12
+
+    mov $1, %rax
+    mov %r12, %rdi
+    lea doomed_payload(%rip), %rsi
+    mov $doomed_len, %rdx
+    syscall
+    cmp $doomed_len, %rax
     jne fail
 
     mov $3, %rax
@@ -76,6 +131,17 @@ _start:
     mov $3, %rax
     mov %r12, %rdi
     syscall
+
+    /* A rename after revocation must fail without committing the staging. */
+    mov $82, %rax
+    lea temp_path(%rip), %rdi
+    lea portal_path(%rip), %rsi
+    syscall
+    cmp $-13, %rax
+    je 3f
+    cmp $-2, %rax
+    jne fail
+3:
 
     /* A post-revocation read must fail with EACCES or ENOENT. */
     mov $257, %rax
@@ -115,10 +181,15 @@ fail:
     .section .rodata
 portal_path:
     .asciz "/run/aether/portal/dd8f879ba78d207c/gate4.xlsx"
+temp_path:
+    .asciz "/run/aether/portal/dd8f879ba78d207c/gate4.xlsx.sctmp"
 revoke_path:
     .asciz "/run/aether/gate4/revoke"
 saved_payload:
     .incbin "tests/fixtures/gate4/saved.csv"
     .set saved_len, . - saved_payload
+doomed_payload:
+    .ascii "revoked-commit-must-not-land\n"
+    .set doomed_len, . - doomed_payload
 
     .section .note.GNU-stack,"",@progbits
