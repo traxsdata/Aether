@@ -60,7 +60,10 @@ It never receives ambient filesystem, network, or device authority.
 ELF/`PT_INTERP` mapping, VMA and page-table management, and runtime library
 loading remain in the kernel. There is no syscall remoting: `linuxd` does not
 receive Linux registers, emulate file descriptors, or map application pages.
-Moving those responsibilities into `linuxd` requires the Gate 3 remoting ABI.
+Moving those responsibilities into `linuxd` remains the Gate 2 production
+follow-up. The Gate 3 headless GridCraft run uses this kernel-side path: the
+verified AppImage supplies the selected program, the runtime rootfs supplies
+`ld.so`/libc, and `/tmp` writes go to the private overlay.
 
 ### Kernel primitives
 

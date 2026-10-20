@@ -120,7 +120,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | HI-28 | Audio: ALSA/PipeWire symbols; no audio path observed in the CLI | Audio service only when a capability is granted | planned audio service | HI-T27 | deferred |
 | HI-29 | Devices and GPU nodes: no `/dev/input`, `/dev/dri`, block devices, or raw PCI | Deny by default; no device capability in the first profile | `kernel/services`, planned `user/linuxd` | HI-T28 | denied |
 | HI-30 | Lifecycle and limits: crash containment, restart budget, address-space/thread/fd/CPU quotas, `prlimit64`, `sched_*` | Supervisor plus per-domain resource accounting | `kernel/src/supervisor.rs`, `kernel/src/scheduler.rs` | HI-T29, HI-T30 | partial |
-| HI-31 | Compatibility record: exact digest, runtime version, named tests | Database schema and classification rules | `tests/compatibility` | HI-T31 | existing (record stays `unsupported`) |
+| HI-31 | Compatibility record: exact digest, runtime version, named tests | Database schema and classification rules | `tests/compatibility` | HI-T31 | existing (record is `limited` after Gate 3) |
 
 ## Test plan
 
@@ -159,7 +159,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T28 | planned `make linux-device-deny-test` | `/dev/dri`, `/dev/input`, block devices, and raw PCI are absent or denied | planned |
 | HI-T29 | planned `make linux-crash-test` | Fault retires only the domain; supervisor restarts within budget; quotas are enforced | planned |
 | HI-T30 | planned `make linux-limit-test` | Address-space, thread, fd, and CPU limits return the documented error and do not leak authority | planned |
-| HI-T31 | `make compat-test` | GridCraft remains `unsupported` until a completed gate has named evidence | existing |
+| HI-T31 | `make compat-test` + `make gate3-test` | GridCraft is `limited` with named Gate 3 evidence and is not upgraded above `limited` before Gate 4 | existing |
 | HI-T32 | planned `make linux-clipboard-deny-test` | No clipboard grant is advertised; the application starts and copy/paste fails cleanly | planned |
 
 ## Decisions
@@ -227,13 +227,13 @@ payload exits non-zero. No test is evidence until it runs in `make ci`.
 | Family | Location | Existing targets | Planned targets |
 |---|---|---|---|
 | Host unit | `apps/linux/*`, `kernel/memory`, `kernel/fs` | `make appimage-test`, `make squashfs-test`, `make unittest` | ABI policy and path-translation unit tests inside `make unittest` |
-| QEMU Linux payload | `tests/fixtures/linux/`, planned `tools/linux-test.py` | `make test` (static fixture) | `linux-abi-test`, `linux-proc-test`, `linux-thread-test`, `linux-env-test`, `linux-fd-test`, `linux-fs-test`, `linux-portal-test`, `linux-mem-test`, `linux-sync-test`, `linux-signal-test`, `linux-time-test`, `linux-random-test`, `linux-procfs-test`, `linux-poll-test`, `linux-socket-test`, `linux-net-deny-test`, `linux-gl-test`, `linux-vulkan-test`, `linux-x11-deny-test`, `linux-dbus-test`, `linux-audio-deny-test`, `linux-device-deny-test`, `linux-crash-test`, `linux-limit-test`, `linux-clipboard-deny-test` |
+| QEMU Linux payload | `tests/fixtures/linux/`, `tools/build-gate3-*.sh` | `make test` (static fixture), `make gate3-test` (real GridCraft CLI) | `linux-abi-test`, `linux-proc-test`, `linux-thread-test`, `linux-env-test`, `linux-fd-test`, `linux-fs-test`, `linux-portal-test`, `linux-mem-test`, `linux-sync-test`, `linux-signal-test`, `linux-time-test`, `linux-random-test`, `linux-procfs-test`, `linux-poll-test`, `linux-socket-test`, `linux-net-deny-test`, `linux-gl-test`, `linux-vulkan-test`, `linux-x11-deny-test`, `linux-dbus-test`, `linux-audio-deny-test`, `linux-device-deny-test`, `linux-crash-test`, `linux-limit-test`, `linux-clipboard-deny-test` |
 | Desktop integration | `tools/desktop_smoke.py` | `make iso-test` | `linux-input-test`, `wayland-test`, `wayland-protocol-test`, `wayland-buffer-test` |
-| Compatibility database | `tests/compatibility` | `make compat-test` | None; the record stays `unsupported` until a gate passes |
+| Compatibility database | `tests/compatibility` | `make compat-test` | None; the Gate 3 record is `limited` and cannot rise above that before Gate 4 |
 
-The target names above are reserved for the Linux layer; none exist in the
-Makefile today except the existing targets in the third column. A target is added
-only with its harness, and it must fail closed when the marker is absent.
+The target names above are reserved for the Linux layer; `make gate3-test` is
+the first Gate 3 harness, and the remaining planned targets are added only with
+their harness. A target must fail closed when the marker is absent.
 
 ## Security criteria review
 
@@ -269,5 +269,5 @@ authority. The remaining risk is implementation, not an unmapped interface.
 
 **Gate 1 is complete for the pinned artifact.** The 32 mapped facilities and
 their test IDs are the Gate 2 backlog; implementation status does not change the
-inventory result. GridCraft remains `unsupported` until Gate 3 or Gate 4 has a
-completed run.
+inventory result. Gate 3 now has a completed headless run, so the GridCraft
+record is `limited`; Gate 4 is still required before any upgrade beyond that.

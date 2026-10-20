@@ -25,12 +25,13 @@ grants, and the desktop is not a security authority.
 > Ed25519 update verification with rollback protection, and a signed release
 > bundle plus qualification report.
 >
-> Windows compatibility, the Linux AppImage layer, networking, persistent
-> storage, audio, GPU acceleration, a general installer, Secure Boot, and an
-> external security review are not implemented. The Linux work has a validated
-> AppImage importer and a ring-3 Linux `syscall` path that runs a static test
-> ELF; it cannot run a dynamic AppImage such as GridCraft yet. Do not use this
-> tree for real data.
+> Windows compatibility, the Linux GUI layer, networking, persistent storage,
+> audio, GPU acceleration, a general installer, Secure Boot, and an external
+> security review are not implemented. The Linux track imports the pinned
+> GridCraft AppImage and runs its headless `gridcraft-cli` at QEMU prototype
+> scope (Gate 3); Wayland, software Vulkan, the windowed GUI, and general
+> application compatibility are not implemented. Do not use this tree for real
+> data.
 
 ## What works today
 
@@ -121,8 +122,10 @@ grants, and the desktop is not a security authority.
 - A bounded `no_std` SquashFS 4 reader (`aether-squashfs`) with zstd, gzip,
   lz4, lzo, xz, and lzma decompression, symlink/hardlink policy, and a host extractor. It
   extracts the real GridCraft AppImage tree. The kernel imports an embedded
-  signed rootfs and serves Linux file opens from it; user-supplied AppImage
-  import and persistent overlay storage remain pending.
+  signed rootfs and serves Linux file opens from it. The UEFI loader also
+  stages the pinned real GridCraft AppImage; the kernel verifies and launches
+  its headless CLI through `PT_INTERP` (`make gate3-test`). User-selected
+  AppImage import and persistent overlay storage remain pending.
 - A first Linux ABI slice: a static freestanding x86-64 Linux ELF is loaded
   into its own PML4, enters through the `syscall` instruction, writes through a
   validated user pointer, and exits cleanly (`AETHER_LINUX_OK`). The layer now
@@ -142,7 +145,10 @@ grants, and the desktop is not a security authority.
   (`AETHER_LINUX_DYN_*`). `make glibc-test` packages the host glibc in a signed
   runtime rootfs and runs a dynamically linked hello through `ld.so`,
   relocations, and shared `libc` (`AETHER_GLIBC_OK`). That is an opt-in host-ABI
-  smoke test, not the pinned production runtime. Threads, Wayland, and Vulkan
+  smoke test, not the pinned production runtime. Gate 3 uses the same loader
+  path for the real `gridcraft-cli`: one process evaluates formulas, reads a
+  CSV, writes it through the private `/tmp` overlay, and exits zero
+  (`make gate3-test`, `AETHER_GATE3_APP_OK`). Threads, Wayland, and Vulkan
   are still missing.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.

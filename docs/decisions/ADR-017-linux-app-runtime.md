@@ -1,7 +1,7 @@
 # ADR-017: Linux application and AppImage runtime
 
-- **Status:** Accepted; import and static Linux ABI slices implemented, runtime
-  incomplete
+- **Status:** Accepted; Gate 3 headless GridCraft CLI runs at QEMU prototype
+  scope, production runtime and GUI incomplete
 - **Date:** 2026-10-20
 - **Supersedes:** none
 - **Related:** [Linux compatibility](../specifications/linux-compatibility.md),
@@ -72,8 +72,10 @@ Compatibility is claimed only after the gates in
 are met. Gate 0 (container inspection) is implemented. Gate 1 (host-interface
 inventory) is complete in
 [`../specifications/linux-host-interface-inventory.md`](../specifications/linux-host-interface-inventory.md);
-its missing interfaces are Gate 2 work. Gate 3 must run `gridcraft-cli` from the
-AppImage headlessly before Gate 4 attempts the GUI.
+its missing interfaces are Gate 2 work. Gate 3 now runs the pinned
+`gridcraft-cli` from the AppImage headlessly at QEMU prototype scope (formula
+evaluation and a CSV round trip through the private overlay). The production
+runtime, a merged per-application AppImage root, and Gate 4's GUI remain open.
 
 ## Consequences
 

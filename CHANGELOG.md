@@ -7,6 +7,20 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Linux Gate 3 headless GridCraft prototype: `make gate3-test` stages the
+  pinned 19,024,376-byte GridCraft 0.8.0 AppImage, verifies its signed import
+  record and SHA-256, imports the SquashFS payload, and launches the bundled
+  `gridcraft-cli` through `PT_INTERP` with a configured argv. One process
+  evaluates `=1+1` (`2.0`) and `=SUM(B2:B3)` (`3`) and writes a 38-byte CSV
+  through the private `/tmp` overlay (`wrote /tmp/gate3-out.csv`). The kernel
+  emits `AETHER_GATE3_APP_OK` only after a zero exit and derives
+  `AETHER_GATE3_DENIAL_OK portal=none native=denied root=readonly
+  overlay=private` from the task table. Supporting changes include dynamic
+  AppImage launch, an argv-string stack-layout fix, `mprotect` over
+  demand-paged ranges, bounded overlay `rename`/`unlink`, short `read`/`write`
+  counts, and a 16-entry/4 KiB-per-file overlay. The imported AppImage tree is
+  not yet merged into a per-app root, the runtime pin is host-derived, and the
+  overlay is RAM-backed; the GUI remains Gate 4.
 - Linux Gate 2 prototype: blocking/finite `poll`/`epoll_wait` and
   cross-process pipes, `nanosleep`/`clock_nanosleep`/`timerfd`, full-enough
   inotify (blocking mode, directory watches, overflow), `siginfo`/`ucontext`,

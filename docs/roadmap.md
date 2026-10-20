@@ -160,17 +160,33 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Gate 2 production follow-up: move Linux ABI emulation, ELF/library
   loading, and syscall remoting into the ring-3 `linuxd`, pin a
   Mesa/lavapipe/Wayland runtime rootfs, and make AppImage installation and the
-  overlay durable on a persistent block device. These are prerequisites for a
-  production compatibility claim and for Gate 3's application run.
-- [ ] Gate 3 — headless GridCraft: import
-  `gridcraft-0.8.0-linux-x86_64.AppImage` and run its `gridcraft-cli`
-  (`eval`, CSV import/export) with a read-only root and private overlay.
+  overlay durable on a persistent block device. These remain required for a
+  production compatibility claim; the Gate 3 prototype run below does not
+  satisfy them.
+- [x] Gate 3 — headless GridCraft (QEMU prototype scope): import
+  `gridcraft-0.8.0-linux-x86_64.AppImage` and run its bundled
+  `gridcraft-cli` unmodified in one process with a read-only root and private
+  `/tmp` overlay. `make gate3-test` verifies the exact digest
+  `942096a29a534aa2503e9e7aa1816e952f7250e73d55f8f32afd077547617f77`
+  (19,024,376 bytes), launches `/usr/bin/gridcraft-cli` through `PT_INTERP`,
+  evaluates `=1+1` (`2.0`) and `=SUM(B2:B3)` (`3`), writes and prints the CSV
+  round trip (`item,value`, `alpha,1`, `beta,2`, `total,3`), and exits zero.
+  The kernel emits `AETHER_GATE3_APP_OK` only after the app exits successfully,
+  and derives `AETHER_GATE3_DENIAL_OK portal=none native=denied root=readonly
+  overlay=private` from the task table. The program bytes come from the
+  verified AppImage; glibc, `ld.so`, `libm`, and `libgcc_s` come from the
+  signed host-derived Gate 3 runtime rootfs. The imported AppImage tree is not
+  yet merged into a per-application visible root, so this is a prototype run,
+  not a production claim.
 - [ ] Gate 4 — windowed GridCraft: run `usr/bin/gridcraft` with Wayland,
   software rendering, keyboard/pointer input, and workbook open/save through
   the portal.
-- [ ] Move the GridCraft record above `unsupported` only after the relevant
-  gate has a completed run, named tests, the exact AppImage digest, the runtime
-  version, and the platform/date.
+- [x] Moved the GridCraft record from `unsupported` to `limited` after the
+  Gate 3 run, with the exact digest, runtime profile, named tests, platform,
+  and date.
+- [ ] Raise the GridCraft record above `limited` only after the relevant gate
+  has a completed run, named tests, the exact AppImage digest, the runtime
+  version, and the platform/date. Gate 4 is still required for the GUI.
 
 #### Import and runtime root
 
@@ -220,6 +236,20 @@ user space. It is not a VM. The target and security gates are in
   before parsing or launch (`AETHER_LINUX_APPIMAGE_STAGED_OK`,
   `AETHER_LINUX_APPIMAGE_OK`, `AETHER_LINUX_APPIMAGE_EXEC_OK`). Missing and
   tampered staged files fail closed.
+- [x] Real pinned GridCraft artifact: `make gate3-test` stages the 19,024,376
+  byte GridCraft 0.8.0 AppImage, signs and verifies its import record, imports
+  the SquashFS payload, and launches the bundled `gridcraft-cli` with a
+  configured argv against the signed Gate 3 runtime rootfs
+  (`AETHER_LINUX_APPIMAGE_STAGED_OK bytes=19024376`, `AETHER_GATE3_APP_OK`).
+  The AppImage tool refuses any file whose SHA-256 differs from the pin.
+- [ ] Merge the imported AppImage tree into the application's visible
+  read-only root. Today the selected program is read from the verified
+  AppImage, while data and libraries are resolved from the runtime rootfs; the
+  CLI gate does not need the GUI's data files.
+- [ ] Replace the 512 MiB fixed bootstrap heap. The allocation-only SquashFS
+  importer accumulates every AppImage file and decompression buffer, so the
+  real 19 MiB image forced a large static arena. A selective import of the
+  launch program, or a reclaiming scratch allocator, should remove it.
 - [ ] User-installed AppImage selection: no file picker, package channel, or
   writable install location exists yet; the AppImage is staged on the boot
   volume at build time.
@@ -254,6 +284,11 @@ user space. It is not a VM. The target and security gates are in
 - [x] Dynamic ELF slice: `ET_DYN` and `PT_INTERP` parsing, image mapping,
   auxv construction, runtime-rootfs interpreter resolution, and
   interpreter-to-main handoff (`AETHER_LINUX_DYN_*`).
+- [x] Dynamic AppImage launch: the imported program is entered through the
+  interpreter named by its `PT_INTERP`, with a compile-time `argv` and a fixed
+  environment. The initial stack keeps argv/envp strings above the vector
+  area, and `mprotect` now updates demand-paged ranges whose leaf entries do
+  not exist yet. This is the path used by the real GridCraft CLI.
 - [x] Host-glibc proof: `make glibc-test` builds a signed runtime rootfs from
   the host glibc and runs a dynamically linked hello through `ld.so`,
   relocations, and shared `libc` (`AETHER_GLIBC_OK`). This is not the pinned
@@ -264,6 +299,13 @@ user space. It is not a VM. The target and security gates are in
 - [x] File metadata and descriptor calls: `stat`/`fstat`/`newfstatat`/`statx`,
   `readlink`, `getdents64`, `fcntl`, `dup`, `dup2`, `pipe2`, non-blocking
   `poll`, and descriptor table cleanup.
+- [x] Overlay mutation and short I/O: `rename` and `unlink` are confined to the
+  current application's `/tmp`, `/settings`, and `/logs` entries and refuse the
+  read-only root with `EROFS`; `getcwd` reports `/`; `AT_EMPTY_PATH` `statx`
+  delegates to `fstat`; and oversized `read`/`pread64`/`write` calls return a
+  short count instead of `EINVAL`. The bounded overlay is 16 entries, 4 KiB per
+  file, and 8 KiB per application, with the quota-denial fixture still
+  exercised (`AETHER_LINUX_QUOTA_OK`).
 - [x] Notification calls: non-blocking `poll`, `eventfd2`, and basic
   `epoll_create1`/`epoll_ctl`/`epoll_wait`.
 - [x] Futex timed wait: the fixture verifies timeout with `ETIMEDOUT`
@@ -352,6 +394,11 @@ user space. It is not a VM. The target and security gates are in
   bounded descriptor/VMA/overlay/shared-page quotas
   (`AETHER_LINUX_SYSCALL_POLICY_OK`, `AETHER_LINUX_DENIAL_OK`,
   `AETHER_LINUX_QUOTA_OK`, `AETHER_LINUXD_DENY_OK`).
+- [x] Gate 3 application denial evidence: the imported GridCraft task has an
+  empty capability table, receives no portal handle, cannot use the native ABI,
+  sees the imported tree as read-only, and writes only to its private overlay
+  (`AETHER_GATE3_DENIAL_OK portal=none native=denied root=readonly
+  overlay=private`).
 - [ ] Dedicated crash-containment test: a Linux application fault retires only
   its domain and cannot mint capabilities or observe a sibling application root.
   The scheduler already contains Linux fault retirement, but there is no named
@@ -399,30 +446,34 @@ the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
 image records without touching user data. VMware Workstation itself has not yet
 been smoke-tested.
 
-The Linux track has completed the Gate 1 inventory and the **Gate 2 prototype**
-(QEMU scope). Boot markers cover signed embedded-rootfs and loader-staged
-AppImage import, the pinned host-glibc runtime manifest, ring-3 `linuxd` launch
-approval and denial, demand paging, cross-process shared anonymous mappings,
-read-shared rootfs mappings, per-domain quotas, blocking/finite
-`poll`/`epoll_wait`, cross-process pipes, sleeps/timerfds, blocking and
-directory inotify, pseudo-files/devices, default-deny syscall policy,
-`clone3`/robust futex/`rseq`, `siginfo`/`ucontext`/alt-stack/`SA_RESTART`,
-process groups, blocking `wait4`, static/dynamic exec, and the `PT_INTERP`
-loader. `make ci` and `make glibc-test` pass at the commit recorded for this
-roadmap; `make docs-check`, `make appimage-test`, and the runtime-packaging
-tests pass. The exact commit and marker transcript belong in the PR, not this
-planning file.
+The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
+(QEMU scope), and the **Gate 3 headless GridCraft run** (QEMU prototype scope).
+Boot markers cover signed embedded-rootfs and loader-staged AppImage import, the
+pinned host-glibc runtime manifest, ring-3 `linuxd` launch approval and denial,
+demand paging, cross-process shared anonymous mappings, read-shared rootfs
+mappings, per-domain quotas, blocking/finite `poll`/`epoll_wait`, cross-process
+pipes, sleeps/timerfds, blocking and directory inotify, pseudo-files/devices,
+default-deny syscall policy, `clone3`/robust futex/`rseq`,
+`siginfo`/`ucontext`/alt-stack/`SA_RESTART`, process groups, blocking `wait4`,
+static/dynamic exec, the `PT_INTERP` loader, and the real GridCraft CLI CSV
+round trip. `make gate3-test` passes with the pinned 19 MiB AppImage, and
+`make ci` (including lint, unit/tooling tests, QEMU boot, ISO/desktop/Files,
+fault/rollback/negative paths, release checks, and the runtime-packaging tests)
+passes at the commit that adds this run. The exact commit and marker transcript
+belong in the PR, not this planning file.
 
-The Gate 2 prototype is not a production compatibility claim. Linux syscall
-dispatch, ELF/library mapping, and VMA management remain in the kernel, so
-`linuxd` is a ring-3 launch-policy manager rather than the full ABI service
-described by the architecture. Mesa/lavapipe/Wayland runtime content, durable
-storage, a user-installed AppImage picker, complete inotify/signal/epoll
-semantics, and the Wayland portal/renderer stack remain open. These are tracked
-as the Gate 2 production follow-up and Gate 3/4 work; Gate 2's prototype scope
-does not make GridCraft compatible.
+Neither the Gate 2 prototype nor the Gate 3 run is a production compatibility
+claim. Linux syscall dispatch, ELF/library mapping, and VMA management remain in
+the kernel, so `linuxd` is a ring-3 launch-policy manager rather than the full
+ABI service described by the architecture. The imported AppImage tree is not yet
+merged into a per-application visible root, and the runtime pin is host-derived.
+Mesa/lavapipe/Wayland runtime content, durable storage, a user-installed
+AppImage picker, complete inotify/signal/epoll semantics, and the Wayland
+portal/renderer stack remain open. These are tracked as the Gate 2 production
+follow-up and Gate 4 work; Gate 3's prototype scope does not make the GUI or
+arbitrary Linux applications compatible.
 
-The remaining Phase 5/6 work is blocked on user-space process creation, a
-persistent store, network/audio services, an installer, the Linux runtime
-interfaces above, and external review. Persistent storage, interactive consent,
-SMP, blocking IPC, and capability revocation remain follow-up work.
+The remaining Phase 5/6 work is blocked on a persistent store, network/audio
+services, the Wayland/software-renderer stack, a user-installed AppImage/package
+channel, an installer, and external review. Persistent storage, interactive
+consent, SMP, and capability revocation remain follow-up work.

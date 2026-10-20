@@ -68,7 +68,7 @@ ledger, not a security boundary.
 | Aether Other | native | verified | Sibling-root denial test passes. |
 | Aether Package Verifier | native | verified | Signature, digest, and publisher tests pass on host and in the boot self-test. |
 | Notepad (Win32) | none | unsupported | No Windows runtime exists; the package verifier rejects `runtime=windows`. |
-| GridCraft 0.8.0 (AppImage) | none | unsupported | Importer and static Linux ABI slices exist; the payload still needs glibc 2.35, Wayland, and Vulkan. See [Linux compatibility](linux-compatibility.md). |
+| GridCraft 0.8.0 (AppImage) | linux-runtime-glibc-2.43 | limited | The headless `gridcraft-cli` Gate 3 run passes on QEMU with a read-only root and private overlay, including formula evaluation and a CSV round trip. The GUI still needs Wayland and software Vulkan. See [Linux compatibility](linux-compatibility.md). |
 
 ## Test suite
 

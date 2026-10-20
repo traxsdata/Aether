@@ -1,7 +1,7 @@
 # Linux application compatibility
 
 **Document ID:** AETHER-LINUX-001
-**Status:** Gate 2 prototype is implemented at QEMU scope; no application compatibility claim
+**Status:** Gate 3 headless CLI run is implemented at QEMU prototype scope; the GUI and general application compatibility are not claimed
 **Related:** [ADR-017](../decisions/ADR-017-linux-app-runtime.md), technical
 specification §7 (compatibility)
 
@@ -24,8 +24,8 @@ threads, Wayland/X11, Vulkan, D-Bus, and file dialogs.
   into a private root; FUSE is not required.
 - A private AppImage root is not a security boundary by itself. The Aether
   security domain, filesystem service, and portal enforce isolation.
-- No GridCraft record may be classified above `unsupported` until the gates
-  below pass.
+- No GridCraft record may be classified above `limited` until Gate 4 passes
+  and the Gate 2 production follow-up is complete.
 
 ## Tested artifact
 
@@ -44,7 +44,8 @@ threads, Wayland/X11, Vulkan, D-Bus, and file dialogs.
 | Payload linkage | dynamic: `ld-linux-x86-64.so.2`, `libc.so.6` (up to GLIBC_2.35), `libm.so.6`, `libgcc_s.so.1` |
 | GUI stack | `winit` 0.30 (Wayland/X11), `wgpu`/Vulkan, D-Bus, XDG desktop portal, `arboard` clipboard |
 | Test date | 2026-10-20 |
-| Classification | `unsupported` (no runtime) |
+| Runtime profile | `gate3-host-glibc`, glibc 2.43, host-derived pin |
+| Classification | `limited` (headless `gridcraft-cli` only; GUI not run) |
 
 `make appimage-test` exercises the container parser against a synthetic image.
 `appimage-inspect` reports the fields above from a real AppImage without
@@ -61,15 +62,15 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 
 | Facility | What the runtime needs | Aether interface to define | Current status |
 |---|---|---|---|
-| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, pinned host-glibc root profile, embedded signed-rootfs in-OS import, and loader-staged signed AppImage import implemented**; the populated Mesa/Wayland rootfs, a cross-host reproducible pin, and user-selected AppImage import are missing |
-| ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static and dynamic exec fixtures propagate bounded argv/envp; a `PT_INTERP` fixture, opt-in host-glibc hello, and a host-derived pinned glibc/loader profile run; Mesa/Wayland libraries and a cross-host reproducible pin remain missing |
+| AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, pinned host-glibc root profile, embedded signed-rootfs in-OS import, loader-staged signed AppImage import, and the real GridCraft 0.8.0 import and launch implemented**; the populated Mesa/Wayland rootfs, a cross-host reproducible pin, a merged per-app root, and user-selected AppImage import are missing |
+| ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static and dynamic exec fixtures propagate bounded argv/envp; a `PT_INTERP` fixture, opt-in host-glibc hello, a host-derived pinned glibc/loader profile, and the dynamically linked GridCraft CLI run; Mesa/Wayland libraries and a cross-host reproducible pin remain missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: eager-copy fork, blocking `wait4` with nonchild/selector checks, bounded same-session process groups with `setpgid`/`getpgid`/`getsid`/`setsid` validation, static/dynamic exec, and bounded `clone3` thread creation; stopped/continued waits and group selectors return `ENOSYS`/`EINVAL` |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `clone` and `clone3` threads, per-thread stacks/TLS, clear-child-tid join, and bounded `rseq` registration/validation (CPU id always 0, no abort notifications); detach and affinity remain |
 | Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: bounded demand paging for private anonymous mappings; `MAP_SHARED|MAP_ANONYMOUS` uses a reference-counted physical-frame registry, so contents survive `fork` and are visible to parent and child while private mappings stay private. A bounded in-memory page cache backs read-shared file mappings keyed by rootfs/overlay inode and page offset, including aliasing across unrelated processes; writes are never persisted to the read-only root and `msync` returns `EOPNOTSUPP`. Shared mappings are limited to 16 VMA entries and 256 physical pages per application domain, with `ENOMEM` on exhaustion. `mremap` of a shared mapping returns `EOPNOTSUPP`. |
 | Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: futex wait/wake queues, timeout (`ETIMEDOUT`), clear-child-tid join, robust-futex registration and exit-time `FUTEX_OWNER_DIED` wakeup for the exact 24-byte x86-64 head layout, and eventfd counters shared by threads in one tgid; condition variables, semaphores, and other robust-list layouts remain |
 | Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Partial: x86-64 `rt_sigframe` with `siginfo_t`/`ucontext_t`, `SA_SIGINFO`, `SA_ONSTACK` with fallback, GPR/mask restore, `SA_RESTART` for `wait4`, self/group and cross-process SIGUSR1 handlers, and default `SIGKILL`/`SIGTERM`/`SIGCHLD`; stopping, queued real-time signals, and most `siginfo` variants remain |
 | Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; relative/absolute `nanosleep`/`clock_nanosleep` with `EINTR`; bounded `timerfd_create`/`settime`/`gettime` for `CLOCK_MONOTONIC`, one-shot and periodic, with poll/epoll integration. High-resolution clocks and `CLOCK_REALTIME` remain absent |
-| Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root, per-application `/tmp`, `/settings`, and `/logs` overlays, and inotify with blocking or nonblocking instances, four watches, file and directory events (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`, `IN_IGNORED`), bounded-queue `IN_Q_OVERFLOW`, and thread wakeups. Recursive watches, move/delete/unmount events, and cross-process watch sharing are unsupported |
+| Files | `openat`, `statx`, `readlink`, `rename`, `unlink`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root, per-application `/tmp`, `/settings`, and `/logs` overlays with bounded `rename`/`unlink` confined to the current application, and inotify with blocking or nonblocking instances, four watches, file and directory events (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`, `IN_IGNORED`), bounded-queue `IN_Q_OVERFLOW`, and thread wakeups. Recursive watches, move/delete/unmount events, `renameat`/`unlinkat`, cross-process watch sharing, and deferred deletion for open descriptors are unsupported |
 | Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Blocking/finite `poll`/`epoll_wait`, same-tgid thread-shared eventfd, blocking pipes, and blocking/nonblocking inotify | Partial: `poll` and `epoll_wait` support finite and infinite timeouts with scheduler parking and deadlines; `epoll` is level-triggered by default with a bounded `EPOLLET` transition slice and honest `EPOLLONESHOT` re-arm via `EPOLL_CTL_MOD`; pipes block on empty read/full write across `fork`-inherited descriptors; inotify is bounded to one instance, four watches, and eight queued events per process. Full inotify, nested epoll watches, and cross-process eventfd sharing remain unsupported |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/proc/self/status`, `/proc/self/fd`, `/dev/urandom`, `/dev/zero`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | **Implemented** in the kernel prototype through open/read/stat/readdir, plus a read-only `/proc/aether/syscalls` audit view. `/sys`, tty, input, and GPU nodes are absent. `/dev/random` and `/dev/urandom` return the same deterministic boot PRNG stream as `getrandom`, not host entropy |
 | Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Not implemented |
@@ -305,8 +306,35 @@ Import the AppImage and run the bundled `gridcraft-cli` unmodified
 (`gridcraft-cli eval '=1+1'` and a CSV round trip) in an isolated domain with a
 read-only app root and a private overlay.
 
-**Evidence:** exact AppImage digest, command transcript, file-portal denial
-tests, and a compatibility record with named tests.
+**Status: met at QEMU prototype scope.** `make gate3-test` stages the pinned
+19,024,376-byte AppImage, verifies its record and digest, imports the SquashFS
+payload, and launches `/usr/bin/gridcraft-cli` through its `PT_INTERP` against
+the signed Gate 3 runtime rootfs. One process runs:
+
+```text
+gridcraft-cli run --in /usr/share/gridcraft/gate3-in.csv \
+  --cmd 'formulas.evaluate={"formula":"=1+1"}' \
+  --cmd 'cell.set={"cell":"A4","input":"total"}' \
+  --cmd 'cell.set={"cell":"B4","input":"=SUM(B2:B3)"}' \
+  --out /tmp/gate3-out.csv --print A1:B4 --csv
+```
+
+The boot transcript contains the formula result `2.0`, cell `B4` value `3`,
+`wrote /tmp/gate3-out.csv (38 bytes)`, and the CSV rows `item,value`,
+`alpha,1`, `beta,2`, `total,3`, followed by a zero exit,
+`AETHER_GATE3_APP_OK`, and
+`AETHER_GATE3_DENIAL_OK portal=none native=denied root=readonly
+overlay=private`. The denial marker is derived from the application task's
+empty capability table, not from guest output. The compatibility database
+record is `limited` with the named tests `linux.appimage.import`,
+`linux.gridcraft.eval`, `linux.gridcraft.csv`, and `linux.denial.portal`.
+
+**Prototype limitations:** the selected program is read from the verified
+AppImage, while libraries and data are resolved from the signed runtime rootfs;
+the imported tree is not yet merged into a per-application visible root. The
+runtime pin is host-derived, the overlay is RAM-backed, and the AppImage is
+staged at build time rather than selected by a user. These do not block the
+headless gate but do block a production compatibility claim.
 
 ### Gate 4 — Windowed GridCraft
 
@@ -361,10 +389,17 @@ revocation tests, and a compatibility record no better than the suite supports.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.
 7. No persistent storage; the RAM disk and the application overlay are
    volatile, so overlay persistence is limited to one boot.
-8. The AppImage import path is exercised with a separately built signed
-   artifact that the UEFI loader stages from the boot volume. There is no user
-   file picker, writable install location, or persistent block device, so the
-   artifact is still test-built rather than user-supplied.
+8. The AppImage import path is exercised with the pinned real GridCraft
+   artifact, but the UEFI loader stages it from the boot volume at build time.
+   There is no user file picker, writable install location, or persistent block
+   device, so the artifact is not yet user-supplied. The imported AppImage tree
+   is also not merged into the application's visible root: the selected program
+   is read from the verified AppImage, while libraries and data resolve from the
+   runtime rootfs.
+9. The kernel bootstrap heap is a 512 MiB fixed arena because the SquashFS
+   importer accumulates every AppImage file and decompression buffer and never
+   reclaims. A selective import of the selected program or a reclaiming scratch
+   allocator is required before this is a general runtime.
 
 These are ordered dependencies, not independent bugs. Gate 3 does not require
 graphics; Gate 4 does. Owners and test IDs are in the
