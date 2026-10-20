@@ -157,6 +157,13 @@ irq_1:
     push 33
     jmp irq_common
 
+.global irq_12
+.type irq_12, @function
+irq_12:
+    push 0
+    push 44
+    jmp irq_common
+
 /* Save the full interrupted context, call Rust, restore the selected frame. */
 .p2align 4
 .global irq_common
@@ -296,6 +303,7 @@ unsafe extern "C" {
     fn isr_31();
     fn irq_0();
     fn irq_1();
+    fn irq_12();
     fn syscall_entry();
 }
 
@@ -378,12 +386,13 @@ pub fn init() {
         unsafe { (*idt.add(index)).set_handler(*handler as usize as u64) };
     }
 
-    // IRQ0 (timer) and IRQ1 (keyboard) are vectors 32 and 33 after the PIC
-    // remap.
-    // SAFETY: Both indices are inside the IDT.
+    // IRQ0 (timer), IRQ1 (keyboard), and IRQ12 (mouse) are vectors 32, 33, and
+    // 44 after the PIC remap.
+    // SAFETY: All indices are inside the IDT.
     unsafe {
         (*idt.add(32)).set_handler(irq_0 as *const () as usize as u64);
         (*idt.add(33)).set_handler(irq_1 as *const () as usize as u64);
+        (*idt.add(44)).set_handler(irq_12 as *const () as usize as u64);
     }
 
     // The syscall gate is callable from ring 3.
@@ -466,12 +475,17 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
 
 /// PIC interrupt entry, called from `irq_common`.
 extern "C" fn irq_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
-    crate::arch::x86_64::timer::acknowledge();
     // SAFETY: The assembly stub passes a complete live frame.
-    match unsafe { (*frame).vector } {
+    let vector = unsafe { (*frame).vector };
+    crate::arch::x86_64::timer::acknowledge_vector(vector);
+    match vector {
         32 => crate::scheduler::on_tick(frame),
         33 => {
             crate::input::on_irq();
+            frame
+        }
+        44 => {
+            crate::input::on_mouse_irq();
             frame
         }
         _ => crate::arch::x86_64::halt(),

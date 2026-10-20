@@ -103,11 +103,18 @@ fn execute_line() {
         "services" => supervisor::print_security(),
         "portal" => portal_command(argument),
         "security" => security(),
-        "input" => serial_line!(
-            "input: dropped={} received={}",
-            crate::input::dropped(),
-            crate::input::received()
-        ),
+        "input" => {
+            let mouse = crate::input::mouse();
+            serial_line!(
+                "input: dropped={} received={} mouse={} packets={} cursor={},{}",
+                crate::input::dropped(),
+                crate::input::received(),
+                if mouse.available { "ps2" } else { "synthetic" },
+                mouse.packets,
+                mouse.x,
+                mouse.y
+            );
+        }
         "mem" => memory(),
         "uptime" => serial_line!("uptime: {} ticks", scheduler::ticks()),
         "recovery" => recovery(),
@@ -131,14 +138,14 @@ fn print_help() {
     serial_line!("  portal           list file portal grants");
     serial_line!("  portal revoke N  revoke grant N (open handles stay valid)");
     serial_line!("  security         permission and sandbox status");
-    serial_line!("  input            keyboard queue status");
+    serial_line!("  input            keyboard and pointer queue status");
     serial_line!("  mem              memory pressure (MiB free/total)");
     serial_line!("  uptime           timer ticks");
     serial_line!("  recovery         system image and rollback status");
     serial_line!("  packages         installed package and verification status");
     serial_line!("  runtime          per-application runtime profiles");
     serial_line!("  updates          signed update and rollback status");
-    serial_line!("  desktop          compositor and desktop status");
+    serial_line!("  desktop          compositor, spaces, and window status");
     serial_line!("  clear            clear the terminal");
 }
 
@@ -255,9 +262,16 @@ fn recovery() {
 
 fn desktop() {
     crate::desktop::redraw();
+    crate::desktop::print_state();
+    let mouse = crate::input::mouse();
     serial_line!(
-        "desktop: focus={} checksum={:#010x} mode={}x{}",
+        "desktop: space={} windows={} focus={} mode={} cursor={},{} checksum={:#010x} display={}x{}",
+        crate::desktop::workspace(),
+        crate::desktop::window_count(),
         crate::desktop::focus(),
+        crate::desktop::mode(),
+        mouse.x,
+        mouse.y,
         crate::graphics::checksum(),
         crate::graphics::width(),
         crate::graphics::height()

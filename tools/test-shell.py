@@ -160,7 +160,7 @@ def main() -> int:
             ("packages", "package org.aether.demo"),
             ("runtime", "runtime org.aether.demo"),
             ("updates", "updates: installed=0.1.0"),
-            ("desktop", "desktop: focus="),
+            ("desktop", "desktop: space="),
             ("input", "input: dropped="),
             ("uptime", "uptime:"),
         ):

@@ -70,6 +70,7 @@ dependencies = [
  "aether-packaging",
  "aether-services",
  "aether-update",
+ "aether-wm",
 ]
 
 [[package]]
@@ -107,3 +108,7 @@ dependencies = [
  "aether-crypto",
  "aether-packaging",
 ]
+
+[[package]]
+name = "aether-wm"
+version = "0.1.0"

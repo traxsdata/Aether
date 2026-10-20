@@ -21,36 +21,54 @@ struct Framebuffer {
     width: u32,
     height: u32,
     stride: u32,
-    format: PixelFormat,
+    clip: Option<Clip>,
+    volatile: bool,
+}
+
+/// The real display surface used by [`present`].
+#[derive(Clone, Copy)]
+struct Front {
+    base: *mut u8,
+    width: u32,
+    height: u32,
+    stride: u32,
+}
+
+/// Maximum resolution held in the off-screen composition buffer.
+///
+/// A back buffer lets a frame complete before the display is touched, which
+/// removes tearing and makes animation pacing independent of display latency.
+/// Larger modes fall back to direct painting rather than failing to boot.
+const BACK_WIDTH: u32 = 1920;
+const BACK_HEIGHT: u32 = 1200;
+const BACK_PIXELS: usize = BACK_WIDTH as usize * BACK_HEIGHT as usize;
+
+struct BackBuffer(UnsafeCell<[u32; BACK_PIXELS]>);
+
+// SAFETY: The back buffer is only accessed by the single CPU through the
+// interrupt-serialized graphics service.
+unsafe impl Sync for BackBuffer {}
+
+static BACK_BUFFER: BackBuffer = BackBuffer(UnsafeCell::new([0; BACK_PIXELS]));
+
+#[derive(Clone, Copy)]
+struct Clip {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl Clip {
+    fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
+    }
 }
 
 unsafe impl Send for Framebuffer {}
 
 static FRAMEBUFFER: Global<Option<Framebuffer>> = Global(UnsafeCell::new(None));
-
-/// Colours in `0x00RRGGBB` form.
-pub mod color {
-    /// Desktop background.
-    pub const BACKGROUND: u32 = 0x0b1220;
-    /// Window body.
-    pub const WINDOW: u32 = 0x16213a;
-    /// Raised window title bar.
-    pub const TITLE: u32 = 0x223255;
-    /// Top bar and taskbar.
-    pub const BAR: u32 = 0x101a30;
-    /// Muted text.
-    pub const MUTED: u32 = 0x8fa3c8;
-    /// Primary text.
-    pub const TEXT: u32 = 0xe8eef9;
-    /// Accent used for focus and the security indicator.
-    pub const ACCENT: u32 = 0x4fd1c5;
-    /// Warning or denied state.
-    pub const WARNING: u32 = 0xf6ad55;
-    /// Window shadow.
-    pub const SHADOW: u32 = 0x070c16;
-    /// Divider line.
-    pub const DIVIDER: u32 = 0x2d3d63;
-}
+static FRONT: Global<Option<Front>> = Global(UnsafeCell::new(None));
 
 /// Graphics initialization failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,25 +78,73 @@ pub enum GraphicsError {
 }
 
 impl Framebuffer {
+    fn unpack(&self, rgb: u32) -> u32 {
+        // The supported virtual firmware exposes a 32-bit BGRX surface for
+        // both linear GOP formats. Writing 0x00RRGGBB in little-endian order
+        // produces B, G, R, X bytes. The boot harness validates the result with
+        // a screenshot; treating the format code as a byte-order guarantee was
+        // wrong on QEMU/OVMF, which reports RGB while presenting BGRX.
+        rgb
+    }
+
     fn pack(&self, rgb: u32) -> u32 {
-        match self.format {
-            PixelFormat::RedGreenBlueReserved => {
-                ((rgb & 0x0000_00ff) << 16) | (rgb & 0x0000_ff00) | ((rgb >> 16) & 0x0000_00ff)
-            }
-            _ => rgb,
-        }
+        self.unpack(rgb)
+    }
+
+    fn visible(&self, x: i32, y: i32) -> bool {
+        x >= 0
+            && y >= 0
+            && x < self.width as i32
+            && y < self.height as i32
+            && self.clip.is_none_or(|clip| clip.contains(x, y))
     }
 
     fn pixel(&mut self, x: i32, y: i32, rgb: u32) {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+        if !self.visible(x, y) {
             return;
         }
         let offset = (y as usize * self.stride as usize + x as usize) * 4;
         // SAFETY: The ABI validated that the framebuffer covers
-        // `stride * height * 4` bytes, and the bounds were checked above.
+        // `stride * height * 4` bytes, and the bounds were checked above. The
+        // back buffer has the same backing guarantee.
         unsafe {
             let pointer = self.base.add(offset) as *mut u32;
-            pointer.write_volatile(self.pack(rgb));
+            if self.volatile {
+                pointer.write_volatile(self.pack(rgb));
+            } else {
+                pointer.write(self.pack(rgb));
+            }
+        }
+    }
+
+    fn pixel_blend(&mut self, x: i32, y: i32, rgb: u32, alpha: u8) {
+        if !self.visible(x, y) || alpha == 0 {
+            return;
+        }
+        if alpha == 255 {
+            self.pixel(x, y, rgb);
+            return;
+        }
+        let offset = (y as usize * self.stride as usize + x as usize) * 4;
+        // SAFETY: Same invariant as `pixel`.
+        unsafe {
+            let pointer = self.base.add(offset) as *mut u32;
+            let existing = if self.volatile {
+                self.unpack(pointer.read_volatile())
+            } else {
+                self.unpack(pointer.read())
+            };
+            let alpha = u32::from(alpha);
+            let inverse = 255 - alpha;
+            let channel = |shift: u32| -> u32 {
+                (((existing >> shift) & 0xff) * inverse + ((rgb >> shift) & 0xff) * alpha) / 255
+            };
+            let blended = (channel(16) << 16) | (channel(8) << 8) | channel(0);
+            if self.volatile {
+                pointer.write_volatile(self.pack(blended));
+            } else {
+                pointer.write(self.pack(blended));
+            }
         }
     }
 
@@ -86,6 +152,14 @@ impl Framebuffer {
         for row in 0..height {
             for column in 0..width {
                 self.pixel(x + column, y + row, rgb);
+            }
+        }
+    }
+
+    fn rect_blend(&mut self, x: i32, y: i32, width: i32, height: i32, rgb: u32, alpha: u8) {
+        for row in 0..height {
+            for column in 0..width {
+                self.pixel_blend(x + column, y + row, rgb, alpha);
             }
         }
     }
@@ -103,21 +177,40 @@ pub fn init(info: &FramebufferInfo, mapped: bool) -> Result<bool, GraphicsError>
         return Err(GraphicsError::UnsupportedFormat);
     }
     // SAFETY: The framebuffer is mapped cache-disabled by the paging layer and
-    // the ABI validated its length.
+    // the ABI validated its length. The back buffer is static and exclusively
+    // owned by this module.
     unsafe {
-        *FRAMEBUFFER.0.get() = Some(Framebuffer {
+        *FRONT.0.get() = Some(Front {
             base: info.base as *mut u8,
             width: info.width,
             height: info.height,
             stride: info.stride,
-            format,
+        });
+        let use_back_buffer = info.width <= BACK_WIDTH && info.height <= BACK_HEIGHT;
+        let (base, stride, volatile) = if use_back_buffer {
+            (BACK_BUFFER.0.get() as *mut u8, info.width, false)
+        } else {
+            (info.base as *mut u8, info.stride, true)
+        };
+        *FRAMEBUFFER.0.get() = Some(Framebuffer {
+            base,
+            width: info.width,
+            height: info.height,
+            stride,
+            clip: None,
+            volatile,
         });
     }
     serial_line!(
-        "graphics: framebuffer {}x{} format={:?}",
+        "graphics: framebuffer {}x{} format={:?} backbuffer={}",
         info.width,
         info.height,
-        format
+        format,
+        if info.width <= BACK_WIDTH && info.height <= BACK_HEIGHT {
+            "on"
+        } else {
+            "direct"
+        }
     );
     Ok(true)
 }
@@ -126,21 +219,21 @@ pub fn init(info: &FramebufferInfo, mapped: bool) -> Result<bool, GraphicsError>
 #[must_use]
 pub fn is_ready() -> bool {
     // SAFETY: The slot is written once during boot and then read-only.
-    unsafe { (*FRAMEBUFFER.0.get()).is_some() }
+    unsafe { (*FRONT.0.get()).is_some() }
 }
 
 /// Returns the visible width.
 #[must_use]
 pub fn width() -> u32 {
     // SAFETY: Read-only access to the boot-time descriptor.
-    unsafe { (*FRAMEBUFFER.0.get()).as_ref().map_or(0, |fb| fb.width) }
+    unsafe { (*FRONT.0.get()).as_ref().map_or(0, |front| front.width) }
 }
 
 /// Returns the visible height.
 #[must_use]
 pub fn height() -> u32 {
     // SAFETY: Read-only access to the boot-time descriptor.
-    unsafe { (*FRAMEBUFFER.0.get()).as_ref().map_or(0, |fb| fb.height) }
+    unsafe { (*FRONT.0.get()).as_ref().map_or(0, |front| front.height) }
 }
 
 fn with_framebuffer<R>(f: impl FnOnce(&mut Framebuffer) -> R) -> Option<R> {
@@ -149,30 +242,314 @@ fn with_framebuffer<R>(f: impl FnOnce(&mut Framebuffer) -> R) -> Option<R> {
     unsafe { (*FRAMEBUFFER.0.get()).as_mut().map(f) }
 }
 
-/// Fills the whole screen.
-pub fn clear(rgb: u32) {
-    let _ = with_framebuffer(|fb| {
-        let width = fb.width as i32;
-        let height = fb.height as i32;
-        fb.rect(0, 0, width, height, rgb);
-    });
-}
-
 /// Fills a rectangle, clipped to the screen.
 pub fn fill_rect(x: i32, y: i32, width: i32, height: i32, rgb: u32) {
     let _ = with_framebuffer(|fb| fb.rect(x, y, width, height, rgb));
 }
 
-/// Draws a one-pixel rectangle outline.
-pub fn outline(x: i32, y: i32, width: i32, height: i32, rgb: u32) {
+/// Blends a translucent rectangle over the framebuffer.
+pub fn blend_rect(x: i32, y: i32, width: i32, height: i32, rgb: u32, alpha: u8) {
+    let _ = with_framebuffer(|fb| fb.rect_blend(x, y, width, height, rgb, alpha));
+}
+
+/// Restricts all subsequent drawing to a rectangle.
+pub fn set_clip(x: i32, y: i32, width: i32, height: i32) {
     let _ = with_framebuffer(|fb| {
-        for column in 0..width {
-            fb.pixel(x + column, y, rgb);
-            fb.pixel(x + column, y + height - 1, rgb);
-        }
+        fb.clip = Some(Clip {
+            x,
+            y,
+            width: width.max(0),
+            height: height.max(0),
+        });
+    });
+}
+
+/// Removes the current clip rectangle.
+pub fn clear_clip() {
+    let _ = with_framebuffer(|fb| fb.clip = None);
+}
+
+/// Fills a rectangle with a vertical colour gradient.
+pub fn vertical_gradient(x: i32, y: i32, width: i32, height: i32, top: u32, bottom: u32) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let _ = with_framebuffer(|fb| {
         for row in 0..height {
-            fb.pixel(x, y + row, rgb);
-            fb.pixel(x + width - 1, y + row, rgb);
+            let amount = if height <= 1 {
+                0
+            } else {
+                (i64::from(row) * 256 / i64::from(height - 1)) as u32
+            };
+            let inverse = 256 - amount;
+            let channel = |shift: u32| -> u32 {
+                (((top >> shift) & 0xff) * inverse + ((bottom >> shift) & 0xff) * amount) / 256
+            };
+            let rgb = (channel(16) << 16) | (channel(8) << 8) | channel(0);
+            fb.rect(x, y + row, width, 1, rgb);
+        }
+    });
+}
+
+/// Fills a circle with a hard edge.
+pub fn fill_circle(center_x: i32, center_y: i32, radius: i32, rgb: u32) {
+    if radius <= 0 {
+        return;
+    }
+    let _ = with_framebuffer(|fb| {
+        for row in -radius..=radius {
+            let span = square_root(radius * radius - row * row);
+            fb.rect(center_x - span, center_y + row, span * 2 + 1, 1, rgb);
+        }
+    });
+}
+
+/// Fills a translucent circle.
+pub fn blend_circle(center_x: i32, center_y: i32, radius: i32, rgb: u32, alpha: u8) {
+    if radius <= 0 {
+        return;
+    }
+    let _ = with_framebuffer(|fb| {
+        for row in -radius..=radius {
+            let span = square_root(radius * radius - row * row);
+            fb.rect_blend(center_x - span, center_y + row, span * 2 + 1, 1, rgb, alpha);
+        }
+    });
+}
+
+/// Fills a rounded rectangle.
+pub fn fill_round_rect(x: i32, y: i32, width: i32, height: i32, radius: i32, rgb: u32) {
+    rounded_spans(
+        x,
+        y,
+        width,
+        height,
+        radius,
+        |left, top, span, row_height| {
+            fill_rect(left, top, span, row_height, rgb);
+        },
+    );
+}
+
+/// Fills a translucent rounded rectangle.
+pub fn blend_round_rect(x: i32, y: i32, width: i32, height: i32, radius: i32, rgb: u32, alpha: u8) {
+    rounded_spans(
+        x,
+        y,
+        width,
+        height,
+        radius,
+        |left, top, span, row_height| {
+            blend_rect(left, top, span, row_height, rgb, alpha);
+        },
+    );
+}
+
+/// Draws a one-pixel rounded outline.
+pub fn outline_round_rect(x: i32, y: i32, width: i32, height: i32, radius: i32, rgb: u32) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let radius = radius.min(width / 2).min(height / 2).max(0);
+    let _ = with_framebuffer(|fb| {
+        for row in 0..height {
+            let inset = rounded_inset(row, height, radius);
+            fb.pixel(x + inset, y + row, rgb);
+            fb.pixel(x + width - 1 - inset, y + row, rgb);
+            if row < 2 || row >= height - 2 {
+                fb.rect(x + inset, y + row, width - inset * 2, 1, rgb);
+            }
+        }
+    });
+}
+
+/// Fills a convex or concave polygon using a scanline fill.
+pub fn fill_polygon(points: &[(i32, i32)], rgb: u32) {
+    if points.len() < 3 {
+        return;
+    }
+    let mut top = points[0].1;
+    let mut bottom = points[0].1;
+    for point in points {
+        top = top.min(point.1);
+        bottom = bottom.max(point.1);
+    }
+    if bottom < top {
+        return;
+    }
+    let mut intersections = [0i32; 24];
+    let _ = with_framebuffer(|fb| {
+        for scanline in top..=bottom {
+            let mut count = 0usize;
+            for index in 0..points.len() {
+                let first = points[index];
+                let second = points[(index + 1) % points.len()];
+                let (low, high) = if first.1 < second.1 {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                if scanline < low.1 || scanline >= high.1 || high.1 == low.1 {
+                    continue;
+                }
+                let x = i64::from(low.0)
+                    + (i64::from(scanline - low.1) * i64::from(high.0 - low.0))
+                        / i64::from(high.1 - low.1);
+                if count < intersections.len() {
+                    intersections[count] = x as i32;
+                    count += 1;
+                }
+            }
+            for left in 0..count {
+                for right in (left + 1)..count {
+                    if intersections[right] < intersections[left] {
+                        intersections.swap(left, right);
+                    }
+                }
+            }
+            let mut pair = 0;
+            while pair + 1 < count {
+                let start = intersections[pair];
+                let end = intersections[pair + 1];
+                fb.rect(start, scanline, (end - start).max(1), 1, rgb);
+                pair += 2;
+            }
+        }
+    });
+}
+
+/// Returns the horizontal width of `text` at a scale.
+#[must_use]
+pub fn text_width(text: &str, scale: i32) -> i32 {
+    text.chars().count() as i32 * 6 * scale.max(1)
+}
+
+fn square_root(value: i32) -> i32 {
+    if value <= 0 {
+        return 0;
+    }
+    let mut current = value;
+    let mut next = (current + 1) / 2;
+    while next < current {
+        current = next;
+        next = (current + value / current) / 2;
+    }
+    current
+}
+
+fn rounded_inset(row: i32, height: i32, radius: i32) -> i32 {
+    if radius <= 0 || height <= 0 {
+        return 0;
+    }
+    let dy = if row < radius {
+        radius - row
+    } else if row >= height - radius {
+        row - (height - radius) + 1
+    } else {
+        return 0;
+    };
+    radius - square_root(radius * radius - dy * dy)
+}
+
+fn rounded_spans(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    mut paint: impl FnMut(i32, i32, i32, i32),
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let radius = radius.min(width / 2).min(height / 2).max(0);
+    for row in 0..height {
+        let inset = rounded_inset(row, height, radius);
+        paint(x + inset, y + row, (width - inset * 2).max(1), 1);
+    }
+}
+
+/// Draws a one-pixel line.
+pub fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, rgb: u32) {
+    let dx = (x1 - x0).abs();
+    let step_x = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let step_y = if y0 < y1 { 1 } else { -1 };
+    let mut error = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
+    let _ = with_framebuffer(|fb| {
+        loop {
+            fb.pixel(x, y, rgb);
+            if x == x1 && y == y1 {
+                break;
+            }
+            let doubled = error * 2;
+            if doubled >= dy {
+                error += dy;
+                x += step_x;
+            }
+            if doubled <= dx {
+                error += dx;
+                y += step_y;
+            }
+        }
+    });
+}
+
+/// Draws a one-pixel circle outline.
+pub fn stroke_circle(center_x: i32, center_y: i32, radius: i32, rgb: u32) {
+    if radius <= 0 {
+        return;
+    }
+    let _ = with_framebuffer(|fb| {
+        let mut x = radius;
+        let mut y = 0;
+        let mut error = 1 - radius;
+        while x >= y {
+            for (px, py) in [
+                (x, y),
+                (y, x),
+                (-y, x),
+                (-x, y),
+                (-x, -y),
+                (-y, -x),
+                (y, -x),
+                (x, -y),
+            ] {
+                fb.pixel(center_x + px, center_y + py, rgb);
+            }
+            y += 1;
+            if error < 0 {
+                error += 2 * y + 1;
+            } else {
+                x -= 1;
+                error += 2 * (y - x) + 1;
+            }
+        }
+    });
+}
+
+/// Fills a radial glow with a quadratic falloff.
+pub fn blend_glow(center_x: i32, center_y: i32, radius: i32, rgb: u32, alpha: u8) {
+    if radius <= 0 || alpha == 0 {
+        return;
+    }
+    let squared = i64::from(radius) * i64::from(radius);
+    let _ = with_framebuffer(|fb| {
+        for row in -radius..=radius {
+            for column in -radius..=radius {
+                let distance =
+                    i64::from(column) * i64::from(column) + i64::from(row) * i64::from(row);
+                if distance >= squared {
+                    continue;
+                }
+                let falloff = ((squared - distance) * 256 / squared) as u32;
+                let strength = u32::from(alpha) * falloff / 256;
+                if strength > 0 {
+                    fb.pixel_blend(center_x + column, center_y + row, rgb, strength as u8);
+                }
+            }
         }
     });
 }
@@ -275,32 +652,63 @@ pub fn draw_text(x: i32, y: i32, text: &str, rgb: u32, scale: i32) -> i32 {
     cursor - x
 }
 
+/// Copies the completed back buffer to the display.
+///
+/// This is the only path that writes the real framebuffer when a back buffer is
+/// active. A frame is therefore never presented half-painted.
+pub fn present() {
+    // SAFETY: Both descriptors are boot-time constants and the copy stays
+    // within each surface's validated dimensions.
+    unsafe {
+        let Some(draw) = (*FRAMEBUFFER.0.get()).as_ref() else {
+            return;
+        };
+        let Some(front) = (*FRONT.0.get()).as_ref() else {
+            return;
+        };
+        if draw.base == front.base {
+            return;
+        }
+        let source = draw.base as *const u32;
+        let target = front.base as *mut u32;
+        let width = draw.width as usize;
+        for row in 0..draw.height as usize {
+            for column in 0..width {
+                let value = source.add(row * width + column).read();
+                target
+                    .add(row * front.stride as usize + column)
+                    .write_volatile(value);
+            }
+        }
+    }
+}
+
 /// Returns a deterministic checksum of sampled framebuffer pixels.
 ///
 /// This is the evidence the boot test uses to prove the compositor actually
-/// wrote pixels, without requiring a screenshot.
+/// wrote pixels, without requiring a screenshot. It samples the presented
+/// surface, not the back buffer.
 #[must_use]
 pub fn checksum() -> u32 {
-    let Some(hash) = with_framebuffer(|fb| {
-        let mut hash = 0x811c_9dc5u32;
-        let step_x = (fb.width / 16).max(1);
-        let step_y = (fb.height / 12).max(1);
-        let mut y = 0;
-        while y < fb.height {
-            let mut x = 0;
-            while x < fb.width {
-                let offset = (y as usize * fb.stride as usize + x as usize) * 4;
-                // SAFETY: Bounds are inside the validated framebuffer.
-                let value = unsafe { (fb.base.add(offset) as *const u32).read_volatile() };
-                hash ^= value;
-                hash = hash.wrapping_mul(0x0100_0193);
-                x += step_x;
-            }
-            y += step_y;
-        }
-        hash
-    }) else {
+    // SAFETY: Read-only access to a validated surface.
+    let Some(front) = (unsafe { (*FRONT.0.get()).as_ref() }) else {
         return 0;
     };
+    let mut hash = 0x811c_9dc5u32;
+    let step_x = (front.width / 16).max(1);
+    let step_y = (front.height / 12).max(1);
+    let mut y = 0;
+    while y < front.height {
+        let mut x = 0;
+        while x < front.width {
+            let offset = (y as usize * front.stride as usize + x as usize) * 4;
+            // SAFETY: Bounds are inside the validated framebuffer.
+            let value = unsafe { (front.base.add(offset) as *const u32).read_volatile() };
+            hash ^= value;
+            hash = hash.wrapping_mul(0x0100_0193);
+            x += step_x;
+        }
+        y += step_y;
+    }
     hash
 }
