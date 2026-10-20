@@ -43,6 +43,16 @@ versioning scheme until the kernel ABI stabilises.
   counts, and a 16-entry/4 KiB-per-file overlay. The imported AppImage tree is
   not yet merged into a per-app root, the runtime pin is host-derived, and the
   overlay is RAM-backed; the GUI remains Gate 4.
+- Linux Gate 4 runtime rootfs packaging: `make gate4-runtime` builds and signs
+  a host-derived Mesa lavapipe/LLVM/Wayland-client rootfs (40 files,
+  164,543,720 bytes uncompressed, 45,268,992 bytes compressed) and
+  `make gate4-runtime-test` boots it through a new `BootInfo` v5
+  runtime-rootfs extent staged by the UEFI loader. The kernel verifies the
+  signed `linux-rootfs` record, the manifest pin, and every `file_sha256`
+  entry, emits `AETHER_GATE4_RUNTIME_OK`, and runs the real GridCraft AppImage's
+  `gridcraft-cli --version` through the rootfs. Missing and tampered runtime
+  images fail closed. The allocation-only importer needs a 1.5 GiB heap and a
+  3 GiB guest for this tree; the Wayland bridge and GUI launch remain open.
 - Linux Gate 2 prototype: blocking/finite `poll`/`epoll_wait` and
   cross-process pipes, `nanosleep`/`clock_nanosleep`/`timerfd`, full-enough
   inotify (blocking mode, directory watches, overflow), `siginfo`/`ucontext`,

@@ -74,8 +74,9 @@ some rendering code ignored the format entirely. Version 3 fixes those semantics
 without changing the structure size. Rebuild loader and kernel together; mixed
 versions are rejected. See [ADR-016](../decisions/ADR-016-desktop-review-and-uefi-correctness.md).
 
-Version 4 appends the two `BootArtifact` descriptors and grows the structure to
-168 bytes. Version 3 loaders cannot boot a version 4 kernel.
+Version 4 appended the two `BootArtifact` descriptors and grew the structure to
+168 bytes. Version 5 appends the loader-staged runtime-rootfs descriptors and
+grows the structure to 200 bytes. Older loaders cannot boot a newer kernel.
 
 ## MemoryRegion
 
