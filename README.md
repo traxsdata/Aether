@@ -129,8 +129,10 @@ grants, and the desktop is not a security authority.
   tracks a bounded per-task VMA table and supports file-backed `mmap`,
   `munmap` reuse, `mprotect`, and a growing `brk`, with write+execute mappings
   rejected (`AETHER_LINUX_VMA_OK`). Pages are allocated on demand and returned
-  on unmap or task exit. Dynamic libraries, threads, Wayland, and Vulkan are
-  still missing.
+  on unmap or task exit. A dynamic `ET_DYN`/`PT_INTERP` loader maps a main image
+  and its interpreter, builds auxv, and hands control from the interpreter to
+  the main entry (`AETHER_LINUX_DYN_*`). glibc/`ld.so`, threads, Wayland, and
+  Vulkan are still missing.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,
@@ -160,7 +162,9 @@ grants, and the desktop is not a security authority.
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
   `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`,
   `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_IMPORT_OK`,
-  `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, `AETHER_LINUX_OK`,
+  `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`,
+  `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
+  `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`,
   `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
   `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
 - `make iso-test`, which boots the generated ISO through UEFI El Torito and
@@ -376,6 +380,7 @@ kernel/              Aether kernel (no_std, target x86_64-unknown-none)
 sdk/                 native application SDK
 tests/fixtures/      test keys and signed package/update fixtures
 apps/linux/appimage/ AppImage container inspector for the Linux layer
+apps/linux/elf/      defensive Linux ELF64 parser for the dynamic loader
 apps/linux/squashfs/ SquashFS 4 reader and host extractor for AppImage import
 tests/compatibility/ compatibility database and classification harness
 tests/rendering/     host harness for the actual kernel graphics module

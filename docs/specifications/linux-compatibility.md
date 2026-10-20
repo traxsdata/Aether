@@ -143,7 +143,7 @@ interface, with owners and test cases.
 **Evidence:** [the Linux host-interface inventory](linux-host-interface-inventory.md)
 maps 32 facilities from the pinned GUI and CLI payloads to an interface, owner,
 and test ID, with decisions for X11, D-Bus, process spawning, clipboard, paths,
-locale, GPU, and network. **Met:** 2 facilities are existing, 7 partial, 18
+locale, GPU, and network. **Met:** 2 facilities are existing, 8 partial, 17
 missing, 2 deliberately denied, and 3 deferred. The inventory is complete; the
 missing interfaces are Gate 2 work and their absence does not invalidate the
 mapping. Do not claim compatibility.
@@ -159,7 +159,11 @@ syscall and pointer is validated; unsupported calls fail with `ENOSYS`, never
 with ambient authority.
 
 **Evidence:** boot transcript, syscall coverage tests, denial tests. **Partial:**
-a static freestanding Linux ELF runs at CPL3, exercises anonymous and
+a dynamically linked test image is mapped through `PT_INTERP` into an `ET_DYN`
+address space, receives argc/argv/envp/auxv, and hands control from a test
+interpreter to the main entry (`AETHER_LINUX_DYN_INTERP_OK`,
+`AETHER_LINUX_DYN_MAIN_OK`, `AETHER_LINUX_DYN_OK`). A static freestanding Linux
+ELF also runs at CPL3, exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only
 root, create/write/read through the `/tmp` overlay, `write`, and `exit`. It
@@ -203,7 +207,8 @@ revocation tests, and a compatibility record no better than the suite supports.
 
 ## Current blockers
 
-1. No dynamic loader or glibc; the boot fixture is static.
+1. No glibc/`ld.so`, relocations, or shared-library search; the dynamic boot
+   fixture uses a minimal test interpreter.
 2. No user-space process creation, threads, real futex queues, or signals.
 3. No `mremap`, page-fault handling, or shared mappings; every mapping is
    eager and private.

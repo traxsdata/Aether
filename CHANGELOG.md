@@ -73,6 +73,14 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Dynamic Linux loader slice: `aether-linux-elf` is a host-tested, allocation-
+  free parser for `ET_EXEC`/`ET_DYN` images with bounded `PT_LOAD` segments and
+  `PT_INTERP`. `kernel/src/linux_loader.rs` maps a main image and interpreter
+  into a fresh address space, builds argc/argv/envp/auxv, and enters the
+  interpreter. A test interpreter validates the auxv and jumps to the main
+  image's `AT_ENTRY` (`AETHER_LINUX_DYN_INTERP_OK`,
+  `AETHER_LINUX_DYN_MAIN_OK`, `AETHER_LINUX_DYN_OK`). glibc, relocations,
+  shared-library loading, and a user-supplied interpreter remain missing.
 - `docs/specifications/linux-host-interface-inventory.md`: the completed Gate 1
   mapping from the pinned GridCraft GUI and CLI payloads to 32 Aether
   interfaces, with an owner, test ID, implementation status, and an accepted

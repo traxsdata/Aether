@@ -104,6 +104,11 @@ exact AppImage digest, and the runtime version.
 - SquashFS/zstd import: implemented in `apps/linux/squashfs`, with a synthetic
   fixture, a real-AppImage host extraction, and `squashfs-extract`.
 - Linux ELF loading into a private PML4: implemented for the boot test fixture.
+- Dynamic image loading: `aether-linux-elf` parses `ET_DYN`/`ET_EXEC` and
+  `PT_INTERP`; `kernel/src/linux_loader.rs` maps a main image and interpreter,
+  builds the initial stack with auxv, and enters the interpreter, which hands
+  off to the main entry. Relocations and shared-library loading are not part of
+  this slice; the test interpreter only validates auxv and transfers control.
 - Linux `syscall` entry: implemented, with `write`, `exit`/`exit_group`,
   `mmap`, `munmap`, `mprotect`, `brk`, `arch_prctl` FS base, single-task futex,
   `clock_gettime`, `getrandom`, `uname`, `getpid`/`gettid`, and

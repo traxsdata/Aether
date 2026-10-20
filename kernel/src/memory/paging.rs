@@ -193,17 +193,7 @@ pub fn create_user_address_space(
     image: &Image,
     bytes: &[u8],
 ) -> Result<PhysFrame, PagingError> {
-    let kernel_pml4 = current_pml4().ok_or(PagingError::MissingKernelMapping)?;
-    let kernel_entry = unsafe { (*table_ptr(kernel_pml4)).entry(0) };
-    if !kernel_entry.is_present() {
-        return Err(PagingError::MissingKernelMapping);
-    }
-
-    let pml4 = allocate_table(allocator)?;
-    // SAFETY: The table was just allocated and zeroed. The kernel entry is
-    // copied unchanged so kernel text, data, stacks, and the identity map stay
-    // supervisor-only in the new address space.
-    unsafe { (*table_ptr(pml4)).set_entry(0, kernel_entry) };
+    let pml4 = create_empty_user_address_space(allocator)?;
 
     for segment in image.segments() {
         let physical_end = segment
@@ -264,6 +254,34 @@ pub fn create_user_address_space(
         }
     }
 
+    map_user_stack(allocator, pml4)?;
+
+    Ok(pml4)
+}
+
+/// Creates an empty ring-3 address space sharing the kernel identity map.
+pub fn create_empty_user_address_space(
+    allocator: &mut FrameAllocator<'_>,
+) -> Result<PhysFrame, PagingError> {
+    let kernel_pml4 = current_pml4().ok_or(PagingError::MissingKernelMapping)?;
+    let kernel_entry = unsafe { (*table_ptr(kernel_pml4)).entry(0) };
+    if !kernel_entry.is_present() {
+        return Err(PagingError::MissingKernelMapping);
+    }
+
+    let pml4 = allocate_table(allocator)?;
+    // SAFETY: The table was just allocated and zeroed. The kernel entry is
+    // copied unchanged so kernel text, data, stacks, and the identity map stay
+    // supervisor-only in the new address space.
+    unsafe { (*table_ptr(pml4)).set_entry(0, kernel_entry) };
+    Ok(pml4)
+}
+
+/// Maps the fixed user stack window into an address space.
+pub fn map_user_stack(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+) -> Result<(), PagingError> {
     for page in 0..USER_STACK_PAGES {
         let address = USER_STACK_TOP - (page + 1) * PAGE_SIZE;
         let frame = allocate_table(allocator)?;
@@ -277,8 +295,7 @@ pub fn create_user_address_space(
             PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE,
         )?;
     }
-
-    Ok(pml4)
+    Ok(())
 }
 
 fn user_segment_flags(flags: u32) -> PageFlags {

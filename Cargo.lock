@@ -86,6 +86,7 @@ dependencies = [
  "aether-fs",
  "aether-input",
  "aether-ipc",
+ "aether-linux-elf",
  "aether-memory",
  "aether-packaging",
  "aether-services",
@@ -93,6 +94,10 @@ dependencies = [
  "aether-update",
  "aether-wm",
 ]
+
+[[package]]
+name = "aether-linux-elf"
+version = "0.1.0"
 
 [[package]]
 name = "aether-memory"

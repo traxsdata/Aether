@@ -12,6 +12,8 @@ KERNEL_ELF := $(BUILD)/aether-kernel.elf
 USER_ELF := $(BUILD)/aether-init.elf
 LOADER_EFI := $(BUILD)/BOOTX64.EFI
 LINUX_ELF := $(BUILD)/linux-hello.elf
+LINUX_DYN_ELF := $(BUILD)/linux-dynamic.elf
+LINUX_INTERP_ELF := $(BUILD)/linux-interp.elf
 IMAGE := $(BUILD)/aether.img
 
 KERNEL_TARGET := x86_64-unknown-none
@@ -45,11 +47,18 @@ linux-fixture:
 	$(AS) --64 tests/fixtures/linux/hello.S -o $(BUILD)/linux-hello.o
 	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
 		$(BUILD)/linux-hello.o -o $(LINUX_ELF)
+	$(AS) --64 tests/fixtures/linux/dynamic.S -o $(BUILD)/linux-dynamic.o
+	$(LD) -pie -e _start --dynamic-linker /lib/ld-aether.so \
+		$(BUILD)/linux-dynamic.o -o $(LINUX_DYN_ELF)
+	$(AS) --64 tests/fixtures/linux/interp.S -o $(BUILD)/linux-interp.o
+	$(LD) -shared -e _start $(BUILD)/linux-interp.o -o $(LINUX_INTERP_ELF)
 
 kernel: user linux-fixture
 	@mkdir -p $(BUILD)
 	AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 	AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
+	AETHER_LINUX_DYN_ELF=$(abspath $(LINUX_DYN_ELF)) \
+	AETHER_LINUX_INTERP_ELF=$(abspath $(LINUX_INTERP_ELF)) \
 		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
 
@@ -129,10 +138,14 @@ lint: kernel
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
+		AETHER_LINUX_DYN_ELF=$(abspath $(LINUX_DYN_ELF)) \
+		AETHER_LINUX_INTERP_ELF=$(abspath $(LINUX_INTERP_ELF)) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
+		AETHER_LINUX_DYN_ELF=$(abspath $(LINUX_DYN_ELF)) \
+		AETHER_LINUX_INTERP_ELF=$(abspath $(LINUX_INTERP_ELF)) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
 			--features fault-selftest --locked -- -D warnings
 	RUSTFLAGS="$(USER_RUSTFLAGS)" \

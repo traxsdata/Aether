@@ -35,8 +35,10 @@ pub const WORKER_COUNT: usize = 3;
 pub const USER_TASK: usize = WORKER_COUNT + 1;
 /// Task index of the Linux ABI boot test.
 pub const LINUX_TASK: usize = USER_TASK + 1;
+/// Task index of the dynamic Linux loader test.
+pub const LINUX_DYN_TASK: usize = LINUX_TASK + 1;
 
-const MAX_TASKS: usize = WORKER_COUNT + 3;
+const MAX_TASKS: usize = WORKER_COUNT + 4;
 const STACK_SIZE: usize = 16 * 1024;
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const ROUNDS: usize = 4;
@@ -46,6 +48,9 @@ const MAGIC_PREFIX: u64 = 0xa5a5_0000_0000_0000;
 static USER_ELF: &[u8] = include_bytes!(env!("AETHER_USER_ELF"));
 /// Static Linux program used to exercise the Linux syscall entry.
 static LINUX_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_ELF"));
+/// Dynamic Linux program and its interpreter for the loader boot test.
+static LINUX_DYN_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_DYN_ELF"));
+static LINUX_INTERP_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_INTERP_ELF"));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TaskState {
@@ -172,10 +177,18 @@ unsafe impl<T> Sync for Global<T> {}
 
 static TASKS: Global<[Task; MAX_TASKS]> =
     Global(UnsafeCell::new([const { Task::new() }; MAX_TASKS]));
-static STACKS: Global<[[u8; STACK_SIZE]; WORKER_COUNT]> =
-    Global(UnsafeCell::new([[0; STACK_SIZE]; WORKER_COUNT]));
-static KERNEL_STACKS: Global<[[u8; KERNEL_STACK_SIZE]; MAX_TASKS]> =
-    Global(UnsafeCell::new([[0; KERNEL_STACK_SIZE]; MAX_TASKS]));
+#[repr(align(16))]
+struct WorkerStacks([[u8; STACK_SIZE]; WORKER_COUNT]);
+
+#[repr(align(16))]
+struct KernelStacks([[u8; KERNEL_STACK_SIZE]; MAX_TASKS]);
+
+static STACKS: Global<WorkerStacks> = Global(UnsafeCell::new(WorkerStacks(
+    [[0; STACK_SIZE]; WORKER_COUNT],
+)));
+static KERNEL_STACKS: Global<KernelStacks> = Global(UnsafeCell::new(KernelStacks(
+    [[0; KERNEL_STACK_SIZE]; MAX_TASKS],
+)));
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static DONE: AtomicUsize = AtomicUsize::new(0);
@@ -188,6 +201,9 @@ static USER_EXITS: AtomicUsize = AtomicUsize::new(0);
 static LINUX_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
 static LINUX_EXITS: AtomicUsize = AtomicUsize::new(0);
 static LINUX_FAULTS: AtomicUsize = AtomicUsize::new(0);
+static LINUX_DYN_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
+static LINUX_DYN_EXITS: AtomicUsize = AtomicUsize::new(0);
+static LINUX_DYN_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static MEM_FREE_MIB: AtomicUsize = AtomicUsize::new(0);
 static MEM_TOTAL_MIB: AtomicUsize = AtomicUsize::new(0);
 
@@ -258,6 +274,7 @@ pub fn run() -> ! {
         if DONE.load(Ordering::Acquire) == WORKER_COUNT
             && USER_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
             && LINUX_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
+            && LINUX_DYN_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
         {
             timer::disable_interrupts();
             let denied = DENIED.load(Ordering::Acquire);
@@ -284,10 +301,24 @@ pub fn run() -> ! {
                 );
                 halt()
             }
+            let dyn_result = LINUX_DYN_RESULT.load(Ordering::Acquire);
+            if dyn_result != UserTestResult::Passed as usize {
+                serial_line!(
+                    "AETHER_BOOT_FAILED reason=linux-dynamic-test result={} faults={}",
+                    dyn_result,
+                    LINUX_DYN_FAULTS.load(Ordering::Acquire)
+                );
+                halt()
+            }
             serial_line!(
                 "AETHER_LINUX_OK abi=linux exits={} faults={}",
                 linux_exits(),
                 LINUX_FAULTS.load(Ordering::Acquire)
+            );
+            serial_line!(
+                "AETHER_LINUX_DYN_OK abi=linux exits={} faults={}",
+                LINUX_DYN_EXITS.load(Ordering::Acquire),
+                LINUX_DYN_FAULTS.load(Ordering::Acquire)
             );
 
             serial_line!(
@@ -376,10 +407,10 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     idle.state = TaskState::Running;
     idle.kind = TaskKind::Idle;
     idle.pml4 = kernel_pml4.start_address();
-    idle.kernel_stack_top = stack_top(&kernel_stacks[0]);
+    idle.kernel_stack_top = stack_top(&kernel_stacks.0[0]);
     tasks[0] = idle;
 
-    for (index, stack) in stacks.iter_mut().enumerate() {
+    for (index, stack) in stacks.0.iter_mut().enumerate() {
         let task_id = index + 1;
         let private = allocator.allocate().ok_or(SchedulerError::OutOfMemory)?;
         // SAFETY: The frame is exclusively owned by this task.
@@ -394,7 +425,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         task.kind = TaskKind::Worker;
         task.saved_rsp = saved_rsp;
         task.pml4 = pml4.start_address();
-        task.kernel_stack_top = stack_top(&kernel_stacks[task_id]);
+        task.kernel_stack_top = stack_top(&kernel_stacks.0[task_id]);
         tasks[task_id] = task;
         serial_line!(
             "sched: task {task_id} ready pml4={:#018x} private={:#018x}",
@@ -454,8 +485,9 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // is copied supervisor-only; only USER_BASE..USER_LIMIT is user-accessible.
     let image = elf::parse(USER_ELF).map_err(SchedulerError::UserImage)?;
     let user_pml4 = paging::create_user_address_space(allocator, &image, USER_ELF)?;
-    let user_kernel_top = stack_top(&kernel_stacks[USER_TASK]);
-    let user_saved_rsp = prepare_user_stack(user_kernel_top, image.entry());
+    let user_kernel_top = stack_top(&kernel_stacks.0[USER_TASK]);
+    let user_saved_rsp =
+        prepare_user_stack(user_kernel_top, image.entry(), (USER_STACK_TOP - 16) & !0xf);
 
     let mut user = Task::new();
     user.state = TaskState::Ready;
@@ -476,8 +508,12 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // syscall entry, not yet an application domain with its own root.
     let linux_image = elf::parse(LINUX_ELF).map_err(|_| SchedulerError::LinuxImage)?;
     let linux_pml4 = paging::create_user_address_space(allocator, &linux_image, LINUX_ELF)?;
-    let linux_kernel_top = stack_top(&kernel_stacks[LINUX_TASK]);
-    let linux_saved_rsp = prepare_user_stack(linux_kernel_top, linux_image.entry());
+    let linux_kernel_top = stack_top(&kernel_stacks.0[LINUX_TASK]);
+    let linux_saved_rsp = prepare_user_stack(
+        linux_kernel_top,
+        linux_image.entry(),
+        (USER_STACK_TOP - 16) & !0xf,
+    );
 
     let mut linux = Task::new();
     linux.state = TaskState::Ready;
@@ -489,6 +525,32 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     linux.root = crate::fs::DEMO_ROOT;
     linux.brk = paging::LINUX_ARENA_BASE;
     tasks[LINUX_TASK] = linux;
+
+    // Load a position-independent image through its interpreter. This proves
+    // PT_INTERP resolution, auxv construction, and interpreter-to-main
+    // control transfer. The interpreter is embedded for now; resolving its
+    // path through the verified rootfs is follow-up work.
+    let dynamic = crate::linux_loader::load(allocator, LINUX_DYN_ELF, LINUX_INTERP_ELF)
+        .map_err(|_| SchedulerError::LinuxImage)?;
+    let dynamic_kernel_top = stack_top(&kernel_stacks.0[LINUX_DYN_TASK]);
+    let dynamic_saved_rsp =
+        prepare_user_stack(dynamic_kernel_top, dynamic.entry, dynamic.stack_pointer);
+    let mut dynamic_task = Task::new();
+    dynamic_task.state = TaskState::Ready;
+    dynamic_task.kind = TaskKind::Linux;
+    dynamic_task.abi = TaskAbi::Linux;
+    dynamic_task.saved_rsp = dynamic_saved_rsp;
+    dynamic_task.pml4 = dynamic.pml4.start_address();
+    dynamic_task.kernel_stack_top = dynamic_kernel_top;
+    dynamic_task.root = crate::fs::DEMO_ROOT;
+    dynamic_task.brk = paging::LINUX_ARENA_BASE;
+    tasks[LINUX_DYN_TASK] = dynamic_task;
+    serial_line!(
+        "sched: linux dynamic task ready pid={} pml4={:#018x} entry={:#018x}",
+        LINUX_DYN_TASK,
+        dynamic.pml4.start_address(),
+        dynamic.entry
+    );
 
     // SAFETY: Interrupts are disabled during boot and the idle task is current.
     unsafe { gdt::set_kernel_stack(tasks[0].kernel_stack_top) };
@@ -559,7 +621,7 @@ fn prepare_stack(stack_top: u64, entry: extern "C" fn(u64) -> !, arg: u64) -> u6
 }
 
 /// Builds an interrupt-return frame that enters ring 3 at `entry`.
-fn prepare_user_stack(kernel_stack_top: u64, entry: u64) -> u64 {
+fn prepare_user_stack(kernel_stack_top: u64, entry: u64, user_rsp: u64) -> u64 {
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
     let frame_end = (kernel_stack_top - 16) & !7;
     let frame_start = frame_end - frame_size;
@@ -571,7 +633,7 @@ fn prepare_user_stack(kernel_stack_top: u64, entry: u64) -> u64 {
             rip: entry,
             cs: u64::from(USER_CODE_SELECTOR),
             rflags: 0x202,
-            rsp: (USER_STACK_TOP - 16) & !0xf,
+            rsp: user_rsp,
             ss: u64::from(USER_DATA_SELECTOR),
             ..InterruptFrame::default()
         };
@@ -1359,7 +1421,9 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     let current = CURRENT.load(Ordering::Relaxed);
     {
         let tasks = unsafe { &*TASKS.0.get() };
-        if current != LINUX_TASK || tasks[current].kind != TaskKind::Linux {
+        if (current != LINUX_TASK && current != LINUX_DYN_TASK)
+            || tasks[current].kind != TaskKind::Linux
+        {
             serial_line!("AETHER_BOOT_FAILED reason=linux exit from wrong task");
             halt()
         }
@@ -1371,13 +1435,18 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
     tasks[current].linux_overlay = [None; OVERLAY_FILES];
     tasks[current].vmas.reset();
-    LINUX_EXITS.fetch_add(1, Ordering::Release);
     let result = if status == 0 {
         UserTestResult::Passed
     } else {
         UserTestResult::Failed
     };
-    LINUX_RESULT.store(result as usize, Ordering::Release);
+    if current == LINUX_DYN_TASK {
+        LINUX_DYN_EXITS.fetch_add(1, Ordering::Release);
+        LINUX_DYN_RESULT.store(result as usize, Ordering::Release);
+    } else {
+        LINUX_EXITS.fetch_add(1, Ordering::Release);
+        LINUX_RESULT.store(result as usize, Ordering::Release);
+    }
     serial_line!("linux: exit pid={} status={status}", current);
     schedule_next(current)
 }
@@ -1409,8 +1478,13 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
         tasks[current].linux_overlay = [None; OVERLAY_FILES];
         tasks[current].vmas.reset();
-        LINUX_FAULTS.fetch_add(1, Ordering::Release);
-        LINUX_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+        if current == LINUX_DYN_TASK {
+            LINUX_DYN_FAULTS.fetch_add(1, Ordering::Release);
+            LINUX_DYN_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+        } else {
+            LINUX_FAULTS.fetch_add(1, Ordering::Release);
+            LINUX_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+        }
     } else {
         USER_FAULTS.fetch_add(1, Ordering::Release);
         USER_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);

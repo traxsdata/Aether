@@ -142,9 +142,9 @@ user space. It is not a VM. The target and security gates are in
   process/thread, signal, Wayland, and Vulkan interfaces remain Gate 2 work.
 - [ ] Gate 2 — interface mapping and prototype: **partial**. A static Linux ELF
   runs at CPL3 with a per-task VMA table, runtime frame allocation and reclaim,
-  file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, and W^X
-  denial, but the dynamic loader, glibc, user-space `linuxd`, threads, and
-  signals remain missing.
+  file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, W^X denial,
+  and a dynamic `ET_DYN`/`PT_INTERP` loader with auxv and interpreter handoff,
+  but glibc/`ld.so`, user-space `linuxd`, threads, and signals remain missing.
 - [ ] Gate 3 — headless GridCraft: import
   `gridcraft-0.8.0-linux-x86_64.AppImage` and run its `gridcraft-cli`
   (`eval`, CSV import/export) with a read-only root and private overlay.
@@ -207,8 +207,11 @@ user space. It is not a VM. The target and security gates are in
   returned on unmap or task exit.
 - [ ] `mremap`, page-fault handling, and shared mappings; preserve W^X and
   account every mapping against the domain limit.
-- [ ] Dynamic ELF loader: `PT_INTERP`, auxv, `ld.so`, relocations, library
-  search, TLS, and `LD_LIBRARY_PATH` restrictions.
+- [x] Dynamic ELF slice: `ET_DYN` and `PT_INTERP` parsing, image mapping,
+  auxv construction, and interpreter-to-main handoff with a test interpreter
+  (`AETHER_LINUX_DYN_*`).
+- [ ] `ld.so`/glibc, relocations, shared-library search, and
+  `LD_LIBRARY_PATH` restrictions.
 - [ ] File syscalls: `stat`/`fstat`/`statx`, `readlink`, `getdents64`, `fcntl`,
   `dup`, `pipe`, `poll`/`epoll`, `eventfd`, `inotify` (bounded).
 - [ ] Process and thread syscalls: `clone`, `clone3`, `wait4`, `execve`,
@@ -291,10 +294,12 @@ The Linux track has completed the Gate 1 inventory and has partial Gate 2
 evidence: the kernel verifies and imports an embedded signed rootfs, a static
 Linux ELF runs at CPL3 through the Linux `syscall` path with a per-task VMA
 table, file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, FS-based
-TLS, read-only root files, and a bounded `/tmp` overlay
+TLS, read-only root files, a bounded `/tmp` overlay, and a dynamic
+`ET_DYN`/`PT_INTERP` loader with auxv
 (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
-`AETHER_LINUX_VMA_OK`, `AETHER_LINUX_OK`), and the native ABI is denied to
-Linux tasks. This is a test
+`AETHER_LINUX_VMA_OK`, `AETHER_LINUX_DYN_INTERP_OK`,
+`AETHER_LINUX_DYN_MAIN_OK`, `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`), and the
+native ABI is denied to Linux tasks. This is a test
 fixture, not an AppImage: the dynamic loader, glibc/`ld.so`, threads, signals,
 Wayland, software Vulkan, and a user-supplied import path are still missing.
 

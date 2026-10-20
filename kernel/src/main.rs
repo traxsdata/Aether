@@ -19,6 +19,7 @@ mod icons;
 mod input;
 mod ipc;
 mod linux;
+mod linux_loader;
 mod memory;
 mod packaging;
 mod portal;
@@ -39,8 +40,16 @@ use core::panic::PanicInfo;
 const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
 /// Kernel boot stack. Firmware boot-services stacks are not reused.
+///
+/// The wrapper guarantees 16-byte alignment for the initial RSP. Without it
+/// the linker may place this byte array directly after a smaller static,
+/// producing a misaligned stack and corrupting formatted output.
+#[repr(align(16))]
+#[allow(dead_code)]
+struct KernelStack([u8; KERNEL_STACK_SIZE]);
+
 #[unsafe(link_section = ".bss.stack")]
-static mut KERNEL_STACK: [u8; KERNEL_STACK_SIZE] = [0; KERNEL_STACK_SIZE];
+static mut KERNEL_STACK: KernelStack = KernelStack([0; KERNEL_STACK_SIZE]);
 
 core::arch::global_asm!(
     r#"
