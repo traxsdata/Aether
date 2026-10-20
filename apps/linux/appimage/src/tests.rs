@@ -1,7 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Host tests for the AppImage container inspector.
 
+use crate::manifest::{self, ManifestError};
 use crate::{Compression, Digest, Error, RuntimeElf, parse, parse_verified};
+use aether_packaging::signed::{TrustStore, TrustedPublisher};
+
+const TEST_PUBLISHER: &str = "Aether Test Publisher";
+
+fn test_seed() -> [u8; 32] {
+    let text = include_str!("../../../../tests/fixtures/keys/test.seed");
+    let mut seed = [0u8; 32];
+    assert_eq!(
+        aether_crypto::from_hex(text.trim().as_bytes(), &mut seed),
+        Some(32)
+    );
+    seed
+}
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -159,6 +173,89 @@ fn digest_pins_one_exact_artifact() {
         Some(Digest::of(b"abc"))
     );
     assert_eq!(parse_verified(&other, digest), Err(Error::DigestMismatch));
+}
+
+fn signed_record(image: &[u8], mutate: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    let digest = Digest::of(image);
+    let mut hex = [0u8; 64];
+    let length = aether_crypto::to_hex(digest.as_bytes(), &mut hex).unwrap();
+    let digest_text = core::str::from_utf8(&hex[..length]).unwrap();
+    let mut key_hex = [0u8; 64];
+    let key = aether_crypto::ed25519::public_key_from_seed(&test_seed());
+    let length = aether_crypto::to_hex(&key, &mut key_hex).unwrap();
+    let key_text = core::str::from_utf8(&key_hex[..length]).unwrap();
+    let body = format!(
+        "id=org.artcraft.gridcraft\nversion=0.8.0\nsha256={digest_text}\nruntime=linux-appimage\npublisher={TEST_PUBLISHER}\npublisher-key={key_text}\n"
+    );
+    let signature = aether_crypto::ed25519::sign(&test_seed(), body.as_bytes());
+    let mut record = Vec::new();
+    record.extend_from_slice(&manifest::MANIFEST_MAGIC);
+    record.extend_from_slice(&manifest::MANIFEST_VERSION.to_le_bytes());
+    record.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    record.extend_from_slice(body.as_bytes());
+    record.extend_from_slice(&signature);
+    mutate(&mut record);
+    record
+}
+
+#[test]
+fn signed_import_record_verifies_the_image() {
+    let image = image();
+    let key = aether_crypto::ed25519::public_key_from_seed(&test_seed());
+    let publishers = [TrustedPublisher {
+        name: TEST_PUBLISHER,
+        key,
+    }];
+    let trust = TrustStore::new(&publishers);
+    let record = signed_record(&image, |_| {});
+    let parsed = manifest::verify_image(&record, &trust, &image).expect("verified");
+    assert_eq!(parsed.id, "org.artcraft.gridcraft");
+    assert_eq!(parsed.version, "0.8.0");
+    assert_eq!(parsed.runtime, "linux-appimage");
+    assert_eq!(parsed.publisher, TEST_PUBLISHER);
+
+    let mut other_image = image.clone();
+    other_image.push(0);
+    assert_eq!(
+        manifest::verify_image(&record, &trust, &other_image).unwrap_err(),
+        ManifestError::DigestMismatch
+    );
+}
+
+#[test]
+fn signed_import_record_rejects_bad_signature_and_untrusted_key() {
+    let image = image();
+    let key = aether_crypto::ed25519::public_key_from_seed(&test_seed());
+    let publishers = [TrustedPublisher {
+        name: TEST_PUBLISHER,
+        key,
+    }];
+    let trust = TrustStore::new(&publishers);
+    let record = signed_record(&image, |record| {
+        let length = record.len();
+        record[length - 1] ^= 0xff;
+    });
+    assert_eq!(
+        manifest::verify(&record, &trust).unwrap_err(),
+        ManifestError::Signature
+    );
+
+    let record = signed_record(&image, |_| {});
+    let empty_entries: [TrustedPublisher; 0] = [];
+    let empty = TrustStore::new(&empty_entries);
+    assert_eq!(
+        manifest::verify(&record, &empty).unwrap_err(),
+        ManifestError::UntrustedPublisher
+    );
+    let wrong_entries = [TrustedPublisher {
+        name: "Someone Else",
+        key,
+    }];
+    let wrong_name = TrustStore::new(&wrong_entries);
+    assert_eq!(
+        manifest::verify(&record, &wrong_name).unwrap_err(),
+        ManifestError::PublisherName
+    );
 }
 
 #[test]

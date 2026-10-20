@@ -283,5 +283,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     ]))
 }
 
+pub mod manifest;
+
 #[cfg(test)]
 mod tests;

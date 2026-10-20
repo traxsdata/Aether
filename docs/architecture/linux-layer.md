@@ -96,7 +96,9 @@ exact AppImage digest, and the runtime version.
 ## Current state
 
 - AppImage container inspection: implemented in `apps/linux/appimage`, with
-  host tests, pinned digest verification, and the `appimage-inspect` diagnostic.
+  host tests, pinned digest verification, signed import records with Ed25519
+  publisher/trust-store checks, and the `appimage-inspect` /
+  `appimage-manifest` diagnostics.
 - SquashFS/zstd import: implemented in `apps/linux/squashfs`, with a synthetic
   fixture, a real-AppImage host extraction, and `squashfs-extract`.
 - Linux ELF loading into a private PML4: implemented for the boot test fixture.
@@ -112,9 +114,10 @@ exact AppImage digest, and the runtime version.
   boot-reserved arena; there is no runtime frame allocator or VMA table yet.
   The root is embedded and read-only; it is not yet an AppImage import.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
-  zstd, gzip, and lz4 (metadata, file data, fragments, directories, symlinks,
-  hardlink marking, xattr dropping, extraction limits, host extractor).
-  xz/lzma/lzo, in-OS integration, and the writable overlay remain missing.
+  zstd, gzip, lz4, and host xz (metadata, file data, fragments, directories,
+  symlinks, hardlink marking, xattr dropping, extraction limits, host
+  extractor). No_std xz/lzma/lzo, in-OS integration, and the writable overlay
+  remain missing.
 - Dynamic glibc libraries, threads, real futex waiting, signals, file-backed
   mappings, and memory reclaim: not implemented.
 - Wayland bridge and software renderer: not implemented.

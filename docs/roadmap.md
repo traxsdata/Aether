@@ -127,20 +127,24 @@ user space. It is not a VM. The target and security gates are in
 
 - [x] Validate AppImage type 2, ELF runtime, SquashFS bounds, and table offsets.
 - [x] Pin and verify the artifact SHA-256 before parsing.
-- [x] Bounded SquashFS 4 reader with zstd, gzip, and lz4 metadata/data/fragment
-  decompression, inode and directory parsing, extraction limits, and a
-  real-AppImage host extractor (`aether-squashfs`). Unsupported inode types and
-  lzma/lzo are rejected.
+- [x] Bounded SquashFS 4 reader with zstd, gzip, lz4, and host xz
+  metadata/data/fragment decompression, inode and directory parsing, extraction
+  limits, and a real-AppImage host extractor (`aether-squashfs`). Unsupported
+  inode types and lzma/lzo are rejected.
 - [x] Import policy: relative symlinks only, duplicate-path rejection, hardlinks
   marked and copied per path, setuid/setgid/sticky stripped, xattrs counted and
   dropped, extraction limits.
-- [ ] Add xz/lzma/lzo decompression and explicit xattr policy controls.
+- [ ] Add no_std xz/lzma and lzo decompression and explicit xattr policy
+  controls.
 - [ ] Import into a private read-only root; reject symlink escapes, hardlinks
   outside the root, duplicate paths, and oversized files.
 - [ ] Add a per-application writable overlay for settings, logs, and temporary
   files; cap its size and make it erasable by the user.
-- [ ] Verify publisher signatures/trust store for runtime rootfs and AppImages;
-  record the runtime version in the compatibility database.
+- [x] Signed import records with pinned digest, identity, version, runtime, and
+  publisher; Ed25519 verification against a trust store, plus
+  `appimage-manifest sign|verify`.
+- [ ] Sign and verify the runtime rootfs package itself; record the runtime
+  version in the compatibility database.
 - [ ] Package the Linux runtime rootfs (glibc, `ld.so`, Mesa/lavapipe, Wayland
   client libraries) as a signed Aether runtime package.
 

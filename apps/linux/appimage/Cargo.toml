@@ -10,10 +10,15 @@ authors.workspace = true
 
 [dependencies]
 aether-crypto = { path = "../../../crypto" }
+aether-packaging = { path = "../../../packaging" }
 
 [features]
 # Builds the host-only diagnostic binary. The library remains no_std.
 std = []
+
+[[bin]]
+name = "appimage-manifest"
+path = "src/bin/manifest.rs"
 
 [[bin]]
 name = "appimage-inspect"
