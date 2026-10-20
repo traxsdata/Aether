@@ -192,6 +192,25 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Gate 4 — windowed GridCraft: run `usr/bin/gridcraft` with Wayland,
   software rendering, keyboard/pointer input, and workbook open/save through
   the portal.
+  - [x] Gate 4 portal slice (QEMU prototype scope): `make gate4-portal-test`
+    seeds an exact-file read+write grant for
+    `/run/aether/portal/dd8f879ba78d207c/gate4.xlsx`, launches a small static
+    Linux AppImage fixture from the signed import path, reads the workbook
+    fixture, saves new bytes to the `/home/gate4.xlsx` backing file, revokes
+    the grant through a test-only kernel control path, and requires fresh read
+    and write opens to fail closed. The kernel emits
+    `AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_SAVE_OK`, and
+    `AETHER_GATE4_REVOKE_OK` only after validating the read, the saved bytes in
+    the kernel filesystem, and the two post-revocation denials. Path parsing
+    and grant resolution have host tests in `aether-services`; traversal,
+    duplicate slashes, extra components, overlong names, caller-root mismatch,
+    file mismatch, and revocation are covered. The launch environment also
+    carries `AETHER_PORTAL_WORKBOOK` for a future GUI launch.
+  - [ ] Gate 4 GUI remains open: the Wayland bridge, compositor presentation,
+    software Vulkan/GL, keyboard/pointer input, the real windowed
+    `usr/bin/gridcraft` run, and a pixel/checksum plus input-trace record have
+    not been implemented. The workbook does not yet travel through a desktop
+    file chooser or D-Bus portal.
 - [x] Moved the GridCraft record from `unsupported` to `limited` after the
   Gate 3 run, with the exact digest, runtime profile, named tests, platform,
   and date.
@@ -459,12 +478,13 @@ without touching user data. VMware Workstation itself has not yet been
 smoke-tested.
 
 The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
-(QEMU scope), and the **Gate 3 headless GridCraft run** (QEMU prototype scope).
-Boot markers cover signed embedded-rootfs and loader-staged AppImage import, the
-pinned host-glibc runtime manifest, ring-3 `linuxd` launch approval and denial,
-demand paging, cross-process shared anonymous mappings, read-shared rootfs
-mappings, per-domain quotas, blocking/finite `poll`/`epoll_wait`, cross-process
-pipes, sleeps/timerfds, blocking and directory inotify, pseudo-files/devices,
+(QEMU scope), the **Gate 3 headless GridCraft run** (QEMU prototype scope), and
+the **Gate 4 portal slice** (QEMU prototype scope). Boot markers cover signed
+embedded-rootfs and loader-staged AppImage import, the pinned host-glibc runtime
+manifest, ring-3 `linuxd` launch approval and denial, demand paging,
+cross-process shared anonymous mappings, read-shared rootfs mappings,
+per-domain quotas, blocking/finite `poll`/`epoll_wait`, cross-process pipes,
+sleeps/timerfds, blocking and directory inotify, pseudo-files/devices,
 default-deny syscall policy, `clone3`/robust futex/`rseq`,
 `siginfo`/`ucontext`/alt-stack/`SA_RESTART`, process groups, blocking `wait4`,
 static/dynamic exec, the `PT_INTERP` loader, and the real GridCraft CLI CSV
@@ -473,6 +493,17 @@ round trip. `make gate3-test` passes with the pinned 19 MiB AppImage, and
 fault/rollback/negative paths, release checks, and the runtime-packaging tests)
 passes at the commit that adds this run. The exact commit and marker transcript
 belong in the PR, not this planning file.
+
+`make gate4-portal-test` covers the portal half of Gate 4: a Linux AppImage
+fixture opens a seeded workbook through
+`/run/aether/portal/<grant-id>/gate4.xlsx`, reads it, saves new bytes through
+the same exact-file grant, and then fails closed on a fresh read and write
+after the kernel revokes the grant. Kernel-owned markers
+`AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_SAVE_OK`, and
+`AETHER_GATE4_REVOKE_OK` are emitted after the kernel validates the read
+operation, the saved bytes in its filesystem, and both denials. The GUI,
+Wayland bridge, software renderer, input routing, and a real windowed GridCraft
+run remain open; the compatibility record stays `limited`.
 
 Neither the Gate 2 prototype nor the Gate 3 run is a production compatibility
 claim. Linux syscall dispatch, ELF/library mapping, and VMA management remain in

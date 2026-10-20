@@ -360,31 +360,38 @@ fn failed(reason: &str) -> ! {
 /// `linux-erase` shell command uses. Nothing here survives a power cycle: the
 /// filesystem service is a RAM disk and there is no persistent block device.
 pub fn post_app_exit() {
-    // The static fixture writes three files to prove overlay persistence. A
-    // real dynamically linked application is not required to write anything,
-    // so its successful exit is checked by the scheduler result instead.
-    if crate::linux::app_is_dynamic() {
-        serial_line!("AETHER_LINUX_OVERLAY_SKIP_OK reason=dynamic-app");
-        return;
+    #[cfg(feature = "gate4-portal-test")]
+    {
+        crate::scheduler::gate4_portal_post_exit();
     }
-    let (entries, bytes) = crate::scheduler::linux_overlay_stats(APP_OVERLAY_ID);
-    if entries == 0 {
-        serial_line!("AETHER_BOOT_FAILED reason=linuxd overlay did not persist");
-        return;
+    #[cfg(not(feature = "gate4-portal-test"))]
+    {
+        // The static fixture writes three files to prove overlay persistence. A
+        // real dynamically linked application is not required to write anything,
+        // so its successful exit is checked by the scheduler result instead.
+        if crate::linux::app_is_dynamic() {
+            serial_line!("AETHER_LINUX_OVERLAY_SKIP_OK reason=dynamic-app");
+            return;
+        }
+        let (entries, bytes) = crate::scheduler::linux_overlay_stats(APP_OVERLAY_ID);
+        if entries == 0 {
+            serial_line!("AETHER_BOOT_FAILED reason=linuxd overlay did not persist");
+            return;
+        }
+        serial_line!(
+            "AETHER_LINUX_OVERLAY_PERSIST_OK app={} entries={} bytes={}",
+            crate::linux::app_identity().map_or("unknown", |(id, _, _)| id),
+            entries,
+            bytes
+        );
+        let erased = crate::scheduler::linux_overlay_erase(APP_OVERLAY_ID);
+        let (remaining, _) = crate::scheduler::linux_overlay_stats(APP_OVERLAY_ID);
+        if erased != entries || remaining != 0 {
+            serial_line!("AETHER_BOOT_FAILED reason=linuxd overlay erase");
+            return;
+        }
+        serial_line!("AETHER_LINUX_OVERLAY_ERASE_OK app={APP_OVERLAY_ID} erased={erased}");
     }
-    serial_line!(
-        "AETHER_LINUX_OVERLAY_PERSIST_OK app={} entries={} bytes={}",
-        crate::linux::app_identity().map_or("unknown", |(id, _, _)| id),
-        entries,
-        bytes
-    );
-    let erased = crate::scheduler::linux_overlay_erase(APP_OVERLAY_ID);
-    let (remaining, _) = crate::scheduler::linux_overlay_stats(APP_OVERLAY_ID);
-    if erased != entries || remaining != 0 {
-        serial_line!("AETHER_BOOT_FAILED reason=linuxd overlay erase");
-        return;
-    }
-    serial_line!("AETHER_LINUX_OVERLAY_ERASE_OK app={APP_OVERLAY_ID} erased={erased}");
 }
 
 /// Prints the runtime manager status for the shell and security view.

@@ -395,6 +395,18 @@ fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i6
     if path.as_bytes().first() != Some(&b'/') {
         return LINUX_ENOENT;
     }
+    #[cfg(feature = "gate4-portal-test")]
+    if path == crate::fs::GATE4_REVOKE_PATH {
+        return match scheduler::gate4_revoke_portal() {
+            Ok(()) => scheduler::linux_open_pseudo("/dev/null", false)
+                .map_or_else(|error| error, |fd| fd as i64),
+            Err(error) => error,
+        };
+    }
+    if path.starts_with(aether_services::portal_store::PORTAL_PREFIX) {
+        return scheduler::linux_portal_open(path, flags)
+            .map_or_else(|error| error, |fd| fd as i64);
+    }
     // Device paths are denied unless they are one of the four synthetic nodes.
     if let Some(rest) = path.strip_prefix("/dev/")
         && !matches!(rest, "null" | "zero" | "random" | "urandom")

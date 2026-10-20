@@ -87,7 +87,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | ID | Facility and artifact evidence | Aether interface | Owner | Test | Status |
 |---|---|---|---|---|---|
 | HI-08 | Metadata and directories: `stat64`, `statx`, `fstat64`, `newfstatat`, `readlink`, `getdents64`, `mkdir`, `unlink`, `rename`, `dirfd` | Synthetic stat/statx and directory enumeration over the imported root; filesystem service mutations remain missing | `kernel/src/linux.rs`, `kernel/src/scheduler.rs`, `kernel/fs` | HI-T08 | partial |
-| HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Portal grant handles and `/run/aether/portal/<grant>` paths; `/home/user` is the private overlay | `kernel/src/portal.rs`, planned `user/portald` | HI-T09 | missing |
+| HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Exact-file portal grants exposed as `/run/aether/portal/<grant-id>/<file>` for read and read+write opens, scoped to the caller root and revocable; `/home/user` remains the private overlay. A desktop chooser/D-Bus portal is still missing | `kernel/src/portal.rs`, `kernel/services/src/portal_store.rs`, `kernel/src/scheduler.rs`, planned `user/portald` | HI-T09 | partial |
 | HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `mremap`, `brk`, file mappings, W^X | Per-task VMA table; bounded demand paging for anonymous mappings; file-backed `mmap`, `munmap` reclaim, `mprotect`, `mremap` grow/move, growing `brk`; `MAP_SHARED|MAP_ANONYMOUS` within one `CLONE_VM` thread group. `fork()` is rejected while such a mapping exists; cross-process shared ownership and quotas remain missing | `kernel/src/memory`, `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T10 | partial |
 | HI-11 | Synchronization: `futex`, pthread mutex/condition variables, robust lists, `eventfd` | Futex wait/wake queues with timeouts | `kernel/src/scheduler.rs`, `kernel/src/ipc.rs` | HI-T11 | partial |
 | HI-12 | Signals: `sigaction`, `signal`, `sigemptyset`, `sigaddset`, `sigaltstack`, `kill`, `pause` | `rt_sigaction`/`rt_sigprocmask`/`sigaltstack`, self/group `kill`/`tgkill`, handler frames, restorer return, fault-to-signal, and cross-process SIGUSR1 fixture; siginfo/ucontext completeness and signal-safe restart remain | `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T12 | partial |
@@ -137,7 +137,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T06 | `make test`, `make glibc-test`; planned `make linux-env-test` | Auxv and a fixed library path reach `ld.so`; host path leakage, passwd, locale, and `getcwd` tests remain planned | partial |
 | HI-T07 | `make test`; planned `make linux-fd-test` | Boot fixture exercises open/read/seek/dup/fcntl/close, pipe2 write/read, and poll; bad-descriptor and bounce-buffer matrices remain planned | partial |
 | HI-T08 | `make test`; planned `make linux-fs-test` | Boot fixture exercises newfstatat/fstat/statx/readlink and getdents64 on `/` and `/usr/bin`; mutations and outside-path denial remain planned | partial |
-| HI-T09 | planned `make linux-portal-test` | File chooser grant, exact-file open, revocation, denial, and no ambient home | planned |
+| HI-T09 | `make gate4-portal-test` | Kernel-seeded exact-file grant, Linux read, save, revocation, post-revocation read/write denial, no ambient home, and host-tested traversal/root/file/rights rejection; the desktop file chooser and D-Bus portal remain planned | partial |
 | HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixtures cover bounded private-anonymous demand paging, thread-shared anonymous mapping, file map/unmap/reuse, growing `brk`, `mremap`, W^X denial; cross-process shared mappings and quotas remain | partial |
 | HI-T11 | `make test`; planned `make linux-sync-test` | Boot fixture blocks on FUTEX_WAIT and wakes through FUTEX_WAKE during thread join; timeouts, robust lists, and condition variables remain planned | partial |
 | HI-T12 | `make test`; planned `make linux-signal-test` | Boot fixtures cover self SIGUSR1 handler/return and cross-process SIGUSR1; siginfo/ucontext completeness, alt-stack delivery, and restart semantics remain planned | partial |
@@ -190,7 +190,7 @@ view from the signed runtime rootfs, the per-app overlay, and portal handles.
 | `/` | Runtime rootfs view | Read-only; no host root |
 | `/tmp`, `/var/tmp` | Per-domain overlay | Read/write, cleared on exit or fault |
 | `/home/user` | Per-domain overlay | Read/write, private to the domain |
-| `/run/aether/portal/<grant>/` | Portal grant path | Read/write only for the granted file |
+| `/run/aether/portal/<grant-id>/<file>` | Portal grant backing path | Read or read+write only for the exact granted file and caller root; revoked grants fail the next open |
 | `/proc/self` | `linuxd` synthesis | Read-only, bounded |
 | `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` | Synthetic nodes | Fixed behaviour |
 | `/run/user/1000` | Per-domain runtime directory | Wayland and D-Bus sockets only |
