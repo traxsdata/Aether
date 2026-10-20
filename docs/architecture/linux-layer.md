@@ -111,20 +111,29 @@ exact AppImage digest, and the runtime version.
   this slice; the test interpreter only validates auxv and transfers control.
 - Linux `syscall` entry: implemented for the tested ABI slices, including
   `mmap`/`munmap`/`mprotect`/`brk`, bounded private-anonymous demand paging,
-  file-backed mappings, `mremap`, `clone` threads/futex join, `fork` and blocking
-  `wait4` (with nonchild/selector checks), static and dynamic `execve` with
-  bounded argv/envp, bounded same-session process groups, and self/cross-process
-  SIGUSR1 fixtures. Descriptor/filesystem calls include `openat`, read/write,
-  stat/statx, `readlink`, `fcntl`, dup, `getdents64`, pipes, nonblocking poll,
-  eventfd/basic epoll, and narrow inotify. Eventfd counters are shared by
-  threads in one tgid; futex timeouts are implemented. The inotify prototype
-  requires
-  `IN_NONBLOCK` and supports `IN_MODIFY` on one exact existing overlay file;
-  default blocking init and blocking reads are unsupported. Named fixture
-  markers are enumerated in the roadmap and host-interface inventory. Shared
-  mappings, blocking/finite poll and epoll waits (`-EOPNOTSUPP`), pipe and
-  cross-process waits, full inotify, and
-  complete siginfo/ucontext remain missing.
+  file-backed mappings, `mremap`, `clone` and bounded `clone3` threads, `fork`
+  and blocking `wait4`, static and dynamic `execve` with bounded argv/envp, and
+  bounded same-session process groups with `setpgid`/`getpgid`/`getsid`/`setsid`
+  validation. Signal delivery builds an x86-64 `rt_sigframe` with `siginfo_t`
+  and `ucontext_t`, including `si_signo`/`si_code`/`si_pid`/`si_uid` for
+  `kill`/`tgkill`, fault addresses, full GPR and signal-mask restore,
+  `SA_SIGINFO`, `SA_ONSTACK` with safe fallback, and `SA_RESTART` for `wait4`.
+  Default termination for `SIGKILL`/`SIGTERM` and default-ignored `SIGCHLD`
+  are bounded to one thread group and session. Robust futex registration and
+  exit-time `FUTEX_OWNER_DIED` wakeup are implemented for the exact 24-byte
+  x86-64 head layout; `rseq` registration validates and stores a bounded area
+  but never reports preemption. Descriptor/filesystem calls include `openat`,
+  read/write, stat/statx, `readlink`, `fcntl`, dup, `getdents64`, pipes,
+  nonblocking poll, eventfd and basic epoll, and narrow inotify. Eventfd counters
+  are shared by threads in one tgid; futex timeouts are implemented. The
+  inotify prototype requires `IN_NONBLOCK` and supports `IN_MODIFY` on one exact
+  existing overlay file; default blocking init and blocking reads are
+  unsupported. Named fixture markers are enumerated in the roadmap and
+  host-interface inventory. Shared mappings, blocking/finite poll and epoll
+  waits (`-EOPNOTSUPP`), pipe and cross-process waits, full inotify, stopped/
+  continued `wait4` (`-ENOSYS`), `wait4` group selectors, signal stopping and
+  `SIGSTOP`/`SIGCONT` semantics, `clone3` pidfds/set_tid/cgroups/namespaces,
+  and `rseq` abort notification remain missing.
 - A fixed per-task VMA table tracks ranges and rejects writable+executable
   mappings. Anonymous private pages are faulted in on demand with bounded
   allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.

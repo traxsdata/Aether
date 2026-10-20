@@ -934,6 +934,922 @@ after_thread:
     mov $futex_timeout_message_len, %rdx
     syscall
 
+    /* ---- siginfo/ucontext, alternate stack, register restore ---- */
+    mov $9, %rax                /* mmap data page */
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_siginfo
+    mov %rax, %r12
+    mov $9, %rax                /* mmap alternate stack */
+    xor %rdi, %rdi
+    mov $8192, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_siginfo
+    mov %rax, %r13
+
+    /* sigaltstack{ss_sp = r13+4096, flags=0, ss_size=4096} */
+    lea 4096(%r13), %rax
+    mov %rax, 0x80(%r12)
+    movl $0, 0x88(%r12)
+    movl $0, 0x8c(%r12)
+    movq $4096, 0x90(%r12)
+    mov $131, %rax
+    lea 0x80(%r12), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_siginfo
+
+    /* SIGUSR1 with SA_SIGINFO|SA_ONSTACK|SA_RESTORER. */
+    lea siginfo_handler(%rip), %rax
+    mov %rax, 0xa0(%r12)
+    movq $0x0c000004, 0xa8(%r12)
+    lea signal_restorer(%rip), %rax
+    mov %rax, 0xb0(%r12)
+    movq $0, 0xb8(%r12)
+    mov $13, %rax
+    mov $10, %rdi
+    lea 0xa0(%r12), %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_siginfo
+
+    /* Block SIGUSR2 (bit 12, 0x800) to check mask preservation. */
+    movq $0x800, 0xc0(%r12)
+    mov $14, %rax
+    mov $2, %rdi
+    lea 0xc0(%r12), %rsi
+    lea 0xc8(%r12), %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_siginfo
+
+    mov $39, %rax               /* getpid */
+    syscall
+    mov %rax, 0xd0(%r12)
+    movabs $0x1122334455667788, %rbx
+    movabs $0x8877665544332211, %r15
+    mov %r13, %r14
+
+    movl $1, 0xe0(%r12)
+    /* kill(getpid, SIGUSR1) -> si_code == SI_USER (0). */
+    mov %rax, 0x00(%r12)        /* placeholder, replaced below */
+    lea 11f(%rip), %rax
+    mov %rax, 0x00(%r12)
+    mov 0xd0(%r12), %rdi
+    mov $10, %rsi
+    mov $62, %rax
+    syscall
+11:
+    movl $2, 0xe0(%r12)
+    test %rax, %rax
+    jne fail_siginfo
+    movl $3, 0xe0(%r12)
+    cmpl $1, 0x48(%r12)
+    jne fail_siginfo
+    cmpq $10, 0x20(%r12)
+    jne fail_siginfo
+    cmpq $0, 0x28(%r12)
+    jne fail_siginfo
+    mov 0xd0(%r12), %rax
+    cmpq %rax, 0x30(%r12)
+    jne fail_siginfo
+    cmpq $0, 0x10(%r12)
+    je fail_siginfo
+    cmpq $0, 0x18(%r12)
+    je fail_siginfo
+    mov 0x00(%r12), %rax
+    cmpq %rax, 0x38(%r12)
+    jne fail_siginfo
+    movl $4, 0xe0(%r12)
+    cmpq $0x800, 0x40(%r12)
+    jne fail_siginfo
+    movl $5, 0xe0(%r12)
+    mov 0x08(%r12), %rax
+    lea 4096(%r13), %rcx
+    cmp %rcx, %rax
+    jb fail_siginfo
+    lea 8192(%r13), %rcx
+    cmp %rcx, %rax
+    jae fail_siginfo
+    lea 4096(%r13), %rcx
+    cmpq %rcx, 0x58(%r12)
+    jne fail_siginfo
+    cmpl $1, 0x60(%r12)
+    jne fail_siginfo
+    movabs $0x1122334455667788, %rax
+    cmp %rax, %rbx
+    jne fail_siginfo
+    movabs $0x8877665544332211, %rax
+    cmp %rax, %r15
+    jne fail_siginfo
+    cmp %r13, %r14
+    jne fail_siginfo
+
+    movl $7, 0xe0(%r12)
+    /* tgkill(getpid, getpid, SIGUSR1) -> si_code == SI_TKILL (-6). */
+    lea 12f(%rip), %rax
+    mov %rax, 0x00(%r12)
+    mov 0xd0(%r12), %rdi
+    mov %rdi, %rsi
+    mov $10, %rdx
+    mov $234, %rax
+    syscall
+12:
+    movl $8, 0xe0(%r12)
+    test %rax, %rax
+    jne fail_siginfo
+    cmpl $2, 0x48(%r12)
+    jne fail_siginfo
+    cmpq $-6, 0x28(%r12)
+    jne fail_siginfo
+    mov 0x00(%r12), %rax
+    cmpq %rax, 0x38(%r12)
+    jne fail_siginfo
+
+    /* Disable the alternate stack: delivery must fall back to the normal
+     * stack and report SS_DISABLE in ucontext.uc_stack. */
+    movq $0, 0x80(%r12)
+    movl $2, 0x88(%r12)
+    movl $0, 0x8c(%r12)
+    movq $0, 0x90(%r12)
+    mov $131, %rax
+    lea 0x80(%r12), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_siginfo
+    lea 13f(%rip), %rax
+    mov %rax, 0x00(%r12)
+    mov 0xd0(%r12), %rdi
+    mov $10, %rsi
+    mov $62, %rax
+    syscall
+13:
+    movl $9, 0xe0(%r12)
+    test %rax, %rax
+    jne fail_siginfo
+    cmpl $3, 0x48(%r12)
+    jne fail_siginfo
+    mov 0x08(%r12), %rax
+    lea 4096(%r13), %rcx
+    cmp %rcx, %rax
+    jb 33f
+    lea 8192(%r13), %rcx
+    cmp %rcx, %rax
+    jb fail_siginfo
+33:
+    cmpl $2, 0x60(%r12)
+    jne fail_siginfo
+
+    /* The blocked mask must survive handler delivery and return. */
+    mov $14, %rax
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    lea 0xd8(%r12), %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_siginfo
+    cmpq $0x800, 0xd8(%r12)
+    jne fail_siginfo
+    movq $0, 0xc0(%r12)         /* restore an empty mask */
+    mov $14, %rax
+    mov $2, %rdi
+    lea 0xc0(%r12), %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_siginfo
+
+    mov $1, %rax
+    mov $1, %rdi
+    lea siginfo_message(%rip), %rsi
+    mov $siginfo_message_len, %rdx
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea altstack_message(%rip), %rsi
+    mov $altstack_message_len, %rdx
+    syscall
+
+    /* ---- SA_RESTART wait4 vs EINTR ---- */
+    lea restart_handler(%rip), %rax
+    mov %rax, 0xa0(%r12)
+    movq $0x14000000, 0xa8(%r12) /* SA_RESTORER|SA_RESTART */
+    lea signal_restorer(%rip), %rax
+    mov %rax, 0xb0(%r12)
+    movq $0, 0xb8(%r12)
+    mov $13, %rax
+    mov $10, %rdi
+    lea 0xa0(%r12), %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_restart
+    movl $0, 0x500(%r12)
+
+    sub $16, %rsp
+    mov $57, %rax               /* fork restart child */
+    syscall
+    test %rax, %rax
+    js fail_restart
+    jz restart_child
+    mov %rax, %r14
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    mov $61, %rax               /* blocking wait4 with SA_RESTART */
+    syscall
+    cmp %r14, %rax
+    jne fail_restart
+    cmpl $0x0700, (%rsp)
+    jne fail_restart
+    add $16, %rsp
+    cmpl $1, 0x500(%r12)
+    jne fail_restart
+
+    /* Now a handler without SA_RESTART must return EINTR (-4). */
+    movq $0x04000000, 0xa8(%r12)
+    mov $13, %rax
+    mov $10, %rdi
+    lea 0xa0(%r12), %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_restart
+    sub $16, %rsp
+    mov $57, %rax
+    syscall
+    test %rax, %rax
+    js fail_restart
+    jz interrupt_child
+    mov %rax, %r14
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    mov $61, %rax
+    syscall
+    cmp $-4, %rax
+    jne fail_restart
+    cmpl $2, 0x500(%r12)
+    jne fail_restart
+    mov %r14, %rdi              /* reap the child after EINTR */
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    mov $61, %rax
+    syscall
+    cmp %r14, %rax
+    jne fail_restart
+    cmpl $0x0800, (%rsp)
+    jne fail_restart
+    add $16, %rsp
+    mov $1, %rax
+    mov $1, %rdi
+    lea restart_message(%rip), %rsi
+    mov $restart_message_len, %rdx
+    syscall
+
+    jmp after_signals
+
+restart_child:
+    mov $110, %rax              /* getppid */
+    syscall
+    mov %rax, %r13
+    mov $2000000, %ecx
+14:
+    dec %ecx
+    jne 14b
+    mov %r13, %rdi
+    mov $10, %rsi
+    mov $62, %rax
+    syscall
+    mov $2000000, %ecx
+15:
+    dec %ecx
+    jne 15b
+    mov $60, %rax
+    mov $7, %rdi
+    syscall
+    jmp 15b
+
+interrupt_child:
+    mov $110, %rax
+    syscall
+    mov %rax, %r13
+    mov $2000000, %ecx
+16:
+    dec %ecx
+    jne 16b
+    mov %r13, %rdi
+    mov $10, %rsi
+    mov $62, %rax
+    syscall
+    mov $2000000, %ecx
+17:
+    dec %ecx
+    jne 17b
+    mov $60, %rax
+    mov $8, %rdi
+    syscall
+    jmp 17b
+
+after_signals:
+    /* ---- SIGTERM handler and SIGKILL default action ---- */
+    sub $16, %rsp
+    mov $57, %rax
+    syscall
+    test %rax, %rax
+    js fail_default
+    jz term_child
+    mov %rax, %r14
+    mov $10000000, %ecx
+18:
+    dec %ecx
+    jne 18b
+    mov %r14, %rdi
+    mov $15, %rsi               /* SIGTERM */
+    mov $62, %rax
+    syscall
+    test %rax, %rax
+    jne fail_default
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    mov $61, %rax
+    syscall
+    cmp %r14, %rax
+    jne fail_default
+    cmpl $0x2e00, (%rsp)
+    jne fail_default
+    add $16, %rsp
+
+    sub $16, %rsp
+    mov $57, %rax
+    syscall
+    test %rax, %rax
+    js fail_default
+    jz kill_child
+    mov %rax, %r14
+    mov $10000000, %ecx
+19:
+    dec %ecx
+    jne 19b
+    mov %r14, %rdi
+    mov $9, %rsi                /* SIGKILL default action */
+    mov $62, %rax
+    syscall
+    test %rax, %rax
+    jne fail_default
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    mov $61, %rax
+    syscall
+    cmp %r14, %rax
+    jne fail_default
+    cmpl $9, (%rsp)             /* WIFSIGNALED: status == SIGKILL */
+    jne fail_default
+    add $16, %rsp
+    mov $1, %rax
+    mov $1, %rdi
+    lea default_message(%rip), %rsi
+    mov $default_message_len, %rdx
+    syscall
+    jmp after_default
+
+term_child:
+    lea term_handler(%rip), %rax
+    mov %rax, 0xa0(%r12)
+    movq $0x04000000, 0xa8(%r12)
+    lea signal_restorer(%rip), %rax
+    mov %rax, 0xb0(%r12)
+    movq $0, 0xb8(%r12)
+    mov $13, %rax
+    mov $15, %rdi
+    lea 0xa0(%r12), %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_default
+    movl $0, 0x530(%r12)
+    mov $20000000, %ecx
+20:
+    dec %ecx
+    jne 20b
+    mov $60, %rax
+    cmpl $1, 0x530(%r12)
+    jne 21f
+    mov $46, %rdi
+    syscall
+21:
+    mov $1, %rdi
+    syscall
+    jmp 21b
+
+kill_child:
+    mov $20000000, %ecx
+22:
+    dec %ecx
+    jne 22b
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+    jmp 22b
+
+after_default:
+    /* ---- process-group scoped kill and setpgid/setsid validation ---- */
+    /* Ignore SIGUSR1 in the parent; the group signal must only reach the
+     * child that moved itself into a new group. */
+    movq $1, 0xa0(%r12)         /* SIG_IGN */
+    movq $0, 0xa8(%r12)
+    movq $0, 0xb0(%r12)
+    movq $0, 0xb8(%r12)
+    mov $13, %rax
+    mov $10, %rdi
+    lea 0xa0(%r12), %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_group
+    mov $121, %rax              /* getpgid(0) == parent group */
+    xor %rdi, %rdi
+    syscall
+    test %rax, %rax
+    js fail_group
+    mov %rax, 0x520(%r12)
+
+    sub $16, %rsp
+    mov $57, %rax
+    syscall
+    test %rax, %rax
+    js fail_group
+    jz group_child
+    mov %rax, %r14              /* child becomes its own group leader */
+    mov $10000000, %ecx
+23:
+    dec %ecx
+    jne 23b
+    mov %r14, %rdi
+    neg %rdi                    /* kill(-child_pgid, SIGUSR1) */
+    mov $10, %rsi
+    mov $62, %rax
+    syscall
+    test %rax, %rax
+    jne fail_group
+    mov $5000000, %ecx
+24:
+    dec %ecx
+    jne 24b
+    mov 0x520(%r12), %rdi
+    neg %rdi                    /* parent group: ignored locally */
+    mov $10, %rsi
+    mov $62, %rax
+    syscall
+    test %rax, %rax
+    jne fail_group
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    mov $61, %rax
+    syscall
+    cmp %r14, %rax
+    jne fail_group
+    cmpl $0x0100, (%rsp)        /* handler ran exactly once */
+    jne fail_group
+    add $16, %rsp
+    mov $1, %rax
+    mov $1, %rdi
+    lea group_extra_message(%rip), %rsi
+    mov $group_extra_message_len, %rdx
+    syscall
+    jmp after_group
+
+group_child:
+    mov $109, %rax              /* setpgid(0, 0): own group */
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_group
+    mov $39, %rax               /* getpid == getpgid after setpgid(0,0) */
+    syscall
+    mov %rax, 0x528(%r12)
+    mov $121, %rax
+    xor %rdi, %rdi
+    syscall
+    cmp 0x528(%r12), %rax
+    jne fail_group
+    /* A session leader cannot join another group. */
+    mov $109, %rax
+    xor %rdi, %rdi
+    mov 0x520(%r12), %rsi
+    syscall
+    cmp $-1, %rax               /* -EPERM */
+    jne fail_group
+    /* Negative/huge pgid is EINVAL; unknown pid is ESRCH. */
+    mov $109, %rax
+    xor %rdi, %rdi
+    mov $0x7fffffff, %rsi
+    syscall
+    cmp $-22, %rax
+    jne fail_group
+    mov $109, %rax
+    mov $0x7fffffff, %rdi
+    xor %rsi, %rsi
+    syscall
+    cmp $-3, %rax
+    jne fail_group
+    mov $121, %rax
+    mov $0x7fffffff, %rdi
+    syscall
+    cmp $-3, %rax
+    jne fail_group
+    lea group_handler(%rip), %rax
+    mov %rax, 0xa0(%r12)
+    movq $0x04000000, 0xa8(%r12)
+    lea signal_restorer(%rip), %rax
+    mov %rax, 0xb0(%r12)
+    movq $0, 0xb8(%r12)
+    mov $13, %rax
+    mov $10, %rdi
+    lea 0xa0(%r12), %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jne fail_group
+    movl $0, 0x510(%r12)
+    mov $40000000, %ecx
+25:
+    dec %ecx
+    jne 25b
+    mov $60, %rax
+    mov 0x510(%r12), %rdi
+    syscall
+    jmp 25b
+
+after_group:
+    /* ---- bounded rseq registration ---- */
+    movq $0, 0x3c0(%r12)
+    movq $0, 0x3c8(%r12)
+    movq $0, 0x3d0(%r12)
+    movq $0, 0x3d8(%r12)
+    mov $334, %rax
+    lea 0x3c0(%r12), %rdi
+    mov $32, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_rseq
+    mov $334, %rax
+    lea 0x3c0(%r12), %rdi
+    mov $16, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp $-22, %rax
+    jne fail_rseq
+    mov $334, %rax
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_rseq
+    mov $1, %rax
+    mov $1, %rdi
+    lea rseq_message(%rip), %rsi
+    mov $rseq_message_len, %rdx
+    syscall
+
+    /* ---- clone3 thread ---- */
+    movl $0, 0x208(%r12)
+    movl $0, 0x218(%r12)
+    movq $0x1290100, 0x300(%r12)
+    movq $0, 0x308(%r12)
+    lea 0x218(%r12), %rax
+    mov %rax, 0x310(%r12)
+    movq $0, 0x318(%r12)
+    movq $0, 0x320(%r12)
+    lea 0x800(%r12), %rax
+    mov %rax, 0x328(%r12)
+    movq $0x400, 0x330(%r12)
+    lea 0x200(%r12), %rax
+    mov %rax, 0x338(%r12)
+    movq $0, 0x340(%r12)
+    movq $0, 0x348(%r12)
+    movq $0, 0x350(%r12)
+    movq $0, 0x358(%r12)
+    movq $0, 0x360(%r12)
+    movq $0, 0x368(%r12)
+    movq $0, 0x370(%r12)
+    movq $0, 0x378(%r12)
+    movl $1, 0xe4(%r12)
+    /* A short layout is EINVAL; a namespace flag is ENOSYS. */
+    mov $435, %rax
+    lea 0x300(%r12), %rdi
+    mov $32, %rsi
+    syscall
+    cmp $-22, %rax
+    jne fail_clone3
+    movl $2, 0xe4(%r12)
+    movq $0x1290100, %rdx
+    orq $0x20000, %rdx          /* CLONE_NEWNS */
+    mov %rdx, 0x300(%r12)
+    mov $435, %rax
+    lea 0x300(%r12), %rdi
+    mov $88, %rsi
+    syscall
+    cmp $-38, %rax
+    jne fail_clone3
+    movl $3, 0xe4(%r12)
+    movq $0x1290100, 0x300(%r12)
+    mov $435, %rax
+    lea 0x300(%r12), %rdi
+    mov $88, %rsi
+    syscall
+    test %rax, %rax
+    js fail_clone3
+    jz clone3_thread
+    mov %rax, %r14
+    movl $4, 0xe4(%r12)
+26:
+    movl 0x218(%r12), %eax
+    test %eax, %eax
+    jz 34f
+    mov $202, %rax
+    lea 0x218(%r12), %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    jmp 26b
+34:
+    movl $5, 0xe4(%r12)
+    cmpl $1, 0x208(%r12)
+    jne fail_clone3
+    jmp clone3_done
+clone3_done:
+    mov $1, %rax
+    mov $1, %rdi
+    lea clone3_message(%rip), %rsi
+    mov $clone3_message_len, %rdx
+    syscall
+
+    /* ---- robust futex list: owner exits, waiter sees OWNER_DIED ---- */
+    /* Main thread registration round trip. */
+    movl $2, 0xe8(%r12)
+    mov $273, %rax
+    lea 0x480(%r12), %rdi
+    mov $24, %rsi
+    syscall
+    test %rax, %rax
+    je 60f
+    cmp $-14, %rax
+    je 61f
+    cmp $-22, %rax
+    je 62f
+    jmp robust_fail
+61:
+    movl $6, 0xe8(%r12)
+    jmp robust_fail
+62:
+    movl $7, 0xe8(%r12)
+    jmp robust_fail
+60:
+    movl $5, 0xe8(%r12)
+    mov $274, %rax
+    xor %rdi, %rdi
+    lea 0x488(%r12), %rsi
+    lea 0x490(%r12), %rdx
+    syscall
+    test %rax, %rax
+    jne robust_fail
+    movl $6, 0xe8(%r12)
+    cmpq $0, 0x488(%r12)
+    jne 63f
+    movl $7, 0xe8(%r12)
+    jmp robust_fail
+63:
+    lea 0x480(%r12), %rax
+    cmpq %rax, 0x488(%r12)
+    je 64f
+    movq 0x488(%r12), %rax
+    sub $32, %rsp
+    mov %rsp, %rdi
+    mov $16, %ecx
+65:
+    rol $4, %rax
+    mov %al, %dl
+    and $0xf, %dl
+    cmp $10, %dl
+    jb 66f
+    add $39, %dl
+66:
+    add $48, %dl
+    mov %dl, (%rdi)
+    inc %rdi
+    dec %ecx
+    jne 65b
+    mov $1, %rax
+    mov $1, %rdi
+    mov %rsp, %rsi
+    mov $16, %rdx
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea failure_newline(%rip), %rsi
+    mov $1, %rdx
+    syscall
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+    jmp .
+64:
+    cmpq $24, 0x490(%r12)
+    je 67f
+    jmp robust_fail
+67:
+    mov $273, %rax              /* unregister */
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jne robust_fail
+    movl $0, 0x440(%r12)
+    movl $0, 0x448(%r12)
+    movl $0, 0x44c(%r12)
+    movl $0, 0x450(%r12)
+    movl $0, 0x454(%r12)
+    movl $0, 0x458(%r12)
+    movl $0, 0x46c(%r12)
+    lea 0x420(%r12), %rax
+    mov %rax, 0x400(%r12)       /* head.next = entry */
+    movq $0x20, 0x408(%r12)     /* futex_offset = word - entry */
+    movq $0, 0x410(%r12)
+    lea 0x400(%r12), %rax
+    mov %rax, 0x420(%r12)       /* entry.next = head */
+    movl $0, 0x218(%r12)
+    mov $56, %rax               /* clone owner thread */
+    mov $0x1290100, %rdi
+    lea 0xc00(%r12), %rsi
+    xor %rdx, %rdx
+    lea 0x218(%r12), %r10
+    xor %r8, %r8
+    syscall
+    test %rax, %rax
+    js fail_robust
+    jz robust_owner
+28:
+    cmpl $1, 0x448(%r12)
+    jne 28b
+    movl $0, 0x218(%r12)
+    mov $56, %rax               /* clone waiter thread */
+    mov $0x1290100, %rdi
+    lea 0xf00(%r12), %rsi
+    xor %rdx, %rdx
+    lea 0x21c(%r12), %r10
+    xor %r8, %r8
+    syscall
+    test %rax, %rax
+    js fail_robust
+    jz robust_waiter
+29:
+    cmpl $1, 0x450(%r12)
+    jne 29b
+    mov $1000000, %ecx
+30:
+    dec %ecx
+    jne 30b
+    movl $1, 0x44c(%r12)
+    mov $202, %rax
+    lea 0x44c(%r12), %rdi
+    mov $1, %rsi
+    mov $1, %rdx
+    syscall
+    sub $16, %rsp
+    movq $1, 0(%rsp)
+    movq $0, 8(%rsp)
+    cmpl $0, 0x458(%r12)
+    jne 31f
+    mov $202, %rax
+    lea 0x458(%r12), %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    mov %rsp, %r10
+    syscall
+31:
+    add $16, %rsp
+    movl $5, 0xe8(%r12)
+    cmpl $1, 0x458(%r12)
+    jne fail_robust
+    movl $7, 0xe8(%r12)
+    cmpl $1, 0x454(%r12)
+    jne fail_robust
+    mov $1, %rax
+    mov $1, %rdi
+    lea robust_message(%rip), %rsi
+    mov $robust_message_len, %rdx
+    syscall
+
+    jmp after_new_signals
+
+clone3_thread:
+    movl $1, 0x208(%r12)
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+    jmp clone3_thread
+
+robust_owner:
+    movl $1, 0xe8(%r12)
+    mov $186, %rax              /* gettid */
+    syscall
+    mov %eax, 0x440(%r12)       /* futex word names this thread */
+    mov $273, %rax              /* set_robust_list(head, 24) */
+    lea 0x400(%r12), %rdi
+    mov $24, %rsi
+    syscall
+    test %rax, %rax
+    jne robust_fail
+    movl $1, 0x448(%r12)
+    mov $202, %rax
+    lea 0x448(%r12), %rdi
+    mov $1, %rsi
+    mov $1, %rdx
+    syscall
+32:
+    cmpl $1, 0x44c(%r12)
+    jne 32b
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+    jmp 32b
+
+robust_waiter:
+    movl $3, 0xe8(%r12)
+33:
+    cmpl $1, 0x448(%r12)
+    jne 33b
+    movl $1, 0x450(%r12)
+    mov 0x440(%r12), %edx
+    lea 0x440(%r12), %rdi
+    xor %rsi, %rsi
+    xor %r10, %r10
+    mov $202, %rax
+    syscall
+    movl $4, 0xe8(%r12)
+    mov 0x440(%r12), %eax
+    mov %eax, %ecx
+    and $0x40000000, %ecx
+    jz robust_waiter_done
+    and $0x3fffffff, %eax
+    jnz robust_waiter_done
+    movl $1, 0x454(%r12)
+robust_waiter_done:
+    movl $1, 0x458(%r12)
+    mov $202, %rax
+    lea 0x458(%r12), %rdi
+    mov $1, %rsi
+    mov $1, %rdx
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+    jmp robust_waiter_done
+
+robust_fail:
+    jmp fail_robust
+
+after_new_signals:
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea event_message(%rip), %rsi
@@ -1072,6 +1988,123 @@ fail_signal:
     lea signal_failure(%rip), %rsi
     mov $signal_failure_len, %rdx
     jmp report_failure
+fail_siginfo:
+    movl 0xe0(%r12), %eax
+    add $48, %al
+    sub $16, %rsp
+    mov %al, (%rsp)
+    mov $1, %rax
+    mov $1, %rdi
+    lea siginfo_failure(%rip), %rsi
+    mov $siginfo_failure_len, %rdx
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    mov %rsp, %rsi
+    mov $1, %rdx
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea failure_newline(%rip), %rsi
+    mov $1, %rdx
+    syscall
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+    jmp .
+fail_restart:
+    lea restart_failure(%rip), %rsi
+    mov $restart_failure_len, %rdx
+    jmp report_failure
+fail_default:
+    lea default_failure(%rip), %rsi
+    mov $default_failure_len, %rdx
+    jmp report_failure
+fail_group:
+    lea group_failure(%rip), %rsi
+    mov $group_failure_len, %rdx
+    jmp report_failure
+fail_rseq:
+    lea rseq_failure(%rip), %rsi
+    mov $rseq_failure_len, %rdx
+    jmp report_failure
+fail_clone3:
+    movl 0xe4(%r12), %eax
+    add $48, %al
+    sub $16, %rsp
+    mov %al, (%rsp)
+    mov $1, %rax
+    mov $1, %rdi
+    lea clone3_failure(%rip), %rsi
+    mov $clone3_failure_len, %rdx
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    mov %rsp, %rsi
+    mov $1, %rdx
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea failure_newline(%rip), %rsi
+    mov $1, %rdx
+    syscall
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+    jmp .
+fail_robust:
+    movl 0xe8(%r12), %eax
+    cmp $0, %eax
+    je 40f
+    cmp $1, %eax
+    je 41f
+    cmp $2, %eax
+    je 42f
+    cmp $3, %eax
+    je 43f
+    cmp $4, %eax
+    je 44f
+    cmp $5, %eax
+    je 45f
+    cmp $6, %eax
+    je 46f
+    cmp $7, %eax
+    je 47f
+    lea robust_failure(%rip), %rsi
+    mov $robust_failure_len, %rdx
+    jmp report_failure
+40:
+    lea robust_f0(%rip), %rsi
+    mov $robust_f_len, %rdx
+    jmp report_failure
+41:
+    lea robust_f1(%rip), %rsi
+    mov $robust_f_len, %rdx
+    jmp report_failure
+42:
+    lea robust_f2(%rip), %rsi
+    mov $robust_f_len, %rdx
+    jmp report_failure
+43:
+    lea robust_f3(%rip), %rsi
+    mov $robust_f_len, %rdx
+    jmp report_failure
+44:
+    lea robust_f4(%rip), %rsi
+    mov $robust_f_len, %rdx
+    jmp report_failure
+45:
+    lea robust_f5(%rip), %rsi
+    mov $robust_f_len, %rdx
+    jmp report_failure
+46:
+    lea robust_f6(%rip), %rsi
+    mov $robust_f_len, %rdx
+    jmp report_failure
+47:
+    lea robust_f7(%rip), %rsi
+    mov $robust_f_len, %rdx
+    jmp report_failure
 fail_fork:
     lea fork_failure(%rip), %rsi
     mov $fork_failure_len, %rdx
@@ -1194,6 +2227,70 @@ cross_signal_message:
 signal_failure:
     .ascii "AETHER_LINUX_SIGNAL_FAIL\n"
     .set signal_failure_len, . - signal_failure
+siginfo_message:
+    .ascii "AETHER_LINUX_SIGINFO_OK siginfo=ok ucontext=ok regs=ok\n"
+    .set siginfo_message_len, . - siginfo_message
+altstack_message:
+    .ascii "AETHER_LINUX_ALTSTACK_OK onstack=ok fallback=ok\n"
+    .set altstack_message_len, . - altstack_message
+restart_message:
+    .ascii "AETHER_LINUX_RESTART_OK sa_restart=ok eintr=ok\n"
+    .set restart_message_len, . - restart_message
+default_message:
+    .ascii "AETHER_LINUX_SIGNAL_DEFAULT_OK sigterm=handler sigkill=default\n"
+    .set default_message_len, . - default_message
+group_extra_message:
+    .ascii "AETHER_LINUX_PROCESS_GROUP_KILL_OK group=scoped eperm=ok esrch=ok einval=ok\n"
+    .set group_extra_message_len, . - group_extra_message
+rseq_message:
+    .ascii "AETHER_LINUX_RSEQ_OK register=ok validation=ok\n"
+    .set rseq_message_len, . - rseq_message
+rseq_failure:
+    .ascii "AETHER_LINUX_RSEQ_FAIL\n"
+    .set rseq_failure_len, . - rseq_failure
+clone3_message:
+    .ascii "AETHER_LINUX_CLONE3_OK clone3=ok join=ok enosys=ok\n"
+    .set clone3_message_len, . - clone3_message
+robust_message:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_OK register=ok owner_died=ok wake=ok\n"
+    .set robust_message_len, . - robust_message
+siginfo_failure:
+    .ascii "AETHER_LINUX_SIGINFO_FAIL stage="
+    .set siginfo_failure_len, . - siginfo_failure
+failure_newline:
+    .byte 10
+restart_failure:
+    .ascii "AETHER_LINUX_RESTART_FAIL\n"
+    .set restart_failure_len, . - restart_failure
+default_failure:
+    .ascii "AETHER_LINUX_SIGNAL_DEFAULT_FAIL\n"
+    .set default_failure_len, . - default_failure
+group_failure:
+    .ascii "AETHER_LINUX_PROCESS_GROUP_KILL_FAIL\n"
+    .set group_failure_len, . - group_failure
+clone3_failure:
+    .ascii "AETHER_LINUX_CLONE3_FAIL stage="
+    .set clone3_failure_len, . - clone3_failure
+robust_failure:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL\n"
+    .set robust_failure_len, . - robust_failure
+robust_f0:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL stage=0\n"
+robust_f1:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL stage=1\n"
+robust_f2:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL stage=2\n"
+robust_f3:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL stage=3\n"
+robust_f4:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL stage=4\n"
+robust_f5:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL stage=5\n"
+robust_f6:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL stage=6\n"
+robust_f7:
+    .ascii "AETHER_LINUX_ROBUST_FUTEX_FAIL stage=7\n"
+    .set robust_f_len, 39
 fork_message:
     .ascii "AETHER_LINUX_FORK_OK fork=ok wait4=ok status=ok\nAETHER_LINUX_PROCESS_GROUP_OK setpgid=ok getpgid=ok setsid=ok kill_group=ok\n"
     .set fork_message_len, . - fork_message
@@ -1208,6 +2305,44 @@ signal_restorer:
     mov $15, %rax
     syscall
     jmp signal_restorer
+
+siginfo_handler:
+    /* rdi=signo, rsi=&siginfo, rdx=&ucontext */
+    mov %rsp, 0x08(%r12)
+    mov %rsi, 0x10(%r12)
+    mov %rdx, 0x18(%r12)
+    movslq 0(%rsi), %rax
+    mov %rax, 0x20(%r12)
+    movslq 8(%rsi), %rax
+    mov %rax, 0x28(%r12)
+    movslq 16(%rsi), %rax
+    mov %rax, 0x30(%r12)
+    mov 168(%rdx), %rax         /* ucontext.uc_mcontext.rip */
+    mov %rax, 0x38(%r12)
+    mov 296(%rdx), %rax         /* ucontext.uc_sigmask */
+    mov %rax, 0x40(%r12)
+    mov 16(%rdx), %rax          /* ucontext.uc_stack.ss_sp */
+    mov %rax, 0x58(%r12)
+    mov 24(%rdx), %eax          /* ucontext.uc_stack.ss_flags */
+    mov %rax, 0x60(%r12)
+    incl 0x48(%r12)
+    movq $0xdeadbeef, %rbx
+    movq $0xdeadbeef, %r13
+    movq $0xdeadbeef, %r14
+    movq $0xdeadbeef, %r15
+    ret
+
+restart_handler:
+    incl 0x500(%r12)
+    ret
+
+term_handler:
+    movl $1, 0x530(%r12)
+    ret
+
+group_handler:
+    incl 0x510(%r12)
+    ret
 root_path:
     .asciz "/"
 usrbin_path:

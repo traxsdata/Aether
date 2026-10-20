@@ -658,6 +658,35 @@ pub fn write_user_bytes(pml4: PhysFrame, address: u64, bytes: &[u8]) -> bool {
     true
 }
 
+/// Copies a short user byte range into a kernel buffer without changing CR3.
+/// The range must be present and readable in the supplied address space.
+pub fn read_user_bytes(pml4: PhysFrame, address: u64, bytes: &mut [u8]) -> bool {
+    if !user_range_valid(pml4, address, bytes.len() as u64, false) {
+        return false;
+    }
+    let mut copied = 0usize;
+    while copied < bytes.len() {
+        let virtual_address = address + copied as u64;
+        let Some(entry) = user_leaf_entry(pml4, virtual_address) else {
+            return false;
+        };
+        let page_offset = (virtual_address & (PAGE_SIZE - 1)) as usize;
+        let length = (PAGE_SIZE as usize - page_offset).min(bytes.len() - copied);
+        let physical = entry.address() + page_offset as u64;
+        // SAFETY: The page-table walk validated this task's user readable
+        // mapping, and the identity map covers allocated physical frames.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                physical as *const u8,
+                bytes[copied..copied + length].as_mut_ptr(),
+                length,
+            );
+        }
+        copied += length;
+    }
+    true
+}
+
 fn user_leaf_entry(pml4: PhysFrame, address: u64) -> Option<PageTableEntry> {
     let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
     // SAFETY: The PML4 is the active or a task-owned table and the kernel

@@ -207,14 +207,95 @@ pub struct SigAction {
     pub mask: u64,
 }
 
+/// Per-signal `siginfo_t` payload kept until the handler is delivered.
+#[derive(Clone, Copy, Default)]
+struct SigInfo {
+    code: i32,
+    pid: u32,
+    uid: u32,
+    address: u64,
+}
+
+/// x86-64 `struct sigcontext` as embedded in `ucontext_t` (`mcontext`).
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct SignalFrame {
-    saved: InterruptFrame,
-    blocked: u64,
+struct SigContext {
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rdi: u64,
+    rsi: u64,
+    rbp: u64,
+    rbx: u64,
+    rdx: u64,
+    rax: u64,
+    rcx: u64,
+    rsp: u64,
+    rip: u64,
+    eflags: u64,
+    cs: u16,
+    gs: u16,
+    fs: u16,
+    _pad0: u16,
+    err: u64,
+    trapno: u64,
+    oldmask: u64,
+    cr2: u64,
+    fpstate: u64,
+    reserved: [u64; 8],
+}
+
+/// x86-64 `ucontext_t` (304 bytes with a 64-bit signal set).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UContext {
+    flags: u64,
+    link: u64,
+    ss_sp: u64,
+    ss_flags: u32,
+    _pad1: u32,
+    ss_size: u64,
+    mcontext: SigContext,
+    sigmask: u64,
+}
+
+/// x86-64 `struct rt_sigframe`: restorer pointer, ucontext, then siginfo.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RtSigFrame {
+    restorer: u64,
+    context: UContext,
+    info: [u8; 128],
 }
 
 const MAX_SIGNALS: usize = 64;
+const SIGKILL: usize = 9;
+const SIGCHLD: usize = 17;
+
+// `rt_sigaction` flag bits.
+const SA_SIGINFO: u64 = 0x0000_0004;
+const SA_ONSTACK: u64 = 0x0800_0000;
+const SA_RESTART: u64 = 0x1000_0000;
+const SA_NODEFER: u64 = 0x4000_0000;
+
+// `sigaltstack` flag bits.
+const SS_ONSTACK: u32 = 1;
+const SS_DISABLE: u32 = 2;
+
+// Futex owner fields used by robust-list cleanup.
+const FUTEX_WAITERS: u32 = 0x8000_0000;
+const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+const ROBUST_LIST_HEAD_SIZE: u64 = 24;
+
+const _: () = assert!(core::mem::size_of::<SigContext>() == 256);
+const _: () = assert!(core::mem::size_of::<UContext>() == 304);
+const _: () = assert!(core::mem::size_of::<RtSigFrame>() == 440);
 
 struct Task {
     state: TaskState,
@@ -246,9 +327,17 @@ struct Task {
     linux_eventfds: [Option<()>; MAX_EVENTFDS],
     linux_epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
     sigactions: [Option<SigAction>; MAX_SIGNALS],
+    sigqueue: [Option<SigInfo>; MAX_SIGNALS],
     sigblocked: u64,
     sigpending: u64,
     sigaltstack: Option<(u64, u64)>,
+    sigaltstack_active: bool,
+    restart_wait: bool,
+    signal_exit: u8,
+    robust_list: u64,
+    robust_list_len: u64,
+    rseq: u64,
+    rseq_len: u64,
     parent: usize,
     exit_status: i64,
     wait_pid: i64,
@@ -290,9 +379,17 @@ impl Task {
             linux_eventfds: [None; MAX_EVENTFDS],
             linux_epolls: [None; MAX_EPOLLS],
             sigactions: [None; MAX_SIGNALS],
+            sigqueue: [None; MAX_SIGNALS],
             sigblocked: 0,
             sigpending: 0,
             sigaltstack: None,
+            sigaltstack_active: false,
+            restart_wait: false,
+            signal_exit: 0,
+            robust_list: 0,
+            robust_list_len: 0,
+            rseq: 0,
+            rseq_len: 0,
             parent: 0,
             exit_status: 0,
             wait_pid: 0,
@@ -1217,6 +1314,13 @@ pub fn linux_clone(
     thread.futex_address = 0;
     thread.futex_deadline = 0;
     thread.clear_child_tid = child_tid;
+    thread.sigactions = tasks[current].sigactions;
+    thread.sigblocked = tasks[current].sigblocked;
+    thread.sigaltstack = None;
+    thread.robust_list = 0;
+    thread.robust_list_len = 0;
+    thread.rseq = 0;
+    thread.rseq_len = 0;
     thread.linux_fds = parent_fds;
     thread.linux_overlay = parent_overlay;
     thread.linux_inotify = parent_inotify;
@@ -1346,6 +1450,11 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.sigactions = sigactions;
     child.sigblocked = sigblocked;
     child.sigaltstack = sigaltstack;
+    child.sigaltstack_active = false;
+    child.robust_list = 0;
+    child.robust_list_len = 0;
+    child.rseq = 0;
+    child.rseq_len = 0;
 
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
     let frame_end = (kernel_top - 16) & !15;
@@ -1521,6 +1630,136 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
     woken as i64
 }
 
+/// Registers a bounded robust futex list for the current thread.
+///
+/// Only the exact 24-byte x86-64 `robust_list_head` layout is accepted. The
+/// list is walked on thread/process exit and entries whose futex word still
+/// names this thread are marked `FUTEX_OWNER_DIED` before a waiter is woken.
+pub fn linux_set_robust_list(head: u64, length: u64) -> i64 {
+    if head == 0 && length == 0 {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+        task.robust_list = 0;
+        task.robust_list_len = 0;
+        return 0;
+    }
+    if length != ROBUST_LIST_HEAD_SIZE || head == 0 || !head.is_multiple_of(8) {
+        return LINUX_EINVAL;
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &mut tasks[current];
+    task.robust_list = head;
+    task.robust_list_len = length;
+    0
+}
+
+/// Returns the registered robust-list head and length for `pid` (0 = caller).
+pub fn linux_get_robust_list(pid: usize) -> Result<(u64, u64), i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let session = tasks[current].sid;
+    let target = if pid == 0 {
+        Some(current)
+    } else {
+        tasks.iter().position(|task| {
+            task.state != TaskState::Empty
+                && task.state != TaskState::Done
+                && task.abi == TaskAbi::Linux
+                && task.sid == session
+                && (task.tgid == pid || (task.kind != TaskKind::Thread && task.tgid == pid))
+        })
+    };
+    let Some(index) = target else {
+        return Err(LINUX_ESRCH);
+    };
+    Ok((tasks[index].robust_list, tasks[index].robust_list_len))
+}
+
+/// Records a validated `rseq` area for the current thread.
+pub fn linux_set_rseq(address: u64, length: u64) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    task.rseq = address;
+    task.rseq_len = if address == 0 { 0 } else { length };
+}
+
+fn robust_read_u32(pml4: PhysFrame, address: u64) -> Option<u32> {
+    if !address.is_multiple_of(4) {
+        return None;
+    }
+    let mut raw = [0u8; 4];
+    if !paging::read_user_bytes(pml4, address, &mut raw) {
+        return None;
+    }
+    Some(u32::from_ne_bytes(raw))
+}
+
+fn robust_write_u32(pml4: PhysFrame, address: u64, value: u32) -> bool {
+    if !address.is_multiple_of(4) {
+        return false;
+    }
+    paging::write_user_bytes(pml4, address, &value.to_ne_bytes())
+}
+
+/// Walks a thread's robust futex list on exit, marking owned words that still
+/// name this thread with `FUTEX_OWNER_DIED` and waking one waiter each.
+fn robust_futex_cleanup(index: usize) {
+    const MAX_ROBUST_ENTRIES: usize = 128;
+    let (head, pml4) = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        (tasks[index].robust_list, tasks[index].pml4)
+    };
+    if head == 0 || !head.is_multiple_of(8) {
+        return;
+    }
+    let Some(pml4) = PhysFrame::from_address(pml4) else {
+        return;
+    };
+    let mut raw = [0u8; ROBUST_LIST_HEAD_SIZE as usize];
+    if !paging::read_user_bytes(pml4, head, &mut raw) {
+        return;
+    }
+    let mut entry = u64::from_ne_bytes(raw[0..8].try_into().unwrap_or([0; 8]));
+    let futex_offset = i64::from_ne_bytes(raw[8..16].try_into().unwrap_or([0; 8]));
+    let pending = u64::from_ne_bytes(raw[16..24].try_into().unwrap_or([0; 8]));
+    let owner = (index as u32) & FUTEX_TID_MASK;
+
+    let mut count = 0usize;
+    while entry != 0 && entry != head && count < MAX_ROBUST_ENTRIES {
+        let mut next_raw = [0u8; 8];
+        if !paging::read_user_bytes(pml4, entry, &mut next_raw) {
+            break;
+        }
+        let next = u64::from_ne_bytes(next_raw);
+        robust_release_entry(pml4, entry, futex_offset, owner);
+        entry = next;
+        count += 1;
+    }
+    if pending != 0 && count < MAX_ROBUST_ENTRIES {
+        robust_release_entry(pml4, pending, futex_offset, owner);
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    tasks[index].robust_list = 0;
+    tasks[index].robust_list_len = 0;
+}
+
+fn robust_release_entry(pml4: PhysFrame, entry: u64, futex_offset: i64, owner: u32) {
+    let Some(address) = entry.checked_add_signed(futex_offset) else {
+        return;
+    };
+    let Some(value) = robust_read_u32(pml4, address) else {
+        return;
+    };
+    if value & FUTEX_TID_MASK != owner {
+        return;
+    }
+    let updated = (value & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
+    if robust_write_u32(pml4, address, updated) {
+        let _ = linux_futex_wake(address, 1);
+    }
+}
+
 /// Installs a signal action for the current task.
 pub fn linux_set_sigaction(signum: usize, action: SigAction) {
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -1560,33 +1799,39 @@ pub fn linux_sigmask() -> u64 {
 /// Sets the alternate signal stack for the current task.
 pub fn linux_set_altstack(address: u64, size: u64) {
     let tasks = unsafe { &mut *TASKS.0.get() };
-    tasks[CURRENT.load(Ordering::Relaxed)].sigaltstack = Some((address, size));
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    task.sigaltstack = if address == 0 && size == 0 {
+        None
+    } else {
+        Some((address, size))
+    };
+    task.sigaltstack_active = false;
 }
 
-/// Returns the alternate signal stack for the current task.
+/// Returns the alternate signal stack and whether the task is running on it.
 #[must_use]
-pub fn linux_altstack() -> Option<(u64, u64)> {
+pub fn linux_altstack_state() -> (Option<(u64, u64)>, bool) {
     let tasks = unsafe { &*TASKS.0.get() };
-    tasks[CURRENT.load(Ordering::Relaxed)].sigaltstack
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    (task.sigaltstack, task.sigaltstack_active)
 }
 
-/// Queues a signal on the current thread group.
-pub fn linux_send_signal(signum: u64) -> i64 {
-    if signum == 0 || signum > MAX_SIGNALS as u64 {
-        return LINUX_EINVAL;
-    }
+fn queue_signal(index: usize, signum: usize, info: SigInfo) {
     let tasks = unsafe { &mut *TASKS.0.get() };
-    let current = CURRENT.load(Ordering::Relaxed);
-    let tgid = tasks[current].tgid;
-    for task in tasks.iter_mut() {
-        if task.tgid == tgid && task.abi == TaskAbi::Linux {
-            task.sigpending |= 1u64 << (signum - 1);
-        }
+    if signum == 0 || signum > MAX_SIGNALS {
+        return;
     }
-    0
+    let bit = 1u64 << (signum - 1);
+    if tasks[index].sigpending & bit == 0 {
+        tasks[index].sigqueue[signum - 1] = Some(info);
+    }
+    tasks[index].sigpending |= bit;
 }
 
 /// Sends a signal to one process or a specific thread in that process.
+///
+/// A process-directed signal (`tid == None`) is queued on the thread-group
+/// leader, matching the bounded model where signal actions are per process.
 /// Signal zero performs only the existence check.
 pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64 {
     if signum > MAX_SIGNALS as u64 {
@@ -1595,6 +1840,7 @@ pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     let session = tasks[current].sid;
+    let sender = tasks[current].tgid as u32;
     let targets: [bool; MAX_TASKS] = core::array::from_fn(|index| {
         let task = &tasks[index];
         task.state != TaskState::Empty
@@ -1602,7 +1848,10 @@ pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64
             && task.abi == TaskAbi::Linux
             && task.sid == session
             && task.tgid == tgid
-            && tid.is_none_or(|tid| tid == index)
+            && match tid {
+                Some(tid) => tid == index,
+                None => task.kind != TaskKind::Thread,
+            }
     });
     if !targets.iter().any(|target| *target) {
         return LINUX_ESRCH;
@@ -1610,85 +1859,313 @@ pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64
     if signum == 0 {
         return 0;
     }
-    for (index, target) in targets.into_iter().enumerate() {
-        if !target {
+    let code = if tid.is_some() { -6 } else { 0 };
+    for (index, target) in targets.iter().enumerate() {
+        if !*target {
             continue;
         }
-        let task = &mut tasks[index];
-        task.sigpending |= 1u64 << (signum - 1);
-        if task.state == TaskState::Blocked {
-            if task.wait_pid != 0 {
-                task.wait_pid = 0;
-                task.wait_status_pointer = 0;
-            }
-            // A queued signal interrupts blocking syscall waits. The handler
-            // is delivered from the normal timer path.
-            unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64 };
-            task.futex_address = 0;
-            task.futex_deadline = 0;
-            task.state = TaskState::Ready;
+        queue_signal(
+            index,
+            signum as usize,
+            SigInfo {
+                code,
+                pid: sender,
+                uid: 0,
+                address: 0,
+            },
+        );
+        if index != current {
+            interrupt_blocked(index);
+            deliver_target(index);
+        }
+    }
+    // A default-terminating signal sent to another task retires it here. The
+    // current task defers termination to the syscall/timer tail.
+    for index in 0..tasks.len() {
+        if targets[index] && index != current && tasks[index].signal_exit != 0 {
+            let signum = tasks[index].signal_exit as u64;
+            tasks[index].signal_exit = 0;
+            terminate_thread_group(index, signum);
         }
     }
     0
 }
 
-/// Delivers the lowest pending unblocked signal, if a handler is installed.
-pub fn linux_deliver_signal(frame: *mut InterruptFrame) -> bool {
-    let tasks = unsafe { &mut *TASKS.0.get() };
-    let current = CURRENT.load(Ordering::Relaxed);
-    let task = &mut tasks[current];
-    if task.abi != TaskAbi::Linux || frame.is_null() {
-        return false;
-    }
+/// Returns true when the first deliverable pending signal restarts `wait4`.
+fn pending_signal_restarts(index: usize) -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[index];
     let pending = task.sigpending & !task.sigblocked;
     if pending == 0 {
         return false;
     }
     let signum = pending.trailing_zeros() as usize + 1;
-    let Some(action) = task.sigactions[signum - 1] else {
-        return false;
+    task.sigactions
+        .get(signum - 1)
+        .copied()
+        .flatten()
+        .is_some_and(|action| action.handler > 1 && action.flags & SA_RESTART != 0)
+}
+
+/// Interrupts a blocked syscall after a signal was queued.
+fn interrupt_blocked(index: usize) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[index];
+    if task.state != TaskState::Blocked || task.saved_rsp == 0 {
+        return;
+    }
+    if task.futex_address != 0 {
+        // Futex waits are not restartable: POSIX defines EINTR here.
+        task.futex_address = 0;
+        task.futex_deadline = 0;
+        task.restart_wait = false;
+        unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64 };
+    } else if task.wait_pid != 0 {
+        if pending_signal_restarts(index) {
+            // ERESTARTSYS is internal; `rt_sigreturn` re-enters wait4 after the
+            // handler when the action has SA_RESTART.
+            task.restart_wait = true;
+            unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-512i64) as u64 };
+        } else {
+            task.restart_wait = false;
+            task.wait_pid = 0;
+            task.wait_status_pointer = 0;
+            unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64 };
+        }
+    } else {
+        task.restart_wait = false;
+        unsafe { (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64 };
+    }
+    task.state = TaskState::Ready;
+}
+
+/// Delivers a pending signal to a target task and falls back to EINTR if a
+/// restartable wait could not be intercepted by a handler.
+fn deliver_target(index: usize) {
+    let frame = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        tasks[index].saved_rsp as *mut InterruptFrame
     };
-    if action.handler == 0 || action.restorer == 0 {
+    let delivered = deliver_signal_to(index, frame);
+    if !delivered {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        if tasks[index].restart_wait && tasks[index].signal_exit == 0 {
+            tasks[index].restart_wait = false;
+            tasks[index].wait_pid = 0;
+            tasks[index].wait_status_pointer = 0;
+            if frame.is_null() {
+                return;
+            }
+            unsafe { (*frame).rax = (-4i64) as u64 };
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefaultAction {
+    Terminate,
+    Ignore,
+}
+
+fn default_action(signum: usize) -> DefaultAction {
+    match signum {
+        // SIGCHLD, SIGCONT, SIGWINCH, SIGURG and the unsupported stop signals
+        // are non-terminating in this bounded model.
+        17 | 18 | 19 | 20 | 21 | 22 | 23 | 28 => DefaultAction::Ignore,
+        _ => DefaultAction::Terminate,
+    }
+}
+
+/// Writes the x86-64 `siginfo_t` payload for a queued signal.
+fn write_siginfo(info: &mut [u8; 128], signum: usize, queued: SigInfo) {
+    info[0..4].copy_from_slice(&(signum as i32).to_ne_bytes());
+    info[4..8].copy_from_slice(&0i32.to_ne_bytes());
+    info[8..12].copy_from_slice(&queued.code.to_ne_bytes());
+    match queued.code {
+        0 | -6 | -1 => {
+            info[16..20].copy_from_slice(&(queued.pid as i32).to_ne_bytes());
+            info[20..24].copy_from_slice(&queued.uid.to_ne_bytes());
+        }
+        _ => {
+            info[16..24].copy_from_slice(&queued.address.to_ne_bytes());
+        }
+    }
+}
+
+/// Delivers the lowest pending unblocked signal to `index` by installing an
+/// x86-64 `rt_sigframe`. Returns true when a handler frame was installed.
+fn deliver_signal_to(index: usize, frame: *mut InterruptFrame) -> bool {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    if index >= tasks.len() || frame.is_null() || tasks[index].abi != TaskAbi::Linux {
         return false;
     }
-    task.sigpending &= !(1u64 << (signum - 1));
-    let Some(pml4) = PhysFrame::from_address(task.pml4) else {
-        return false;
-    };
-    let saved = unsafe { *frame };
-    if saved.cs & 3 != 3 {
-        return false;
+    loop {
+        let task = &tasks[index];
+        let pending =
+            (task.sigpending & !task.sigblocked) | (task.sigpending & (1u64 << (SIGKILL - 1)));
+        if pending == 0 {
+            return false;
+        }
+        let signum = pending.trailing_zeros() as usize + 1;
+        let bit = 1u64 << (signum - 1);
+        let action = task.sigactions[signum - 1];
+        let handler = action.map_or(0, |action| action.handler);
+        if handler == 1 {
+            tasks[index].sigpending &= !bit;
+            continue;
+        }
+        if handler == 0 {
+            match default_action(signum) {
+                DefaultAction::Ignore => {
+                    tasks[index].sigpending &= !bit;
+                    continue;
+                }
+                DefaultAction::Terminate => {
+                    tasks[index].sigpending &= !bit;
+                    tasks[index].signal_exit = signum as u8;
+                    return false;
+                }
+            }
+        }
+        let Some(action) = action else {
+            return false;
+        };
+        if action.restorer == 0 {
+            return false;
+        }
+        let saved = unsafe { *frame };
+        if saved.cs & 3 != 3 {
+            return false;
+        }
+        let Some(pml4) = PhysFrame::from_address(tasks[index].pml4) else {
+            return false;
+        };
+
+        // A signal delivered while already running on the alternate stack must
+        // not nest there; Linux falls back to the interrupted stack.
+        let frame_size = core::mem::size_of::<RtSigFrame>() as u64;
+        let mut frame_pointer = 0u64;
+        let mut used_altstack = false;
+        if action.flags & SA_ONSTACK != 0
+            && !tasks[index].sigaltstack_active
+            && let Some((base, size)) = tasks[index].sigaltstack
+            && size >= frame_size + 64
+        {
+            let top = base.saturating_add(size) & !15;
+            if top > base && top <= USER_LIMIT {
+                let candidate = (top - frame_size) & !15;
+                if candidate >= base && paging::user_range_valid(pml4, candidate, frame_size, true)
+                {
+                    frame_pointer = candidate;
+                    used_altstack = true;
+                }
+            }
+        }
+        if !used_altstack {
+            let Some(candidate) = saved.rsp.checked_sub(frame_size).map(|value| value & !15) else {
+                return false;
+            };
+            if candidate < USER_BASE || !paging::user_range_valid(pml4, candidate, frame_size, true)
+            {
+                return false;
+            }
+            frame_pointer = candidate;
+        }
+
+        let queued = tasks[index].sigqueue[signum - 1].take().unwrap_or_default();
+        let mut info = [0u8; 128];
+        write_siginfo(&mut info, signum, queued);
+        let (ss_sp, ss_size, ss_flags) = match tasks[index].sigaltstack {
+            Some((base, size)) => (base, size, if used_altstack { SS_ONSTACK } else { 0 }),
+            None => (0, 0, SS_DISABLE),
+        };
+        let old_mask = tasks[index].sigblocked;
+        let context = UContext {
+            flags: 0,
+            link: 0,
+            ss_sp,
+            ss_flags,
+            _pad1: 0,
+            ss_size,
+            mcontext: SigContext {
+                r8: saved.r8,
+                r9: saved.r9,
+                r10: saved.r10,
+                r11: saved.r11,
+                r12: saved.r12,
+                r13: saved.r13,
+                r14: saved.r14,
+                r15: saved.r15,
+                rdi: saved.rdi,
+                rsi: saved.rsi,
+                rbp: saved.rbp,
+                rbx: saved.rbx,
+                rdx: saved.rdx,
+                rax: saved.rax,
+                rcx: saved.rcx,
+                rsp: saved.rsp,
+                rip: saved.rip,
+                eflags: saved.rflags,
+                cs: saved.cs as u16,
+                gs: 0,
+                fs: 0,
+                _pad0: 0,
+                err: saved.error,
+                trapno: saved.vector,
+                oldmask: old_mask,
+                cr2: queued.address,
+                fpstate: 0,
+                reserved: [0; 8],
+            },
+            sigmask: old_mask,
+        };
+        let signal_frame = RtSigFrame {
+            restorer: action.restorer,
+            context,
+            info,
+        };
+        let ucontext_pointer = frame_pointer + 8;
+        let siginfo_pointer = ucontext_pointer + core::mem::size_of::<UContext>() as u64;
+        // SAFETY: `signal_frame` is a plain local value; the byte view covers
+        // exactly its initialized representation and is only read here.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &signal_frame as *const RtSigFrame as *const u8,
+                core::mem::size_of::<RtSigFrame>(),
+            )
+        };
+        if !paging::write_user_bytes(pml4, frame_pointer, bytes) {
+            return false;
+        }
+        tasks[index].sigpending &= !bit;
+        tasks[index].sigaltstack_active = used_altstack;
+        let mut blocked = old_mask | action.mask;
+        if action.flags & SA_NODEFER == 0 {
+            blocked |= bit;
+        }
+        tasks[index].sigblocked = blocked;
+        // SAFETY: `frame` is the live interrupt/syscall frame for this task,
+        // retained on its private kernel stack while it is not running.
+        unsafe {
+            (*frame).rax = 0;
+            (*frame).rdi = signum as u64;
+            if action.flags & SA_SIGINFO != 0 {
+                (*frame).rsi = siginfo_pointer;
+                (*frame).rdx = ucontext_pointer;
+            } else {
+                (*frame).rsi = 0;
+                (*frame).rdx = 0;
+            }
+            (*frame).rip = action.handler;
+            (*frame).rsp = frame_pointer;
+        }
+        return true;
     }
-    let size = core::mem::size_of::<SignalFrame>() as u64;
-    let Some(frame_pointer) = saved.rsp.checked_sub(size).map(|value| value & !15) else {
-        return false;
-    };
-    let Some(restorer_pointer) = frame_pointer.checked_sub(8) else {
-        return false;
-    };
-    if frame_pointer < USER_BASE
-        || !paging::user_range_valid(pml4, restorer_pointer, size + 8, true)
-    {
-        return false;
-    }
-    let signal_frame = SignalFrame {
-        saved,
-        blocked: task.sigblocked,
-    };
-    // SAFETY: The user range was validated as writable and the syscall or
-    // interrupt path keeps the task from running concurrently.
-    unsafe {
-        ptr::write(frame_pointer as *mut SignalFrame, signal_frame);
-        ptr::write(restorer_pointer as *mut u64, action.restorer);
-        (*frame).rax = 0;
-        (*frame).rdi = signum as u64;
-        (*frame).rsi = 0;
-        (*frame).rdx = 0;
-        (*frame).rip = action.handler;
-        (*frame).rsp = restorer_pointer;
-    }
-    task.sigblocked |= action.mask;
-    true
+}
+
+/// Delivers the lowest pending unblocked signal to the current task.
+pub fn linux_deliver_signal(frame: *mut InterruptFrame) -> bool {
+    deliver_signal_to(CURRENT.load(Ordering::Relaxed), frame)
 }
 
 /// Consumes a signal frame and restores the interrupted context.
@@ -1699,25 +2176,184 @@ pub fn linux_sigreturn(frame: *mut InterruptFrame) -> bool {
     let Some(pml4) = PhysFrame::from_address(task.pml4) else {
         return false;
     };
-    // The handler popped the restorer address; RSP now points at the saved
-    // signal frame.
-    let frame_pointer = unsafe { (*frame).rsp };
-    let size = core::mem::size_of::<SignalFrame>() as u64;
-    if !paging::user_range_valid(pml4, frame_pointer, size, false) {
+    // The handler returned through the restorer, popping the restorer pointer;
+    // RSP is now eight bytes past the start of the rt_sigframe.
+    let Some(frame_pointer) = unsafe { (*frame).rsp }.checked_sub(8) else {
+        return false;
+    };
+    let frame_size = core::mem::size_of::<RtSigFrame>() as u64;
+    if !paging::user_range_valid(pml4, frame_pointer, frame_size, false) {
         return false;
     }
-    // SAFETY: The saved frame was validated as readable.
-    let saved = unsafe { ptr::read(frame_pointer as *const SignalFrame) };
+    // SAFETY: The complete rt_sigframe was validated as readable.
+    let saved = unsafe { *(frame_pointer as *const RtSigFrame) };
+    let context = saved.context;
+    if context.mcontext.cs & 3 != 3
+        || context.mcontext.rip < USER_BASE
+        || context.mcontext.rip >= USER_LIMIT
+        || context.mcontext.rsp < USER_BASE
+        || context.mcontext.rsp >= USER_LIMIT
+    {
+        return false;
+    }
     // SAFETY: The caller supplied the live interrupt frame.
-    unsafe { ptr::write(frame, saved.saved) };
-    task.sigblocked = saved.blocked;
+    unsafe {
+        (*frame).r8 = context.mcontext.r8;
+        (*frame).r9 = context.mcontext.r9;
+        (*frame).r10 = context.mcontext.r10;
+        (*frame).r11 = context.mcontext.r11;
+        (*frame).r12 = context.mcontext.r12;
+        (*frame).r13 = context.mcontext.r13;
+        (*frame).r14 = context.mcontext.r14;
+        (*frame).r15 = context.mcontext.r15;
+        (*frame).rdi = context.mcontext.rdi;
+        (*frame).rsi = context.mcontext.rsi;
+        (*frame).rbp = context.mcontext.rbp;
+        (*frame).rbx = context.mcontext.rbx;
+        (*frame).rdx = context.mcontext.rdx;
+        (*frame).rax = context.mcontext.rax;
+        (*frame).rcx = context.mcontext.rcx;
+        (*frame).rsp = context.mcontext.rsp;
+        (*frame).rip = context.mcontext.rip;
+        (*frame).rflags = context.mcontext.eflags;
+        (*frame).cs = context.mcontext.cs as u64;
+    }
+    task.sigblocked = context.sigmask;
+    task.sigaltstack_active = false;
     true
 }
 
+/// Takes the saved `wait4` selector when `rt_sigreturn` must restart it.
+pub fn linux_take_wait_restart() -> Option<(i64, u64)> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if !task.restart_wait {
+        return None;
+    }
+    task.restart_wait = false;
+    let pid = task.wait_pid;
+    if pid == 0 {
+        return None;
+    }
+    Some((pid, task.wait_status_pointer))
+}
+
 /// Queues and delivers a fault signal to the current task.
-pub fn linux_deliver_fault(frame: *mut InterruptFrame, signum: u64) -> bool {
-    let _ = linux_send_signal(signum);
-    linux_deliver_signal(frame)
+pub fn linux_deliver_fault(
+    frame: *mut InterruptFrame,
+    signum: u64,
+    code: i32,
+    address: u64,
+) -> bool {
+    let current = CURRENT.load(Ordering::Relaxed);
+    if signum == 0 || signum > MAX_SIGNALS as u64 {
+        return false;
+    }
+    queue_signal(
+        current,
+        signum as usize,
+        SigInfo {
+            code,
+            pid: 0,
+            uid: 0,
+            address,
+        },
+    );
+    deliver_signal_to(current, frame)
+}
+
+/// Returns true when delivery selected a default termination for the caller.
+#[must_use]
+pub fn linux_signal_pending_exit() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].signal_exit != 0
+}
+
+/// Applies a default-terminating signal to the current thread group.
+pub fn linux_signal_exit(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    let current = CURRENT.load(Ordering::Relaxed);
+    let signum = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        tasks[current].signal_exit as u64
+    };
+    if signum == 0 {
+        return frame;
+    }
+    {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].signal_exit = 0;
+    }
+    terminate_thread_group(current, signum);
+    schedule_next(current)
+}
+
+/// Retires every live task in a thread group for a default fatal signal.
+fn terminate_thread_group(index: usize, signum: u64) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    if index >= tasks.len() {
+        return;
+    }
+    let tgid = tasks[index].tgid;
+    let mut leader = index;
+    for (slot, task) in tasks.iter().enumerate() {
+        if task.state != TaskState::Empty
+            && task.state != TaskState::Done
+            && task.tgid == tgid
+            && task.kind != TaskKind::Thread
+        {
+            leader = slot;
+            break;
+        }
+    }
+    for (slot, task) in tasks.iter_mut().enumerate() {
+        if task.state == TaskState::Empty
+            || task.state == TaskState::Done
+            || task.tgid != tgid
+            || task.abi != TaskAbi::Linux
+        {
+            continue;
+        }
+        robust_futex_cleanup(slot);
+        task.futex_address = 0;
+        task.futex_deadline = 0;
+        task.state = TaskState::Done;
+        task.linux_fds = [None; crate::linux::MAX_FDS];
+        task.linux_overlay = [None; OVERLAY_FILES];
+        task.linux_pipes = [None; MAX_PIPES];
+        task.linux_eventfds = [None; MAX_EVENTFDS];
+        task.linux_epolls = [None; MAX_EPOLLS];
+    }
+    release_linux_mappings(leader);
+    tasks[leader].exit_status = signum as i64;
+    serial_line!("linux: signal exit pid={leader} signal={signum}");
+    wake_waiting_parent(leader);
+    queue_child_signal(leader);
+}
+
+/// Queues the default-ignored SIGCHLD notification on a Linux parent.
+fn queue_child_signal(child: usize) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let parent = tasks[child].parent;
+    if parent == 0 || parent >= tasks.len() || parent == child {
+        return;
+    }
+    if tasks[parent].abi != TaskAbi::Linux
+        || tasks[parent].state == TaskState::Empty
+        || tasks[parent].state == TaskState::Done
+    {
+        return;
+    }
+    let child_tgid = tasks[child].tgid as u32;
+    let bit = 1u64 << (SIGCHLD - 1);
+    if tasks[parent].sigpending & bit == 0 {
+        tasks[parent].sigqueue[SIGCHLD - 1] = Some(SigInfo {
+            code: 1, // CLD_EXITED; bounded for both exits and fatal signals.
+            pid: child_tgid,
+            uid: 0,
+            address: 0,
+        });
+    }
+    tasks[parent].sigpending |= bit;
 }
 
 /// Returns the thread-group id for `getpid`.
@@ -1725,6 +2361,13 @@ pub fn linux_deliver_fault(frame: *mut InterruptFrame, signum: u64) -> bool {
 pub fn linux_getpid() -> usize {
     let tasks = unsafe { &*TASKS.0.get() };
     tasks[CURRENT.load(Ordering::Relaxed)].tgid
+}
+
+/// Returns the parent process id for `getppid`.
+#[must_use]
+pub fn linux_getppid() -> i64 {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].parent as i64
 }
 
 /// Current process group/session IDs. IDs are process leaders' task slots.
@@ -1741,14 +2384,30 @@ pub fn linux_getpgid(pid: usize) -> Result<usize, i64> {
     }) else {
         return Err(LINUX_ESRCH);
     };
-    if task.sid != tasks[current].sid {
-        return Err(LINUX_EPERM);
-    }
+    // Linux returns the group of any live process; the session-scoped kill
+    // checks below still prevent cross-session signal delivery.
     Ok(task.pgid)
 }
 
+/// Returns the session id of a live Linux process, or `ESRCH`.
+pub fn linux_getsid(pid: usize) -> i64 {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let target = if pid == 0 { tasks[current].tgid } else { pid };
+    tasks
+        .iter()
+        .find(|task| {
+            task.state != TaskState::Empty
+                && task.state != TaskState::Done
+                && task.abi == TaskAbi::Linux
+                && task.tgid == target
+                && task.kind != TaskKind::Thread
+        })
+        .map_or(LINUX_ESRCH, |task| task.sid as i64)
+}
+
 /// Restricted Linux setpgid: current process or its direct child, same session,
-/// and only the caller's existing group or a new group led by the target.
+/// and only an existing group in that session or a new group led by the target.
 pub fn linux_setpgid(pid: usize, pgid: usize) -> i64 {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
@@ -1763,13 +2422,19 @@ pub fn linux_setpgid(pid: usize, pgid: usize) -> i64 {
     }) else {
         return LINUX_ESRCH;
     };
+    // Only the caller or one of its direct children may be moved.
     if target != self_tgid && tasks[index].parent != current {
         return LINUX_EPERM;
     }
-    if tasks[index].sid != tasks[current].sid || tasks[index].sid == target {
+    // A session leader cannot change its process group.
+    if tasks[index].sid == target || tasks[index].sid != tasks[current].sid {
         return LINUX_EPERM;
     }
     let group = if pgid == 0 { target } else { pgid };
+    // A process-group leader cannot move itself into another group.
+    if tasks[index].pgid == target && group != target {
+        return LINUX_EPERM;
+    }
     if group != target
         && !tasks.iter().any(|task| {
             task.state != TaskState::Empty
@@ -1779,7 +2444,8 @@ pub fn linux_setpgid(pid: usize, pgid: usize) -> i64 {
                 && task.sid == tasks[current].sid
         })
     {
-        return LINUX_EPERM;
+        // The requested group does not exist in the caller's session.
+        return LINUX_EINVAL;
     }
     for task in tasks
         .iter_mut()
@@ -1790,7 +2456,7 @@ pub fn linux_setpgid(pid: usize, pgid: usize) -> i64 {
     0
 }
 
-/// Starts a new session for the caller, unless it is already a process-group leader.
+/// Starts a new session for the caller, unless it is already a group leader.
 pub fn linux_setsid() -> i64 {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
@@ -1816,6 +2482,7 @@ pub fn linux_send_signal_group(pgid: usize, signal: u64) -> i64 {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     let session = tasks[current].sid;
+    let sender = tasks[current].tgid as u32;
     let targets: [bool; MAX_TASKS] = core::array::from_fn(|index| {
         let task = &tasks[index];
         task.state != TaskState::Empty
@@ -1828,31 +2495,33 @@ pub fn linux_send_signal_group(pgid: usize, signal: u64) -> i64 {
     if !targets.iter().any(|target| *target) {
         return LINUX_ESRCH;
     }
-    let tgids: [usize; MAX_TASKS] =
-        core::array::from_fn(|index| if targets[index] { tasks[index].tgid } else { 0 });
-    for task in tasks.iter_mut() {
-        if task.state == TaskState::Empty
-            || task.state == TaskState::Done
-            || !tgids.contains(&task.tgid)
-            || task.tgid == 0
-        {
+    if signal == 0 {
+        return 0;
+    }
+    for (index, target) in targets.iter().enumerate() {
+        if !*target {
             continue;
         }
-        if signal == 0 {
-            continue;
+        queue_signal(
+            index,
+            signal as usize,
+            SigInfo {
+                code: 0,
+                pid: sender,
+                uid: 0,
+                address: 0,
+            },
+        );
+        if index != current {
+            interrupt_blocked(index);
+            deliver_target(index);
         }
-        task.sigpending |= 1u64 << (signal - 1);
-        if task.state == TaskState::Blocked {
-            if task.wait_pid != 0 {
-                task.wait_pid = 0;
-                task.wait_status_pointer = 0;
-            }
-            unsafe {
-                (*(task.saved_rsp as *mut InterruptFrame)).rax = (-4i64) as u64;
-            }
-            task.futex_address = 0;
-            task.futex_deadline = 0;
-            task.state = TaskState::Ready;
+    }
+    for index in 0..tasks.len() {
+        if targets[index] && index != current && tasks[index].signal_exit != 0 {
+            let signum = tasks[index].signal_exit as u64;
+            tasks[index].signal_exit = 0;
+            terminate_thread_group(index, signum);
         }
     }
     0
@@ -3190,6 +3859,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].kind
     };
     if kind == TaskKind::Process {
+        robust_futex_cleanup(current);
         release_linux_mappings(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].futex_address = 0;
@@ -3203,9 +3873,11 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
         serial_line!("linux: process exit pid={current} status={status}");
         wake_waiting_parent(current);
+        queue_child_signal(current);
         return schedule_next(current);
     }
     if kind == TaskKind::Thread {
+        robust_futex_cleanup(current);
         clear_child_tid(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].futex_address = 0;
@@ -3224,6 +3896,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         halt()
     }
 
+    robust_futex_cleanup(current);
     release_linux_mappings(current);
     let tasks = unsafe { &mut *TASKS.0.get() };
     tasks[current].futex_address = 0;
@@ -3311,7 +3984,7 @@ pub fn resolve_linux_demand_fault(_frame: *mut InterruptFrame, address: u64, err
     .unwrap_or(false)
 }
 
-pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptFrame {
+pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *mut InterruptFrame {
     let current = CURRENT.load(Ordering::Relaxed);
     let (linux, thread, process, kind) = {
         let tasks = unsafe { &*TASKS.0.get() };
@@ -3327,6 +4000,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         halt()
     }
     if process {
+        robust_futex_cleanup(current);
         release_linux_mappings(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].state = TaskState::Done;
@@ -3338,9 +4012,11 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
         tasks[current].linux_epolls = [None; MAX_EPOLLS];
         serial_line!("linux: process fault pid={current} vector={vector}");
         wake_waiting_parent(current);
+        queue_child_signal(current);
         return schedule_next(current);
     }
     if thread {
+        robust_futex_cleanup(current);
         clear_child_tid(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].state = TaskState::Faulted;
@@ -3356,11 +4032,14 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
 
     if linux {
         let signum = if vector == 14 { 7 } else { 11 };
-        if linux_deliver_fault(frame, signum) {
+        let code = if vector == 14 { 1 } else { 0x80 };
+        let fault_address = if vector == 14 { address } else { 0 };
+        if linux_deliver_fault(frame, signum, code, fault_address) {
             let tasks = unsafe { &mut *TASKS.0.get() };
             tasks[current].state = TaskState::Running;
             return frame;
         }
+        robust_futex_cleanup(current);
         release_linux_mappings(current);
     }
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -3445,6 +4124,20 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // Deliver a pending signal to the interrupted Linux task before it is
     // saved and possibly scheduled out.
     let _ = linux_deliver_signal(frame);
+    let default_exit = {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        if tasks[current].signal_exit != 0 {
+            let signum = tasks[current].signal_exit as u64;
+            tasks[current].signal_exit = 0;
+            Some(signum)
+        } else {
+            None
+        }
+    };
+    if let Some(signum) = default_exit {
+        terminate_thread_group(current, signum);
+        return schedule_next(current);
+    }
     let tasks = unsafe { &mut *TASKS.0.get() };
 
     for task in tasks.iter_mut() {

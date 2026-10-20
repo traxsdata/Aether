@@ -181,9 +181,11 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
         33 => scheduler::linux_dup2(first, second).map_or_else(|error| error, |fd| fd as i64),
         39 => scheduler::linux_getpid() as i64,
+        110 => scheduler::linux_getppid(),
         109 => linux_setpgid(first, second),
         112 => scheduler::linux_setsid(),
         121 => linux_getpgid(first),
+        124 => linux_getsid(first),
         57 => scheduler::linux_fork(frame).map_or_else(|error| error, |pid| pid as i64),
         59 => return linux_execve(frame, pml4, first, second, third),
         61 => return linux_wait4(frame, pml4, first, second, third),
@@ -196,6 +198,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             unsafe { (*frame).r10 },
             unsafe { (*frame).r8 },
         ),
+        435 => linux_clone3(frame, pml4, first, second),
         62 => linux_kill(pml4, first, second),
         234 => linux_tgkill(pml4, first, second, third),
         72 => linux_fcntl(first, second, third),
@@ -243,7 +246,10 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         102 | 104 | 107 | 108 => 1000,
         158 => linux_arch_prctl(pml4, first, second),
         202 => return linux_futex(frame, pml4, first, second, third),
-        218 | 273 | 334 => 0,
+        218 => 0,
+        273 => linux_set_robust_list(pml4, first, second),
+        274 => linux_get_robust_list(pml4, first, second, third),
+        334 => linux_rseq(pml4, first, second, third, unsafe { (*frame).r10 }),
         228 => linux_clock_gettime(pml4, second),
         318 => linux_getrandom(pml4, first, second),
         257 => linux_openat(pml4, first, second, third),
@@ -254,12 +260,18 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // stack and keeps it valid until iretq.
     unsafe { (*frame).rax = result as u64 };
     scheduler::linux_deliver_signal(frame);
+    if scheduler::linux_signal_pending_exit() {
+        return scheduler::linux_signal_exit(frame);
+    }
     frame
 }
 
 fn linux_result(frame: *mut InterruptFrame, result: i64) -> *mut InterruptFrame {
     unsafe { (*frame).rax = result as u64 };
     scheduler::linux_deliver_signal(frame);
+    if scheduler::linux_signal_pending_exit() {
+        return scheduler::linux_signal_exit(frame);
+    }
     frame
 }
 
@@ -267,6 +279,7 @@ const LINUX_EFAULT: i64 = -14;
 const LINUX_EINVAL: i64 = -22;
 const LINUX_ENOSYS: i64 = -38;
 const LINUX_ESRCH: i64 = -3;
+const LINUX_EPERM: i64 = -1;
 
 const LINUX_ENOMEM: i64 = -12;
 const LINUX_ENOENT: i64 = -2;
@@ -1010,6 +1023,17 @@ fn linux_rt_sigaction(pml4: PhysFrame, signum: u64, action_pointer: u64, old_poi
             restorer: u64::from_ne_bytes(raw[16..24].try_into().unwrap_or([0; 8])),
             mask: u64::from_ne_bytes(raw[24..32].try_into().unwrap_or([0; 8])),
         };
+        // A user handler needs a restorer trampoline; SIG_DFL (0) and SIG_IGN
+        // (1) do not. This keeps `rt_sigreturn` well-defined.
+        if action.handler > 1
+            && (action.restorer == 0
+                || action.handler < aether_abi::user::USER_BASE
+                || action.handler >= aether_abi::user::USER_LIMIT
+                || action.restorer < aether_abi::user::USER_BASE
+                || action.restorer >= aether_abi::user::USER_LIMIT)
+        {
+            return LINUX_EINVAL;
+        }
         scheduler::linux_set_sigaction(signum as usize, action);
     }
     if old_pointer != 0 {
@@ -1049,6 +1073,9 @@ fn linux_rt_sigprocmask(pml4: PhysFrame, how: u64, set_pointer: u64, old_pointer
 }
 
 fn linux_sigaltstack(pml4: PhysFrame, stack_pointer: u64, old_pointer: u64) -> i64 {
+    const SS_ONSTACK: u32 = 1;
+    const SS_DISABLE: u32 = 2;
+    const SS_AUTODISARM: u32 = 1 << 31;
     if stack_pointer != 0 {
         let Some(raw) = user_bytes(pml4, stack_pointer, 24, false) else {
             return LINUX_EFAULT;
@@ -1056,23 +1083,43 @@ fn linux_sigaltstack(pml4: PhysFrame, stack_pointer: u64, old_pointer: u64) -> i
         let pointer = u64::from_ne_bytes(raw[0..8].try_into().unwrap_or([0; 8]));
         let flags = u32::from_ne_bytes(raw[8..12].try_into().unwrap_or([0; 4]));
         let size = u64::from_ne_bytes(raw[16..24].try_into().unwrap_or([0; 8]));
-        if flags & 2 != 0 {
+        if flags & SS_ONSTACK != 0 || flags & !(SS_DISABLE | SS_AUTODISARM) != 0 {
+            return LINUX_EINVAL;
+        }
+        let (_, active) = scheduler::linux_altstack_state();
+        if active {
+            // Linux refuses to replace a stack that is currently in use.
+            return LINUX_EPERM;
+        }
+        if flags & SS_DISABLE != 0 {
             scheduler::linux_set_altstack(0, 0);
         } else {
+            const MIN_ALTSTACK: u64 = 512;
+            if pointer < aether_abi::user::USER_BASE || size < MIN_ALTSTACK {
+                return LINUX_ENOMEM;
+            }
+            let Some(end) = pointer.checked_add(size) else {
+                return LINUX_ENOMEM;
+            };
+            if end > aether_abi::user::USER_LIMIT {
+                return LINUX_ENOMEM;
+            }
+            if !linux_user_range_valid(pml4, pointer, size.min(4096), true) {
+                return LINUX_ENOMEM;
+            }
             scheduler::linux_set_altstack(pointer, size);
         }
     }
     if old_pointer != 0 {
         let mut raw = [0u8; 24];
-        if let Some((pointer, size)) = scheduler::linux_altstack() {
-            if pointer != 0 {
-                raw[0..8].copy_from_slice(&pointer.to_ne_bytes());
-                raw[16..24].copy_from_slice(&size.to_ne_bytes());
-            } else {
-                raw[8..12].copy_from_slice(&2u32.to_ne_bytes());
-            }
+        let (stack, active) = scheduler::linux_altstack_state();
+        if let Some((pointer, size)) = stack {
+            raw[0..8].copy_from_slice(&pointer.to_ne_bytes());
+            let flags = if active { SS_ONSTACK } else { 0 };
+            raw[8..12].copy_from_slice(&flags.to_ne_bytes());
+            raw[16..24].copy_from_slice(&size.to_ne_bytes());
         } else {
-            raw[8..12].copy_from_slice(&2u32.to_ne_bytes());
+            raw[8..12].copy_from_slice(&SS_DISABLE.to_ne_bytes());
         }
         if write_user_bytes(pml4, old_pointer, &raw).is_none() {
             return LINUX_EFAULT;
@@ -1105,17 +1152,29 @@ fn linux_kill(pml4: PhysFrame, pid: u64, signal: u64) -> i64 {
 }
 
 fn linux_setpgid(pid: u64, pgid: u64) -> i64 {
-    if pid > usize::MAX as u64 || pgid > usize::MAX as u64 {
+    const MAX_PID: u64 = 1 << 20;
+    if pid > MAX_PID {
+        return LINUX_ESRCH;
+    }
+    // A negative pgid arrives as a huge unsigned value; Linux rejects it.
+    if pgid > MAX_PID {
         return LINUX_EINVAL;
     }
     scheduler::linux_setpgid(pid as usize, pgid as usize)
 }
 
 fn linux_getpgid(pid: u64) -> i64 {
-    if pid > usize::MAX as u64 {
+    if pid > 1 << 20 {
         return LINUX_ESRCH;
     }
     scheduler::linux_getpgid(pid as usize).map_or_else(|error| error, |pgid| pgid as i64)
+}
+
+fn linux_getsid(pid: u64) -> i64 {
+    if pid > 1 << 20 {
+        return LINUX_ESRCH;
+    }
+    scheduler::linux_getsid(pid as usize)
 }
 
 fn linux_tgkill(pml4: PhysFrame, tgid: u64, tid: u64, signal: u64) -> i64 {
@@ -1128,6 +1187,11 @@ fn linux_tgkill(pml4: PhysFrame, tgid: u64, tid: u64, signal: u64) -> i64 {
 
 fn linux_sigreturn(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     if scheduler::linux_sigreturn(frame) {
+        if let Some((pid, status_pointer)) = scheduler::linux_take_wait_restart() {
+            // `SA_RESTART` for wait4: resume the interrupted blocking wait
+            // after the handler returned, reaping an already-exited child.
+            return scheduler::linux_wait4_block(frame, pid, status_pointer);
+        }
         return frame;
     }
     // SAFETY: The frame is live on the current kernel stack.
@@ -1388,7 +1452,9 @@ fn linux_wait4(
         return frame;
     }
     if options & !WNOHANG != 0 {
-        unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+        // WUNTRACED/WCONTINUED and other stop/continue reporting are not
+        // implemented; fail explicitly rather than pretending to wait.
+        unsafe { (*frame).rax = LINUX_ENOSYS as u64 };
         return frame;
     }
     if status_pointer != 0 && !linux_user_range_valid(pml4, status_pointer, 4, true) {
@@ -1449,6 +1515,150 @@ fn linux_clone(
         let _ = write_user_u32(pml4, child_tid, tid as u32);
     }
     tid as i64
+}
+
+fn linux_clone3(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    arguments_pointer: u64,
+    size: u64,
+) -> i64 {
+    const CLONE_ARGS_SIZE: u64 = 88;
+    const CLONE_ARGS_MIN: u64 = 64;
+    const CLONE_VM: u64 = 0x0000_0100;
+    const CLONE_FS: u64 = 0x0000_0200;
+    const CLONE_FILES: u64 = 0x0000_0400;
+    const CLONE_SIGHAND: u64 = 0x0000_0800;
+    const CLONE_THREAD: u64 = 0x0001_0000;
+    const CLONE_SETTLS: u64 = 0x0008_0000;
+    const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+    const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    const SUPPORTED: u64 = CLONE_VM
+        | CLONE_FS
+        | CLONE_FILES
+        | CLONE_SIGHAND
+        | CLONE_THREAD
+        | CLONE_SETTLS
+        | CLONE_PARENT_SETTID
+        | CLONE_CHILD_CLEARTID
+        | CLONE_CHILD_SETTID;
+
+    if size < CLONE_ARGS_MIN {
+        return LINUX_EINVAL;
+    }
+    let read = size.min(CLONE_ARGS_SIZE);
+    let Some(raw) = user_bytes(pml4, arguments_pointer, read, false) else {
+        return LINUX_EFAULT;
+    };
+    let field = |offset: usize| -> u64 {
+        raw.get(offset..offset + 8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map_or(0, u64::from_ne_bytes)
+    };
+    let flags = field(0);
+    let pidfd = field(8);
+    let child_tid = field(16);
+    let parent_tid = field(24);
+    let exit_signal = field(32);
+    let stack = field(40);
+    let stack_size = field(48);
+    let tls = field(56);
+    let set_tid = field(64);
+    let set_tid_size = field(72);
+    let cgroup = field(80);
+
+    // Only the thread-creating subset of clone3 is mapped to the bounded
+    // clone path. pidfds, set_tid, cgroups, and non-thread process creation
+    // fail explicitly instead of silently changing meaning.
+    if pidfd != 0
+        || set_tid != 0
+        || set_tid_size != 0
+        || cgroup != 0
+        || exit_signal != 0
+        || flags & !SUPPORTED != 0
+        || flags & (CLONE_VM | CLONE_THREAD) != (CLONE_VM | CLONE_THREAD)
+    {
+        return LINUX_ENOSYS;
+    }
+    if stack == 0 {
+        return LINUX_EINVAL;
+    }
+    let child_stack = if stack_size == 0 {
+        stack & !15
+    } else {
+        let Some(top) = stack.checked_add(stack_size) else {
+            return LINUX_EINVAL;
+        };
+        top & !15
+    };
+    if !(aether_abi::user::USER_BASE..aether_abi::user::USER_LIMIT).contains(&child_stack) {
+        return LINUX_EINVAL;
+    }
+    linux_clone(frame, pml4, flags, child_stack, parent_tid, child_tid, tls)
+}
+
+fn linux_set_robust_list(pml4: PhysFrame, head: u64, length: u64) -> i64 {
+    if head == 0 && length == 0 {
+        return scheduler::linux_set_robust_list(0, 0);
+    }
+    if length != 24 || head == 0 || !head.is_multiple_of(8) {
+        return LINUX_EINVAL;
+    }
+    if !linux_user_range_valid(pml4, head, 24, false) {
+        return LINUX_EFAULT;
+    }
+    scheduler::linux_set_robust_list(head, length)
+}
+
+fn linux_get_robust_list(pml4: PhysFrame, pid: u64, head_pointer: u64, length_pointer: u64) -> i64 {
+    if pid > 1 << 20 {
+        return LINUX_ESRCH;
+    }
+    if head_pointer == 0
+        || length_pointer == 0
+        || !linux_user_range_valid(pml4, head_pointer, 8, true)
+        || !linux_user_range_valid(pml4, length_pointer, 8, true)
+    {
+        return LINUX_EFAULT;
+    }
+    let (head, length) = match scheduler::linux_get_robust_list(pid as usize) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if write_user_bytes(pml4, head_pointer, &head.to_ne_bytes()).is_none()
+        || write_user_bytes(pml4, length_pointer, &length.to_ne_bytes()).is_none()
+    {
+        return LINUX_EFAULT;
+    }
+    0
+}
+
+fn linux_rseq(pml4: PhysFrame, address: u64, length: u64, flags: u64, signature: u64) -> i64 {
+    if flags != 0 || signature != 0 {
+        return LINUX_EINVAL;
+    }
+    if address == 0 {
+        if length != 0 {
+            return LINUX_EINVAL;
+        }
+        scheduler::linux_set_rseq(0, 0);
+        return 0;
+    }
+    // struct rseq is 32 bytes; a bounded area keeps the registration from
+    // covering an arbitrary user range. Alignment is required by Linux.
+    if !(32..=4096).contains(&length) || !address.is_multiple_of(32) {
+        return LINUX_EINVAL;
+    }
+    if !linux_user_range_valid(pml4, address, length, true) {
+        return LINUX_EFAULT;
+    }
+    // The bounded stub reports CPU 0 and never sends preemption aborts.
+    if write_user_bytes(pml4, address, &[0u8; 8]).is_none() {
+        return LINUX_EFAULT;
+    }
+    scheduler::linux_set_rseq(address, length);
+    0
 }
 
 fn linux_futex(

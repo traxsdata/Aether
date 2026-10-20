@@ -564,7 +564,7 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
             saved_rip,
             cr2
         );
-        return crate::scheduler::on_user_fault(frame, saved_vector);
+        return crate::scheduler::on_user_fault(frame, saved_vector, cr2);
     }
 
     serial_line!(
