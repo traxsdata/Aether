@@ -347,9 +347,11 @@ open/save a workbook through the portal.
 read+write grant for the demo root, and runs the fixture as a Linux task.
 The fixture opens
 `/run/aether/portal/dd8f879ba78d207c/gate4.xlsx`, reads the workbook fixture,
-saves new bytes through the same grant, and then asks a test-only kernel path
-to revoke the grant. Fresh read and write opens after revocation fail with
-`EACCES`/`ENOENT`.
+writes `<file>.sctmp`, commits it with `rename`, reads the committed bytes
+back, stages a second save, asks a test-only kernel path to revoke the grant,
+and verifies that the post-revocation rename, read, and write all fail closed.
+The kernel then reads the backing file and checks it still contains exactly the
+first committed bytes, so the revoked commit did not land.
 
 The namespace is resolved by the host-tested policy in
 `aether-services::portal_store`: the path must be exactly
@@ -361,12 +363,24 @@ root mismatch, unknown grant ids, and revoked records all fail closed. There is
 no directory grant and no ambient `/home` mapping: the namespace descriptor
 carries the resolved backing path, which is `/home/gate4.xlsx` in this test.
 
+The save transaction is also exact-file scoped. `<file>.sctmp` is a bounded
+staging slot, not a second user file: it may only be created and written when
+`<file>` is an active write grant for the caller root. `rename(<file>.sctmp,
+<file>)` commits to the same backing path after rechecking root, file, rights,
+and revocation; a non-temp source, a temp destination, a different final file,
+a cross-grant rename, traversal, or a revoked grant fails before any bytes are
+written. `unlink(<file>.sctmp)` discards the staging slot. Staging is RAM
+backed, bounded to 2 MiB per grant with one active slot per file and two active
+slots overall, and is independent of the application overlay quota.
+
 Kernel-owned evidence, emitted only after validating the operation:
 
 - `AETHER_GATE4_PORTAL_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx
-  read_bytes=48 source=kernel`
-- `AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx bytes=58 source=kernel` (the
-  kernel reads back the exact saved fixture bytes)
+  read_bytes=106 source=kernel`
+- `AETHER_GATE4_SAVE_OK file=/home/gate4.xlsx bytes=58
+  staging=sctmp+rename temp_bytes=58 staged_bytes=87 renames=1 source=kernel`
+  (one commit, 87 bytes staged across the valid and revoked-attempt saves, and
+  the kernel reads back the exact committed fixture bytes)
 - `AETHER_GATE4_REVOKE_OK path=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx
   read_denials=1 write_denials=1 source=kernel`
 
