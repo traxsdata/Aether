@@ -121,6 +121,8 @@ static MESSAGES: AtomicUsize = AtomicUsize::new(0);
 static USER_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
 static USER_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static USER_EXITS: AtomicUsize = AtomicUsize::new(0);
+static MEM_FREE_MIB: AtomicUsize = AtomicUsize::new(0);
+static MEM_TOTAL_MIB: AtomicUsize = AtomicUsize::new(0);
 
 /// Scheduler initialization failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +213,25 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
                 serial_line!("AETHER_BOOT_FAILED reason=sandbox escapes={escapes}");
                 halt()
             }
+            // The ring-3 IPC demo must have exercised the bound positive and
+            // negative paths: sends, receives, and at least one denial of
+            // every kind. A user task that exited by claiming success without
+            // producing the evidence fails the boot.
+            if crate::syscall::ipc_sends() < 7
+                || crate::syscall::ipc_receives() < 7
+                || crate::syscall::ipc_denials() < 7
+                || crate::fs::quota_denials() < 1
+            {
+                serial_line!(
+                    "AETHER_BOOT_FAILED reason=user-ipc sends={} receives={} denials={} \
+                     quota={}",
+                    crate::syscall::ipc_sends(),
+                    crate::syscall::ipc_receives(),
+                    crate::syscall::ipc_denials(),
+                    crate::fs::quota_denials()
+                );
+                halt()
+            }
             serial_line!(
                 "AETHER_USER_OK tasks={} exits={} faults={}",
                 MAX_TASKS - 1,
@@ -223,9 +244,16 @@ pub fn run(allocator: &mut FrameAllocator<'_>) -> ! {
                 crate::fs::access_denials()
             );
             serial_line!(
-                "AETHER_SANDBOX_OK escapes={} access_denials={}",
+                "AETHER_SANDBOX_OK escapes={} access_denials={} quota_denials={}",
                 escapes,
-                crate::fs::access_denials()
+                crate::fs::access_denials(),
+                crate::fs::quota_denials()
+            );
+            serial_line!(
+                "AETHER_IPC_USER_OK sends={} receives={} denials={}",
+                crate::syscall::ipc_sends(),
+                crate::syscall::ipc_receives(),
+                crate::syscall::ipc_denials()
             );
             serial_line!(
                 "AETHER_BOOT_OK stage=kernel version={}",
@@ -313,10 +341,13 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
 
     crate::fs::init().map_err(SchedulerError::Filesystem)?;
     crate::packaging::init().map_err(SchedulerError::Package)?;
+    crate::fs::seed_application_roots().map_err(SchedulerError::Filesystem)?;
     crate::runtime::init().map_err(SchedulerError::Runtime)?;
     crate::updates::init().map_err(SchedulerError::Update)?;
     crate::supervisor::init().map_err(SchedulerError::Service)?;
     crate::recovery::init().map_err(SchedulerError::Filesystem)?;
+    #[cfg(feature = "recovery-rollback-selftest")]
+    crate::recovery::rollback_self_test().map_err(SchedulerError::Filesystem)?;
     crate::portal::init();
     let revocation_checks = crate::portal::self_test().map_err(|_| SchedulerError::Portal)?;
     serial_line!("AETHER_REVOCATION_OK checks={revocation_checks}");
@@ -351,6 +382,20 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         user_pml4.start_address(),
         image.entry(),
         USER_STACK_TOP
+    );
+
+    // Record the allocator's pressure after every boot allocation for the
+    // `mem` diagnostic. The allocator is not reachable after bootstrap and no
+    // frames are allocated later, so this is the free/total view the shell
+    // reports for the running system.
+    let stats = allocator.stats();
+    MEM_FREE_MIB.store(
+        (stats.free_bytes() / (1024 * 1024)) as usize,
+        Ordering::Release,
+    );
+    MEM_TOTAL_MIB.store(
+        (stats.total_bytes() / (1024 * 1024)) as usize,
+        Ordering::Release,
     );
 
     Ok(())
@@ -666,6 +711,27 @@ pub fn task_count() -> usize {
     MAX_TASKS - 1
 }
 
+/// Returns the number of user tasks that exited normally.
+#[must_use]
+pub fn user_exits() -> usize {
+    USER_EXITS.load(Ordering::Acquire)
+}
+
+/// Returns the number of user tasks retired for a fault.
+#[must_use]
+pub fn user_faults() -> usize {
+    USER_FAULTS.load(Ordering::Acquire)
+}
+
+/// Returns the recorded frame-allocator pressure in MiB as `(free, total)`.
+#[must_use]
+pub fn mem_status() -> (usize, usize) {
+    (
+        MEM_FREE_MIB.load(Ordering::Acquire),
+        MEM_TOTAL_MIB.load(Ordering::Acquire),
+    )
+}
+
 /// Runs `f` with the current task's root scope and capability table.
 ///
 /// Interrupts are masked so a timer tick cannot observe a half-updated table.
@@ -676,6 +742,20 @@ pub fn with_current_caps<R>(f: impl FnOnce(&'static str, &mut CapTable) -> R) ->
     let current = CURRENT.load(Ordering::Relaxed);
     let task = &mut tasks[current];
     f(task.root, &mut task.caps)
+}
+
+/// Runs `f` with the current task identity and capability table.
+///
+/// System calls that touch IPC objects use this so the kernel, not a message
+/// field, supplies the sender identity. Interrupts are masked for the
+/// duration; the closure must not return to user mode while the table is
+/// borrowed.
+pub fn with_current_ipc<R>(f: impl FnOnce(usize, &mut CapTable) -> R) -> R {
+    let _guard = timer::InterruptGuard::enter();
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let task = &mut tasks[current];
+    f(current, &mut task.caps)
 }
 
 /// Terminates the current user process and returns the frame to resume.
@@ -691,6 +771,9 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
 
     tasks[current].state = TaskState::Done;
     USER_EXITS.fetch_add(1, Ordering::Release);
+    // Release the task's open-file slots so a completed task cannot shrink
+    // the filesystem's bounded open-file pool for everyone else.
+    let closed = crate::fs::close_task_files(&mut tasks[current].caps);
     let result = if status == 0 {
         UserTestResult::Passed
     } else {
@@ -698,7 +781,7 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
     };
     USER_RESULT.store(result as usize, Ordering::Release);
     crate::apps::exited(current, status as i64);
-    serial_line!("user: exit pid={} status={status}", current);
+    serial_line!("user: exit pid={} status={status} closed={closed}", current);
 
     schedule_next(current)
 }
@@ -715,6 +798,10 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
 
     tasks[current].state = TaskState::Faulted;
     tasks[current].saved_rsp = frame as u64;
+    // Release the task's open-file slots on the fault path for the same
+    // reason as on exit. Only faulting-task state is touched here; unrelated
+    // tasks and the kernel continue.
+    let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
     USER_FAULTS.fetch_add(1, Ordering::Release);
     USER_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
     crate::apps::faulted(current, vector);

@@ -95,9 +95,15 @@ The boot verifies four embedded fixtures:
 | `downgrade` (0.0.9, counter 3) | `Downgrade` |
 | `forged` (0.3.0, counter 4, untrusted key) | `UnknownPublisher` |
 
-The accepted manifest is recorded in `/system/updates/selected` and the kernel
-prints `AETHER_UPDATE_OK accepted=1 rejected=3 rollback_protected=true`. The
-`updates` shell command reports installed and available state.
+After recording the accepted manifest in `/system/updates/selected`, the boot
+also replays that same manifest against the state that is now installed: the
+activation advanced the installed counter to the accepted manifest's counter,
+so presenting it again must be refused as a `Rollback`. This is the evidence
+that replay protection survives the activation record.
+
+The kernel prints `AETHER_UPDATE_OK accepted=1 rejected=4
+replay_protected=true` and the `updates` shell command reports installed and
+available state.
 
 ## Recovery prototype
 

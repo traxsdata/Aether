@@ -1,8 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# Local equivalent of the pull-request CI gate. A GitHub Actions workflow can
-# call the same commands once it is enabled; keeping this script runnable makes
-# failures reproducible without CI.
+# Local pull-request CI gate. Keeping this script runnable makes failures
+# reproducible without CI; a hosted workflow is a separate follow-up.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -16,4 +15,6 @@ make update-test
 make test
 make shell-test
 make fault-test
+make rollback-test
 make negative-test
+make release-demo

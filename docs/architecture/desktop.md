@@ -30,6 +30,20 @@ kernel works headless but does not print `AETHER_GRAPHICS_OK` or
 All geometry is clipped. Repainting is synchronous and takes no locks beyond
 the single-CPU interrupt guard around the desktop state snapshot.
 
+## Live status windows
+
+The Security Center and System Log are views over counters the kernel itself
+recorded, not authored text. At paint time each window is assembled from:
+installed package identity and root (`packaging::installed()`), service
+counts, sandbox escape/access/quota denials, portal grants/uses/denials, user
+task exits and faults, IPC denials, the update status, and the input queue's
+drop counter. A closing "denied events" roll-up is drawn in the warning
+colour. Because the data is recomputed on every repaint, a counter that stops
+being driven by the boot self-test shows up as a wrong number. The boot gate
+separately cross-checks the IPC send/receive/denial counters and the quota
+counter, and a nonzero exit or user fault fails the boot before
+`AETHER_USER_OK`; the remaining counters are descriptive.
+
 ## Input
 
 `kernel/src/input.rs` owns IRQ1. The PIC unmasks IRQ0 and IRQ1 after scheduler

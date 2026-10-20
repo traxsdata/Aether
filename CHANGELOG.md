@@ -109,6 +109,36 @@ versioning scheme until the kernel ABI stabilises.
 - Documentation: package format, signed updates, compatibility database,
   Windows host-interface report, supported hardware, installer and recovery,
   security response process, community program, and ADR-013/ADR-014.
+- Ring-3 endpoint IPC syscalls: `endpoint_create` (15), `endpoint_send` (16),
+  and `endpoint_receive` (17), with a four-slot kernel endpoint pool, bounded
+  queues of length four, generation-checked handles (`(generation<<8)|index`),
+  and per-direction right bits so send and receive authorization are separate
+  capabilities.
+- `aether-sdk` endpoint wrappers (`endpoint_create`, `endpoint_send`,
+  `endpoint_receive`) and the `EAGAIN` errno for a full or empty queue.
+- A ring-3 IPC and sandbox demonstration program that exercises a hello
+  round trip, bounded-queue fill and drain (`EAGAIN` both directions), a
+  length-violating send (`EINVAL`), forged, wrong-type, and
+  file-handle-as-endpoint sends (`EBADF`), a capability transfer that the
+  receiver sees without transfer rights, open-file quota denial at the fifth
+  concurrent open, root-escape refusal, and granted and denied portal paths.
+- A scheduler boot gate that requires the demonstration program's IPC
+  counters (seven sends, seven receives, seven denials) and at least one
+  open-file quota denial, printing `AETHER_IPC_USER_OK` and
+  `AETHER_BOOT_FAILED reason=user-ipc …` otherwise.
+- A feature-gated recovery rollback self-test (`recovery-rollback-selftest`,
+  exercised by `make rollback-test`) that discards the current image marker,
+  requires the previous marker and preserved user data, and prints
+  `AETHER_RECOVERY_ROLLBACK_OK`.
+- Live Security Center and System Log desktop windows fed from the kernel's
+  quota, portal, IPC, exit, and fault counters, with a closing warning roll-up
+  of denied events.
+- `tools/release-tamper-test.sh`: a poisoned `SHA256SUMS` entry and a flipped
+  image byte must both fail `release verify`.
+- `fs::seed_application_roots`, which provisions the installed application's
+  private directory after package installation; the `memory` shell command;
+  and quota, portal, IPC-denial, exit, and fault counters in the `security`
+  shell command.
 
 ### Changed
 
@@ -143,6 +173,14 @@ versioning scheme until the kernel ABI stabilises.
   selected-update record is derived from the verified manifest.
 - Update image names have their own bounded validator, so version strings such
   as `aether-0.10.0.iso` are accepted without widening package payload names.
+- The update boot self-test also replays the activated manifest after the
+  counter is advanced, and reports
+  `AETHER_UPDATE_OK accepted=1 rejected=4 replay_protected=true`.
+- The demonstration package fixture now grants `portal.read` and
+  `portal.write` so the ring-3 program exercises both granted and denied
+  portal paths.
+- The `demo` counters used by the boot gate are printed once, by the kernel,
+  after the user program exits.
 
 ### Fixed
 
@@ -160,6 +198,28 @@ versioning scheme until the kernel ABI stabilises.
 - A restarted service must still have all dependencies running, matching the
   first-start rule. Failed services must use the bounded restart path, and
   quarantined services cannot be started again.
+- File handles are closed when a task exits or faults. Bounded open-file slots
+  are no longer leaked by a crashing task.
+- Filesystem open-file ids are converted from capability object ids with a
+  checked conversion (`EBADF` on overflow) instead of silent `as u8`
+  truncation.
+- Capability lookup reports a wrong object type as `WrongObjectType` before
+  any rights check, so using a file handle as an endpoint fails with `EBADF`
+  rather than a misleading permission error.
+- Portal permission enforcement checks every requested right: a manifest that
+  declares `portal.write` but not `portal.read` can no longer obtain a
+  readable capability through a combined `READ|WRITE` request. Permission is
+  also checked before the exact-path grant, so an undeclared application gets
+  a consistent `EACCES` instead of learning whether a grant exists.
+- File-handle decoding rejects reserved zero and values above the 24-bit
+  encoding before lookup, matching the endpoint decoder and the system ABI
+  contract instead of silently truncating high bits.
+- The release tamper test removes both temporary bundle copies (the second
+  assignment previously replaced the only `EXIT` trap).
+- The ring-3 diagnostics no longer duplicate the expected errno in the
+  too-long IPC payload line; the serial transcript, Phase 4 status, escape
+  count, boot-gate wording, and memory-view documentation now match the tested
+  output.
 
 ### Known limitations
 

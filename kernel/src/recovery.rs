@@ -82,6 +82,38 @@ fn read_marker(path: &str) -> Option<&'static str> {
     }
 }
 
+/// Boot self-test for the rollback path (`recovery-rollback-selftest`).
+///
+/// The normal boot only ever exercises the healthy branch, so this test
+/// removes the current image marker and re-runs the selection, making the
+/// lost-image branch a boot gate. Rolling back must leave the user data
+/// readable, because user data is outside the image set.
+#[cfg(feature = "recovery-rollback-selftest")]
+pub fn rollback_self_test() -> Result<(), FsError> {
+    fs::remove_path(CURRENT)?;
+    let current = read_marker(CURRENT);
+    let previous = read_marker(PREVIOUS);
+    let user_data = read_marker(USER_DATA).is_some();
+    let rollback = current.is_none() && previous.is_some();
+    let selected = if rollback { previous } else { current }.unwrap_or("unknown");
+    let _ = fs::write_path(SELECTED, b"previous\n");
+    if !rollback || previous != Some("aether-0.0.9") || selected != "aether-0.0.9" || !user_data {
+        serial_line!(
+            "AETHER_BOOT_FAILED reason=rollback-selftest rollback={} selected={} user_data={}",
+            rollback,
+            selected,
+            user_data
+        );
+        return Err(FsError::Corrupt);
+    }
+    serial_line!(
+        "AETHER_RECOVERY_ROLLBACK_OK previous={} selected={} user_data=preserved",
+        previous.unwrap_or("missing"),
+        selected
+    );
+    Ok(())
+}
+
 /// Prints the recovery status for the shell.
 pub fn print_status() {
     let mut buffer = [0u8; 256];

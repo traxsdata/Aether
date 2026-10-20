@@ -9,6 +9,10 @@
 //! - `downgrade`: a valid older version with a newer counter, rejected.
 //! - `forged`: signed by a key that is not in the trust store, rejected.
 //!
+//! After recording the acceptance, the same `current` manifest is checked
+//! again against the state it just activated. It must now be refused as a
+//! replayed rollback; the marker reports this as `replay_protected=true`.
+//!
 //! Installed state is read from `/system/install.txt`. The accepted manifest is
 //! recorded in `/system/updates/selected`; activation and reboot are release
 //! workflow steps, not something this prototype claims to implement.
@@ -151,6 +155,20 @@ pub fn init() -> Result<(), &'static str> {
 
     record_selected(&current)?;
 
+    // The accepted manifest itself, if it is ever presented again after
+    // this activation, must now be rejected as a rollback: activation
+    // advanced the installed counter to exactly this manifest's counter.
+    // This is evidence that the replay protection survives the record.
+    let replayed = InstalledState {
+        version: current.version,
+        counter: current.counter,
+        channel: current.channel,
+    };
+    if check_policy(&current, replayed, PolicyOptions::default()) != Err(PolicyError::Rollback) {
+        serial_line!("updates: replaying the activated manifest was not refused");
+        return Err("replaying the accepted update manifest was not rejected as a rollback");
+    }
+
     // SAFETY: Interrupts are masked and this runs once during boot.
     unsafe {
         *STATUS.0.get() = Some(Status {
@@ -163,7 +181,7 @@ pub fn init() -> Result<(), &'static str> {
     }
 
     serial_line!(
-        "AETHER_UPDATE_OK accepted=1 rejected=3 rollback_protected=true counter={} selected={}.{}.{}",
+        "AETHER_UPDATE_OK accepted=1 rejected=4 replay_protected=true counter={} selected={}.{}.{}",
         current.counter,
         current.version.major,
         current.version.minor,
@@ -265,7 +283,7 @@ pub fn print_status() {
                 status.available_counter,
                 status.channel.name()
             );
-            serial_line!("updates: accepted=1 rejected=3 rollback_protected=true");
+            serial_line!("updates: accepted=1 rejected=4 replay_protected=true");
             let mut buffer = [0u8; 192];
             match fs::read_path(SELECTED, &mut buffer) {
                 Ok(length) => {

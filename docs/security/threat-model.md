@@ -128,6 +128,12 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
   revocation.
 - The kernel identity-maps physical memory and caps the map bitmap at 16 GiB;
   there is no higher-half mapping, kernel heap, or guard page.
+- **No address-space layout randomization.** User images, the kernel image,
+  and stacks load at fixed addresses, so the loss of a code-pointer leak
+  cannot be made benign yet. This is documented as an exclusion and tracked
+  as follow-up work that needs a boot-time entropy source (see
+  [memory.md](../architecture/memory.md)); the prototype has no entropy seed
+  in the boot hand-off and must not claim ASLR.
 - The boot image is unsigned. Secure Boot, measured boot, and bootloader
   verification are not implemented; signed update manifests are verified by the
   kernel and host tooling, but activation of a staged image is not.

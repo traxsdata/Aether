@@ -179,13 +179,16 @@ a pull request:
 6. `make test` — real QEMU boot with the full marker set, including the ring-3,
    filesystem, sandbox, supervisor, recovery, package, runtime, update,
    graphics, desktop, input, portal, and shell markers.
-7. `make shell-test` — drive `help`, `ls`, `cat`, `apps`, `security`,
+7. `make shell-test` — drive `help`, `ls`, `cat`, `apps`, `security`, `mem`,
    `services`, `portal`/`portal revoke`, `recovery`, `packages`, `runtime`,
    `updates`, `desktop`, `input`, and `uptime` over a serial socket.
 8. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
    and failure marker.
-9. `make negative-test` — a deliberately failing kernel must be rejected by the
-   same harness used for the normal boot test.
+9. `make rollback-test` — discard the current image marker and require the
+   previous image with its user data, printing
+   `AETHER_RECOVERY_ROLLBACK_OK`.
+10. `make negative-test` — a deliberately failing kernel must be rejected by
+    the same harness used for the normal boot test.
 
 `make qualify` adds `make release-demo` and writes a report; run it before a
 release, not on every pull request.

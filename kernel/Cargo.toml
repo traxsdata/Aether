@@ -22,3 +22,6 @@ aether-update = { path = "../updates" }
 [features]
 # Boot with a deliberate breakpoint to exercise the exception path.
 fault-selftest = []
+# Boot with a rollback self-test that removes the current image marker and
+# re-selects, exercising the lost-image branch on every test boot.
+recovery-rollback-selftest = []

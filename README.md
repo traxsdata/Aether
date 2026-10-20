@@ -8,17 +8,21 @@ The project's security goal is simple to state and hard to build: applications
 receive only the capabilities they need, user files are opened through explicit
 grants, and the desktop is not a security authority.
 
-> **Status: native desktop prototype, Phase 4 complete, and the Phase 5/6
-> packaging, compatibility, update, and release-engineering slices in place.**
+> **Status: native desktop prototype. Phase 4's core deliverables are in
+> place; interactive portal consent and its exit criterion (launching a
+> packaged application from the desktop with an explicit consent grant) are
+> still pending. The Phase 5/6 packaging, compatibility, update, and
+> release-engineering slices are in place.**
 > The tree has a reproducible UEFI boot path and ISO, a validated physical
 > memory map, kernel-owned page tables with NX and write-protect enforcement, a
 > 100 Hz preemptive scheduler, a ring-3 user/kernel boundary, validated
-> syscalls, a bounded filesystem with per-process roots and generation-checked
-> file capabilities, supervised services, a console shell, a linear framebuffer
-> compositor, keyboard input, a file portal, a recovery prototype, signed
-> package installation, per-application runtime profiles, a compatibility
-> database, Ed25519 update verification with rollback protection, and a signed
-> release bundle plus qualification report.
+> syscalls including user-mode IPC endpoints, a bounded filesystem with
+> per-process roots and generation-checked file capabilities, supervised
+> services, a console shell, a linear framebuffer compositor, keyboard input, a
+> file portal, a recovery prototype, signed package installation,
+> per-application runtime profiles, a compatibility database, Ed25519 update
+> verification with rollback protection, and a signed release bundle plus
+> qualification report.
 >
 > Windows compatibility, networking, persistent storage, audio, GPU
 > acceleration, a general installer, Secure Boot, and an external security
@@ -49,15 +53,20 @@ grants, and the desktop is not a security authority.
   checks, endpoint rights, bounded IPC queues, and kernel-mediated capability
   transfer.
 - A boot-time capability/IPC test covering successful transfer, insufficient
-  rights, forged handles, and endpoint confusion.
+  rights, forged handles, and endpoint confusion, followed by a ring-3
+  demonstration of the `endpoint_create`/`endpoint_send`/`endpoint_receive`
+  syscalls: a round trip, queue-capacity `EAGAIN`, a forged handle, a file
+  handle used as an endpoint, a `TRANSFER`-stripped receiver copy, and pool
+  exhaustion.
 - A ring-3 native application loaded from an embedded ELF image into a private
   PML4, with TSS/RSP0 kernel stacks, an `int 0x80` syscall gate, user-pointer
   validation, and fault containment.
 - A bounded virtual block device and filesystem with directories, files, open
   handles, path traversal rejection, quotas, and per-process roots.
 - Generation-checked file capabilities; `open`, `read`, `write`, `close`,
-  `list`, and `stat` syscalls; and a kernel-mediated file portal grant with
-  exact-path revocation (`AETHER_REVOCATION_OK`).
+  `list`, and `stat` syscalls; a kernel-mediated file portal grant with
+  exact-path revocation (`AETHER_REVOCATION_OK`); and enforcement of the
+  verified package's declared open-file limit (`ENOSPC` on excess opens).
 - A host-tested service supervisor with dependency order, restart budgets, and
   quarantine, plus an application lifecycle table.
 - A serial console shell with filesystem, service, application, recovery, and
@@ -65,7 +74,8 @@ grants, and the desktop is not a security authority.
 - A linear GOP framebuffer service, software compositor, six-window desktop,
   PS/2 keyboard input, Security Center, file manager, settings, portal view,
   and current/previous image recovery view.
-- A native application SDK (`sdk/`) for the initial syscall surface.
+- A native application SDK (`sdk/`) for the initial syscall surface,
+  including typed wrappers for the endpoint syscalls and error names.
 - A dependency-free `aether-crypto` crate with SHA-256, SHA-512, and Ed25519
   verification and signing, tested against RFC 8032 and an independent
   implementation.
@@ -88,86 +98,128 @@ grants, and the desktop is not a security authority.
   assembles a release bundle. Signing keys are read from a file outside the
   repository; unsigned releases are refused.
 - `make release` / `make release-check` for a signed ISO bundle with checksums
-  and a signed manifest, and `make qualify` for a release report with commit,
-  toolchain, emulator, step results, boot markers, and artifact digests.
+  and a signed manifest, `make release-demo` for the same flow with the
+  checked-in test key plus a tamper acceptance test (a poisoned checksum entry
+  and a flipped image byte must each be refused by `release verify`), and
+  `make qualify` for a release report with commit, toolchain, emulator, step
+  results, boot markers, and artifact digests.
 - Host unit tests for ABI layout and region validation, memory arithmetic, the
   frame allocator, page-table encoding, capability tables, IPC endpoints, the
   filesystem, service supervision, application lifecycle, hashes, signatures,
   package policy, update policy, runtime policy, and the defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
-  `AETHER_IPC_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`, `AETHER_SANDBOX_OK`,
-  `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`, `AETHER_REVOCATION_OK`,
-  `AETHER_PACKAGE_OK`,
-  `AETHER_RUNTIME_OK`, `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`,
-  `AETHER_DESKTOP_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
-  `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
+  `AETHER_IPC_OK`, `AETHER_IPC_USER_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`,
+  `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`,
+  `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
+  `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
+  `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`, `AETHER_SHELL_OK`, and
+  `AETHER_BOOT_OK`.
 - `make shell-test`, which drives the console over a QEMU serial socket and
-  checks filesystem, service, portal grant/revocation, package, runtime, update,
-  recovery, desktop, and input commands.
+  checks filesystem, service, memory, portal grant/revocation, package,
+  runtime, update, recovery, desktop, and input commands.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
+- `make rollback-test`, which boots a kernel with the
+  `recovery-rollback-selftest` feature: the current image marker is removed and
+  the previous image must be selected with the user data still readable
+  (`AETHER_RECOVERY_ROLLBACK_OK`).
 - `make negative-test`, which proves the boot harness rejects a deliberately
   failing kernel.
 - `make iso`, which builds a timestamped UEFI El Torito ISO under
   `build/ISOs/`.
-- A local CI gate (`make ci`) that runs formatting, clippy, documentation and
-  licence checks, unit tests, the boot test, the shell test, the fault test, and
-  the negative boot test. A GitHub Actions workflow will publish the same gate
-  in a follow-up; until then, run the gate locally before opening a pull
-  request.
+- A CI gate (`make ci`) that runs formatting, clippy, documentation and
+  licence checks, unit tests, the boot test, the shell test, the fault test,
+  the rollback test, the negative boot test, and the release/tamper
+  demonstration. A hosted GitHub Actions workflow is a separate follow-up.
 
-A representative serial transcript from a successful boot (region counts and
-frame addresses vary with firmware, build, and feature set):
+A representative serial transcript from a successful `make test` boot (region
+counts, frame addresses, and ELF extents vary with firmware, build, and feature
+set; `commit=` is bracketed so this file does not have to be rebuilt):
 
 ```text
 AETHER_LOADER_OK stage=entry version=0.1.0
+loader: kernel elf start=0x4000000 end=0x41e6000 entry=0x4000000 segments=4
 loader: GOP 1280x800 stride=1280 format=1
 loader: framebuffer base=0x80000000 size=4096000 mode=1280x800 stride=1280 format=1
-loader: kernel elf start=0x4000000 end=0x41c4000 entry=0x4000000 segments=4
-loader: memory regions=39 usable=1013 MiB
+loader: memory regions=39 usable=1012 MiB
 loader: boot services exited after 1 attempt(s)
 AETHER_LOADER_HANDOFF entry=0x4000000
 AETHER_KERNEL_OK stage=entry version=0.1.0 commit=...
 boot: hand-off validated (version 2, 136 bytes)
+boot: memory map: 39 regions, 1012 MiB allocatable
 boot: cpu: NX and write-protect enabled
-boot: paging: identity map to 1024 MiB, CR3=0x0000000000100000
+boot: paging: identity map to 1024 MiB, 9 page-table frames, CR3=0x0000000000100000
 boot: framebuffer mapped 1280x800 stride=1280 format=1
+graphics: framebuffer 1280x800 format=RedGreenBlueReserved
+boot: graphics service ready
+boot: frame allocator: 1011 MiB free (258919 frames), bitmap capacity 16384 MiB
 AETHER_MM_OK
-sched: user task ready pid=4 entry=0x0000020000000230 stack=0x0000020004000000
+boot: x86-64 execution environment ready
+sched: task 1 ready pml4=0x000000000010a000 private=0x0000000000109000
+sched: task 2 ready pml4=0x000000000010f000 private=0x000000000010e000
+sched: task 3 ready pml4=0x0000000000114000 private=0x0000000000113000
 package: installed org.aether.demo 0.2.0 at /apps/org.aether.demo
 AETHER_PACKAGE_OK installed=1 rejected=3 files=2
 AETHER_RUNTIME_OK apps=1 isolated=1 prefix_checks=4 shared=0
-AETHER_UPDATE_OK accepted=1 rejected=3 rollback_protected=true counter=2 selected=0.2.0
+AETHER_UPDATE_OK accepted=1 rejected=4 replay_protected=true counter=2 selected=0.2.0
 AETHER_SUPERVISOR_OK starts=11 running=9 quarantined=1
 AETHER_RECOVERY_OK current=aether-0.1.0 previous=aether-0.0.9 selected=aether-0.1.0 rollback=false user_data=true
+portal: audit revoked root=/apps/org.aether.demo path=/portal/README.txt
 AETHER_REVOCATION_OK checks=4
 AETHER_GRAPHICS_OK mode=1280x800 format=linear
-AETHER_DESKTOP_OK windows=6 checksum=0xf20a346d
+AETHER_DESKTOP_OK windows=6 checksum=0xab05346d
+desktop: activated window=SECURITY CENTER
 AETHER_INPUT_OK keys=6 dropped=0 queue=32
+Aether console shell. Type 'help' for commands.
 AETHER_SHELL_OK
+aether>
+sched: user task ready pid=4 pml4=0x0000000000118000 entry=0x0000020000000510 stack=0x0000020004000000
+sched: timer started at 100 Hz
 AETHER_APP_ENTRY cpl=3
+init: pid=4
 init: yield/sleep ok
+init: ipc round trip ok
+init: ipc-too-long EINVAL
+init: ipc-forged EBADF
+init: ipc-queue-full EAGAIN
+init: ipc-drain-empty EAGAIN
+init: ipc-retransfer EACCES
+init: ipc transfer chain ok
+init: ipc-create-limit ENOSPC
 init: private write ok
 init: note=hello from ring 3
 init: own-private: opened
 init: sibling-private: denied EPERM
 init: root-escape: denied EPERM
+init: ipc-wrong-type EBADF
+init: sibling-list EPERM
+init: sibling-stat EPERM
+init: open-file-limit ENOSPC
+init: open-files ok
+init: kernel-pointer-syscall=-2
 init: portal=welcome to aether
 AETHER_PORTAL_OK
 init: portal-parent: denied ENOGRANT
 init: portal-sibling: denied ENOGRANT
 init: portal-write: denied ENOGRANT
 AETHER_APP_OK
+user: exit pid=4 status=0 closed=0
 AETHER_SCHED_OK workers=3 ticks=23
 AETHER_ISOLATION_OK tasks=3
 AETHER_CAP_OK denials=2
 AETHER_IPC_OK messages=3
 AETHER_USER_OK tasks=4 exits=1 faults=0
-AETHER_FS_OK opens=4 denials=0
-AETHER_SANDBOX_OK escapes=2 access_denials=0
+AETHER_FS_OK opens=9 denials=0
+AETHER_SANDBOX_OK escapes=4 access_denials=0 quota_denials=1
+AETHER_IPC_USER_OK sends=7 receives=7 denials=7
 AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
+
+The `AETHER_IPC_USER_OK` line is printed by the scheduler's boot gate after
+counting the user task's IPC sends, receives, and denials; the user program
+itself prints no success marker for IPC, so a broken kernel cannot fake it from
+inside the sandbox.
 
 ## Build
 
@@ -202,6 +254,7 @@ make update-test   # package and update policy crates
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # exception-path test: int3 after paging must reach the IDT
+make rollback-test # recovery rollback branch test with its own marker
 make negative-test # boot harness must detect a deliberately failing kernel
 make docs-check    # relative Markdown links
 make license-check # workspace and dependency licence metadata
@@ -209,7 +262,7 @@ make lint          # rustfmt, host/kernel/user/loader clippy
 make iso           # timestamped UEFI El Torito ISO under build/ISOs
 make release       # signed release bundle (requires a signing key)
 make release-check # verify a release bundle against a trusted publisher key
-make release-demo  # same flow with the checked-in test key, then verify
+make release-demo  # same flow with the checked-in test key, verify, and tamper test
 make qualify       # full release gate and build/qualification/report.md
 make ci            # pull-request gate
 make clean
@@ -282,7 +335,10 @@ by the specification.
    capability rights and bounded IPC including a transfer, and loads a ring-3
    native application into its own PML4.
 8. The application exercises its private root, denied sibling access, denied
-   root escape, kernel-pointer rejection, and a portal-granted read.
+   root escape, kernel-pointer rejection, a portal-granted read, the IPC
+   endpoint syscalls (queue capacity, forged and wrong-type handles, transfer
+   stripping, pool exhaustion), sibling listing and stat denials, and the
+   open-file limit from its verified package.
 9. The kernel verifies and installs an embedded signed package, checks that an
    unknown publisher, a modified payload, and a zeroed signature are rejected,
    derives the application's runtime profile, and verifies a signed update
@@ -322,8 +378,13 @@ and the payload or image digest must match. A package cannot request network,
 device, or system-service authority, and its storage root is derived from its
 identity rather than declared by the manifest. Updates require a newer rollback
 counter and version; a replay or downgrade is rejected unless a recovery action
-explicitly allows an older version. A valid signature says who produced an
-artifact, not that it is safe.
+explicitly allows an older version, and re-presenting the just-activated
+manifest after activation must fail as a rollback. The user task's identity in
+this prototype is the installed demo package: its verified manifest provides
+the task's file scope, portal permissions, and open-file limit. That is a
+verified-manifest profile, not the package's entry point running — packaged
+entry points are still not executed as independent processes. A valid
+signature says who produced an artifact, not that it is safe.
 
 This is still a prototype. Storage is a volatile RAM disk, packages are not
 persisted or executed from their entry points, update activation and the UEFI

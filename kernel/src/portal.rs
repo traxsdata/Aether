@@ -11,6 +11,7 @@ use crate::serial_line;
 use aether_abi::user::FileRights;
 use core::cell::UnsafeCell;
 use core::fmt::{self, Write as _};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 struct Global<T>(UnsafeCell<T>);
 
@@ -18,6 +19,9 @@ struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
 const MAX_GRANTS: usize = 8;
+
+static GRANTED: AtomicUsize = AtomicUsize::new(0);
+static DENIED: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 struct Grant {
@@ -59,7 +63,21 @@ pub fn init() {
 }
 
 /// Checks whether `root` may open `path` with `rights` through the portal.
+///
+/// Grant and denial outcomes are counted here so the Security Center and the
+/// shell can show the portal's actual access history instead of its declared
+/// policy.
 pub fn check(root: &str, path: &str, rights: u64) -> Result<(), PortalError> {
+    let outcome = check_grant(root, path, rights);
+    if outcome.is_ok() {
+        GRANTED.fetch_add(1, Ordering::Release);
+    } else {
+        DENIED.fetch_add(1, Ordering::Release);
+    }
+    outcome
+}
+
+fn check_grant(root: &str, path: &str, rights: u64) -> Result<(), PortalError> {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the read.
     let grants = unsafe { &*GRANTS.0.get() };
@@ -91,6 +109,7 @@ pub fn revoke(root: &str, path: &str) -> Result<(), PortalError> {
     for grant in grants {
         if !grant.revoked && !grant.root.is_empty() && grant.root == root && grant.path == path {
             grant.revoked = true;
+            audit_revoke(root, path);
             return Ok(());
         }
     }
@@ -109,7 +128,28 @@ pub fn revoke_index(index: usize) -> Result<(), PortalError> {
         return Err(PortalError::NotGranted);
     }
     grant.revoked = true;
+    audit_revoke(grant.root, grant.path);
     Ok(())
+}
+
+/// Emits the revocation audit line for the console log.
+///
+/// The serial console is this prototype's audit surface; the Security Center
+/// derives its state from the same counters and table.
+fn audit_revoke(root: &str, path: &str) {
+    serial_line!("portal: audit revoked root={root} path={path}");
+}
+
+/// Returns the number of portal checks that were granted.
+#[must_use]
+pub fn grant_uses() -> usize {
+    GRANTED.load(Ordering::Acquire)
+}
+
+/// Returns the number of portal open attempts that were denied.
+#[must_use]
+pub fn denials() -> usize {
+    DENIED.load(Ordering::Acquire)
 }
 
 /// Exercises grant creation, exact matching, and revocation at boot.

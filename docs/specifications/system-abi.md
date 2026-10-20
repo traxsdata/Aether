@@ -113,10 +113,15 @@ Implemented calls:
 | 12 | `portal_open` | path, path length, rights | file handle |
 | 13 | `create_window` | reserved | reserved |
 | 14 | `task_count` | — | debug value |
+| 15 | `endpoint_create` | — | endpoint capability handle (or `ENOSPC` when the pool is exhausted) |
+| 16 | `endpoint_send` | endpoint handle, payload, payload length, transfer handle (0 = none) | 0 (`EAGAIN` when the queue is full) |
+| 17 | `endpoint_receive` | endpoint handle, buffer, buffer length (at least 32), required transferred-handle out-field | bytes received; the out-field receives the transferred handle, or 0 |
 
 Rules for this implementation:
 
-- Handles encode a capability slot index and generation. They are never raw
+- Handles encode a capability slot index and generation as
+  `(generation << 8) | index`. Handle `0` is "no handle"/"no transfer" and
+  values above `0x00ff_ffff` are rejected before lookup. They are never raw
   pointers or kernel object addresses.
 - Every syscall validates handle validity, generation, object type, and rights.
 - User pointers must lie in the validated user window and every page must be
@@ -126,6 +131,41 @@ Rules for this implementation:
 - Sender identity is derived from the current task, not from a message field.
 - Portal access requires an exact process-root, path, and right grant.
 - A ring-3 fault retires the task; the kernel remains alive.
+
+Endpoint syscalls (15–17) add these rules:
+
+- `endpoint_create` mints a capability for a new bounded endpoint object with
+  `SEND`, `RECEIVE`, and `TRANSFER` rights, granted from the caller's own
+  capability table. The endpoint pool is fixed (four objects); a fifth
+  `endpoint_create` fails with `ENOSPC` instead of growing kernel memory.
+- `endpoint_send` copies at most 32 payload bytes (`MAX_MESSAGE_BYTES` from
+  the IPC crate) and refuses more before touching the queue. The optional
+  transfer handle must be a handle the caller owns and must carry `TRANSFER`;
+  the receiver's installed copy never carries `TRANSFER`, so transfer chains
+  cannot be extended by receivers.
+- `endpoint_receive` requires a buffer able to hold a maximum-size message
+  (at least 32 bytes) so a receive is never partial, plus a required
+  four-byte writable out-field for the transferred handle that does not
+  overlap the payload buffer. Passing `0` for the out-field is an `EINVAL`
+  usage error; it is not silently treated as "discard the transferred
+  handle", because the kernel installs a transferred capability before it
+  reports success. The transferred handle is stored byte-wise; the call
+  returns the received byte count in `RAX`.
+
+Error numbers (two's-complement `i64` in `RAX`):
+
+| Value | Name | Meaning |
+|---|---|---|
+| -1 | `ENOSYS` | unknown syscall number |
+| -2 | `EINVAL` | invalid argument, range, or usage |
+| -3 | `EACCES` | capability rights, portal, or permission denial |
+| -4 | `ENOENT` | path does not exist |
+| -5 | `ENOSPC` | kernel resource limit (open-file pool, capability table, endpoint pool) |
+| -6 | `EPERM` | sandbox escape attempt (`..` outside the task root) |
+| -7 | `EBADF` | bad handle: forged, stale, or wrong object type |
+| -8 | `ENOGRANT` | no portal grant for this path/right |
+| -9 | `EIO` | device or filesystem corruption |
+| -10 | `EAGAIN` | the endpoint queue is full (send) or empty (receive); retry |
 
 Still planned: process creation/wait, general capability derivation and
 revocation, blocking IPC with timeouts, memory-object mapping, window rendering

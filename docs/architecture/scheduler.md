@@ -131,9 +131,10 @@ After the isolation rounds the workers exercise the capability and IPC path:
 
 Capabilities are per task, handles are generation-checked, endpoint identity is
 checked against the target object, and transfer requires `TRANSFER`. A failed
-transfer install does not consume the queued message. The endpoint API is still
-kernel-internal; file capabilities are the part exposed through validated
-syscalls.
+transfer install does not consume the queued message. Endpoint capabilities are
+now also minted from ring 3 through the `endpoint_create` syscall and used by
+the user task's own IPC demonstration (see
+[ipc.md](ipc.md) and the system ABI specification).
 
 ## Verified behavior
 
@@ -148,16 +149,47 @@ AETHER_CAP_OK denials=2
 AETHER_IPC_OK messages=3
 AETHER_APP_OK
 AETHER_USER_OK tasks=4 exits=1 faults=0
+AETHER_SANDBOX_OK escapes=4 access_denials=0 quota_denials=1
+AETHER_IPC_USER_OK sends=7 receives=7 denials=7
 AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
 
+## Task exit, faults, and the boot gate
+
+A user task's exit line records `user: exit pid=N status=S closed=C`, where
+`closed` is the number of file capability handles the kernel closed on the
+task's behalf (`fs::close_task_files`). The kernel closes them on normal exit
+and on every user fault, so a retired task can never keep open-file slots that
+shrink the pool shared by later tasks. The retired task never runs again, so
+its remaining capability table is unreachable; endpoint objects owned by an
+exited task are not reclaimed yet because the pool has no destroy path.
+
+Every user failure is accounted: `user_exits()`/`user_faults()` end up in
+`AETHER_USER_OK`, denial counters in `AETHER_SANDBOX_OK`/`AETHER_CAP_OK`, and
+the application table. The desktop counters read the same sources.
+
+The boot gate in the normal path makes the evidence mandatory rather than
+decorative:
+
+- A user task that exits nonzero, or which faults, fails the boot with
+  `AETHER_BOOT_FAILED reason=user-test ...`.
+- A task that claims a zero exit without exercising the contract fails the
+  gate: `AETHER_BOOT_FAILED reason=user-ipc sends=... receives=... denials=...`
+  unless the IPC counters reached at least 7 sends, 7 receives, 7
+  denials, and the filesystem quota counter reported at least one denied
+  fifth open. Only then is `AETHER_IPC_USER_OK` printed — by the kernel, not
+  by the user program.
+
 `make fault-test` independently verifies the exception path before the
-scheduler starts.
+scheduler starts, and `make rollback-test` exercises the recovery rollback
+branch with its own `AETHER_RECOVERY_ROLLBACK_OK` marker.
 
 ## Known limitations
 
 - Static task set; no process creation, wait, or per-process resource
-  accounting.
+  accounting beyond the counters above.
+- Endpoint objects created by a task are not destroyed when the task exits;
+  the fixed four-object pool is not reclaimed.
 - Single CPU; no SMP startup or per-CPU scheduler state.
 - No priorities, sleeping/wakeup queues, or blocking IPC.
 - Per-task kernel stacks are static, not capability-managed.
@@ -169,7 +201,8 @@ scheduler starts.
 
 ## Next steps
 
-1. Dynamic user-process creation, wait, and cleanup of file capabilities.
+1. Dynamic user-process creation and wait (retired tasks already release their
+   open file slots through `close_task_files`).
 2. Guard pages and IST entries for stack overflow and double faults.
 3. Blocking send/receive with wakeup queues and timeouts.
 4. A user-space loader and `initd` supervision for real services.

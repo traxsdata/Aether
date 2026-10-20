@@ -31,6 +31,10 @@ right.
 5. Revocation has defined semantics.
 6. Every table operation validates bounds, rights, lifetime, and concurrency.
 7. Destroyed objects must not leave usable references to recycled objects.
+8. Rights are validated per object type at mint time, not at use time only:
+   `Rights::for_object` masks the legal set for each object kind, and granting
+   an out-of-scope right (for example `SEND` on a file) is rejected with
+   `InvalidRights` instead of being silently attenuated.
 
 ## Revocation semantics
 
@@ -43,10 +47,16 @@ each resource class the system must define what happens to:
 - Data already copied or displayed.
 - In-flight IPC that carries the capability.
 
-The initial policy should favor fail-closed behavior: future operations fail,
-mappings are removed or made inaccessible, and descendants are invalidated.
-Revocation cannot undo information an application has already legitimately
-read.
+The initial policy is fail-closed where revocation exists: a revoked portal
+grant is already checked on every future `portal_open` call, while handles
+opened before the revoke keep working because "open handles stay valid" is the
+documented, weaker rule for them — the desktop shows the audit when this
+happens. General capability revocation removes future minting authority
+first; already-open file capabilities are re-checked right-by-right on every
+syscall, so a downgraded grant never yields new access, but mapping removal
+and child-capability invalidation are not implemented yet (DERIVE and MAP
+rights do not exist in the minted subset). Revocation cannot undo information
+an application has already legitimately read.
 
 ## Design notes for the first implementation
 
@@ -80,10 +90,24 @@ scheduler test:
 - File capabilities are exposed to ring-3 code through `open`, `read`, `write`,
   and `close` syscalls. A userspace handle is only a slot index and generation;
   the kernel checks the object type and right before every operation.
+- Endpoint capabilities are minted by the caller's own `endpoint_create`
+  syscall (system call 15) with the full `SEND | RECEIVE | TRANSFER` set, from
+  the caller's own table. Message syscalls 16–17 then validate every handle
+  through the same table the kernel knows.
+- A wrong object type is reported as `WrongObjectType` (mapped to `EBADF`)
+  even when the requested rights would also miss; the rights check in each
+  typed accessor runs after the type check, so error precedence is stable.
+- The kernel-side file service reads a task's File-kind capability count with
+  `file_count()` when it enforces a verified package's `limits.open_files`.
+- Tests cover mint-time rights masking, file right snapshots and counts,
+  insufficient rights, forged/stale handles, wrong endpoints, table
+  exhaustion, queue capacity, capability transfer (including the mandatory
+  `TRANSFER` strip), and removal/generation reuse.
 
-The endpoint operations are still a kernel-internal interface. File operations
-cross the user boundary and are validated against the current task's table.
-Portal grants can be revoked, which blocks future `portal_open` calls; general
-capability revocation, endpoint revocation, complete object destruction, and
-invalidating already-open file capabilities are not implemented yet. The
-generation counters prepare the table for them.
+Portal grants can be revoked, which blocks future `portal_open` calls;
+already-open file capabilities are re-checked against the open handle's
+minted rights on every operation, so they cannot gain authority from a
+revocation. General capability revocation, endpoint revocation, complete
+object destruction, and derivation-tree-based invalidation are not
+implemented yet; `DERIVE` and `MAP` rights do not exist in the minted subset.
+The generation counters prepare the table for them.

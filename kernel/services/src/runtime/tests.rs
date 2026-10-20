@@ -23,6 +23,48 @@ fn profile(id: &'static str) -> RuntimeProfile<'static> {
 }
 
 #[test]
+fn portal_permissions_are_checked_per_requested_right() {
+    let limits = profile("org.aether.demo").limits;
+    let read_only = isolated(
+        "org.aether.read",
+        "/apps/org.aether.read",
+        Permissions::parse_list("portal.read").unwrap(),
+        limits,
+    )
+    .unwrap();
+    assert!(read_only.allows_portal(true, false));
+    assert!(!read_only.allows_portal(false, true));
+    // A combined READ|WRITE request must not pass on one declaration alone.
+    assert!(!read_only.allows_portal(true, true));
+
+    let write_only = isolated(
+        "org.aether.write",
+        "/apps/org.aether.write",
+        Permissions::parse_list("portal.write").unwrap(),
+        limits,
+    )
+    .unwrap();
+    assert!(!write_only.allows_portal(true, false));
+    assert!(write_only.allows_portal(false, true));
+    assert!(!write_only.allows_portal(true, true));
+
+    let both = isolated(
+        "org.aether.both",
+        "/apps/org.aether.both",
+        Permissions::parse_list("portal.read,portal.write").unwrap(),
+        limits,
+    )
+    .unwrap();
+    assert!(both.allows_portal(true, true));
+    assert!(both.allows_portal(true, false));
+    assert!(both.allows_portal(false, true));
+
+    let neither = profile("org.aether.demo");
+    assert!(!neither.allows_portal(true, false));
+    assert!(!neither.allows_portal(false, true));
+}
+
+#[test]
 fn prefixes_are_derived_from_identity() {
     let mut buffer = [0u8; 64];
     let prefix = derive_prefix("org.aether.demo", &mut buffer).unwrap();
@@ -104,6 +146,25 @@ fn table_rejects_duplicate_prefixes_and_keeps_profiles_distinct() {
     assert_eq!(table.len(), 2);
     assert!(table.get("org.aether.demo").is_some());
     assert!(table.get("org.example.absent").is_none());
+}
+
+#[test]
+fn prefixes_look_up_the_registered_profile() {
+    let mut table = RuntimeTable::<4>::new();
+    assert_eq!(table.register(profile("org.aether.demo")), Ok(0));
+
+    // The kernel-owned root must match the derived prefix exactly; another
+    // application's root yields no profile and therefore no declared limits.
+    let found = table.find_by_prefix("/apps/org.aether.demo");
+    assert_eq!(found.map(|profile| profile.id), Some("org.aether.demo"));
+    assert_eq!(found.map(|profile| profile.limits.open_files), Some(4));
+    assert!(table.find_by_prefix("/apps/org.aether.other").is_none());
+    assert!(table.find_by_prefix("/apps").is_none());
+    assert!(
+        table
+            .find_by_prefix("/apps/org.aether.demo/extra")
+            .is_none()
+    );
 }
 
 #[test]

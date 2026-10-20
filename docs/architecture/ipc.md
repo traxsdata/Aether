@@ -65,12 +65,22 @@ Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
   If the table is full, the message stays queued and no capability is lost.
 - Queue operations run with interrupts masked, so preemption cannot observe a
   half-updated queue.
-- Polled semantics: send returns `Full` and receive returns `Empty`; test tasks
-  wait with `HLT` until the timer preempts them. Blocking/wakeup queues are next.
+- Polled semantics from ring 3: a full queue denies `endpoint_send` with
+  `EAGAIN` and an empty queue denies `endpoint_receive` with `EAGAIN`; the
+  kernel counts denied attempts and the boot gate requires the negative paths
+  to have run.
 - Host tests cover bounded messages, rights, forged handles, endpoint
   confusion, queue capacity, table exhaustion, and transfer.
+- Ring-3 exposure: `endpoint_create` (15), `endpoint_send` (16), and
+  `endpoint_receive` (17) validate the handle, the payload range, and the
+  transferred-handle out-field before any queue is touched (see
+  `docs/specifications/system-abi.md`). Application code uses the `aether-sdk`
+  wrappers. The boot self-test drives both the positive and every documented
+  negative path from user mode; the kernel prints `AETHER_IPC_USER_OK` with
+  the counters when the gate passes.
 
-The endpoint API is not yet exposed through a user-mode syscall boundary.
-File operations have a separate validated syscall path and per-task file
-capabilities; endpoint syscalls, blocking receives, and timeouts remain
-follow-up work.
+The endpoint object pool is fixed at four objects for the whole boot; the
+fifth `endpoint_create` fails with `ENOSPC` instead of growing kernel memory,
+so queue memory is bounded by construction. Blocking receives and timeouts
+remain follow-up work; the polled `EAGAIN` contract is the documented
+transient behavior.
