@@ -46,8 +46,9 @@ make clean
 
 `make test` requires the markers from `tools/test-boot.py`, including
 `AETHER_USER_OK`, `AETHER_FS_OK`, `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`,
-`AETHER_RECOVERY_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
-`AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
+`AETHER_RECOVERY_OK`, `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`,
+`AETHER_RUNTIME_OK`, `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`,
+`AETHER_DESKTOP_OK`,
 `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`, and `AETHER_BOOT_OK`, and fails on any
 failure marker. `make fault-test` requires the exception handler to report
 `breakpoint (3)` and `AETHER_BOOT_FAILED`. All use TCG and need no KVM or root
@@ -179,8 +180,8 @@ a pull request:
    filesystem, sandbox, supervisor, recovery, package, runtime, update,
    graphics, desktop, input, portal, and shell markers.
 7. `make shell-test` — drive `help`, `ls`, `cat`, `apps`, `security`,
-   `services`, `recovery`, `packages`, `runtime`, `updates`, `desktop`, `input`,
-   and `uptime` over a serial socket.
+   `services`, `portal`/`portal revoke`, `recovery`, `packages`, `runtime`,
+   `updates`, `desktop`, `input`, and `uptime` over a serial socket.
 8. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
    and failure marker.
 9. `make negative-test` — a deliberately failing kernel must be rejected by the

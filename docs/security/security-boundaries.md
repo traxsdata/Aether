@@ -17,8 +17,10 @@ validation, capability checks.
 - System calls validate every pointer, length, handle, and right.
 - Faults terminate or isolate the faulting task; they do not panic the kernel.
 
-**Evidence:** Address-space isolation tests (AT-002), fault-containment tests
-(AT-010), adversarial syscall tests.
+**Evidence:** Address-space switching and isolation checks (AT-002), adversarial
+syscall tests, and the fault path (AT-010). The current AT-002 proxy uses three
+ring-0 workers with distinct PML4s; there is not yet a two-ring-3-task test, and
+the user-fault handling path has no dedicated user-task test in CI.
 
 **Current status:** A ring-3 native application runs in a private PML4 whose
 only user mappings are in the validated user window. TSS `RSP0` supplies a
@@ -69,11 +71,16 @@ not yet persistent private storage.
 
 **Current status:** The portal holds exact `(process root, path, rights)`
 grants. The native application receives one read grant for
-`/home/welcome.txt`; it cannot name other user files. Grant records are visible
-in the Security Center. Interactive consent and revocation UI are follow-up
-work.
+`/home/welcome.txt`; it cannot name other user files. Grant records are derived
+from the live table in the Security Center. The console command `portal revoke
+<index>` revokes a grant; the boot self-test verifies that a revoked grant
+denies future opens (`AETHER_REVOCATION_OK`). An already-open capability stays
+valid until closed because revocation cannot recall data already read.
+Interactive consent, a persistent grant store, and a graphical revocation
+control are follow-up work.
 
-**Evidence:** AT-006 and the `AETHER_PORTAL_OK` boot marker.
+**Evidence:** AT-006, AT-007, `AETHER_PORTAL_OK`, and
+`AETHER_REVOCATION_OK`.
 
 ## 4. Service / service boundary
 
@@ -107,12 +114,14 @@ and restart rules.
 - UI consent is an input to policy, not proof of authorization.
 - A compromised desktop cannot silently grant filesystem or device access.
 
-**Current status:** The compositor paints pixels and displays supervisor,
-filesystem, application, and portal state. It cannot mint a file capability or
-bypass the filesystem root check; portal opens are decided by the portal
-service. There is no interactive consent dialog yet.
+**Current status:** The compositor paints pixels and displays live supervisor,
+filesystem, application, and portal state. Its code does not mint file
+capabilities or bypass the filesystem root check; portal opens are decided by
+the portal service. The compositor still runs as a kernel module in this
+prototype, so this is a code-structure rule, not an enforced user-space
+isolation boundary. There is no interactive consent dialog yet.
 
-**Evidence:** Code review and the portal/sandbox boot markers.
+**Evidence:** Code review and the portal/revocation/sandbox boot markers.
 
 ## 6. Boot boundary
 

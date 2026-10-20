@@ -71,7 +71,8 @@ It is a planning model, not a delivery promise.
 - [x] Graphics and input services over a linear GOP framebuffer and PS/2 IRQ1.
 - [x] Basic software compositor with bounded windows and focus handling.
 - [x] Desktop shell, file manager, settings, and Security Center views.
-- [x] File portal with per-process, per-file, revocable grant records.
+- [x] File portal with per-process, per-file grant records; revocation blocks
+  future portal opens (`AETHER_REVOCATION_OK`).
 - [x] Initial native application SDK (`sdk/`) and user syscall ABI.
 - [x] System image and recovery prototype with current/previous selection and
   preserved user data.

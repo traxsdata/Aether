@@ -40,8 +40,12 @@ sequence and verifies the queue and focus changes.
 
 ## Authority
 
-The desktop has no filesystem or capability authority. It reads directory
-contents and recovery text through the services and asks the portal for a
-grant. It cannot mint a capability or bypass the filesystem's root check. The
-Security Center is a view over supervisor, filesystem, application, and portal
-state, not a policy engine.
+The desktop code runs in the kernel in this prototype, so it is not an isolated
+security domain and must not be presented as one. Its logic is deliberately
+kept non-authoritative: it reads directory contents through the filesystem
+service, displays live supervisor/application/portal state, and asks the portal
+for grants. It cannot mint a file capability or bypass the filesystem's root
+check. The Security Center is a view over enforced state, not a policy engine.
+Moving the compositor and desktop services to ring 3 is follow-up work; until
+then the kernel module boundary is a code-structure rule, not a security
+boundary.

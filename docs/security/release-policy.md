@@ -44,6 +44,12 @@ The prototype is complete only when it can:
 The mandatory isolation tests (AT-002, AT-003, AT-005, AT-007, AT-008, AT-010)
 block release on failure.
 
+The working tree does not yet meet every mandatory test in its strongest form:
+AT-002 is demonstrated by ring-0 workers rather than two ring-3 tasks, AT-008
+service bodies still run in the kernel, and AT-010 has no dedicated user-fault
+test. These gaps block a release claim; they do not block local prototype
+development.
+
 ## Release requirements
 
 - Reproducible build from a clean checkout with pinned tools.

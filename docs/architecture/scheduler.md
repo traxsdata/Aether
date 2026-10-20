@@ -1,73 +1,104 @@
 # Tasks, Scheduler, and Address Spaces
 
-Phase 2 begins with preemptive kernel tasks and hardware-enforced address-space
-isolation. User mode, capabilities, and IPC build on this slice.
+The scheduler started as a Phase 2 kernel-task slice and now also runs one
+ring-3 native application. Kernel workers prove address-space switching; the
+user task proves the user/kernel boundary, syscall validation, and per-process
+file root.
 
 ## Current slice
 
-- Four static task slots: one idle task and three workers.
-- A per-task 16 KiB kernel stack in `.bss`.
+- Five static task slots: one idle task, three ring-0 workers, and one ring-3
+  user task.
+- Worker stacks are 16 KiB `.bss` arrays. Every task also has a 32 KiB static
+  kernel stack used for ring-3 interrupts and syscalls.
 - A 100 Hz timer interrupt from the 8254 PIT through the remapped 8259 PIC.
+  IRQ0 (timer) and IRQ1 (keyboard) are unmasked; all other legacy IRQs stay
+  masked.
 - Round-robin preemptive scheduling on every timer tick.
-- A per-task PML4 and private physical frame mapped at the same virtual address.
+- A per-task PML4, a private physical frame for workers, and a user-only
+  address-space window for the native application.
 - A CR3 switch on every task switch.
 - NX and supervisor write-protect enabled before the first address space is
   activated.
 - Per-task capability tables, endpoint identity checks, and two endpoints.
-- An isolation self-test plus a capability/IPC self-test in the normal boot path.
+- An isolation self-test, a capability/IPC self-test, and a ring-3 application
+  self-test in the normal boot path.
 
 There is no kernel heap. Task control blocks and stacks are static, and the
-frame allocator supplies address-space page tables and private frames during
-scheduler initialization.
+frame allocator supplies address-space page tables, user pages, and worker
+frames during scheduler initialization.
 
 ## Task model
 
 Each task records:
 
-- state (`Empty`, `Ready`, `Running`, `Done`);
+- state (`Empty`, `Ready`, `Running`, `Done`, `Faulted`);
 - saved interrupt-frame pointer;
-- PML4 physical address.
+- PML4 physical address;
+- kernel stack top loaded into TSS `RSP0` when the task is selected;
+- a kernel-owned filesystem root for the user task;
+- a capability table and endpoint handles.
 
-The idle task is the boot context (`kernel_main`). Its stack is the kernel boot
-stack and it keeps the kernel PML4. Worker tasks are created with prepared
-interrupt-return frames so the first `IRETQ` enters `worker_entry(task_id)` with
-interrupts enabled.
+The idle task is the boot context (`kernel_main`). It keeps the kernel PML4 and
+runs the console shell after the boot tests finish. Worker tasks are created
+with prepared interrupt-return frames so the first `IRETQ` enters
+`worker_entry(task_id)` with interrupts enabled. The user task is created from
+the embedded native ELF in a private PML4 and enters at CPL3.
 
-Static limits are deliberate: the first scheduler is small, deterministic, and
-auditable. Dynamic task creation, per-task kernel stacks, and a heap arrive with
-the user-space task model.
+The scheduler is deliberately small and deterministic: no dynamic task
+creation, no priorities, and no SMP. The user-task slice is static; process
+creation and resource accounting are follow-up work.
 
 ## Timer and interrupt path
 
 `arch::x86_64::timer` remaps the PIC to vectors 32–47 and programs PIT channel 0
-for 100 Hz. IRQ0 is the only unmasked legacy IRQ.
+for 100 Hz.
 
 The IRQ path in `arch::x86_64::idt`:
 
-1. pushes a synthetic error code and vector 32;
+1. pushes a synthetic error code and vector;
 2. saves all 15 general-purpose registers in a fixed `InterruptFrame` layout;
 3. aligns the stack and calls `scheduler::on_tick(frame)`;
-4. switches CR3 if the selected task has a different address space;
-5. restores the selected frame and executes `IRETQ`.
+4. saves the interrupted frame, selects the next ready task, and updates TSS
+   `RSP0`;
+5. switches CR3 if the selected task has a different address space;
+6. restores the selected frame and executes `IRETQ`.
 
-Exceptions use a separate emergency stack so a fault on a corrupted task stack
-can still produce a diagnostic instead of a triple fault.
+The same assembly tail is used for exceptions and the `int 0x80` syscall gate.
+A user fault is routed to `scheduler::on_user_fault`, which retires only that
+task. A fault from ring 0 remains fatal.
+
+There is no separate emergency stack or IST for double faults and stack
+overflow. Exception reporting depends on the interrupted stack still being
+usable; guard pages and IST entries are follow-up hardening.
 
 ## Scheduling policy
 
 `on_tick` saves the interrupted task's frame, marks a running task ready, scans
-round-robin for the next ready worker, and falls back to the idle task when no
-worker is runnable. Finished workers are marked `Done` and skipped.
+round-robin for the next ready task, and falls back to the idle task when
+nothing else is runnable. Finished, exited, and faulted tasks are skipped.
 
-This is intentionally minimal: no priorities, no sleeping/wakeup queues, no
-SMP, no load balancing, and no preemption points outside the timer interrupt.
+The `yield` and `sleep` syscalls save the caller's frame and enter the same
+selection path, so they actually schedule another ready task instead of
+returning immediately. There is still no sleep queue: `sleep` yields for at
+most the next timer tick.
+
+This is intentionally minimal: no priorities, no blocking IPC wakeups, no SMP,
+no load balancing, and no preemption points outside the timer interrupt and
+explicit yields.
 
 ## Address-space isolation
 
 `memory::paging::create_address_space` allocates a new PML4, copies the kernel
 identity mapping entry, and maps a private physical frame at
-`PRIVATE_BASE = 0x0000_0080_0000_0000` (PML4 slot 1). Each task has a different
-physical frame at the same virtual address.
+`PRIVATE_BASE = 0x0000_0080_0000_0000` (PML4 slot 1). Each worker has a
+different physical frame at the same virtual address.
+
+`create_user_address_space` copies the supervisor-only kernel entry and adds
+user mappings only in the validated user window at `USER_BASE`. Every `PT_LOAD`
+page gets its own frame and final permissions from the ELF flags; the stack is
+mapped with NX. Kernel text, stacks, page tables, and the identity map are never
+mapped with the user bit.
 
 The worker test:
 
@@ -78,6 +109,11 @@ The worker test:
 If CR3 were not switched, another task would overwrite the shared virtual
 address and the test would fail with
 `AETHER_BOOT_FAILED reason=isolation ...`.
+
+This demonstrates hardware address-space isolation between kernel tasks. The
+ring-3 application separately demonstrates that user code cannot reach the
+kernel identity map and that syscall pointers are validated against its user
+window.
 
 ## Capability and IPC test
 
@@ -95,17 +131,14 @@ After the isolation rounds the workers exercise the capability and IPC path:
 
 Capabilities are per task, handles are generation-checked, endpoint identity is
 checked against the target object, and transfer requires `TRANSFER`. A failed
-transfer install does not consume the queued message. This is still a
-kernel-internal API; user mode and a syscall boundary are the next step.
-
-This demonstrates hardware address-space isolation between kernel tasks. It is
-not yet user/kernel isolation: all tasks run at CPL0 and share the kernel
-mapping. User-accessible page permissions, a TSS, and user-mode entry are the
-next step.
+transfer install does not consume the queued message. The endpoint API is still
+kernel-internal; file capabilities are the part exposed through validated
+syscalls.
 
 ## Verified behavior
 
-`make test` requires:
+`make test` requires the full marker set in
+[`tools/test-boot.py`](../../tools/test-boot.py), including:
 
 ```text
 AETHER_MM_OK
@@ -113,7 +146,9 @@ AETHER_SCHED_OK workers=3 ticks=N
 AETHER_ISOLATION_OK tasks=3
 AETHER_CAP_OK denials=2
 AETHER_IPC_OK messages=3
-AETHER_BOOT_OK
+AETHER_APP_OK
+AETHER_USER_OK tasks=4 exits=1 faults=0
+AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
 
 `make fault-test` independently verifies the exception path before the
@@ -121,20 +156,22 @@ scheduler starts.
 
 ## Known limitations
 
-- Kernel tasks only; no ring-3 tasks or syscall boundary.
+- Static task set; no process creation, wait, or per-process resource
+  accounting.
 - Single CPU; no SMP startup or per-CPU scheduler state.
-- No priorities, sleeping, wakeup, or task creation syscall.
+- No priorities, sleeping/wakeup queues, or blocking IPC.
 - Per-task kernel stacks are static, not capability-managed.
 - Address spaces share all kernel mappings; there is no higher-half split.
 - No guard pages or IST for stack overflow.
 - The timer uses legacy PIC/PIT rather than the local APIC.
+- One ring-3 program is loaded at boot; there is no general user-space loader
+  or service supervision in ring 3.
 
 ## Next steps
 
-1. User-mode entry: TSS/RSP0, user page permissions, syscall gate.
-2. Per-task kernel stacks and guard pages.
-3. Expose capability and IPC operations through validated syscalls.
-4. Blocking send/receive with wakeup queues and timeouts.
-5. User-space loader and `initd` supervision.
-6. Adversarial scheduler, capability, IPC, and isolation tests, including a
+1. Dynamic user-process creation, wait, and cleanup of file capabilities.
+2. Guard pages and IST entries for stack overflow and double faults.
+3. Blocking send/receive with wakeup queues and timeouts.
+4. A user-space loader and `initd` supervision for real services.
+5. Adversarial scheduler, capability, IPC, and isolation tests, including a
    deliberately shared address space that must fail the isolation check.

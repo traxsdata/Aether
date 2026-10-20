@@ -18,6 +18,15 @@ The format is intentionally bounded: 32 inodes, at most 8 blocks (4 KiB) per
 file, 25 entries per directory block, and an 8-slot open table. Exhaustion is
 reported as `ENOSPC`; no metadata allocation can grow without bound.
 
+The current user rights are `READ`, `WRITE`, and `CREATE`. Separate delete,
+rename, execute, and directory-listing rights from the specification are not
+exposed yet; the kernel console performs deletion with its own root authority.
+
+Every metadata operation validates the superblock magic, version, inode count,
+and root inode before trusting an inode. Unformatted media and unknown versions
+fail with `NotFormatted` or `Corrupt` rather than being parsed as a valid
+filesystem.
+
 ## Path scoping
 
 A process never resolves a global path. The kernel owns a root prefix for each
@@ -46,7 +55,9 @@ index and generation. Every `read`, `write`, and `close`:
 
 Closing revokes the capability and advances the slot generation, so a stale
 handle cannot name a later file. A handle from another task is meaningless
-because capability tables are per task.
+because capability tables are per task. Deletion is refused while any handle
+for the inode is open; after the last close the name can be removed and the
+blocks released.
 
 ## Portal grants
 
@@ -54,8 +65,15 @@ An application cannot name a file outside its root. It may call `portal_open`,
 which succeeds only when a grant matches the exact process root, exact path,
 and requested right. Grants are single-file and revocable; a grant for a file
 never implies access to its parent or siblings. The boot prototype seeds one
-read grant for `demo` on `/home/welcome.txt`, and displays it in the Security
-Center.
+read grant for `demo` on `/home/welcome.txt`, displays it in the Security
+Center, and checks a temporary grant/revocation pair during boot
+(`AETHER_REVOCATION_OK`).
+
+`portal` lists the grant table and `portal revoke <index>` marks a grant
+revoked. Revocation applies to future portal opens. A file capability that was
+already issued remains open until the owner closes it, because revoking a grant
+cannot undo bytes the application has already read. There is no persistent
+grant store or interactive consent UI yet.
 
 ## Persistence and recovery
 

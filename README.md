@@ -56,7 +56,8 @@ grants, and the desktop is not a security authority.
 - A bounded virtual block device and filesystem with directories, files, open
   handles, path traversal rejection, quotas, and per-process roots.
 - Generation-checked file capabilities; `open`, `read`, `write`, `close`,
-  `list`, and `stat` syscalls; and a kernel-mediated file portal grant.
+  `list`, and `stat` syscalls; and a kernel-mediated file portal grant with
+  exact-path revocation (`AETHER_REVOCATION_OK`).
 - A host-tested service supervisor with dependency order, restart budgets, and
   quarantine, plus an application lifecycle table.
 - A serial console shell with filesystem, service, application, recovery, and
@@ -96,13 +97,14 @@ grants, and the desktop is not a security authority.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
   `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
   `AETHER_IPC_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`, `AETHER_SANDBOX_OK`,
-  `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`, `AETHER_PACKAGE_OK`,
+  `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`, `AETHER_REVOCATION_OK`,
+  `AETHER_PACKAGE_OK`,
   `AETHER_RUNTIME_OK`, `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`,
   `AETHER_DESKTOP_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
   `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
 - `make shell-test`, which drives the console over a QEMU serial socket and
-  checks filesystem, service, package, runtime, update, recovery, desktop, and
-  input commands.
+  checks filesystem, service, portal grant/revocation, package, runtime, update,
+  recovery, desktop, and input commands.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
 - `make negative-test`, which proves the boot harness rejects a deliberately
@@ -139,16 +141,23 @@ AETHER_RUNTIME_OK apps=1 isolated=1 prefix_checks=4 shared=0
 AETHER_UPDATE_OK accepted=1 rejected=3 rollback_protected=true counter=2 selected=0.2.0
 AETHER_SUPERVISOR_OK starts=11 running=9 quarantined=1
 AETHER_RECOVERY_OK current=aether-0.1.0 previous=aether-0.0.9 selected=aether-0.1.0 rollback=false user_data=true
+AETHER_REVOCATION_OK checks=4
 AETHER_GRAPHICS_OK mode=1280x800 format=linear
-AETHER_DESKTOP_OK windows=6 checksum=0xc3c51a73
+AETHER_DESKTOP_OK windows=6 checksum=0xf20a346d
 AETHER_INPUT_OK keys=6 dropped=0 queue=32
 AETHER_SHELL_OK
 AETHER_APP_ENTRY cpl=3
+init: yield/sleep ok
 init: private write ok
+init: note=hello from ring 3
+init: own-private: opened
 init: sibling-private: denied EPERM
 init: root-escape: denied EPERM
 init: portal=welcome to aether
 AETHER_PORTAL_OK
+init: portal-parent: denied ENOGRANT
+init: portal-sibling: denied ENOGRANT
+init: portal-write: denied ENOGRANT
 AETHER_APP_OK
 AETHER_SCHED_OK workers=3 ticks=23
 AETHER_ISOLATION_OK tasks=3
@@ -296,11 +305,16 @@ validate every user range, length, handle, generation, object type, and right
 before copying. A ring-3 fault retires only the faulting task. Files are opened
 through generation-checked capabilities; a process root rejects `..`, and the
 portal grants one exact outside file for one process and one right set.
+Revoking a grant blocks future portal opens for that root/path (the console
+command is `portal revoke <index>`); an already-open capability stays valid
+until it is closed because revocation cannot undo bytes already read.
 
 The desktop is not a policy authority: it can display grants and request
-capabilities, but the filesystem and portal services make the decision. Service
-profiles are declared and the supervisor quarantines a service that exhausts
-its restart budget.
+capabilities, but the filesystem and portal services make the decision. Desktop
+and service code still runs in the kernel in this prototype, so that separation
+is a code-structure rule, not an enforced user-space boundary. Service profiles
+are declared and the supervisor quarantines a service that exhausts its restart
+budget.
 
 Packages and updates are authenticated before use: the kernel verifies an
 Ed25519 signature over the manifest, the publisher is pinned in a trust store,
@@ -315,8 +329,11 @@ This is still a prototype. Storage is a volatile RAM disk, packages are not
 persisted or executed from their entry points, update activation and the UEFI
 installer are not implemented, the signing keys in `tests/fixtures` are test
 keys, and there is no Secure Boot, measured boot, TPM counter, capability
-revocation UI, blocking IPC, SMP, networking, audio, or GPU acceleration. Do
-not store real data on it.
+revocation UI, blocking IPC, SMP, networking, audio, or GPU acceleration. The
+serial console shell is a ring-0 diagnostic surface with full filesystem
+authority, not the ordinary-user terminal required by the specification; it
+does not provide an administrative elevation boundary. Do not store real data
+on it.
 
 See [`docs/security/threat-model.md`](docs/security/threat-model.md) and
 [`docs/security/security-boundaries.md`](docs/security/security-boundaries.md)
