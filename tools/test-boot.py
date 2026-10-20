@@ -22,12 +22,13 @@ IMAGE = BUILD / "aether.img"
 SERIAL = BUILD / "serial.log"
 VARS = BUILD / "OVMF_VARS.fd"
 
-SUCCESS_MARKERS = (
+BASE_MARKERS = (
     "AETHER_MM_OK",
     "AETHER_SCHED_OK",
     "AETHER_ISOLATION_OK",
     "AETHER_CAP_OK",
     "AETHER_IPC_OK",
+    "AETHER_IPC_USER_OK",
     "AETHER_APP_OK",
     "AETHER_FS_OK",
     "AETHER_SANDBOX_OK",
@@ -44,6 +45,15 @@ SUCCESS_MARKERS = (
     "AETHER_SHELL_OK",
     "AETHER_BOOT_OK",
 )
+# Feature-specific self-tests append their own markers through the environment
+# (comma separated, for example AETHER_EXTRA_MARKERS=AETHER_RECOVERY_ROLLBACK_OK)
+# so `make rollback-test` can require the evidence its build produces.
+EXTRA_MARKERS = tuple(
+    marker.strip()
+    for marker in os.environ.get("AETHER_EXTRA_MARKERS", "").split(",")
+    if marker.strip()
+)
+SUCCESS_MARKERS = BASE_MARKERS + EXTRA_MARKERS
 FAULT_MARKERS = ("KERNEL EXCEPTION: breakpoint (3)", "AETHER_BOOT_FAILED")
 FAILURES = ("AETHER_LOADER_FAILED", "AETHER_LOADER_PANIC", "AETHER_KERNEL_PANIC", "AETHER_BOOT_FAILED")
 EXPECT_FAULT = os.environ.get("AETHER_EXPECT_FAULT") == "1"

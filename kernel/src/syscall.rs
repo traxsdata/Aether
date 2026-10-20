@@ -13,7 +13,45 @@ use crate::memory::paging;
 use crate::scheduler;
 use crate::serial_line;
 use aether_abi::user::{MAX_SYSCALL_IO, Syscall, USER_LIMIT, errno};
+use aether_ipc::{IpcError, MAX_MESSAGE_BYTES};
 use aether_memory::frame::PhysFrame;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+static IPC_SENDS: AtomicUsize = AtomicUsize::new(0);
+static IPC_RECEIVES: AtomicUsize = AtomicUsize::new(0);
+static IPC_DENIED: AtomicUsize = AtomicUsize::new(0);
+
+/// Returns the number of IPC messages user tasks sent.
+#[must_use]
+pub fn ipc_sends() -> usize {
+    IPC_SENDS.load(Ordering::Acquire)
+}
+
+/// Returns the number of IPC messages user tasks received.
+#[must_use]
+pub fn ipc_receives() -> usize {
+    IPC_RECEIVES.load(Ordering::Acquire)
+}
+
+/// Returns the number of IPC syscall attempts that were denied.
+#[must_use]
+pub fn ipc_denials() -> usize {
+    IPC_DENIED.load(Ordering::Acquire)
+}
+
+fn ipc_denied(error: IpcError) -> i64 {
+    IPC_DENIED.fetch_add(1, Ordering::Release);
+    match error {
+        IpcError::Full | IpcError::Empty => errno::EAGAIN,
+        IpcError::MessageTooLong => errno::EINVAL,
+        IpcError::Capability(
+            aether_ipc::CapError::InsufficientRights | aether_ipc::CapError::InvalidRights,
+        ) => errno::EACCES,
+        IpcError::Capability(aether_ipc::CapError::TableFull) => errno::ENOSPC,
+        IpcError::Capability(_) => errno::EBADF,
+        IpcError::EndpointGone | IpcError::WrongEndpoint => errno::EBADF,
+    }
+}
 
 /// Dispatches one system call and returns the frame to resume.
 ///
@@ -75,6 +113,9 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         Syscall::Close => crate::fs::sys_close(rdi).unwrap_or(errno::EBADF),
         Syscall::List => crate::fs::sys_list(pml4, rdi, rsi, rdx, r10).unwrap_or(errno::EINVAL),
         Syscall::Stat => crate::fs::sys_stat(pml4, rdi, rsi).unwrap_or(errno::EINVAL),
+        Syscall::EndpointCreate => endpoint_create(),
+        Syscall::EndpointSend => endpoint_send(pml4, rdi, rsi, rdx, r10),
+        Syscall::EndpointReceive => endpoint_receive(pml4, rdi, rsi, rdx, r10),
         _ => errno::ENOSYS,
     };
 
@@ -95,6 +136,159 @@ fn write_console(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) ->
     };
     serial::write_bytes(bytes);
     length as i64
+}
+
+/// Decodes a capability handle passed through a register.
+///
+/// Handle 0 is reserved (generations start at 1), and bytes above the
+/// 24-bit encoding are rejected so a caller cannot smuggle extra bits.
+fn decode_ipc_handle(value: u64) -> Option<aether_ipc::CapHandle> {
+    if value == 0 || value > 0x00ff_ffff {
+        return None;
+    }
+    let index = (value & 0xff) as u8;
+    let generation = (value >> 8) as u16;
+    Some(aether_ipc::CapHandle { index, generation })
+}
+
+/// Returns `true` when two byte ranges overlap.
+fn ranges_overlap(a: u64, a_len: u64, b: u64, b_len: u64) -> bool {
+    let a_end = a.saturating_add(a_len);
+    let b_end = b.saturating_add(b_len);
+    a < b_end && b < a_end
+}
+
+/// `EndpointSend`: sends a message through the caller's endpoint capability.
+///
+/// The sender identity is the kernel's current task id. The payload and the
+/// optional transferred handle are validated before the queue is touched, so
+/// a malformed message never reaches any endpoint's queue.
+fn endpoint_send(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, transfer: u64) -> i64 {
+    let Some(cap) = decode_ipc_handle(handle) else {
+        return ipc_denied_usage();
+    };
+    if length as usize > MAX_MESSAGE_BYTES {
+        return ipc_denied_usage();
+    }
+    let Some(payload) = user_bytes(pml4, pointer, length, false) else {
+        return ipc_denied_usage();
+    };
+    let transfer = if transfer == 0 {
+        None
+    } else {
+        match decode_ipc_handle(transfer) {
+            Some(handle) => Some(handle),
+            None => {
+                return ipc_denied_usage();
+            }
+        }
+    };
+    let sender = scheduler::current_task() as u16;
+    let result = scheduler::with_current_ipc(|_current, caps| {
+        crate::ipc::send(caps, cap, sender, payload, transfer)
+    });
+    match result {
+        Ok(()) => {
+            IPC_SENDS.fetch_add(1, Ordering::Release);
+            0
+        }
+        Err(error) => ipc_denied(error),
+    }
+}
+
+/// `EndpointCreate`: creates a bounded endpoint for the caller.
+///
+/// The endpoint pool is fixed at boot (4 objects), so repeated creation
+/// fails with `ENOSPC` instead of growing kernel memory. This is the same
+/// bound the kernel's own boot self-tests exercise.
+fn endpoint_create() -> i64 {
+    let full =
+        aether_ipc::Rights::SEND | aether_ipc::Rights::RECEIVE | aether_ipc::Rights::TRANSFER;
+    let result =
+        scheduler::with_current_ipc(|_current, caps| match crate::ipc::create_endpoint() {
+            None => Err(errno::ENOSPC),
+            Some(object) => caps
+                .grant(object, aether_ipc::ObjectType::Endpoint, full)
+                .map(|handle| (u64::from(handle.generation) << 8) | u64::from(handle.index))
+                .map_err(|_| errno::ENOSPC),
+        });
+    match result {
+        Ok(handle) => handle as i64,
+        Err(code) => {
+            IPC_DENIED.fetch_add(1, Ordering::Release);
+            code
+        }
+    }
+}
+
+fn ipc_denied_usage() -> i64 {
+    IPC_DENIED.fetch_add(1, Ordering::Release);
+    errno::EINVAL
+}
+
+/// `EndpointReceive`: receives a message through the caller's endpoint.
+///
+/// The buffer must be able to hold a maximum-size message so a receive is
+/// never partial, and the transferred-handle field must be a writable user
+/// range disjoint from the payload buffer. The transferred capability, if
+/// any, is installed in the caller's table by the endpoint before the queue
+/// slot is released, so it is never consumed without the table entry
+/// staying visible to the caller.
+fn endpoint_receive(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, out: u64) -> i64 {
+    let Some(cap) = decode_ipc_handle(handle) else {
+        return ipc_denied_usage();
+    };
+    if (length as usize) < MAX_MESSAGE_BYTES {
+        return ipc_denied_usage();
+    }
+    if out == 0 || out >= USER_LIMIT || !paging::user_range_valid(pml4, out, 4, true) {
+        return ipc_denied_usage();
+    }
+    if ranges_overlap(pointer, length, out, 4) {
+        return ipc_denied_usage();
+    }
+    let Some(buffer) = (unsafe {
+        // SAFETY: The kernel checks the whole user range, including the user
+        // bit and write permission, before returning the slice.
+        user_bytes_mut(pml4, pointer, MAX_MESSAGE_BYTES as u64)
+    }) else {
+        return ipc_denied_usage();
+    };
+    let mut received_len = 0usize;
+    let result =
+        scheduler::with_current_ipc(|_current, caps| match crate::ipc::receive(caps, cap) {
+            Ok(message) => {
+                let payload = message.payload();
+                let transferred = match message.transferred {
+                    Some(transferred) => {
+                        (u32::from(transferred.generation) << 8) | u32::from(transferred.index)
+                    }
+                    None => 0,
+                };
+                buffer[..payload.len()].copy_from_slice(payload);
+                for byte in buffer[payload.len()..].iter_mut() {
+                    *byte = 0;
+                }
+                // SAFETY: `out` was validated as a four-byte writable user range
+                // and is disjoint from the payload buffer; the byte-wise copy
+                // avoids alignment requirements, and interrupts are masked so no
+                // context switch can occur inside the store.
+                unsafe {
+                    let bytes = transferred.to_ne_bytes();
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
+                }
+                received_len = payload.len();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        });
+    match result {
+        Ok(()) => {
+            IPC_RECEIVES.fetch_add(1, Ordering::Release);
+            received_len as i64
+        }
+        Err(error) => ipc_denied(error),
+    }
 }
 
 /// Returns a validated read-only user slice.

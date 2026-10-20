@@ -71,6 +71,29 @@ pub enum Syscall {
     CreateWindow = 13,
     /// Return the scheduler's active task count (diagnostics only).
     TaskCount = 14,
+    /// Create a new IPC endpoint for the caller. The endpoint is a bounded,
+    /// task-local message queue, and the caller receives a full-rights
+    /// capability (`SEND|RECEIVE|TRANSFER`). Returns the capability handle,
+    /// or `ENOSPC` when the endpoint pool is exhausted. Creating endpoints is
+    /// a privileged kernel mechanism exposed through this call; the global
+    /// bound makes repeated creation fail instead of growing kernel memory.
+    EndpointCreate = 15,
+    /// Send a bounded IPC message through an endpoint capability owned by the
+    /// caller. `arg1` is the endpoint capability handle, `arg2` the payload
+    /// pointer, `arg3` the payload length (the kernel enforces the endpoint
+    /// message bound of 32 bytes), and `arg4` an optional capability handle
+    /// to transfer (0 = no transfer). The transferred capability must carry
+    /// the `TRANSFER` right and loses it on arrival. Returns zero, or
+    /// `EAGAIN` when the endpoint queue is full.
+    EndpointSend = 16,
+    /// Receive a bounded IPC message. `arg1` is the endpoint capability
+    /// handle, `arg2` the buffer pointer, `arg3` the buffer length (the
+    /// kernel requires room for a maximum-size message), and `arg4` the
+    /// pointer of a writable 4-byte field that receives the transferred
+    /// capability handle (0 = none). The sender identity comes from the
+    /// kernel; a message field never names the sender. Returns the payload
+    /// length, or `EAGAIN` when the queue is empty.
+    EndpointReceive = 17,
 }
 
 impl Syscall {
@@ -93,6 +116,9 @@ impl Syscall {
             12 => Some(Self::PortalOpen),
             13 => Some(Self::CreateWindow),
             14 => Some(Self::TaskCount),
+            15 => Some(Self::EndpointCreate),
+            16 => Some(Self::EndpointSend),
+            17 => Some(Self::EndpointReceive),
             _ => None,
         }
     }
@@ -130,6 +156,8 @@ pub mod errno {
     pub const ENOGRANT: i64 = -8;
     /// The backing device reported an I/O or format error.
     pub const EIO: i64 = -9;
+    /// The endpoint queue is full (send) or empty (receive); retry later.
+    pub const EAGAIN: i64 = -10;
 }
 
 /// Result of the boot-time user-mode self-test.

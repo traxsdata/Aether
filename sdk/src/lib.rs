@@ -10,6 +10,9 @@
 
 use aether_abi::user::{FileRights, Syscall, errno};
 
+/// Maximum bytes an IPC message payload may carry; enforced by the kernel.
+pub const MAX_MESSAGE_BYTES: usize = 32;
+
 /// Raw syscall with up to four arguments.
 ///
 /// # Safety
@@ -215,6 +218,80 @@ pub fn file_size(path: &str) -> Result<usize, i64> {
     }
 }
 
+/// Creates a bounded IPC endpoint and returns its capability handle.
+///
+/// The kernel endpoint pool is fixed (four endpoints), so a fifth create
+/// fails with `ENOSPC` instead of growing kernel memory. The returned
+/// capability carries `SEND`, `RECEIVE`, and `TRANSFER` rights.
+pub fn endpoint_create() -> Result<u64, i64> {
+    // SAFETY: No pointers or handles are involved.
+    let result = unsafe { syscall4(Syscall::EndpointCreate as u64, 0, 0, 0, 0) };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as u64)
+    }
+}
+
+/// Sends `payload` through an IPC endpoint capability.
+///
+/// Returns `EAGAIN` when the endpoint queue is full; the caller may retry on
+/// a later iteration.
+pub fn endpoint_send(handle: u64, payload: &[u8]) -> Result<(), i64> {
+    endpoint_send_with_transfer(handle, payload, 0)
+}
+
+/// Sends `payload` and optionally transfers another capability the caller
+/// owns. The transferred capability must carry the `TRANSFER` right; the
+/// receiver's copy does not.
+pub fn endpoint_send_with_transfer(handle: u64, payload: &[u8], transfer: u64) -> Result<(), i64> {
+    if payload.len() > MAX_MESSAGE_BYTES {
+        return Err(errno::EINVAL);
+    }
+    // SAFETY: The payload slice is readable in the caller's address space and
+    // the kernel validates the range and both handles before it acts.
+    let result = unsafe {
+        syscall4(
+            Syscall::EndpointSend as u64,
+            handle,
+            payload.as_ptr() as u64,
+            payload.len() as u64,
+            transfer,
+        )
+    };
+    if result < 0 { Err(result) } else { Ok(()) }
+}
+
+/// Receives one message from an endpoint capability.
+///
+/// The buffer must be able to hold a maximum-size message so a receive is
+/// never partial. Returns the payload length and the handle of a transferred
+/// capability (`0` when none arrived). Returns `EAGAIN` while the queue is
+/// empty.
+pub fn endpoint_receive(handle: u64, buffer: &mut [u8]) -> Result<(usize, u64), i64> {
+    if buffer.len() < MAX_MESSAGE_BYTES {
+        return Err(errno::EINVAL);
+    }
+    let mut transferred = 0u32;
+    // SAFETY: `transferred` is a local 4-byte field and the buffer is
+    // writable in the caller's own address space; the kernel validates both
+    // ranges and both handles before it acts.
+    let result = unsafe {
+        syscall4(
+            Syscall::EndpointReceive as u64,
+            handle,
+            buffer.as_mut_ptr() as u64,
+            MAX_MESSAGE_BYTES as u64,
+            core::ptr::addr_of_mut!(transferred) as u64,
+        )
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok((result.max(0) as usize, u64::from(transferred)))
+    }
+}
+
 /// Convenience constants for callers.
 pub const READ: u64 = FileRights::READ;
 /// Write access.
@@ -235,6 +312,7 @@ pub fn error_name(error: i64) -> &'static str {
         errno::EBADF => "EBADF",
         errno::ENOGRANT => "ENOGRANT",
         errno::EIO => "EIO",
+        errno::EAGAIN => "EAGAIN",
         _ => "unknown",
     }
 }
