@@ -180,7 +180,6 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     frame
 }
 
-const LINUX_EBADF: i64 = -9;
 const LINUX_EFAULT: i64 = -14;
 const LINUX_EINVAL: i64 = -22;
 const LINUX_ENOSYS: i64 = -38;
@@ -189,7 +188,6 @@ const LINUX_ENOMEM: i64 = -12;
 const LINUX_EPERM: i64 = -1;
 const LINUX_ENOENT: i64 = -2;
 const LINUX_EACCES: i64 = -13;
-const LINUX_EROFS: i64 = -30;
 
 fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i64 {
     let Some(path) = user_cstr(pml4, pointer, 256) else {
@@ -198,13 +196,17 @@ fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i6
     if path.as_bytes().first() != Some(&b'/') {
         return LINUX_ENOENT;
     }
-    // The Linux root is read-only. Reject write, create, truncate, and append.
+    // Writable paths live in the per-task overlay; the imported root stays
+    // read-only.
     const WRITE_FLAGS: u64 = 0x1 | 0x2 | 0x40 | 0x200 | 0x400;
     if flags & WRITE_FLAGS != 0 {
-        return LINUX_EROFS;
+        let create = flags & 0x40 != 0;
+        let truncate = flags & 0x200 != 0;
+        return scheduler::linux_overlay_open(path, create, truncate)
+            .map_or_else(|error| error, |fd| fd as i64);
     }
     let _ = directory;
-    scheduler::linux_open(path).map_or_else(|error| error, |fd| fd as i64)
+    scheduler::linux_open_read(path).map_or_else(|error| error, |fd| fd as i64)
 }
 
 fn linux_read(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {
@@ -362,17 +364,17 @@ fn write_user_u64(pml4: PhysFrame, pointer: u64) -> Option<()> {
 }
 
 fn linux_write(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {
-    if descriptor != 1 && descriptor != 2 {
-        return LINUX_EBADF;
-    }
     if length as usize > MAX_SYSCALL_IO {
         return LINUX_EINVAL;
     }
     let Some(bytes) = user_bytes(pml4, pointer, length, false) else {
         return LINUX_EFAULT;
     };
-    serial::write_bytes(bytes);
-    length as i64
+    if descriptor == 1 || descriptor == 2 {
+        serial::write_bytes(bytes);
+        return length as i64;
+    }
+    scheduler::linux_write_file(descriptor, bytes).map_or_else(|error| error, |count| count as i64)
 }
 
 fn write_console(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) -> i64 {

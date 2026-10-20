@@ -75,6 +75,60 @@ _start:
     mov %r13, %rdi
     syscall
 
+    /* openat(AT_FDCWD, "/tmp/out", O_WRONLY|O_CREAT|O_TRUNC, 0600) */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea overlay_path(%rip), %rsi
+    mov $0x241, %rdx
+    mov $0600, %r10
+    syscall
+    test %rax, %rax
+    js fail_overlay
+    mov %rax, %r13
+
+    /* write the overlay content */
+    mov $1, %rax
+    mov %r13, %rdi
+    lea overlay_content(%rip), %rsi
+    mov $overlay_content_len, %rdx
+    syscall
+    test %rax, %rax
+    js fail_overlay
+    cmp $overlay_content_len, %rax
+    jne fail_overlay
+
+    /* close and reopen read-only */
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $257, %rax
+    mov $-100, %rdi
+    lea overlay_path(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_overlay
+    mov %rax, %r13
+
+    /* read it back through the overlay */
+    mov $0, %rax
+    mov %r13, %rdi
+    mov %r12, %rsi
+    mov $128, %rdx
+    syscall
+    test %rax, %rax
+    jle fail_overlay
+    mov %rax, %r14
+    mov $1, %rax
+    mov $1, %rdi
+    mov %r12, %rsi
+    mov %r14, %rdx
+    syscall
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea message(%rip), %rsi
@@ -98,6 +152,10 @@ fail_fs:
 fail_file:
     lea file_failure(%rip), %rsi
     mov $file_failure_len, %rdx
+    jmp report_failure
+fail_overlay:
+    lea overlay_failure(%rip), %rsi
+    mov $overlay_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -110,7 +168,7 @@ report_failure:
 
     .section .rodata
 message:
-    .ascii "AETHER_LINUX_EXEC_OK source=static-linux-elf mmap=ok fs=ok\n"
+    .ascii "AETHER_LINUX_EXEC_OK source=static-linux-elf mmap=ok fs=ok overlay=ok\n"
     .set message_len, . - message
 mmap_failure:
     .ascii "AETHER_LINUX_EXEC_FAIL stage=mmap\n"
@@ -123,5 +181,13 @@ file_failure:
     .set file_failure_len, . - file_failure
 motd_path:
     .asciz "/etc/motd"
+overlay_path:
+    .asciz "/tmp/out"
+overlay_failure:
+    .ascii "AETHER_LINUX_EXEC_FAIL stage=overlay\n"
+    .set overlay_failure_len, . - overlay_failure
+overlay_content:
+    .ascii "AETHER_LINUX_OVERLAY_OK source=/tmp/out\n"
+    .set overlay_content_len, . - overlay_content
 
     .section .note.GNU-stack,"",@progbits

@@ -110,9 +110,11 @@ exact AppImage digest, and the runtime version.
   `tests/fixtures/linux/hello.S` runs at CPL3, allocates and writes anonymous
   memory, sets FS-based TLS, opens and reads `/etc/motd`, writes through a
   validated user pointer, exits cleanly, and gates the boot with
-  `AETHER_LINUX_ROOT_OK` and `AETHER_LINUX_OK`. Anonymous memory comes from a
-  boot-reserved arena; there is no runtime frame allocator or VMA table yet.
-  The root is embedded and read-only; it is not yet an AppImage import.
+  `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`, and `AETHER_LINUX_OK`.
+  Anonymous memory comes from a boot-reserved arena; there is no runtime frame
+  allocator or VMA table yet. The root is embedded and read-only; `/tmp` writes
+  go to a bounded per-task overlay that is cleared on exit/fault. This is not
+  yet an AppImage import or a persistent per-application store.
 - SquashFS reader and extraction: implemented in `apps/linux/squashfs` for
   zstd, gzip, lz4, lzo, and host xz/lzma (metadata, file data, fragments,
   directories, symlinks, hardlink marking, xattr dropping, extraction limits,

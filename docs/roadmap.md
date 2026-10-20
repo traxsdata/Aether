@@ -137,8 +137,11 @@ user space. It is not a VM. The target and security gates are in
 - [ ] Add no_std xz/lzma decompression and explicit xattr policy controls.
 - [ ] Import into a private read-only root; reject symlink escapes, hardlinks
   outside the root, duplicate paths, and oversized files.
-- [ ] Add a per-application writable overlay for settings, logs, and temporary
-  files; cap its size and make it erasable by the user.
+- [x] Per-task writable overlay prototype: bounded entries under `/tmp`,
+  created/truncated/read/written through the Linux file descriptors, cleared on
+  exit and fault.
+- [ ] Extend the overlay to settings/logs paths, persistent per-application
+  storage, user-visible erasure, and quotas that survive a crash.
 - [x] Signed import records with pinned digest, identity, version, runtime, and
   publisher; Ed25519 verification against a trust store, plus
   `appimage-manifest sign|verify`.

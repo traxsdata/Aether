@@ -38,6 +38,10 @@ versioning scheme until the kernel ABI stabilises.
   setuid/setgid/sticky bits, and counts/drops xattrs. It extracts 16 files
   (48,350,419 bytes) and two symlinks from the tested GridCraft AppImage.
   no_std xz/lzma and in-OS integration remain missing.
+- Per-task Linux writable overlay prototype: bounded `/tmp` entries created,
+  truncated, read, and written through the Linux file descriptors, with
+  `AETHER_LINUX_OVERLAY_OK` boot evidence. The overlay is cleared on exit/fault;
+  persistence, settings/logs paths, and user-visible erasure remain follow-up.
 - Signed AppImage import records: identity, version, runtime, digest, and
   publisher are covered by Ed25519; verification checks the publisher key and
   name against a trust store before comparing the image digest.

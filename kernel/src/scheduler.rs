@@ -74,9 +74,40 @@ pub enum TaskAbi {
 }
 
 #[derive(Clone, Copy)]
+enum LinuxFileSource {
+    Root(usize),
+    Overlay(usize),
+}
+
+#[derive(Clone, Copy)]
 struct LinuxFile {
-    file: usize,
+    source: LinuxFileSource,
     offset: usize,
+}
+
+const OVERLAY_FILES: usize = 4;
+const OVERLAY_BYTES: usize = 512;
+const OVERLAY_PATH: usize = 64;
+
+#[derive(Clone, Copy)]
+struct LinuxOverlay {
+    path: [u8; OVERLAY_PATH],
+    path_len: usize,
+    data: [u8; OVERLAY_BYTES],
+    len: usize,
+}
+
+impl LinuxOverlay {
+    const EMPTY: Self = Self {
+        path: [0; OVERLAY_PATH],
+        path_len: 0,
+        data: [0; OVERLAY_BYTES],
+        len: 0,
+    };
+
+    fn path(&self) -> &str {
+        core::str::from_utf8(&self.path[..self.path_len]).unwrap_or("")
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -102,6 +133,7 @@ struct Task {
     brk: u64,
     fs_base: u64,
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
+    linux_overlay: [Option<LinuxOverlay>; OVERLAY_FILES],
 }
 
 impl Task {
@@ -126,6 +158,7 @@ impl Task {
             brk: 0,
             fs_base: 0,
             linux_fds: [None; crate::linux::MAX_FDS],
+            linux_overlay: [None; OVERLAY_FILES],
         }
     }
 }
@@ -890,6 +923,9 @@ const LINUX_EBADF: i64 = -9;
 const LINUX_EINVAL: i64 = -22;
 const LINUX_EMFILE: i64 = -24;
 const LINUX_ENOENT: i64 = -2;
+const LINUX_EROFS: i64 = -30;
+const LINUX_ENAMETOOLONG: i64 = -36;
+const LINUX_ENOSPC: i64 = -28;
 
 /// Opens a file from the read-only Linux root and returns a file descriptor.
 pub fn linux_open(path: &str) -> Result<u64, i64> {
@@ -903,7 +939,75 @@ pub fn linux_open(path: &str) -> Result<u64, i64> {
     }
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
         if slot.is_none() {
-            *slot = Some(LinuxFile { file, offset: 0 });
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::Root(file),
+                offset: 0,
+            });
+            return Ok(descriptor as u64);
+        }
+    }
+    Err(LINUX_EMFILE)
+}
+
+/// Opens a read-only file, preferring an existing overlay entry.
+pub fn linux_open_read(path: &str) -> Result<u64, i64> {
+    if path.starts_with("/tmp/")
+        && let Ok(fd) = linux_overlay_open(path, false, false)
+    {
+        return Ok(fd);
+    }
+    linux_open(path)
+}
+
+/// Opens or creates a file in the task's private writable overlay.
+///
+/// The overlay is deliberately separate from the read-only root. Only `/tmp`
+/// paths are accepted, entries are bounded, and the overlay disappears with the
+/// task. This is the prototype of the per-application writable layer.
+pub fn linux_overlay_open(path: &str, create: bool, truncate: bool) -> Result<u64, i64> {
+    if !path.starts_with("/tmp/") || !crate::linux::valid_path(path) {
+        return Err(LINUX_EROFS);
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.abi != TaskAbi::Linux {
+        return Err(LINUX_EBADF);
+    }
+    let mut overlay_index = None;
+    for (index, entry) in task.linux_overlay.iter().enumerate() {
+        if entry.as_ref().is_some_and(|entry| entry.path() == path) {
+            overlay_index = Some(index);
+            break;
+        }
+    }
+    if overlay_index.is_none() {
+        if !create {
+            return Err(LINUX_ENOENT);
+        }
+        if path.len() > OVERLAY_PATH {
+            return Err(LINUX_ENAMETOOLONG);
+        }
+        let index = task
+            .linux_overlay
+            .iter()
+            .position(Option::is_none)
+            .ok_or(LINUX_ENOSPC)?;
+        let mut entry = LinuxOverlay::EMPTY;
+        entry.path[..path.len()].copy_from_slice(path.as_bytes());
+        entry.path_len = path.len();
+        task.linux_overlay[index] = Some(entry);
+        overlay_index = Some(index);
+    }
+    let index = overlay_index.unwrap();
+    if truncate && let Some(entry) = task.linux_overlay[index].as_mut() {
+        entry.len = 0;
+    }
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::Overlay(index),
+                offset: 0,
+            });
             return Ok(descriptor as u64);
         }
     }
@@ -917,14 +1021,51 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
     let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
         return Err(LINUX_EBADF);
     };
-    let Some(file) = crate::linux::file(slot.file) else {
+    match slot.source {
+        LinuxFileSource::Root(file) => {
+            let Some(file) = crate::linux::file(file) else {
+                return Err(LINUX_EBADF);
+            };
+            let remaining = file.data.len().saturating_sub(slot.offset);
+            let length = remaining.min(out.len());
+            out[..length].copy_from_slice(&file.data[slot.offset..slot.offset + length]);
+            slot.offset += length;
+            Ok(length)
+        }
+        LinuxFileSource::Overlay(index) => {
+            let Some(entry) = task.linux_overlay.get(index).and_then(Option::as_ref) else {
+                return Err(LINUX_EBADF);
+            };
+            let remaining = entry.len.saturating_sub(slot.offset);
+            let length = remaining.min(out.len());
+            out[..length].copy_from_slice(&entry.data[slot.offset..slot.offset + length]);
+            slot.offset += length;
+            Ok(length)
+        }
+    }
+}
+
+/// Writes to a writable overlay descriptor.
+pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
         return Err(LINUX_EBADF);
     };
-    let remaining = file.data.len().saturating_sub(slot.offset);
-    let length = remaining.min(out.len());
-    out[..length].copy_from_slice(&file.data[slot.offset..slot.offset + length]);
-    slot.offset += length;
-    Ok(length)
+    let LinuxFileSource::Overlay(index) = slot.source else {
+        return Err(LINUX_EROFS);
+    };
+    let Some(entry) = task.linux_overlay.get_mut(index).and_then(Option::as_mut) else {
+        return Err(LINUX_EBADF);
+    };
+    let end = slot.offset.checked_add(data.len()).ok_or(LINUX_ENOSPC)?;
+    if end > OVERLAY_BYTES {
+        return Err(LINUX_ENOSPC);
+    }
+    entry.data[slot.offset..end].copy_from_slice(data);
+    entry.len = entry.len.max(end);
+    slot.offset = end;
+    Ok(data.len())
 }
 
 /// Reads from a Linux file descriptor without changing its offset.
@@ -934,16 +1075,31 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
     let Some(slot) = task.linux_fds.get(fd as usize).and_then(Option::as_ref) else {
         return Err(LINUX_EBADF);
     };
-    let Some(file) = crate::linux::file(slot.file) else {
-        return Err(LINUX_EBADF);
-    };
     let offset = usize::try_from(offset).map_err(|_| LINUX_EINVAL)?;
-    if offset > file.data.len() {
-        return Ok(0);
+    match slot.source {
+        LinuxFileSource::Root(file) => {
+            let Some(file) = crate::linux::file(file) else {
+                return Err(LINUX_EBADF);
+            };
+            if offset > file.data.len() {
+                return Ok(0);
+            }
+            let length = (file.data.len() - offset).min(out.len());
+            out[..length].copy_from_slice(&file.data[offset..offset + length]);
+            Ok(length)
+        }
+        LinuxFileSource::Overlay(index) => {
+            let Some(entry) = task.linux_overlay.get(index).and_then(Option::as_ref) else {
+                return Err(LINUX_EBADF);
+            };
+            if offset > entry.len {
+                return Ok(0);
+            }
+            let length = (entry.len - offset).min(out.len());
+            out[..length].copy_from_slice(&entry.data[offset..offset + length]);
+            Ok(length)
+        }
     }
-    let length = (file.data.len() - offset).min(out.len());
-    out[..length].copy_from_slice(&file.data[offset..offset + length]);
-    Ok(length)
 }
 
 /// Closes a Linux file descriptor.
@@ -967,19 +1123,24 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
     let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
         return LINUX_EBADF;
     };
-    let Some(file) = crate::linux::file(slot.file) else {
-        return LINUX_EBADF;
+    let size = match slot.source {
+        LinuxFileSource::Root(file) => crate::linux::file(file).map_or(0, |file| file.data.len()),
+        LinuxFileSource::Overlay(index) => task
+            .linux_overlay
+            .get(index)
+            .and_then(Option::as_ref)
+            .map_or(0, |entry| entry.len),
     };
     let base = match whence {
         0 => 0i64,
         1 => slot.offset as i64,
-        2 => file.data.len() as i64,
+        2 => size as i64,
         _ => return LINUX_EINVAL,
     };
     let Some(position) = base.checked_add(offset) else {
         return LINUX_EINVAL;
     };
-    if position < 0 || position as usize > file.data.len() {
+    if position < 0 || position as usize > size {
         return LINUX_EINVAL;
     }
     slot.offset = position as usize;
@@ -1050,6 +1211,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
 
     tasks[current].state = TaskState::Done;
     tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
+    tasks[current].linux_overlay = [None; OVERLAY_FILES];
     LINUX_EXITS.fetch_add(1, Ordering::Release);
     let result = if status == 0 {
         UserTestResult::Passed
@@ -1080,6 +1242,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptF
     let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
     if linux {
         tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
+        tasks[current].linux_overlay = [None; OVERLAY_FILES];
         LINUX_FAULTS.fetch_add(1, Ordering::Release);
         LINUX_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
     } else {
