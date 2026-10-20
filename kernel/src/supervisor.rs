@@ -62,8 +62,8 @@ const SECURITY_PROFILE: CapabilityProfile = CapabilityProfile {
     capabilities: &["policy.observe", "grant.observe"],
 };
 const LINUX_PROFILE: CapabilityProfile = CapabilityProfile {
-    name: "linux",
-    capabilities: &["file.read", "process.spawn", "policy.observe"],
+    name: "linux-manager",
+    capabilities: &["ipc.endpoint", "policy.observe", "launch.approve"],
 };
 const PROBE_PROFILE: CapabilityProfile = CapabilityProfile {
     name: "probe",

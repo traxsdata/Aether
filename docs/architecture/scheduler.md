@@ -189,7 +189,7 @@ branch with its own `AETHER_RECOVERY_ROLLBACK_OK` marker.
 - Static task set; no process creation, wait, or per-process resource
   accounting beyond the counters above.
 - Endpoint objects created by a task are not destroyed when the task exits;
-  the fixed four-object pool is not reclaimed.
+  the fixed eight-object pool is not reclaimed.
 - Single CPU; no SMP startup or per-CPU scheduler state.
 - No priorities, sleeping/wakeup queues, or blocking IPC.
 - Per-task kernel stacks are static, not capability-managed.

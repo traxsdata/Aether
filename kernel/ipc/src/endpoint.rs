@@ -10,7 +10,7 @@ use crate::capability::{CapError, CapHandle, CapTable, ObjectId, Rights, Transfe
 /// Maximum queued messages per endpoint.
 pub const QUEUE_LEN: usize = 4;
 /// Maximum message payload.
-pub const MAX_MESSAGE_BYTES: usize = 32;
+pub const MAX_MESSAGE_BYTES: usize = 64;
 
 /// Errors from endpoint operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -39,6 +39,8 @@ pub const LINUX_TASK: usize = USER_TASK + 1;
 pub const LINUX_DYN_TASK: usize = LINUX_TASK + 1;
 /// Task index of the program launched from the imported user AppImage.
 pub const APPIMAGE_TASK: usize = LINUX_DYN_TASK + 1;
+/// Task index of the ring-3 `linuxd` launch-policy service.
+pub const LINUXD_TASK: usize = APPIMAGE_TASK + 1;
 
 const MAX_TASKS: usize = WORKER_COUNT + 12;
 const STACK_SIZE: usize = 16 * 1024;
@@ -48,6 +50,8 @@ const MAGIC_PREFIX: u64 = 0xa5a5_0000_0000_0000;
 
 /// Native user program embedded by the kernel build.
 static USER_ELF: &[u8] = include_bytes!(env!("AETHER_USER_ELF"));
+/// Native ring-3 `linuxd` service embedded by the kernel build.
+static LINUXD_ELF: &[u8] = include_bytes!(env!("AETHER_LINUXD_ELF"));
 /// Static Linux program used to exercise the Linux syscall entry.
 static LINUX_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_ELF"));
 /// Path of the dynamic test image inside the imported runtime rootfs.
@@ -72,6 +76,8 @@ enum TaskKind {
     Idle,
     Worker,
     User,
+    /// Native ring-3 service with a restricted syscall surface.
+    Service,
     Linux,
     Thread,
     Process,
@@ -514,6 +520,8 @@ struct Task {
     exit_status: i64,
     wait_pid: i64,
     wait_status_pointer: u64,
+    /// Boot reserved this slot for a task that is created after an approval.
+    reserved: bool,
 }
 
 impl Task {
@@ -572,6 +580,7 @@ impl Task {
             exit_status: 0,
             wait_pid: 0,
             wait_status_pointer: 0,
+            reserved: false,
         }
     }
 }
@@ -631,6 +640,8 @@ static LINUX_DYN_EXITS: AtomicUsize = AtomicUsize::new(0);
 static LINUX_DYN_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static APPIMAGE_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
 static APPIMAGE_FAULTS: AtomicUsize = AtomicUsize::new(0);
+static LINUXD_RESULT: AtomicUsize = AtomicUsize::new(UserTestResult::Pending as usize);
+static LINUXD_FAULTS: AtomicUsize = AtomicUsize::new(0);
 static MEM_FREE_MIB: AtomicUsize = AtomicUsize::new(0);
 static MEM_TOTAL_MIB: AtomicUsize = AtomicUsize::new(0);
 
@@ -705,6 +716,7 @@ pub fn run() -> ! {
             && LINUX_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
             && LINUX_DYN_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
             && APPIMAGE_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
+            && LINUXD_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
         {
             timer::disable_interrupts();
             let denied = DENIED.load(Ordering::Acquire);
@@ -738,6 +750,19 @@ pub fn run() -> ! {
                     dyn_result,
                     LINUX_DYN_FAULTS.load(Ordering::Acquire)
                 );
+                halt()
+            }
+            let linuxd_result = LINUXD_RESULT.load(Ordering::Acquire);
+            if linuxd_result != UserTestResult::Passed as usize {
+                serial_line!(
+                    "AETHER_BOOT_FAILED reason=linuxd-service result={} faults={}",
+                    linuxd_result,
+                    LINUXD_FAULTS.load(Ordering::Acquire)
+                );
+                halt()
+            }
+            if !crate::linuxd::launch_approved() {
+                serial_line!("AETHER_BOOT_FAILED reason=app launched without linuxd approval");
                 halt()
             }
             let app_result = APPIMAGE_RESULT.load(Ordering::Acquire);
@@ -952,7 +977,43 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // task can resolve any file.
     let (root_files, root_bytes) = crate::linux::init().map_err(|_| SchedulerError::LinuxRoot)?;
     serial_line!("AETHER_LINUX_IMPORT_OK files={root_files} bytes={root_bytes}");
-    crate::linuxd::init().map_err(|_| SchedulerError::Linuxd)?;
+
+    // Reserve the imported application's task slot. Process and thread
+    // creation skip it; the slot stays empty until `linuxd` approves launch.
+    tasks[APPIMAGE_TASK] = Task::new();
+    tasks[APPIMAGE_TASK].reserved = true;
+    serial_line!(
+        "sched: linux appimage slot reserved pid={} state=awaiting-linuxd",
+        APPIMAGE_TASK
+    );
+
+    // Load the ring-3 launch manager into its own PML4. It receives exactly
+    // two capabilities: receive on the launch-request endpoint and send on the
+    // approval endpoint. It cannot create endpoints or open files.
+    let linuxd_image = elf::parse(LINUXD_ELF).map_err(SchedulerError::UserImage)?;
+    let linuxd_pml4 = paging::create_user_address_space(allocator, &linuxd_image, LINUXD_ELF)?;
+    let linuxd_kernel_top = stack_top(&kernel_stacks.0[LINUXD_TASK]);
+    let linuxd_saved_rsp = prepare_user_stack(
+        linuxd_kernel_top,
+        linuxd_image.entry(),
+        (USER_STACK_TOP - 16) & !0xf,
+    );
+    let mut linuxd_task = Task::new();
+    linuxd_task.state = TaskState::Ready;
+    linuxd_task.kind = TaskKind::Service;
+    linuxd_task.saved_rsp = linuxd_saved_rsp;
+    linuxd_task.pml4 = linuxd_pml4.start_address();
+    linuxd_task.kernel_stack_top = linuxd_kernel_top;
+    linuxd_task.root = crate::fs::DEMO_ROOT;
+    linuxd_task.tgid = LINUXD_TASK;
+    tasks[LINUXD_TASK] = linuxd_task;
+    serial_line!(
+        "sched: linuxd service ready pid={} pml4={:#018x} entry={:#018x} cpl=3",
+        LINUXD_TASK,
+        linuxd_pml4.start_address(),
+        linuxd_image.entry()
+    );
+    crate::linuxd::init(&mut tasks[LINUXD_TASK].caps).map_err(|_| SchedulerError::Linuxd)?;
 
     // Load the static Linux test program. It is a boot gate for the Linux
     // syscall entry, not yet an application domain with its own root.
@@ -1040,39 +1101,6 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         dynamic.entry
     );
 
-    // Launch the program selected from the verified user AppImage. The
-    // identity is checked by linuxd; this task owns a separate overlay store.
-    let app_program = crate::linux::app_program().ok_or(SchedulerError::Linuxd)?;
-    let app_image = elf::parse(app_program).map_err(|_| SchedulerError::Linuxd)?;
-    let app_pml4 = paging::create_user_address_space(allocator, &app_image, app_program)
-        .map_err(|_| SchedulerError::Linuxd)?;
-    let app_kernel_top = stack_top(&kernel_stacks.0[APPIMAGE_TASK]);
-    let app_saved_rsp = prepare_user_stack(
-        app_kernel_top,
-        app_image.entry(),
-        (USER_STACK_TOP - 16) & !0xf,
-    );
-    let mut app_task = Task::new();
-    app_task.state = TaskState::Ready;
-    app_task.kind = TaskKind::Linux;
-    app_task.abi = TaskAbi::Linux;
-    app_task.saved_rsp = app_saved_rsp;
-    app_task.pml4 = app_pml4.start_address();
-    app_task.kernel_stack_top = app_kernel_top;
-    app_task.root = crate::fs::DEMO_ROOT;
-    app_task.brk = paging::LINUX_ARENA_BASE;
-    app_task.overlay_app = crate::linuxd::APP_OVERLAY_ID;
-    app_task.tgid = APPIMAGE_TASK;
-    app_task.pgid = APPIMAGE_TASK;
-    app_task.sid = APPIMAGE_TASK;
-    tasks[APPIMAGE_TASK] = app_task;
-    serial_line!(
-        "sched: linux appimage task ready pid={} pml4={:#018x} entry={:#018x}",
-        APPIMAGE_TASK,
-        app_pml4.start_address(),
-        app_image.entry()
-    );
-
     // SAFETY: Interrupts are disabled during boot and the idle task is current.
     unsafe { gdt::set_kernel_stack(tasks[0].kernel_stack_top) };
     serial_line!(
@@ -1103,6 +1131,52 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         Ordering::Release,
     );
 
+    Ok(())
+}
+
+/// Creates the imported AppImage task after ring-3 `linuxd` approval.
+///
+/// The signed image is parsed and mapped here, not at boot. Until
+/// `linuxd::service_tick` observes the approval message, no application task
+/// exists and nothing can be scheduled from the imported payload.
+pub fn launch_appimage() -> Result<(), SchedulerError> {
+    if APPIMAGE_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize {
+        return Err(SchedulerError::Linuxd);
+    }
+    let program = crate::linux::app_program().ok_or(SchedulerError::Linuxd)?;
+    let image = elf::parse(program).map_err(|_| SchedulerError::Linuxd)?;
+    let pml4 = crate::memory::with_frame_allocator(|allocator| {
+        paging::create_user_address_space(allocator, &image, program)
+    })
+    .ok_or(SchedulerError::OutOfMemory)??;
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    if tasks[APPIMAGE_TASK].state != TaskState::Empty || !tasks[APPIMAGE_TASK].reserved {
+        return Err(SchedulerError::Linuxd);
+    }
+    // SAFETY: The kernel stack array is static and this task slot was reserved
+    // for the imported payload; no other task owns its stack.
+    let kernel_top = stack_top(&unsafe { &*KERNEL_STACKS.0.get() }.0[APPIMAGE_TASK]);
+    let saved_rsp = prepare_user_stack(kernel_top, image.entry(), (USER_STACK_TOP - 16) & !0xf);
+    let mut app_task = Task::new();
+    app_task.state = TaskState::Ready;
+    app_task.kind = TaskKind::Linux;
+    app_task.abi = TaskAbi::Linux;
+    app_task.saved_rsp = saved_rsp;
+    app_task.pml4 = pml4.start_address();
+    app_task.kernel_stack_top = kernel_top;
+    app_task.root = crate::fs::DEMO_ROOT;
+    app_task.brk = paging::LINUX_ARENA_BASE;
+    app_task.overlay_app = crate::linuxd::APP_OVERLAY_ID;
+    app_task.tgid = APPIMAGE_TASK;
+    app_task.pgid = APPIMAGE_TASK;
+    app_task.sid = APPIMAGE_TASK;
+    tasks[APPIMAGE_TASK] = app_task;
+    serial_line!(
+        "sched: linux appimage task ready pid={} pml4={:#018x} entry={:#018x} approved=linuxd",
+        APPIMAGE_TASK,
+        pml4.start_address(),
+        image.entry()
+    );
     Ok(())
 }
 
@@ -1469,6 +1543,16 @@ pub fn current_abi() -> TaskAbi {
     tasks[CURRENT.load(Ordering::Relaxed)].abi
 }
 
+/// Returns `true` when the running native task is a restricted service.
+///
+/// Native services use `int 0x80`, but the dispatcher applies a narrower
+/// allowlist than the one for ordinary native applications.
+#[must_use]
+pub fn current_is_service() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].kind == TaskKind::Service
+}
+
 /// Creates a Linux thread sharing the caller's address space.
 ///
 /// The child resumes at the instruction after `clone` with `RAX=0`, the
@@ -1532,7 +1616,10 @@ pub fn linux_clone(
             parent.handles,
         )
     };
-    let Some(slot) = tasks.iter().position(|task| task.state == TaskState::Empty) else {
+    let Some(slot) = tasks
+        .iter()
+        .position(|task| task.state == TaskState::Empty && !task.reserved)
+    else {
         return Err(LINUX_EAGAIN);
     };
     let kernel_stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
@@ -1609,7 +1696,10 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         return Err(LINUX_ENOSYS);
     }
     let parent_pml4 = tasks[current].pml4;
-    let Some(slot) = tasks.iter().position(|task| task.state == TaskState::Empty) else {
+    let Some(slot) = tasks
+        .iter()
+        .position(|task| task.state == TaskState::Empty && !task.reserved)
+    else {
         return Err(LINUX_EAGAIN);
     };
     let Some(parent_pml4) = PhysFrame::from_address(parent_pml4) else {
@@ -2984,6 +3074,18 @@ pub fn with_current_ipc<R>(f: impl FnOnce(usize, &mut CapTable) -> R) -> R {
 pub fn user_exit(status: u64) -> *mut InterruptFrame {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
+    if current == LINUXD_TASK && tasks[current].kind == TaskKind::Service {
+        tasks[current].state = TaskState::Done;
+        let closed = crate::fs::close_task_files(&mut tasks[current].caps);
+        let result = if status == 0 {
+            UserTestResult::Passed
+        } else {
+            UserTestResult::Failed
+        };
+        LINUXD_RESULT.store(result as usize, Ordering::Release);
+        serial_line!("linuxd: service exit pid={current} status={status} closed={closed}");
+        return schedule_next(current);
+    }
     if current != USER_TASK || tasks[current].kind != TaskKind::User {
         serial_line!("AETHER_BOOT_FAILED reason=exit from non-user task");
         halt()
@@ -5509,18 +5611,29 @@ pub fn resolve_linux_demand_fault(_frame: *mut InterruptFrame, address: u64, err
 
 pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *mut InterruptFrame {
     let current = CURRENT.load(Ordering::Relaxed);
-    let (linux, thread, process, kind) = {
+    let (linux, thread, process, service, kind) = {
         let tasks = unsafe { &*TASKS.0.get() };
         (
             tasks[current].kind == TaskKind::Linux,
             tasks[current].kind == TaskKind::Thread,
             tasks[current].kind == TaskKind::Process,
+            tasks[current].kind == TaskKind::Service,
             tasks[current].kind,
         )
     };
-    if kind != TaskKind::User && !linux && !thread && !process {
+    if kind != TaskKind::User && !linux && !thread && !process && !service {
         serial_line!("AETHER_BOOT_FAILED reason=user-fault on non-user task");
         halt()
+    }
+    if service {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].state = TaskState::Faulted;
+        tasks[current].saved_rsp = frame as u64;
+        let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
+        LINUXD_FAULTS.fetch_add(1, Ordering::Release);
+        LINUXD_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+        serial_line!("linuxd: service fault pid={current} vector={vector}");
+        return schedule_next(current);
     }
     if process {
         robust_futex_cleanup(current);
@@ -5646,6 +5759,10 @@ pub fn yield_current(frame: *mut InterruptFrame) -> *mut InterruptFrame {
 /// Called from the timer interrupt before returning to a task.
 pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     let now = TICKS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    // Advance the linuxd launch handshake before the interrupted task is
+    // saved. The application task is only created once an approval message
+    // has been received; no boot path creates it directly.
+    crate::linuxd::service_tick();
     let current = CURRENT.load(Ordering::Relaxed);
     // Deliver a pending signal to the interrupted Linux task before it is
     // saved and possibly scheduled out.

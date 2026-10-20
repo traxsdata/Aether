@@ -54,6 +54,21 @@ fn ipc_denied(error: IpcError) -> i64 {
     }
 }
 
+/// Returns the system calls a native service task may use.
+fn service_syscall_allowed(call: Syscall) -> bool {
+    matches!(
+        call,
+        Syscall::Yield
+            | Syscall::Exit
+            | Syscall::Write
+            | Syscall::GetPid
+            | Syscall::Sleep
+            | Syscall::Uptime
+            | Syscall::EndpointSend
+            | Syscall::EndpointReceive
+    )
+}
+
 /// Dispatches one system call and returns the frame to resume.
 ///
 /// Returning a different frame lets `exit` schedule the next task without
@@ -84,6 +99,16 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         unsafe { (*frame).rax = errno::ENOSYS as u64 };
         return frame;
     };
+
+    // Native services have a narrower surface than native applications even
+    // though both enter through `int 0x80`. `linuxd` may talk over the two
+    // endpoints it was granted and write diagnostics; files, portal access,
+    // endpoint creation, and window requests are denied.
+    if scheduler::current_is_service() && !service_syscall_allowed(call) {
+        // SAFETY: Same live-frame invariant as above.
+        unsafe { (*frame).rax = errno::EACCES as u64 };
+        return frame;
+    }
 
     let Some(pml4) = scheduler::current_pml4() else {
         serial_line!("AETHER_BOOT_FAILED reason=syscall without pml4");
@@ -2209,7 +2234,7 @@ fn endpoint_send(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, transf
 
 /// `EndpointCreate`: creates a bounded endpoint for the caller.
 ///
-/// The endpoint pool is fixed at boot (4 objects), so repeated creation
+/// The endpoint pool is fixed at boot (8 objects), so repeated creation
 /// fails with `ENOSPC` instead of growing kernel memory. This is the same
 /// bound the kernel's own boot self-tests exercise.
 fn endpoint_create() -> i64 {

@@ -81,7 +81,7 @@ pub enum Syscall {
     /// Send a bounded IPC message through an endpoint capability owned by the
     /// caller. `arg1` is the endpoint capability handle, `arg2` the payload
     /// pointer, `arg3` the payload length (the kernel enforces the endpoint
-    /// message bound of 32 bytes), and `arg4` an optional capability handle
+    /// message bound of 64 bytes), and `arg4` an optional capability handle
     /// to transfer (0 = no transfer). The transferred capability must carry
     /// the `TRANSFER` right and loses it on arrival. Returns zero, or
     /// `EAGAIN` when the endpoint queue is full.

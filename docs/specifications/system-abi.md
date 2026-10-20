@@ -126,7 +126,7 @@ Implemented calls:
 | 14 | `task_count` | — | debug value |
 | 15 | `endpoint_create` | — | endpoint capability handle (or `ENOSPC` when the pool is exhausted) |
 | 16 | `endpoint_send` | endpoint handle, payload, payload length, transfer handle (0 = none) | 0 (`EAGAIN` when the queue is full) |
-| 17 | `endpoint_receive` | endpoint handle, buffer, buffer length (at least 32), required transferred-handle out-field | bytes received; the out-field receives the transferred handle, or 0 |
+| 17 | `endpoint_receive` | endpoint handle, buffer, buffer length (at least 64), required transferred-handle out-field | bytes received; the out-field receives the transferred handle, or 0 |
 
 Rules for this implementation:
 
@@ -147,15 +147,15 @@ Endpoint syscalls (15–17) add these rules:
 
 - `endpoint_create` mints a capability for a new bounded endpoint object with
   `SEND`, `RECEIVE`, and `TRANSFER` rights, granted from the caller's own
-  capability table. The endpoint pool is fixed (four objects); a fifth
-  `endpoint_create` fails with `ENOSPC` instead of growing kernel memory.
-- `endpoint_send` copies at most 32 payload bytes (`MAX_MESSAGE_BYTES` from
+  capability table. The endpoint pool is fixed (eight objects); further
+  `endpoint_create` calls fail with `ENOSPC` instead of growing kernel memory.
+- `endpoint_send` copies at most 64 payload bytes (`MAX_MESSAGE_BYTES` from
   the IPC crate) and refuses more before touching the queue. The optional
   transfer handle must be a handle the caller owns and must carry `TRANSFER`;
   the receiver's installed copy never carries `TRANSFER`, so transfer chains
   cannot be extended by receivers.
 - `endpoint_receive` requires a buffer able to hold a maximum-size message
-  (at least 32 bytes) so a receive is never partial, plus a required
+  (at least 64 bytes) so a receive is never partial, plus a required
   four-byte writable out-field for the transferred handle that does not
   overlap the payload buffer. Passing `0` for the out-field is an `EINVAL`
   usage error; it is not silently treated as "discard the transferred

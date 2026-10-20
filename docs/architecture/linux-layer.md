@@ -19,9 +19,9 @@ with per-facility owners and test cases in
  application (unmodified Linux ELF / AppImage payload)
         |
         v
- linuxd  ── ELF loader, libc ABI, /proc, signals, threads, Wayland client side
+ linuxd  ── launch policy and approval (ring 3, current Gate 2 slice)
         |
-        +── IPC ──> fsd / portal / waylandd / input / software renderer
+        +── IPC ──> kernel launch channel / fsd / portal / waylandd / input
         |
         v
  narrow Aether kernel primitives
@@ -36,17 +36,31 @@ application's root or capabilities. A crash retires the domain, not the desktop.
 
 ### `linuxd`
 
-`linuxd` is the Linux personality. It owns:
+`linuxd` is the Linux personality. The long-term design gives it AppImage
+root ownership, ELF and shared-library loading, user-space syscalls, synthetic
+`/proc` and devices, thread/futex/signal policy, and the Wayland client side.
 
-- AppImage import and the read-only application root;
-- ELF and shared-library loading, `ld.so` interaction, TLS, and environment;
-- Linux syscalls that can be emulated in user space;
-- a bounded synthetic `/proc`, `/dev/null`, `/dev/urandom`, and similar nodes;
-- thread creation requests, `futex` policy, and signal delivery;
-- the client side of the Wayland protocol used by `winit`.
+**Current Gate 2 slice.** `linuxd` is a native ring-3 process in its own PML4.
+It owns the launch decision for the imported AppImage: the kernel verifies the
+signed record and digest, imports the payload, and sends the signed identity,
+version, and selected launch path over a capability-scoped request endpoint.
+`linuxd` validates the request status and applies identity/version/path policy,
+then sends an approval on a separate return endpoint. The kernel creates the
+Linux application task only after that approval arrives. A malformed launch
+path is denied first, so the denial path is exercised at boot rather than
+asserted.
 
-It never receives ambient filesystem, network, or device authority. It asks
-`fsd` and the portal for handles, exactly like a native application.
+The service receives exactly two capabilities: receive on the request endpoint
+and send on the approval endpoint. Its native syscall surface is allowlisted to
+console writes, yield/sleep, exit, identity/uptime, and those two endpoint
+operations; file, portal, window, and endpoint-creation calls return `EACCES`.
+It never receives ambient filesystem, network, or device authority.
+
+**Still kernel-side in this slice.** The Linux `syscall` trap and dispatcher,
+ELF/`PT_INTERP` mapping, VMA and page-table management, and runtime library
+loading remain in the kernel. There is no syscall remoting: `linuxd` does not
+receive Linux registers, emulate file descriptors, or map application pages.
+Moving those responsibilities into `linuxd` requires the Gate 3 remoting ABI.
 
 ### Kernel primitives
 
@@ -79,6 +93,7 @@ an attempt to open a host device.
 |---|---|
 | Capability model | The domain receives only the endpoints and handles named in its runtime profile. The layer cannot mint capabilities. |
 | Application identity | The domain identity is derived from the verified package/AppImage, never from an application-provided string. |
+| Launch approval | The kernel creates the application task only after ring-3 `linuxd` approves the signed identity, version, and launch path over capability-scoped IPC. An invalid path or a missing approval cannot start the application. |
 | Private storage | The imported root is read-only; writes go to a per-application overlay. Other app roots are denied by `fsd`. |
 | File portal | User files are opened through explicit grants. A Linux path such as `/home/user/file.xlsx` is a runtime mapping, not host authority. |
 | Network | Denied by default. Sockets fail with a clear error unless a network capability is granted. |
@@ -189,12 +204,16 @@ exact AppImage digest, and the runtime version.
   counted. The host extractor does not apply retained attributes. Embedded signed-rootfs in-OS import is
   implemented; user-supplied AppImage import/opening and power-cycle-persistent
   overlay storage remain missing.
-- `linuxd`: a bounded kernel-side supervisor service prototype owns runtime
-  profile selection, verified AppImage identity, and launch policy
-  (`AETHER_LINUXD_OK`). It is registered with the supervisor and exposes
-  `linuxd` status. It is **not** yet a ring-3 process and Linux syscalls are
-  still dispatched by the kernel; the user-space service boundary and syscall
-  remoting remain Gate 2 work.
+- `linuxd`: a ring-3 launch manager runs in its own PML4 and is registered with
+  the supervisor as a `linux-manager` service. The kernel verifies the signed
+  runtime profile and AppImage, then queues a bounded four-message request
+  (status, identity, version, path) on a capability-scoped endpoint. The
+  service rejects an invalid launch path (`AETHER_LINUXD_DENY_OK`), approves
+  the signed request, and the kernel only then maps and schedules the
+  application (`AETHER_LINUXD_OK`, `AETHER_LINUXD_USER_OK`). The service has
+  no file, device, portal, or endpoint-creation capability. Linux syscall
+  dispatch, ELF mapping, and library loading are still kernel-side; syscall
+  remoting is not implemented and is not claimed.
 - Wayland bridge, software renderer, and Mesa/Wayland runtime content: not
   implemented.
 
