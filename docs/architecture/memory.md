@@ -105,7 +105,15 @@ rather than triple-faulting.
 
 `make test` requires `AETHER_MM_OK` and `AETHER_BOOT_OK`. The boot log reports
 `boot: cpu: NX and write-protect enabled`, the identity-map size, page-table
-frame count, CR3, and free frames.
+frame count, CR3, and free frames. The frame allocator's free and total MiB
+are also published to the shell: `mem` prints the live pressure, for example
+`mem: free=1011MiB total=1012MiB`, taken from counters the scheduler records
+during boot. The desktop taskbar and security center use the same source.
+
+**There is no address-space layout randomization yet.** User images load at
+the fixed `USER_BASE` window, and the kernel identity map is deterministic, so
+the spec's post-explaced ASLR entry is a follow-up that needs a boot-time
+entropy source (see the threat model). Kernel self-tests do not claim it.
 
 `make fault-test` builds a kernel that executes `int3` after enabling paging;
 the test requires the IDT handler to report the breakpoint and emit
