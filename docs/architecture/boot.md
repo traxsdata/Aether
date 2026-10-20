@@ -18,7 +18,10 @@
 4. **Loading.** The loader allocates the image's aligned physical range with
    `AllocateAddress`, copies file bytes, and zeroes the remainder of each
    segment.
-5. **Hand-off construction.** It allocates pages below 4 GiB for `BootInfo`, a
+5. **Hand-off construction.** It stages `\linux\app.AppImage` and
+   `\linux\app.import` from the boot volume into retained loader pages and
+   records their physical extents in `BootInfo` v4 (`linux_appimage`,
+   `linux_appimage_record`). It allocates pages below 4 GiB for `BootInfo`, a
    64 KiB firmware-map buffer, and a fixed region array
    (`MAX_MEMORY_REGIONS = 256`). UEFI descriptors are converted to
    `MemoryRegion` entries, sorted by physical start (some firmware returns an

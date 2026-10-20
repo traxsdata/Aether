@@ -30,6 +30,11 @@ truncate -s 32M "$EFI_IMAGE"
 mformat -i "$EFI_IMAGE" -v AETHER ::
 mmd -i "$EFI_IMAGE" ::/EFI ::/EFI/BOOT
 mcopy -i "$EFI_IMAGE" "$BUILD/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
+# The loader stages the signed AppImage from the boot volume; the ISO must
+# carry the same artifacts as the disk image.
+mmd -i "$EFI_IMAGE" ::/linux
+mcopy -i "$EFI_IMAGE" "$BUILD/linux-user.AppImage" ::/linux/app.AppImage
+mcopy -i "$EFI_IMAGE" "$BUILD/linux-user.import" ::/linux/app.import
 cp "$EFI_IMAGE" "$STAGE/efiboot.img"
 
 xorriso -as mkisofs \

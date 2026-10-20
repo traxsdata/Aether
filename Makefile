@@ -24,6 +24,11 @@ LINUX_RUNTIME_PIN := $(BUILD)/linux-runtime-pinned.pin
 LINUX_RUNTIME_MANIFEST := $(BUILD)/linux-runtime-pinned.manifest
 LINUX_APPIMAGE := $(BUILD)/linux-user.AppImage
 LINUX_APPIMAGE_RECORD := $(BUILD)/linux-user.import
+# Artifacts copied onto the boot volume by the image target. The staged
+# AppImage is not embedded in the kernel; the loader reads these paths.
+STAGED_APPIMAGE ?= $(LINUX_APPIMAGE)
+STAGED_APPIMAGE_RECORD ?= $(LINUX_APPIMAGE_RECORD)
+TAMPERED_APPIMAGE := $(BUILD)/linux-user-tampered.AppImage
 LINUX_APPIMAGE_PROGRAM ?= /usr/bin/app
 LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
 LINUX_DYN_PATH ?= /usr/bin/dynamic
@@ -45,7 +50,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
 .PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test shell-test fault-test rollback-test \
-	negative-test unittest lint docs-check license-check compat-test update-test release release-demo \
+	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
 all: image
@@ -89,8 +94,6 @@ kernel: user linux-fixture
 	AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 	AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 	AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
-	AETHER_LINUX_APPIMAGE=$(abspath $(LINUX_APPIMAGE)) \
-	AETHER_LINUX_APPIMAGE_RECORD=$(abspath $(LINUX_APPIMAGE_RECORD)) \
 	AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
 	AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
@@ -106,6 +109,9 @@ image: loader
 	mformat -i $(IMAGE) -F -v AETHER ::
 	mmd -i $(IMAGE) ::/EFI ::/EFI/BOOT
 	mcopy -i $(IMAGE) $(LOADER_EFI) ::/EFI/BOOT/BOOTX64.EFI
+	mmd -i $(IMAGE) ::/linux
+	mcopy -i $(IMAGE) $(STAGED_APPIMAGE) ::/linux/app.AppImage
+	mcopy -i $(IMAGE) $(STAGED_APPIMAGE_RECORD) ::/linux/app.import
 	@echo "built $(IMAGE)"
 
 test: image
@@ -161,6 +167,27 @@ negative-test:
 	$(MAKE) KERNEL_FEATURES=fault-selftest image
 	AETHER_EXPECT_BOOT_FAILURE=1 $(PYTHON) tools/test-boot.py
 
+# Prove the loader-staged AppImage is verified before parsing: mutate the
+# container on the boot volume while leaving the signed record unchanged, then
+# require the record/digest check to fail closed. No parse or launch may occur.
+appimage-stage-tamper-test: image
+	@cp $(LINUX_APPIMAGE) $(TAMPERED_APPIMAGE)
+	@$(PYTHON) -c 'import sys; p=sys.argv[1]; d=bytearray(open(p,"rb").read()); d[-1]^=0xff; open(p,"wb").write(d)' $(TAMPERED_APPIMAGE)
+	@$(MAKE) STAGED_APPIMAGE=$(TAMPERED_APPIMAGE) image
+	@set -e; trap '$(MAKE) image >/dev/null' EXIT; \
+		AETHER_EXPECT_BOOT_FAILURE=1 \
+		AETHER_EXPECT_FAILURE_TEXT="AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=verify" \
+		$(PYTHON) tools/test-boot.py
+
+# A missing staged AppImage must fail in the loader, before the kernel can
+# import or launch anything.
+appimage-stage-missing-test: image
+	@set -e; trap '$(MAKE) image >/dev/null' EXIT; \
+		mdel -i $(IMAGE) ::/linux/app.AppImage; \
+		AETHER_EXPECT_BOOT_FAILURE=1 \
+		AETHER_EXPECT_FAILURE_TEXT="AETHER_LOADER_FAILED error=staged boot file" \
+		$(PYTHON) tools/test-boot.py
+
 unittest:
 	$(CARGO) test --locked
 	$(PYTHON) -m unittest discover -s tools -p 'test_tooling.py'
@@ -194,8 +221,6 @@ lint: kernel
 		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 		AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
-		AETHER_LINUX_APPIMAGE=$(abspath $(LINUX_APPIMAGE)) \
-		AETHER_LINUX_APPIMAGE_RECORD=$(abspath $(LINUX_APPIMAGE_RECORD)) \
 		AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
 		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) --locked -- -D warnings
@@ -205,8 +230,6 @@ lint: kernel
 		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
 		AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
-		AETHER_LINUX_APPIMAGE=$(abspath $(LINUX_APPIMAGE)) \
-		AETHER_LINUX_APPIMAGE_RECORD=$(abspath $(LINUX_APPIMAGE_RECORD)) \
 		AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
 		AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) clippy -p aether-kernel --release --target $(KERNEL_TARGET) \
