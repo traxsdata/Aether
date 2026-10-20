@@ -1,8 +1,11 @@
-# ADR-015: Linux application and AppImage runtime
+# ADR-017: Linux application and AppImage runtime
 
-- **Status:** Proposed; runtime not implemented
+- **Status:** Accepted; import and static Linux ABI slices implemented, runtime
+  incomplete
 - **Date:** 2026-10-20
 - **Supersedes:** none
+- **Related:** [Linux compatibility](../specifications/linux-compatibility.md),
+  [host-interface inventory](../specifications/linux-host-interface-inventory.md)
 
 ## Context
 
@@ -56,14 +59,21 @@ Each application runs in its own security domain with its own root, overlay,
 runtime configuration, and capability profile. A crash terminates that domain,
 not the desktop.
 
+The Gate 1 policy decisions (Wayland only, private D-Bus broker, same-domain
+spawn, no clipboard in the first profile, fixed paths and environment, software
+Vulkan, and network denial) are recorded in the
+[host-interface inventory](../specifications/linux-host-interface-inventory.md#decisions)
+and are part of this decision.
+
 ## Gates
 
 Compatibility is claimed only after the gates in
 [`../specifications/linux-compatibility.md`](../specifications/linux-compatibility.md)
 are met. Gate 0 (container inspection) is implemented. Gate 1 (host-interface
-inventory) is documented and **not met** because the required Aether interfaces
-do not exist yet. Gate 3 must run `gridcraft-cli` from the AppImage headlessly
-before Gate 4 attempts the GUI.
+inventory) is complete in
+[`../specifications/linux-host-interface-inventory.md`](../specifications/linux-host-interface-inventory.md);
+its missing interfaces are Gate 2 work. Gate 3 must run `gridcraft-cli` from the
+AppImage headlessly before Gate 4 attempts the GUI.
 
 ## Consequences
 

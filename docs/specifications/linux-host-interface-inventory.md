@@ -1,9 +1,11 @@
 # Linux Host-Interface Inventory
 
 **Document ID:** AETHER-LINUX-002
-**Status:** Gate 1 inventory draft; no compatibility claim
-**Related:** [Linux compatibility](linux-compatibility.md), [Linux layer](../architecture/linux-layer.md),
-ADR-015, [system ABI](system-abi.md), [compatibility database](compatibility.md)
+**Status:** Gate 1 complete; Gate 2 implementation pending; no compatibility claim
+**Related:** [Linux compatibility](linux-compatibility.md),
+[Linux layer](../architecture/linux-layer.md),
+[ADR-017](../decisions/ADR-017-linux-app-runtime.md),
+[system ABI](system-abi.md), [compatibility database](compatibility.md)
 
 ## Purpose and method
 
@@ -47,10 +49,9 @@ observed symbols and protocol names.
 
 ## Result
 
-**Gate 1 is drafted, not accepted.** Every observed facility now has a proposed
-Aether interface, an owner, and a test case; the acceptance checklist and the
-policy questions at the end of this document are still open. Implementation
-status is uneven:
+**Gate 1 is complete for the pinned artifact.** Every observed facility has a
+proposed Aether interface, an owner, and a test case; the policy decisions and
+acceptance checklist are recorded below. Implementation status is uneven:
 
 | Status | Meaning | Facilities |
 |---|---|---:|
@@ -58,7 +59,7 @@ status is uneven:
 | Partial | Some interface or host tests exist; the runtime cannot use it yet | 7 |
 | Missing | No interface exists | 18 |
 | Denied | Deliberate absence; the runtime must fail closed | 2 |
-| Deferred | Not required for Gate 3 or Gate 4 | 2 |
+| Deferred | Not required for Gate 3 or Gate 4 | 3 |
 
 These counts are the planning baseline. They do not claim that the existing
 interfaces are sufficient for GridCraft: Gate 2 proves that by running binaries.
@@ -86,7 +87,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | ID | Facility and artifact evidence | Aether interface | Owner | Test | Status |
 |---|---|---|---|---|---|
 | HI-08 | Metadata and directories: `stat64`, `statx`, `fstat64`, `readlink`, `mkdir`, `unlink`, `rename`, `opendir`, `readdir64`, `closedir`, `dirfd` | Filesystem service operations with per-domain roots | `kernel/fs`, `kernel/src/fs.rs` | HI-T08 | missing |
-| HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Portal grant handles plus a synthetic `/home/user` mapping | `kernel/src/portal.rs`, planned `user/portald` | HI-T09 | missing |
+| HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Portal grant handles and `/run/aether/portal/<grant>` paths; `/home/user` is the private overlay | `kernel/src/portal.rs`, planned `user/portald` | HI-T09 | missing |
 | HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `posix_memalign`, `malloc`; file mappings; W^X | Memory-object capabilities and validated mapping syscalls | `kernel/src/memory`, `kernel/src/syscall.rs` | HI-T10 | partial |
 | HI-11 | Synchronization: `futex`, pthread mutex/condition variables, robust lists, `eventfd` | Futex wait/wake queues with timeouts | `kernel/src/scheduler.rs`, `kernel/src/ipc.rs` | HI-T11 | partial |
 | HI-12 | Signals: `sigaction`, `signal`, `sigemptyset`, `sigaddset`, `sigaltstack`, `kill`, `pause` | Fault-to-signal delivery and per-thread masks | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T12 | missing |
@@ -102,12 +103,13 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | ID | Facility and artifact evidence | Aether interface | Owner | Test | Status |
 |---|---|---|---|---|---|
 | HI-19 | Wayland client transport: `libwayland-client.so.0`, `wl_display_connect`, `wl_display_*`, event queues, fd passing | `waylandd` service and per-domain socket | planned `user/waylandd` | HI-T19 | missing |
-| HI-20 | Wayland protocols: `wl_compositor`, `wl_surface`, `wl_shm`, `wl_region`, `wl_callback`, `wl_seat`, `wl_keyboard`, `wl_pointer`, `wl_output`, `wl_data_device`, `xdg_shell`, `xdg_popup`, `xdg_activation`, `wp_viewporter`, `wp_fractional_scale`, `wp_cursor_shape` | Protocol subset implemented by `waylandd` | planned `user/waylandd` | HI-T20 | missing |
+| HI-20 | Wayland protocols: `wl_compositor`, `wl_surface`, `wl_shm`, `wl_region`, `wl_callback`, `wl_seat`, `wl_keyboard`, `wl_pointer`, `wl_output`, `xdg_shell`, `xdg_popup`, `xdg_activation`, `wp_viewporter`, `wp_fractional_scale`, `wp_cursor_shape` | Protocol subset implemented by `waylandd`; clipboard protocols are excluded by D-04 | planned `user/waylandd` | HI-T20 | missing |
 | HI-21 | Shared-memory buffers: `wl_shm`, `wl_shm_pool`, `wl_buffer`, `wl_egl_window_*` | Buffer validation (size, stride, format, lifetime) plus compositor presentation | planned `user/waylandd`, `kernel/src/desktop.rs` | HI-T21 | missing |
-| HI-22 | Input and clipboard: keyboard, pointer, touch, keymap from `libxkbcommon`, cursor themes, `wl_data_device`/`arboard` | Input protocol, keymap data, and a revocable clipboard grant | `kernel/input`, planned `user/waylandd` | HI-T22 | partial |
+| HI-22 | Input: keyboard, pointer, touch, keymap from `libxkbcommon`, cursor themes (`libXcursor`, `wp_cursor_shape`) | Input protocol and keymap data | `kernel/input`, planned `user/waylandd` | HI-T22 | partial |
 | HI-23 | EGL/OpenGL ES: `libEGL.so.1`, `EGL_*` platform extensions, `wl_egl_window` | Software GL service (llvmpipe) over the Wayland surface | `kernel/src/graphics.rs`, planned graphics service | HI-T23 | missing |
 | HI-24 | Vulkan: `libvulkan.so.1`, `VK_KHR_surface`, `VK_KHR_wayland_surface`, `VK_KHR_swapchain`, lavapipe | Pinned software Vulkan ICD inside the runtime; no `/dev/dri` | planned graphics service, `user/linuxd` | HI-T24 | missing |
 | HI-25 | X11/XCB fallback: `libX11.so.6`, `libX11-xcb.so.1`, `libxcb.so.1`, `libXcursor`, `libXi`, `libxkbcommon-x11`, `DISPLAY` | No X11 server; Wayland-only policy with a clean failure | planned `user/linuxd` | HI-T25 | deferred |
+| HI-32 | Clipboard: `wl_data_device_manager`, `wl_data_source`, `wl_data_offer`, `arboard` | Revocable clipboard grant; absent in the first profile (D-04) | planned `user/waylandd`, `kernel/src/desktop.rs` | HI-T32 | deferred |
 
 ### Services, lifecycle, and policy
 
@@ -158,38 +160,99 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T29 | planned `make linux-crash-test` | Fault retires only the domain; supervisor restarts within budget; quotas are enforced | planned |
 | HI-T30 | planned `make linux-limit-test` | Address-space, thread, fd, and CPU limits return the documented error and do not leak authority | planned |
 | HI-T31 | `make compat-test` | GridCraft remains `unsupported` until a completed gate has named evidence | existing |
+| HI-T32 | planned `make linux-clipboard-deny-test` | No clipboard grant is advertised; the application starts and copy/paste fails cleanly | planned |
 
-## Open policy questions
+## Decisions
 
-These need a decision before Gate 1 can be accepted. Each proposal preserves the
-default-deny rule and avoids adding authority to make an application start.
+These decisions close the Gate 1 policy questions for the first runtime profile.
+Changing one requires an ADR update, because each removes ambient authority that
+a compatibility shortcut would otherwise reintroduce.
 
-1. **X11 fallback.** The payload contains an X11 backend. Proposal: run
-   Wayland-only, unset `DISPLAY`, and fail cleanly if the application insists on
-   X11. Do not write an X11 server for the first milestone.
-2. **D-Bus.** A shared session bus is ambient IPC. Proposal: run a per-domain
-   broker and allowlist only the portal interfaces Gate 4 needs. Reject arbitrary
-   service names, activation, and eavesdropping.
-3. **Process spawning.** `execvp` and `posix_spawnp` are imported. Proposal:
-   allow spawning only inside the same verified application root, with the same
-   capabilities. Deny `setuid`, `setgid`, `setgroups`, and `chroot` with `EPERM`;
-   record any spawn the application actually needs during Gate 3.
-4. **Clipboard.** A shared clipboard is a data-exfiltration path. Proposal:
-   defer it until after Gate 4; the first profile has no clipboard grant and the
-   application must tolerate that.
-5. **User paths.** Proposal: map `HOME` and workbook paths through portal grants
-   and the per-app overlay; never expose a host home directory or a global mount
-   namespace.
-6. **Language and time.** Proposal: pin a `C.UTF-8` locale, UTC, and a small
-   read-only zoneinfo subset in the runtime rootfs; do not read host locale or
-   timezone data.
-7. **GPU.** Proposal: lavapipe only, with a pinned ICD. No DRM device, no GPU
-   passthrough, and no fallback that opens `/dev/dri`.
-8. **Network.** Proposal: deny AF_INET/AF_INET6 entirely for Gate 3/4. Local
-   sockets are allowed only to brokered services, never as a generic bridge.
-9. **Remaining blockers.** The stale blockers list in
-   [Linux compatibility](linux-compatibility.md) still mentions a missing
-   SquashFS reader; that should be corrected when Gate 1 is accepted.
+| ID | Decision | Rationale | Affected |
+|---|---|---|---|
+| D-01 | **Wayland only.** Unset `DISPLAY`, expose only a Wayland socket, and fail cleanly if the application insists on X11. No X11 server or XCB connection path. | The payload's X11 fallback would add a second window-system surface and another ambient input path. Wayland is the smaller, reviewable boundary. | HI-25, HI-T25 |
+| D-02 | **Private per-domain D-Bus broker.** Allowlist the portal interfaces, reject service activation, arbitrary name ownership, and eavesdropping. | A shared session bus is ambient IPC and a data-exfiltration channel. The broker keeps the portal path without granting general bus access. | HI-26, HI-27, HI-T26 |
+| D-03 | **Same-domain spawn only.** A child inherits the verified root, overlay, capabilities, and quota. `setuid`, `setgid`, `setgroups`, and `chroot` return `EPERM`; no host path or new capability is inherited. | `execvp`/`posix_spawnp` are imported, but compatibility does not require privilege changes. Keeping the domain identity fixed preserves the application boundary. | HI-04, HI-T04 |
+| D-04 | **No clipboard in the first profile.** Do not advertise `wl_data_device_manager`; copy/paste fails cleanly. Revisit after Gate 4 with a revocable grant. | The clipboard is a cross-domain data path and is not needed to prove the spreadsheet runtime. | HI-32, HI-T32 |
+| D-05 | **Fixed path namespace.** User files are reachable only through portal paths or handles; `/home/user` is the per-app overlay, never the host home directory. | File authority must come from portal grants, not from a path string the application chooses. | HI-09, HI-T09 |
+| D-06 | **Fixed environment and locale.** `C.UTF-8`, UTC, a bundled zoneinfo subset, and the environment in the table below; no host environment inheritance. | Host locale, timezone, and environment are ambient inputs that can change behaviour and leak host state. | HI-06, HI-T06 |
+| D-07 | **Software Vulkan only.** Pin lavapipe with `VK_ICD_FILENAMES`; no `/dev/dri`, GPU passthrough, or host GL driver. | The first GUI milestone needs a reviewable renderer, not device ownership. Software rendering keeps the GPU outside the trusted path. | HI-23, HI-24, HI-T23, HI-T24 |
+| D-08 | **Network denied.** AF_INET/AF_INET6 and DNS fail closed; AF_UNIX is allowed only to the Wayland and D-Bus brokers. | The application has no network permission in the first profile, and a local-socket bridge would recreate one. | HI-17, HI-18, HI-T17, HI-T18 |
+
+### Path namespace
+
+The runtime does not mount the host filesystem. It assembles the application
+view from the signed runtime rootfs, the per-app overlay, and portal handles.
+
+| Guest path | Backing | Authority |
+|---|---|---|
+| `/usr`, `/lib`, `/lib64`, `/etc` (selected), `/share` | Signed runtime rootfs | Read-only |
+| `/` | Runtime rootfs view | Read-only; no host root |
+| `/tmp`, `/var/tmp` | Per-domain overlay | Read/write, cleared on exit or fault |
+| `/home/user` | Per-domain overlay | Read/write, private to the domain |
+| `/run/aether/portal/<grant>/` | Portal grant path | Read/write only for the granted file |
+| `/proc/self` | `linuxd` synthesis | Read-only, bounded |
+| `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` | Synthetic nodes | Fixed behaviour |
+| `/run/user/1000` | Per-domain runtime directory | Wayland and D-Bus sockets only |
+| `/dev/dri`, `/dev/input`, block devices, `/sys` | Not present | Denied |
+
+### Runtime environment
+
+The runtime profile sets these values explicitly and does not inherit host
+variables. Values that name a resource point at the private namespace.
+
+| Variable | Value |
+|---|---|
+| `HOME` | `/home/user` |
+| `TMPDIR` | `/tmp` |
+| `XDG_RUNTIME_DIR` | `/run/user/1000` |
+| `XDG_CONFIG_HOME` | `/home/user/.config` |
+| `XDG_CACHE_HOME` | `/home/user/.cache` |
+| `XDG_DATA_HOME` | `/home/user/.local/share` |
+| `WAYLAND_DISPLAY` | `wayland-0` |
+| `DISPLAY` | Unset |
+| `DBUS_SESSION_BUS_ADDRESS` | Private broker socket under `/run/user/1000` |
+| `LANG`, `LC_ALL` | `C.UTF-8` |
+| `TZ` | `UTC` |
+| `VK_ICD_FILENAMES` | Pinned lavapipe ICD in the runtime rootfs |
+| `LD_LIBRARY_PATH` | Unset; library search is constrained to the runtime rootfs |
+
+## Harness plan
+
+Every planned test uses one of four harness families. The QEMU family reuses
+the existing serial-marker gate: a run fails when its `AETHER_LINUX_<SUITE>_OK`
+marker is missing, when any `AETHER_LINUX_*_FAIL` marker appears, or when the
+payload exits non-zero. No test is evidence until it runs in `make ci`.
+
+| Family | Location | Existing targets | Planned targets |
+|---|---|---|---|
+| Host unit | `apps/linux/*`, `kernel/memory`, `kernel/fs` | `make appimage-test`, `make squashfs-test`, `make unittest` | ABI policy and path-translation unit tests inside `make unittest` |
+| QEMU Linux payload | `tests/fixtures/linux/`, planned `tools/linux-test.py` | `make test` (static fixture) | `linux-abi-test`, `linux-proc-test`, `linux-thread-test`, `linux-env-test`, `linux-fd-test`, `linux-fs-test`, `linux-portal-test`, `linux-mem-test`, `linux-sync-test`, `linux-signal-test`, `linux-time-test`, `linux-random-test`, `linux-procfs-test`, `linux-poll-test`, `linux-socket-test`, `linux-net-deny-test`, `linux-gl-test`, `linux-vulkan-test`, `linux-x11-deny-test`, `linux-dbus-test`, `linux-audio-deny-test`, `linux-device-deny-test`, `linux-crash-test`, `linux-limit-test`, `linux-clipboard-deny-test` |
+| Desktop integration | `tools/desktop_smoke.py` | `make iso-test` | `linux-input-test`, `wayland-test`, `wayland-protocol-test`, `wayland-buffer-test` |
+| Compatibility database | `tests/compatibility` | `make compat-test` | None; the record stays `unsupported` until a gate passes |
+
+The target names above are reserved for the Linux layer; none exist in the
+Makefile today except the existing targets in the third column. A target is added
+only with its harness, and it must fail closed when the marker is absent.
+
+## Security criteria review
+
+The mapping covers each acceptance criterion in
+[Linux compatibility](linux-compatibility.md#security-acceptance-criteria):
+
+| Criterion | Facilities | Tests |
+|---|---|---|
+| Importer validates bounds before parsing | HI-01 | HI-T01 |
+| Root is read-only; writes use the overlay | HI-02, HI-08, HI-10 | HI-T02, HI-T08, HI-T10 |
+| User files only through portal grants | HI-09, HI-27 | HI-T09 |
+| Network, audio, and devices denied; local sockets brokered | HI-17, HI-18, HI-28, HI-29 | HI-T17, HI-T18, HI-T27, HI-T28 |
+| Crash terminates only the domain | HI-30 | HI-T29 |
+| Malformed ELF, library, or Wayland message cannot escape | HI-03, HI-20, HI-21 | HI-T03, HI-T20, HI-T21 |
+| AppImages and runtime packages are verified before use | HI-01, HI-02 | HI-T01, HI-T02 |
+| No record upgrade without a completed run | HI-31 | HI-T31 |
+
+The review confirms the inventory has no facility that requires ambient host
+authority. The remaining risk is implementation, not an unmapped interface.
 
 ## Gate 1 acceptance checklist
 
@@ -198,11 +261,13 @@ default-deny rule and avoids adding authority to make an application start.
 - [x] Map every observed facility to a proposed Aether interface.
 - [x] Assign an owner component to every facility.
 - [x] Assign a test ID and pass condition to every facility.
-- [ ] Resolve the open policy questions above.
-- [ ] Review the mapping against the runtime architecture and security criteria.
-- [ ] Confirm each planned test has a harness target and a failure mode.
-- [ ] Correct the stale blocker list and record the inventory as Gate 1 evidence
+- [x] Resolve the policy questions above.
+- [x] Review the mapping against the runtime architecture and security criteria.
+- [x] Confirm each planned test has a harness target and a failure mode.
+- [x] Correct the stale blocker list and record the inventory as Gate 1 evidence
   in [Linux compatibility](linux-compatibility.md).
 
-Until this checklist is complete, Gate 1 remains open and GridCraft remains
-`unsupported`.
+**Gate 1 is complete for the pinned artifact.** The 32 mapped facilities and
+their test IDs are the Gate 2 backlog; implementation status does not change the
+inventory result. GridCraft remains `unsupported` until Gate 3 or Gate 4 has a
+completed run.

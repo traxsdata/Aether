@@ -97,7 +97,7 @@ It is a planning model, not a delivery promise.
 
 This phase has two compatibility tracks. Windows compatibility is the target in
 technical specification §7; the Linux AppImage layer was added by
-[ADR-015](decisions/ADR-015-linux-app-runtime.md) and is specified in
+[ADR-017](decisions/ADR-017-linux-app-runtime.md) and is specified in
 [Linux compatibility](specifications/linux-compatibility.md). The Linux track
 does not replace Windows work, give native Aether applications a second ABI, or
 change the Phase 4 exit criterion.
@@ -126,7 +126,7 @@ what is missing.
 The layer runs unmodified Linux x86-64 applications, including AppImages, in
 user space. It is not a VM. The target and security gates are in
 [Linux compatibility](specifications/linux-compatibility.md); the design is in
-[ADR-015](decisions/ADR-015-linux-app-runtime.md) and
+[ADR-017](decisions/ADR-017-linux-app-runtime.md) and
 [the Linux layer](architecture/linux-layer.md).
 
 #### Gates
@@ -134,13 +134,12 @@ user space. It is not a VM. The target and security gates are in
 - [x] Gate 0 — AppImage import inspection: validate the container without
   executing it, with bounds, compression, table offsets, pinned SHA-256, and
   signed import records.
-- [ ] Gate 1 — host-interface inventory: **drafted** in
-  [the Linux host-interface inventory](specifications/linux-host-interface-inventory.md).
-  It maps 31 facilities from the pinned GUI and CLI to owners and test IDs;
-  acceptance is open on the X11, D-Bus, process-spawn, clipboard, locale, GPU,
-  and network policy questions. Gate 1 is not an implementation gate: the
-  missing ELF loader, process/thread, signal, Wayland, and Vulkan interfaces
-  remain Gate 2 work.
+- [x] Gate 1 — host-interface inventory:
+  [the Linux host-interface inventory](specifications/linux-host-interface-inventory.md)
+  maps 32 facilities from the pinned GUI and CLI to owners and test IDs, with
+  decisions for X11, D-Bus, process spawning, clipboard, paths, locale, GPU, and
+  network. Gate 1 is not an implementation gate: the missing ELF loader,
+  process/thread, signal, Wayland, and Vulkan interfaces remain Gate 2 work.
 - [ ] Gate 2 — interface mapping and prototype: **partial**. A static Linux ELF
   runs at CPL3, but the dynamic loader, glibc, user-space `linuxd`, threads,
   signals, and file mappings remain missing.
@@ -283,10 +282,10 @@ the portal, boots the UEFI ISO under OVMF, and verifies the current/previous
 image records without touching user data. VMware Workstation itself has not yet
 been smoke-tested.
 
-The Linux track has partial Gate 2 evidence while Gate 1 is drafted but not
-accepted: the kernel verifies and imports an embedded signed rootfs, a static Linux ELF runs
-at CPL3 through the Linux `syscall` path with anonymous memory, FS-based TLS,
-read-only root files, and a bounded `/tmp` overlay
+The Linux track has completed the Gate 1 inventory and has partial Gate 2
+evidence: the kernel verifies and imports an embedded signed rootfs, a static
+Linux ELF runs at CPL3 through the Linux `syscall` path with anonymous memory,
+FS-based TLS, read-only root files, and a bounded `/tmp` overlay
 (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 `AETHER_LINUX_OK`), and the native ABI is denied to Linux tasks. This is a test
 fixture, not an AppImage: the dynamic loader, glibc/`ld.so`, threads, signals,

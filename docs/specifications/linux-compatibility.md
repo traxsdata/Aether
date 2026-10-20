@@ -3,7 +3,7 @@
 **Document ID:** AETHER-LINUX-001
 **Status:** Import and static Linux ELF execution stages only; no dynamic
 runtime and no compatibility claim
-**Related:** [ADR-015](../decisions/ADR-015-linux-app-runtime.md), technical
+**Related:** [ADR-017](../decisions/ADR-017-linux-app-runtime.md), technical
 specification §7 (compatibility)
 
 ## Purpose
@@ -126,12 +126,14 @@ a trust store; `appimage-manifest` signs and verifies both `linux-appimage` and
 `linux-rootfs` artifacts. `tools/build-runtime-rootfs.sh` packages a root
 directory as zstd SquashFS and signs it.
 
-**Evidence:** `apps/linux/appimage` validates the container; `apps/linux/squashfs`
-reads zstd/gzip/lz4/lzo/xz/lzma SquashFS metadata, file data, fragments, directories, and
-symlinks, with extraction limits, symlink/hardlink policy, and a host
+**Evidence:** `apps/linux/appimage` validates the container and verifies pinned
+digests and signed import records; `apps/linux/squashfs` reads
+zstd/gzip/lz4/lzo/xz/lzma SquashFS metadata, file data, fragments, directories,
+and symlinks, with extraction limits, symlink/hardlink policy, and a host
 `squashfs-extract` tool. It extracts all 16 files (48,350,419 bytes) and two
-symlinks from the tested AppImage. Publisher signatures, writable overlay, and
-remaining follow-up work is runtime-rootfs signing/packaging and in-OS import.
+symlinks from the tested AppImage. Runtime-rootfs packaging/signing and in-OS
+import of an embedded signed rootfs are implemented; the populated glibc/Mesa
+rootfs and user-supplied AppImage import remain Gate 2 work.
 
 ### Gate 1 — Host-interface inventory
 
@@ -139,16 +141,15 @@ Map every facility the pinned application and runtime need to an Aether
 interface, with owners and test cases.
 
 **Evidence:** [the Linux host-interface inventory](linux-host-interface-inventory.md)
-maps 31 facilities from the pinned GUI and CLI payloads to an interface, owner,
-and test ID. **Draft, not accepted:** 2 facilities are existing, 7 partial, 18
-missing, 2 deliberately denied, and 2 deferred. The inventory still has open
-policy questions (X11, D-Bus, process spawning, clipboard, locale, GPU, and
-network) and the acceptance checklist is incomplete. Do not claim compatibility.
+maps 32 facilities from the pinned GUI and CLI payloads to an interface, owner,
+and test ID, with decisions for X11, D-Bus, process spawning, clipboard, paths,
+locale, GPU, and network. **Met:** 2 facilities are existing, 7 partial, 18
+missing, 2 deliberately denied, and 3 deferred. The inventory is complete; the
+missing interfaces are Gate 2 work and their absence does not invalidate the
+mapping. Do not claim compatibility.
 
-Gate 1 is an inventory gate, not an implementation gate: the missing interfaces
-are Gate 2 work, and their absence does not invalidate the mapping. Gate 1 closes
-when the owners, test cases, and policy questions are reviewed and the checklist
-is signed off.
+The remaining gap is implementation, not planning. Gate 2 proceeds from the
+inventory's owner and test IDs in dependency order.
 
 ### Gate 2 — Interface mapping and prototype
 
@@ -198,17 +199,18 @@ revocation tests, and a compatibility record no better than the suite supports.
 
 ## Current blockers
 
-1. No dynamic loader / glibc, user-space process creation, or general `mmap`.
-2. No pthread/futex/TLS ABI.
-3. No signal delivery.
-4. No Wayland compositor service.
-5. No Vulkan/GL implementation or GPU service.
-6. No SquashFS/zstd reader in the runtime.
+1. No dynamic loader or glibc; the boot fixture is static.
+2. No user-space process creation, threads, real futex queues, or signals.
+3. No file-backed `mmap`, reclaim, or general VMA table.
+4. No populated and pinned glibc/Mesa/Wayland runtime rootfs.
+5. No `linuxd` service, Wayland service, or software renderer.
+6. No D-Bus broker or XDG portal bridge for the Linux domain.
 7. No persistent storage; the current RAM disk is volatile.
-8. No Linux runtime package or update channel.
+8. No user-supplied AppImage import or Linux runtime package channel.
 
 These are ordered dependencies, not independent bugs. Gate 3 does not require
-graphics; Gate 4 does.
+graphics; Gate 4 does. Owners and test IDs are in the
+[host-interface inventory](linux-host-interface-inventory.md).
 
 ## References
 

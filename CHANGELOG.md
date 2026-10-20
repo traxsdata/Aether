@@ -57,15 +57,15 @@ versioning scheme until the kernel ABI stabilises.
   `parse_verified`) and an optional digest argument to `appimage-inspect`.
   A mismatch is rejected before the container is parsed. Publisher signatures
   and the trust store remain runtime-manager work.
-- `docs/decisions/ADR-015-linux-app-runtime.md`,
+- `docs/decisions/ADR-017-linux-app-runtime.md`,
   `docs/specifications/linux-compatibility.md`, and
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
-- `docs/specifications/linux-host-interface-inventory.md`: the Gate 1 mapping
-  from the pinned GridCraft GUI and CLI payloads to 31 Aether interfaces, with
-  an owner, test ID, implementation status, and open policy questions for each
-  facility.
+- `docs/specifications/linux-host-interface-inventory.md`: the completed Gate 1
+  mapping from the pinned GridCraft GUI and CLI payloads to 32 Aether
+  interfaces, with an owner, test ID, implementation status, and an accepted
+  decision for each policy question.
 - `aether-wm`, a `no_std`, `unsafe`-free, allocation-free window-manager crate:
   geometry, responsive layout, window and workspace state, focus and z-order,
   menus, dock targeting, Spotlight-style search, settings, hit testing, and
