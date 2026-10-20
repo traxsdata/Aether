@@ -9,7 +9,7 @@
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::serial_line;
 use aether_input::{EventQueue, Keyboard, MouseDecoder};
-pub use aether_input::{Key, KeyEvent};
+pub use aether_input::{Key, KeyEvent, Modifiers};
 use core::cell::UnsafeCell;
 
 struct Global<T>(UnsafeCell<T>);

@@ -22,7 +22,12 @@ use aether_memory::frame::{FrameAllocator, PhysFrame};
 use core::cell::UnsafeCell;
 
 /// Maximum number of simultaneously registered shared frames.
-pub const MAX_SHARED_FRAMES: usize = 512;
+///
+/// The anonymous/file pool is small, but a Gate 4 memfd may own up to 16 MiB
+/// (4096 pages) and four such objects may coexist. Memfd pages keep their own
+/// global budget (see `memfd.rs`) and do not consume the per-domain anonymous
+/// page quota, so this table must cover both pools.
+pub const MAX_SHARED_FRAMES: usize = 512 + 16_384;
 /// Linux application domains are identified by the bounded overlay app id.
 pub const MAX_DOMAINS: usize = 256;
 /// Shared physical pages charged to one application domain.
@@ -37,6 +42,8 @@ struct SharedFrame {
     /// `u64::MAX` for anonymous mappings, otherwise the scheduler file key.
     file_key: u64,
     file_offset: u64,
+    /// Whether this frame was charged to the anonymous domain quota.
+    charged: bool,
 }
 
 const ANONYMOUS_KEY: u64 = u64::MAX;
@@ -78,6 +85,29 @@ pub fn register(
     domain: u8,
     file: Option<(u64, u64)>,
 ) -> Result<(), SharedFrameError> {
+    register_inner(frame, domain, file, true)
+}
+
+/// Registers a memfd-owned frame.
+///
+/// Memfd pages have their own global budget and are bounded per object, so
+/// they are not charged to the anonymous shared-page domain quota. This keeps
+/// the existing 256-page anonymous quota test meaningful while allowing a
+/// 16 MiB `wl_shm`-style pool.
+pub fn register_memfd(
+    frame: PhysFrame,
+    domain: u8,
+    file: (u64, u64),
+) -> Result<(), SharedFrameError> {
+    register_inner(frame, domain, Some(file), false)
+}
+
+fn register_inner(
+    frame: PhysFrame,
+    domain: u8,
+    file: Option<(u64, u64)>,
+    charge_domain: bool,
+) -> Result<(), SharedFrameError> {
     // SAFETY: Single-CPU serialization as described on `RegistryCell`.
     let registry = unsafe { &mut *REGISTRY.0.get() };
     if registry
@@ -92,7 +122,7 @@ pub fn register(
     let Some(pages) = registry.domain_pages.get_mut(domain_index) else {
         return Err(SharedFrameError::Quota);
     };
-    if *pages >= MAX_DOMAIN_SHARED_PAGES {
+    if charge_domain && *pages >= MAX_DOMAIN_SHARED_PAGES {
         return Err(SharedFrameError::Quota);
     }
     let Some(slot) = registry.entries.iter_mut().find(|slot| slot.is_none()) else {
@@ -105,8 +135,11 @@ pub fn register(
         domain,
         file_key,
         file_offset,
+        charged: charge_domain,
     });
-    *pages += 1;
+    if charge_domain {
+        *pages += 1;
+    }
     Ok(())
 }
 
@@ -167,8 +200,10 @@ pub fn release(allocator: &mut FrameAllocator<'_>, frame: PhysFrame) -> bool {
     }
     let owned = entry.frame;
     let domain = usize::from(entry.domain);
+    let charged = entry.charged;
     registry.entries[index] = None;
-    if let Some(pages) = registry.domain_pages.get_mut(domain)
+    if charged
+        && let Some(pages) = registry.domain_pages.get_mut(domain)
         && *pages > 0
     {
         *pages -= 1;

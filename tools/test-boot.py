@@ -62,6 +62,9 @@ EXPECT_BOOT_FAILURE = os.environ.get("AETHER_EXPECT_BOOT_FAILURE") == "1"
 # the intended fail-closed branch ran instead of some unrelated failure.
 EXPECT_FAILURE_TEXT = os.environ.get("AETHER_EXPECT_FAILURE_TEXT", "")
 TIMEOUT = int(os.environ.get("AETHER_BOOT_TIMEOUT", "90"))
+# VNC display number for the headless q35 boot. Parallel worktrees can collide
+# on the default display, so callers may select another one explicitly.
+VNC_DISPLAY = os.environ.get("AETHER_VNC_DISPLAY", "9")
 
 def qemu_command(code: Path, variables: Path | None) -> list[str]:
     command = [
@@ -73,7 +76,7 @@ def qemu_command(code: Path, variables: Path | None) -> list[str]:
         "-m",
         os.environ.get("AETHER_MEMORY", "1024M"),
         "-display",
-        "vnc=127.0.0.1:9",
+        f"vnc=127.0.0.1:{VNC_DISPLAY}",
         "-device",
         "VGA",
         "-monitor",

@@ -42,6 +42,12 @@ pub enum WindowKind {
     Log,
     /// Welcome, shortcuts, and clean-room notice.
     Welcome,
+    /// A presented pixel surface owned by a Linux application.
+    ///
+    /// This is not a Wayland surface. It is the compositor window fed by the
+    /// synthetic `/dev/aether-display` endpoint; the title is supplied by the
+    /// display service rather than this fixed kind.
+    Linux,
 }
 
 impl WindowKind {
@@ -67,6 +73,7 @@ impl WindowKind {
             Self::Recovery => "RECOVERY",
             Self::Log => "SYSTEM LOG",
             Self::Welcome => "WELCOME",
+            Self::Linux => "LINUX APP",
         }
     }
 
@@ -81,6 +88,7 @@ impl WindowKind {
             Self::Recovery => "Recovery",
             Self::Log => "Log",
             Self::Welcome => "Welcome",
+            Self::Linux => "Linux",
         }
     }
 
@@ -95,6 +103,7 @@ impl WindowKind {
             Self::Recovery => "Current and previous image records",
             Self::Log => "Live kernel and input counters",
             Self::Welcome => "Desktop guide and keyboard shortcuts",
+            Self::Linux => "Pixel surface presented by a Linux application",
         }
     }
 }
@@ -1351,6 +1360,21 @@ impl Wm {
     #[must_use]
     pub const fn is_dragging(&self) -> bool {
         self.dragging.is_some()
+    }
+
+    /// Sets a window's logical and restore frame.
+    ///
+    /// The display endpoint uses this so a client-requested surface size maps
+    /// to a bounded compositor window. Geometry is clamped to the work area.
+    pub fn set_window_frame(&mut self, id: u8, frame: Rect) {
+        let area = layout::work_area(self.screen);
+        let frame = frame.clamp_inside(area);
+        if let Some(index) = self.window_index(id)
+            && let Some(window) = &mut self.windows[index]
+        {
+            window.frame = frame;
+            window.restore_frame = frame;
+        }
     }
 
     /// Returns the frame actually painted, including workspace and window motion.

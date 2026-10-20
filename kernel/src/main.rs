@@ -13,6 +13,7 @@
 mod apps;
 mod arch;
 mod desktop;
+mod display;
 mod fs;
 mod graphics;
 mod icons;
@@ -22,6 +23,7 @@ mod linux;
 mod linux_loader;
 mod linux_policy;
 mod linuxd;
+mod memfd;
 mod memory;
 mod packaging;
 mod portal;

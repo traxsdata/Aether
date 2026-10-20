@@ -221,11 +221,6 @@ user space. It is not a VM. The target and security gates are in
     read, temp open, and rename, and emits `AETHER_GATE4_REVOKE_OK` only after
     all three deny. The windowed GridCraft target consumes this feature with
     the same namespace path as argv.
-  - [ ] Gate 4 GUI remains open: the Wayland bridge, compositor presentation,
-    software Vulkan/GL, keyboard/pointer input, the real windowed
-    `usr/bin/gridcraft` run, and a pixel/checksum plus input-trace record have
-    not been implemented. The workbook does not yet travel through a desktop
-    file chooser or D-Bus portal.
   - [x] Gate 4 runtime rootfs packaging (QEMU prototype scope): `make
     gate4-runtime` assembles and signs a host-derived rootfs with glibc,
     libwayland-client/cursor, libxkbcommon, the Vulkan loader, Mesa lavapipe,
@@ -242,6 +237,18 @@ user space. It is not a VM. The target and security gates are in
     portal workbook open/save, and pixel/checksum evidence remain open. The
     in-tree `libwayland-client.so.0` is the host library until the bridge
     replaces it at the same SONAME path.
+  - [x] Kernel display endpoint slice (QEMU prototype scope): `/dev/aether-display`
+    with bounded `CREATE`/`PRESENT`/`DESTROY`, a Linux window in the ring-0
+    compositor, focused-window input routing, and kernel-owned evidence
+    (`AETHER_GATE4_DISPLAY_CREATE_OK`, `AETHER_GATE4_PRESENT_OK`,
+    `AETHER_GATE4_INPUT_OK`). Boot test: `make gate4-display-test`.
+  - [x] `memfd_create`, `ftruncate`, `fstat`, and `mmap(MAP_SHARED)` for bounded
+    anonymous shared buffers (16 MiB per object, four per task,
+    reference-counted and released on task exit).
+  - [ ] Wayland bridge (`libwayland-client.so.0`), Mesa/lavapipe surface WSI,
+    xdg-shell, keymap, frame callbacks, and the real windowed GridCraft GUI.
+    The endpoint is not a Wayland wire server and this slice does not claim GUI
+    completion.
 - [x] Moved the GridCraft record from `unsupported` to `limited` after the
   Gate 3 run, with the exact digest, runtime profile, named tests, platform,
   and date.
