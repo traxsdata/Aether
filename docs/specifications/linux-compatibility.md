@@ -176,8 +176,9 @@ and joins through `CLONE_CHILD_CLEARTID` (`AETHER_LINUX_THREAD_OK`). `mremap`
 grows and moves a mapping while preserving contents (`AETHER_LINUX_MREMAP_OK`).
 A SIGUSR1 handler is installed, raised, run, and returned from through
 `rt_sigreturn` (`AETHER_LINUX_SIGNAL_OK`). A child process is forked and its
-exit status is reaped through `wait4` (`AETHER_LINUX_FORK_OK`). A static
-freestanding Linux ELF runs at CPL3,
+exit status is reaped through `wait4` (`AETHER_LINUX_FORK_OK`), then the
+process replaces itself with `/usr/bin/exec` through `execve`
+(`AETHER_LINUX_EXECVE_OK`). A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only

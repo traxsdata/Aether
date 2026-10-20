@@ -702,6 +702,16 @@ after_thread:
     mov $message_len, %rdx
     syscall
 
+    /* execve replaces this process; success never returns here. */
+    mov $59, %rax
+    lea exec_path(%rip), %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    syscall
+    lea exec_failure(%rip), %rsi
+    mov $exec_failure_len, %rdx
+    jmp report_failure
+
     mov $60, %rax               /* exit */
     xor %rdi, %rdi
     syscall
@@ -773,6 +783,11 @@ report_failure:
 message:
     .ascii "AETHER_LINUX_EXEC_OK source=static-linux-elf mmap=ok fs=ok overlay=ok\n"
     .set message_len, . - message
+exec_path:
+    .asciz "/usr/bin/exec"
+exec_failure:
+    .ascii "AETHER_LINUX_EXECVE_FAIL\n"
+    .set exec_failure_len, . - exec_failure
 vma_message:
     .ascii "AETHER_LINUX_VMA_OK file=ok fixed=ok wx=deny brk=ok\n"
     .set vma_message_len, . - vma_message

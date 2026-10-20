@@ -14,6 +14,7 @@ LOADER_EFI := $(BUILD)/BOOTX64.EFI
 LINUX_ELF := $(BUILD)/linux-hello.elf
 LINUX_DYN_ELF := $(BUILD)/linux-dynamic.elf
 LINUX_INTERP_ELF := $(BUILD)/linux-interp.elf
+LINUX_EXEC_ELF := $(BUILD)/linux-exec.elf
 LINUX_RUNTIME_DIR := $(BUILD)/linux-runtime
 LINUX_ROOTFS := $(BUILD)/linux-runtime.sqfs
 LINUX_ROOTFS_RECORD := $(BUILD)/linux-runtime.import
@@ -58,12 +59,16 @@ linux-fixture:
 		$(BUILD)/linux-dynamic.o -o $(LINUX_DYN_ELF)
 	$(AS) --64 tests/fixtures/linux/interp.S -o $(BUILD)/linux-interp.o
 	$(LD) -shared -e _start $(BUILD)/linux-interp.o -o $(LINUX_INTERP_ELF)
+	$(AS) --64 tests/fixtures/linux/exec.S -o $(BUILD)/linux-exec.o
+	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
+		$(BUILD)/linux-exec.o -o $(LINUX_EXEC_ELF)
 	if [ "$(LINUX_RUNTIME_PREBUILT)" = "0" ]; then \
 		rm -rf $(LINUX_RUNTIME_DIR); \
 		mkdir -p $(LINUX_RUNTIME_DIR)/etc $(LINUX_RUNTIME_DIR)/lib $(LINUX_RUNTIME_DIR)/usr/bin; \
 		printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\n' > $(LINUX_RUNTIME_DIR)/etc/motd; \
 		cp $(LINUX_INTERP_ELF) $(LINUX_RUNTIME_DIR)/lib/ld-aether.so; \
 		cp $(LINUX_DYN_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/dynamic; \
+		cp $(LINUX_EXEC_ELF) $(LINUX_RUNTIME_DIR)/usr/bin/exec; \
 		sh tools/build-runtime-rootfs.sh $(LINUX_RUNTIME_DIR) $(LINUX_ROOTFS) \
 			$(LINUX_RUNTIME_SEED) org.aether.linux-runtime 0.1.0 \
 			"Aether Test Publisher" $(LINUX_ROOTFS_RECORD); \
@@ -98,6 +103,7 @@ test: image
 # hello, then boot it through the same loader. This is not the pinned runtime
 # rootfs and is not part of `make ci`.
 glibc-test:
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 linux-fixture
 	sh tools/build-glibc-rootfs.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
 		$(LINUX_RUNTIME_SEED)
 	$(MAKE) LINUX_RUNTIME_PREBUILT=1 LINUX_DYN_PATH=/usr/bin/hello image

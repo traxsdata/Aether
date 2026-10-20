@@ -1278,6 +1278,16 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     Ok(slot)
 }
 
+/// Replaces the current task's address space after `execve`.
+pub fn linux_replace_image(pml4: PhysFrame) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    task.pml4 = pml4.start_address();
+    task.vmas.reset();
+    task.brk = paging::LINUX_ARENA_BASE;
+    task.fs_base = 0;
+}
+
 /// Reaps an exited child of the current process.
 ///
 /// Returns `None` when the child has not exited yet and [`LINUX_ECHILD`] when

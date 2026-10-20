@@ -42,6 +42,10 @@ for library in libc.so.6 libm.so.6 libgcc_s.so.1; do
     fi
 done
 cc -O2 -o "$ROOT/usr/bin/hello" tests/fixtures/linux/glibc-hello.c
+# The static Linux boot fixture also runs in this image and execs this path.
+if [ -f build/linux-exec.elf ]; then
+    cp build/linux-exec.elf "$ROOT/usr/bin/exec"
+fi
 
 mksquashfs "$ROOT" "$OUT" \
     -comp zstd -noappend -all-root -no-xattrs -no-progress >/dev/null

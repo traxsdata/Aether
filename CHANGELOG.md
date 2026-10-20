@@ -73,6 +73,11 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Linux `execve` slice: resolve a static `ET_EXEC` image from the verified
+  rootfs, build a fresh address space and stack, and enter its entry point.
+  The boot fixture execs `/usr/bin/exec` and reports
+  `AETHER_LINUX_EXECVE_OK image=ok`. Dynamic exec, argv/envp propagation, and
+  close-on-exec remain missing.
 - Linux process slice: eager-copy `fork` into a fresh address space, a child
   task table with descriptor inheritance, and `wait4` status/reap (polled with
   `sched_yield`). The boot fixture forks, exits 42 in the child, and reaps the

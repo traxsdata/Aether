@@ -132,11 +132,11 @@ grants, and the desktop is not a security authority.
   on unmap or task exit. File metadata (`stat`/`fstat`/`newfstatat`/`statx`),
   `readlink`, `fcntl`, and descriptor duplication are implemented
   (`AETHER_LINUX_FILEMETA_OK`). Directory enumeration, bounded pipes, non-blocking `poll`, `eventfd`, basic
-  `epoll`, threads through `clone`, `fork`/`wait4`, futex wait/wake/join, `mremap`, and
-  basic signal handlers are available (`AETHER_LINUX_DIR_OK`,
+  `epoll`, threads through `clone`, `fork`/`wait4`/static `execve`, futex wait/wake/join,
+  `mremap`, and basic signal handlers are available (`AETHER_LINUX_DIR_OK`,
   `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`, `AETHER_LINUX_THREAD_OK`,
   `AETHER_LINUX_MREMAP_OK`, `AETHER_LINUX_SIGNAL_OK`,
-  `AETHER_LINUX_FORK_OK`). A dynamic `ET_DYN`/`PT_INTERP` loader maps a
+  `AETHER_LINUX_FORK_OK`, `AETHER_LINUX_EXECVE_OK`). A dynamic `ET_DYN`/`PT_INTERP` loader maps a
   main image and its interpreter from the verified runtime rootfs, builds
   auxv, and hands control from the interpreter to the main entry
   (`AETHER_LINUX_DYN_*`). `make glibc-test` packages the host glibc in a signed
@@ -176,7 +176,7 @@ grants, and the desktop is not a security authority.
   `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`,
   `AETHER_LINUX_DIR_OK`, `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`,
   `AETHER_LINUX_THREAD_OK`, `AETHER_LINUX_MREMAP_OK`, `AETHER_LINUX_SIGNAL_OK`, `AETHER_LINUX_FORK_OK`,
-  `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
+  `AETHER_LINUX_EXECVE_OK`, `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
   `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`,
   `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
   `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.

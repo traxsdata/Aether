@@ -12,7 +12,7 @@ use crate::arch::x86_64::serial;
 use crate::memory::paging;
 use crate::scheduler;
 use crate::serial_line;
-use aether_abi::user::{MAX_SYSCALL_IO, Syscall, USER_LIMIT, errno};
+use aether_abi::user::{MAX_SYSCALL_IO, Syscall, USER_LIMIT, USER_STACK_TOP, errno};
 use aether_ipc::{IpcError, MAX_MESSAGE_BYTES};
 use aether_memory::frame::PhysFrame;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -182,6 +182,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         33 => scheduler::linux_dup2(first, second).map_or_else(|error| error, |fd| fd as i64),
         39 => scheduler::linux_getpid() as i64,
         57 => scheduler::linux_fork(frame).map_or_else(|error| error, |pid| pid as i64),
+        59 => return linux_execve(frame, pml4, first, second, third),
         61 => linux_wait4(pml4, first, second, third),
         56 => linux_clone(
             frame,
@@ -1044,6 +1045,65 @@ fn linux_sigreturn(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     }
     // SAFETY: The frame is live on the current kernel stack.
     unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+    frame
+}
+
+fn linux_execve(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    path_pointer: u64,
+    _argv: u64,
+    _envp: u64,
+) -> *mut InterruptFrame {
+    let Some(path) = user_cstr(pml4, path_pointer, 256) else {
+        unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+        return frame;
+    };
+    let Some(bytes) = crate::linux::file_data(path) else {
+        unsafe { (*frame).rax = LINUX_ENOENT as u64 };
+        return frame;
+    };
+    let Ok(image) = aether_boot_common::elf::parse(bytes) else {
+        unsafe { (*frame).rax = LINUX_EINVAL as u64 };
+        return frame;
+    };
+    let Some(new_pml4) = crate::memory::with_frame_allocator(|allocator| {
+        paging::create_user_address_space(allocator, &image, bytes)
+    }) else {
+        unsafe { (*frame).rax = LINUX_ENOMEM as u64 };
+        return frame;
+    };
+    let Ok(new_pml4) = new_pml4 else {
+        unsafe { (*frame).rax = LINUX_ENOMEM as u64 };
+        return frame;
+    };
+
+    let stack_page = USER_STACK_TOP - aether_memory::PAGE_SIZE;
+    let mut page = [0u8; aether_memory::PAGE_SIZE as usize];
+    let path_bytes = path.as_bytes();
+    page[..path_bytes.len()].copy_from_slice(path_bytes);
+    let mut offset = 1024usize;
+    let mut push = |value: u64| {
+        page[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        offset += 8;
+    };
+    push(1); // argc
+    push(stack_page); // argv[0]
+    push(0); // argv
+    push(0); // envp
+    push(0); // AT_NULL
+    push(0);
+
+    paging::activate(new_pml4);
+    // SAFETY: The new address space maps the stack page writable, and the
+    // syscall path has interrupts masked.
+    unsafe {
+        core::ptr::copy_nonoverlapping(page.as_ptr(), stack_page as *mut u8, offset);
+        (*frame).rax = 0;
+        (*frame).rip = image.entry();
+        (*frame).rsp = stack_page + 1024;
+    }
+    scheduler::linux_replace_image(new_pml4);
     frame
 }
 
