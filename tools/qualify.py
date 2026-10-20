@@ -38,6 +38,7 @@ STEPS = [
     ("compatibility-suite", ["make", "compat-test"]),
     ("package-update-policy", ["make", "update-test"]),
     ("boot", ["make", "test"]),
+    ("iso-boot", ["make", "iso-test"]),
     ("shell", ["make", "shell-test"]),
     ("fault-path", ["make", "fault-test"]),
     ("negative-boot", ["make", "negative-test"]),
