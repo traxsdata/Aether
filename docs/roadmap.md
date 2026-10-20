@@ -223,10 +223,13 @@ user space. It is not a VM. The target and security gates are in
 - [x] Notification calls: non-blocking `poll`, `eventfd2`, and basic
   `epoll_create1`/`epoll_ctl`/`epoll_wait`.
 - [ ] Blocking waits, edge-triggered epoll semantics, and bounded `inotify`.
-- [ ] Process and thread syscalls: `clone`, `clone3`, `wait4`, `execve`,
-  `set_tid_address`, `set_robust_list`, `rseq`, thread-local storage.
-- [ ] Synchronization: real futex wait/wake queues, timeouts, robust lists;
-  semaphores and condition variables through glibc.
+- [x] Thread creation: `clone` with `CLONE_VM|CLONE_THREAD`, per-thread
+  kernel stacks, TLS, tgid/tid, and clear-child-tid join.
+- [ ] Process syscalls: `fork`, `clone3`, `wait4`, `execve`, process groups,
+  `set_robust_list`, `rseq` details.
+- [x] Synchronization: futex wait/wake queues and clear-child-tid join; thread
+  wake ordering.
+- [ ] Futex timeouts, robust lists, condition variables, and semaphores.
 - [ ] Signals: `rt_sigaction`, `rt_sigprocmask`, `sigaltstack`,
   `rt_sigreturn`, fault-to-signal delivery, and per-thread masks.
 - [ ] Time and scheduling: `nanosleep`, `clock_nanosleep`, `timerfd`,

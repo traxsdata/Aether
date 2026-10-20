@@ -73,6 +73,12 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Linux thread and futex slice: `clone` with `CLONE_VM|CLONE_THREAD`,
+  per-thread kernel stacks, TLS, tgid/tid, and clear-child-tid join; real
+  `FUTEX_WAIT`/`FUTEX_WAKE` queues that block and wake tasks. The boot fixture
+  creates a thread, signals through futex, joins it, and exits
+  (`AETHER_LINUX_THREAD_OK`). File/capability tables are copied per thread for
+  now, and fork/exec/signals remain missing.
 - Linux notification slice: `eventfd2` counters and basic
   `epoll_create1`/`epoll_ctl`/`epoll_wait` over files, directories, and pipes.
   The boot fixture watches an eventfd through epoll and reads it back

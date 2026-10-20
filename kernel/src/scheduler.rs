@@ -38,7 +38,7 @@ pub const LINUX_TASK: usize = USER_TASK + 1;
 /// Task index of the dynamic Linux loader test.
 pub const LINUX_DYN_TASK: usize = LINUX_TASK + 1;
 
-const MAX_TASKS: usize = WORKER_COUNT + 4;
+const MAX_TASKS: usize = WORKER_COUNT + 12;
 const STACK_SIZE: usize = 16 * 1024;
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const ROUNDS: usize = 4;
@@ -59,6 +59,7 @@ enum TaskState {
     Empty,
     Ready,
     Running,
+    Blocked,
     Done,
     Faulted,
 }
@@ -70,6 +71,7 @@ enum TaskKind {
     Worker,
     User,
     Linux,
+    Thread,
 }
 
 /// Syscall ABI selected for a ring-3 task.
@@ -186,6 +188,9 @@ struct Task {
     vmas: VmaTable,
     brk: u64,
     fs_base: u64,
+    tgid: usize,
+    futex_address: u64,
+    clear_child_tid: u64,
     linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
     linux_overlay: [Option<LinuxOverlay>; OVERLAY_FILES],
     linux_pipes: [Option<LinuxPipe>; MAX_PIPES],
@@ -213,6 +218,9 @@ impl Task {
             vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
             brk: 0,
             fs_base: 0,
+            tgid: 0,
+            futex_address: 0,
+            clear_child_tid: 0,
             linux_fds: [None; crate::linux::MAX_FDS],
             linux_overlay: [None; OVERLAY_FILES],
             linux_pipes: [None; MAX_PIPES],
@@ -551,6 +559,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     user.pml4 = user_pml4.start_address();
     user.kernel_stack_top = user_kernel_top;
     user.root = crate::fs::DEMO_ROOT;
+    user.tgid = USER_TASK;
     tasks[USER_TASK] = user;
     crate::apps::started(USER_TASK);
 
@@ -579,6 +588,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     linux.kernel_stack_top = linux_kernel_top;
     linux.root = crate::fs::DEMO_ROOT;
     linux.brk = paging::LINUX_ARENA_BASE;
+    linux.tgid = LINUX_TASK;
     tasks[LINUX_TASK] = linux;
 
     // Load a position-independent image through its interpreter. This proves
@@ -608,6 +618,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     dynamic_task.kernel_stack_top = dynamic_kernel_top;
     dynamic_task.root = crate::fs::DEMO_ROOT;
     dynamic_task.brk = paging::LINUX_ARENA_BASE;
+    dynamic_task.tgid = LINUX_DYN_TASK;
     let dynamic_interpreter =
         aether_linux_elf::parse(dynamic_interp).map_err(|_| SchedulerError::LinuxImage)?;
     seed_linux_vmas(
@@ -1029,6 +1040,169 @@ pub fn current_abi() -> TaskAbi {
     tasks[CURRENT.load(Ordering::Relaxed)].abi
 }
 
+/// Creates a Linux thread sharing the caller's address space.
+///
+/// The child resumes at the instruction after `clone` with `RAX=0`, the
+/// caller-supplied stack, and an optional TLS base. File and signal tables are
+/// copied for now; true sharing is a later refinement.
+#[allow(clippy::too_many_arguments)]
+pub fn linux_clone(
+    frame: *mut InterruptFrame,
+    flags: u64,
+    child_stack: u64,
+    child_tid: u64,
+    tls: u64,
+) -> Result<usize, i64> {
+    const CLONE_VM: u64 = 0x0000_0100;
+    const CLONE_THREAD: u64 = 0x0001_0000;
+    const CLONE_SETTLS: u64 = 0x0008_0000;
+    if flags & (CLONE_VM | CLONE_THREAD) != (CLONE_VM | CLONE_THREAD) {
+        return Err(LINUX_ENOSYS);
+    }
+    if child_stack == 0
+        || !child_stack.is_multiple_of(16)
+        || !(USER_BASE..USER_LIMIT).contains(&child_stack)
+    {
+        return Err(LINUX_EINVAL);
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let (
+        parent_abi,
+        parent_pml4,
+        parent_root,
+        parent_vmas,
+        parent_brk,
+        parent_fs_base,
+        parent_tgid,
+        parent_fds,
+        parent_overlay,
+        parent_pipes,
+        parent_eventfds,
+        parent_epolls,
+        parent_handles,
+    ) = {
+        let parent = &tasks[current];
+        (
+            parent.abi,
+            parent.pml4,
+            parent.root,
+            parent.vmas,
+            parent.brk,
+            parent.fs_base,
+            parent.tgid,
+            parent.linux_fds,
+            parent.linux_overlay,
+            parent.linux_pipes,
+            parent.linux_eventfds,
+            parent.linux_epolls,
+            parent.handles,
+        )
+    };
+    let Some(slot) = tasks.iter().position(|task| task.state == TaskState::Empty) else {
+        return Err(LINUX_EAGAIN);
+    };
+    let kernel_stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
+    let kernel_top = stack_top(&kernel_stacks.0[slot]);
+
+    let mut thread = Task::new();
+    thread.state = TaskState::Ready;
+    thread.kind = TaskKind::Thread;
+    thread.abi = parent_abi;
+    thread.saved_rsp = 0;
+    thread.pml4 = parent_pml4;
+    thread.kernel_stack_top = kernel_top;
+    thread.root = parent_root;
+    thread.vmas = parent_vmas;
+    thread.brk = parent_brk;
+    thread.fs_base = if flags & CLONE_SETTLS != 0 {
+        tls
+    } else {
+        parent_fs_base
+    };
+    thread.tgid = parent_tgid;
+    thread.futex_address = 0;
+    thread.clear_child_tid = child_tid;
+    thread.linux_fds = parent_fds;
+    thread.linux_overlay = parent_overlay;
+    thread.linux_pipes = parent_pipes;
+    thread.linux_eventfds = parent_eventfds;
+    thread.linux_epolls = parent_epolls;
+    thread.handles = parent_handles;
+
+    let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
+    let frame_end = (kernel_top - 16) & !15;
+    let frame_start = frame_end - frame_size;
+    // SAFETY: The destination is inside the new task's private kernel stack,
+    // and the source frame is live on the caller's kernel stack.
+    unsafe {
+        ptr::copy_nonoverlapping(
+            frame as *const u8,
+            frame_start as *mut u8,
+            frame_size as usize,
+        );
+        let child_frame = &mut *(frame_start as *mut InterruptFrame);
+        child_frame.rax = 0;
+        child_frame.rsp = child_stack;
+    }
+    thread.saved_rsp = frame_start;
+    tasks[slot] = thread;
+    Ok(slot)
+}
+
+/// Blocks the current Linux task on a futex word.
+pub fn linux_futex_wait(frame: *mut InterruptFrame, address: u64) -> *mut InterruptFrame {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    tasks[current].futex_address = address;
+    tasks[current].state = TaskState::Blocked;
+    yield_current(frame)
+}
+
+/// Wakes up to `count` tasks blocked on `address`.
+pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let mut woken = 0u64;
+    for task in tasks.iter_mut() {
+        if woken >= count {
+            break;
+        }
+        if task.state == TaskState::Blocked && task.futex_address == address {
+            task.state = TaskState::Ready;
+            task.futex_address = 0;
+            woken += 1;
+        }
+    }
+    woken as i64
+}
+
+/// Returns the thread-group id for `getpid`.
+#[must_use]
+pub fn linux_getpid() -> usize {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].tgid
+}
+
+/// Clears a thread's `CLONE_CHILD_CLEARTID` word and wakes a joiner.
+fn clear_child_tid(index: usize) {
+    let (pointer, pml4) = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        (tasks[index].clear_child_tid, tasks[index].pml4)
+    };
+    if pointer == 0 || pointer >= USER_LIMIT || !pointer.is_multiple_of(4) {
+        return;
+    }
+    let Some(pml4) = PhysFrame::from_address(pml4) else {
+        return;
+    };
+    if !paging::user_range_valid(pml4, pointer, 4, true) {
+        return;
+    }
+    // SAFETY: The four-byte user range was validated as writable above.
+    unsafe { ptr::write(pointer as *mut u32, 0) };
+    let _ = linux_futex_wake(pointer, 1);
+}
+
 /// Returns the number of user tasks retired for a fault.
 #[must_use]
 pub fn user_faults() -> usize {
@@ -1100,6 +1274,7 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
 
 const LINUX_EBADF: i64 = -9;
 const LINUX_EAGAIN: i64 = -11;
+const LINUX_ENOSYS: i64 = -38;
 const LINUX_ENOTDIR: i64 = -20;
 const LINUX_EISDIR: i64 = -21;
 const LINUX_EINVAL: i64 = -22;
@@ -1989,14 +2164,25 @@ fn release_linux_mappings(index: usize) {
 /// Terminates the Linux ABI boot task.
 pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     let current = CURRENT.load(Ordering::Relaxed);
-    {
+    let kind = {
         let tasks = unsafe { &*TASKS.0.get() };
-        if (current != LINUX_TASK && current != LINUX_DYN_TASK)
-            || tasks[current].kind != TaskKind::Linux
-        {
-            serial_line!("AETHER_BOOT_FAILED reason=linux exit from wrong task");
-            halt()
-        }
+        tasks[current].kind
+    };
+    if kind == TaskKind::Thread {
+        clear_child_tid(current);
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].state = TaskState::Done;
+        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
+        tasks[current].linux_overlay = [None; OVERLAY_FILES];
+        tasks[current].linux_pipes = [None; MAX_PIPES];
+        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
+        tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        serial_line!("linux: thread exit tid={current} status={status}");
+        return schedule_next(current);
+    }
+    if (current != LINUX_TASK && current != LINUX_DYN_TASK) || kind != TaskKind::Linux {
+        serial_line!("AETHER_BOOT_FAILED reason=linux exit from wrong task");
+        halt()
     }
 
     release_linux_mappings(current);
@@ -2020,6 +2206,11 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         LINUX_EXITS.fetch_add(1, Ordering::Release);
         LINUX_RESULT.store(result as usize, Ordering::Release);
     }
+    for task in tasks.iter_mut().skip(1) {
+        if task.kind == TaskKind::Thread && task.tgid == current {
+            task.state = TaskState::Done;
+        }
+    }
     serial_line!("linux: exit pid={} status={status}", current);
     schedule_next(current)
 }
@@ -2028,13 +2219,30 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
 /// continues with the next runnable task.
 pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64) -> *mut InterruptFrame {
     let current = CURRENT.load(Ordering::Relaxed);
-    let (linux, kind) = {
+    let (linux, thread, kind) = {
         let tasks = unsafe { &*TASKS.0.get() };
-        (tasks[current].kind == TaskKind::Linux, tasks[current].kind)
+        (
+            tasks[current].kind == TaskKind::Linux,
+            tasks[current].kind == TaskKind::Thread,
+            tasks[current].kind,
+        )
     };
-    if kind != TaskKind::User && !linux {
+    if kind != TaskKind::User && !linux && !thread {
         serial_line!("AETHER_BOOT_FAILED reason=user-fault on non-user task");
         halt()
+    }
+    if thread {
+        clear_child_tid(current);
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].state = TaskState::Faulted;
+        tasks[current].saved_rsp = frame as u64;
+        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
+        tasks[current].linux_overlay = [None; OVERLAY_FILES];
+        tasks[current].linux_pipes = [None; MAX_PIPES];
+        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
+        tasks[current].linux_epolls = [None; MAX_EPOLLS];
+        serial_line!("linux: thread fault tid={current} vector={vector}");
+        return schedule_next(current);
     }
 
     if linux {

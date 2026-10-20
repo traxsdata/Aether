@@ -475,6 +475,72 @@ _start:
     syscall
     add $64, %rsp
 
+    /* Thread + futex: map a shared page, clone, wait for the child. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_thread
+    mov %rax, %r12
+    movl $0, (%r12)
+    movl $0, 8(%r12)
+    mov $56, %rax               /* clone */
+    mov $0x1290100, %rdi        /* VM|THREAD|SETTLS|CLEARTID|CHILD_SETTID */
+    lea 0xf00(%r12), %rsi
+    xor %rdx, %rdx
+    lea 8(%r12), %r10
+    lea 0x200(%r12), %r8
+    syscall
+    test %rax, %rax
+    jz child_thread
+wait_flag:
+    cmpl $0, (%r12)
+    jne wait_child
+    mov $202, %rax              /* futex wait on flag */
+    mov %r12, %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    syscall
+    jmp wait_flag
+wait_child:
+    mov 8(%r12), %edx
+    test %edx, %edx
+    jz thread_done
+    mov $202, %rax              /* futex wait on child_tid */
+    lea 8(%r12), %rdi
+    xor %rsi, %rsi
+    syscall
+    jmp wait_child
+thread_done:
+    mov %r12, %rdi
+    mov $4096, %rsi
+    mov $11, %rax
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea thread_message(%rip), %rsi
+    mov $thread_message_len, %rdx
+    syscall
+    jmp after_thread
+
+child_thread:
+    movl $1, (%r12)
+    mov $202, %rax              /* futex wake flag */
+    mov %r12, %rdi
+    mov $1, %rsi
+    mov $1, %rdx
+    syscall
+    mov $60, %rax               /* thread exit */
+    xor %rdi, %rdi
+    syscall
+    jmp child_thread
+
+after_thread:
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea event_message(%rip), %rsi
@@ -552,6 +618,10 @@ fail_pipe:
 fail_event:
     lea event_failure(%rip), %rsi
     mov $event_failure_len, %rdx
+    jmp report_failure
+fail_thread:
+    lea thread_failure(%rip), %rsi
+    mov $thread_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -598,6 +668,12 @@ event_message:
 event_failure:
     .ascii "AETHER_LINUX_EVENT_FAIL\n"
     .set event_failure_len, . - event_failure
+thread_message:
+    .ascii "AETHER_LINUX_THREAD_OK clone=ok futex=ok join=ok\n"
+    .set thread_message_len, . - thread_message
+thread_failure:
+    .ascii "AETHER_LINUX_THREAD_FAIL\n"
+    .set thread_failure_len, . - thread_failure
 root_path:
     .asciz "/"
 usrbin_path:

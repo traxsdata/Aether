@@ -166,6 +166,16 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         28 => 0,
         32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
         33 => scheduler::linux_dup2(first, second).map_or_else(|error| error, |fd| fd as i64),
+        39 => scheduler::linux_getpid() as i64,
+        56 => linux_clone(
+            frame,
+            pml4,
+            first,
+            second,
+            third,
+            unsafe { (*frame).r10 },
+            unsafe { (*frame).r8 },
+        ),
         72 => linux_fcntl(first, second, third),
         89 => linux_readlink(pml4, first, second, third, 0),
         204 => linux_sched_getaffinity(pml4, first, second, third),
@@ -196,11 +206,11 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         10 => linux_mprotect(pml4, first, second, third),
         11 => linux_munmap(pml4, first, second),
         12 => scheduler::linux_brk(first) as i64,
-        39 | 186 => scheduler::current_task() as i64,
+        186 => scheduler::current_task() as i64,
         63 => linux_uname(pml4, first),
         102 | 104 | 107 | 108 => 1000,
         158 => linux_arch_prctl(pml4, first, second),
-        202 => linux_futex(first, second),
+        202 => return linux_futex(frame, pml4, first, second, third),
         218 | 273 | 334 => 0,
         228 => linux_clock_gettime(pml4, second),
         318 => linux_getrandom(pml4, first, second),
@@ -221,6 +231,7 @@ const LINUX_ENOSYS: i64 = -38;
 const LINUX_ENOMEM: i64 = -12;
 const LINUX_ENOENT: i64 = -2;
 const LINUX_EACCES: i64 = -13;
+const LINUX_EAGAIN: i64 = -11;
 const LINUX_EBADF: i64 = -9;
 const LINUX_EEXIST: i64 = -17;
 
@@ -758,13 +769,77 @@ fn linux_arch_prctl(pml4: PhysFrame, code: u64, value: u64) -> i64 {
     }
 }
 
-fn linux_futex(_address: u64, operation: u64) -> i64 {
-    match operation & 0x7f {
-        // WAIT and WAKE are single-task no-ops for now. A real implementation
-        // needs a wait queue and a timeout service.
-        0 | 1 => 0,
-        _ => LINUX_ENOSYS,
+fn linux_clone(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    flags: u64,
+    child_stack: u64,
+    parent_tid: u64,
+    child_tid: u64,
+    tls: u64,
+) -> i64 {
+    const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+    const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    if flags & CLONE_PARENT_SETTID != 0
+        && (parent_tid == 0 || !paging::user_range_valid(pml4, parent_tid, 4, true))
+    {
+        return LINUX_EFAULT;
     }
+    if flags & (CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID) != 0
+        && (child_tid == 0 || !paging::user_range_valid(pml4, child_tid, 4, true))
+    {
+        return LINUX_EFAULT;
+    }
+    let tid = match scheduler::linux_clone(frame, flags, child_stack, child_tid, tls) {
+        Ok(tid) => tid,
+        Err(error) => return error,
+    };
+    if flags & CLONE_PARENT_SETTID != 0 {
+        let _ = write_user_u32(pml4, parent_tid, tid as u32);
+    }
+    if flags & CLONE_CHILD_SETTID != 0 {
+        let _ = write_user_u32(pml4, child_tid, tid as u32);
+    }
+    tid as i64
+}
+
+fn linux_futex(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    address: u64,
+    operation: u64,
+    value: u64,
+) -> *mut InterruptFrame {
+    match operation & 0x7f {
+        0 => {
+            if !address.is_multiple_of(4) || !paging::user_range_valid(pml4, address, 4, true) {
+                // SAFETY: The frame is live on the current kernel stack.
+                unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+                return frame;
+            }
+            // SAFETY: The four-byte user word was validated above.
+            let observed = unsafe { core::ptr::read(address as *const u32) } as u64;
+            if observed != value {
+                unsafe { (*frame).rax = LINUX_EAGAIN as u64 };
+                return frame;
+            }
+            scheduler::linux_futex_wait(frame, address)
+        }
+        1 => {
+            let woken = scheduler::linux_futex_wake(address, value);
+            unsafe { (*frame).rax = woken as u64 };
+            frame
+        }
+        _ => {
+            unsafe { (*frame).rax = LINUX_ENOSYS as u64 };
+            frame
+        }
+    }
+}
+
+fn write_user_u32(pml4: PhysFrame, pointer: u64, value: u32) -> Option<()> {
+    write_user_bytes(pml4, pointer, &value.to_le_bytes())
 }
 
 fn linux_clock_gettime(pml4: PhysFrame, pointer: u64) -> i64 {
