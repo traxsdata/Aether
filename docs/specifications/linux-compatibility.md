@@ -63,11 +63,11 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 |---|---|---|---|
 | AppImage import | Validate ELF/SquashFS bounds, digest, publisher; unpack read-only root | AppImage importer and package trust policy | **Container inspection, pinned digest, signed AppImage and runtime-rootfs records, all-compression SquashFS extraction, host packaging, and embedded signed-rootfs in-OS import implemented**; the populated glibc/Mesa rootfs and user-supplied AppImage import are missing |
 | ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static and dynamic exec fixtures propagate bounded argv/envp; a `PT_INTERP` fixture and opt-in host-glibc hello run; pinned production libraries/runtime remain missing |
-| Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: eager-copy fork, blocking `wait4` with nonchild/selector checks, bounded same-session process groups, static/dynamic exec; broader process semantics remain missing |
-| Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `clone` threads, per-thread stacks/TLS and clear-child-tid join; detach/affinity/rseq details and broader stress remain |
+| Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: eager-copy fork, blocking `wait4` with nonchild/selector checks, bounded same-session process groups with `setpgid`/`getpgid`/`getsid`/`setsid` validation, static/dynamic exec, and bounded `clone3` thread creation; stopped/continued waits and group selectors return `ENOSYS`/`EINVAL` |
+| Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `clone` and `clone3` threads, per-thread stacks/TLS, clear-child-tid join, and bounded `rseq` registration/validation (CPU id always 0, no abort notifications); detach and affinity remain |
 | Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: bounded demand paging for anonymous mappings; `MAP_SHARED|MAP_ANONYMOUS` is supported only among threads sharing one `CLONE_VM` address space, with thread-group VMA metadata kept in sync. File-backed shared mappings remain unsupported. `fork()` returns `ENOSYS` while such a mapping exists because cross-process shared-frame ownership is not implemented. |
-| Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: futex wait/wake queues, timeout (`ETIMEDOUT`), clear-child-tid join, and eventfd counters shared by threads in one tgid; robust lists, condition variables, and semaphores remain |
-| Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Partial: self/group and cross-process SIGUSR1 fixture coverage; siginfo/ucontext and complete alt-stack/restart semantics remain missing |
+| Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: futex wait/wake queues, timeout (`ETIMEDOUT`), clear-child-tid join, robust-futex registration and exit-time `FUTEX_OWNER_DIED` wakeup for the exact 24-byte x86-64 head layout, and eventfd counters shared by threads in one tgid; condition variables, semaphores, and other robust-list layouts remain |
+| Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Partial: x86-64 `rt_sigframe` with `siginfo_t`/`ucontext_t`, `SA_SIGINFO`, `SA_ONSTACK` with fallback, GPR/mask restore, `SA_RESTART` for `wait4`, self/group and cross-process SIGUSR1 handlers, and default `SIGKILL`/`SIGTERM`/`SIGCHLD`; stopping, queued real-time signals, and most `siginfo` variants remain |
 | Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; relative/absolute `nanosleep`/`clock_nanosleep` with `EINTR`; bounded `timerfd_create`/`settime`/`gettime` for `CLOCK_MONOTONIC`, one-shot and periodic, with poll/epoll integration. High-resolution clocks and `CLOCK_REALTIME` remain absent |
 | Files | `openat`, `statx`, `readlink`, `rename`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root plus bounded `/tmp` overlay and one exact existing overlay-file `IN_MODIFY` watch; requires `IN_NONBLOCK`. Default blocking init/reads, rootfs/directory watches, other events, overflow, and persistent/shared-thread watch identity are unsupported |
 | Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Blocking/finite `poll`/`epoll_wait`, same-tgid thread-shared eventfd, blocking pipes, and narrow nonblocking inotify | Partial: `poll` and `epoll_wait` support finite and infinite timeouts with scheduler parking and deadlines; `epoll` is level-triggered by default with a bounded `EPOLLET` transition slice and honest `EPOLLONESHOT` re-arm via `EPOLL_CTL_MOD`; pipes block on empty read/full write across `fork`-inherited descriptors. Full inotify, nested epoll watches, and cross-process eventfd sharing remain unsupported |
@@ -202,14 +202,26 @@ A SIGUSR1 handler is installed, raised, run, and returned from through
 cross-process SIGUSR1 (`AETHER_LINUX_CROSS_PROCESS_SIGNAL_OK`). A child process
 is forked and reaped through blocking `wait4`, with nonchild/selector checks
 (`AETHER_LINUX_FORK_OK`), and bounded same-session process groups are exercised
-(`AETHER_LINUX_PROCESS_GROUP_OK`). Futex timeout behavior is tested
-(`AETHER_LINUX_FUTEX_TIMEOUT_OK`). Eventfd counters are shared across threads
-in one tgid (and remain process-private across fork). Blocking multiplexing is
-covered by `poll` finite/infinite timeouts over a pipe and an eventfd
-(`AETHER_LINUX_POLL_BLOCK_OK`), `epoll_wait` finite/infinite waits with
-level-triggered re-reporting, an edge-triggered transition slice, and
-one-shot re-arm (`AETHER_LINUX_EPOLL_BLOCK_OK`), and cross-process blocking
-pipe read/write plus end-of-file (`AETHER_LINUX_PIPE_BLOCK_OK`). Relative and
+(`AETHER_LINUX_PROCESS_GROUP_OK`), including group-scoped `kill(-pgid)` and
+`setpgid` `EPERM`/`ESRCH`/`EINVAL` validation
+(`AETHER_LINUX_PROCESS_GROUP_KILL_OK`). The signal fixture verifies an x86-64
+`rt_sigframe` with `siginfo_t`/`ucontext_t`, `si_code` for `kill` and
+`tgkill`, `ucontext` register/mask capture, and GPR restore
+(`AETHER_LINUX_SIGINFO_OK`); alternate-stack delivery and safe fallback
+(`AETHER_LINUX_ALTSTACK_OK`); `SA_RESTART` versus `EINTR` for `wait4`
+(`AETHER_LINUX_RESTART_OK`); and default `SIGTERM` handler plus `SIGKILL`
+termination (`AETHER_LINUX_SIGNAL_DEFAULT_OK`). A bounded `clone3` thread
+create/join and its `EINVAL`/`ENOSYS` rejections are tested
+(`AETHER_LINUX_CLONE3_OK`), as are `set_robust_list`/`get_robust_list` and
+owner-died wakeup on thread exit (`AETHER_LINUX_ROBUST_FUTEX_OK`) and bounded
+`rseq` registration/validation (`AETHER_LINUX_RSEQ_OK`). Futex timeout behavior
+is tested (`AETHER_LINUX_FUTEX_TIMEOUT_OK`). Eventfd counters are shared across
+threads in one tgid (and remain process-private across fork). Blocking
+multiplexing is covered by `poll` finite/infinite timeouts over a pipe and an
+eventfd (`AETHER_LINUX_POLL_BLOCK_OK`), `epoll_wait` finite/infinite waits with
+level-triggered re-reporting, an edge-triggered transition slice, and one-shot
+re-arm (`AETHER_LINUX_EPOLL_BLOCK_OK`), and cross-process blocking pipe
+read/write plus end-of-file (`AETHER_LINUX_PIPE_BLOCK_OK`). Relative and
 absolute sleeps with signal `EINTR` (`AETHER_LINUX_NANOSLEEP_OK`) and
 one-shot/periodic timerfds seen through `poll` and `epoll`
 (`AETHER_LINUX_TIMERFD_OK`) are also exercised. A static freestanding Linux ELF runs at CPL3,
@@ -222,8 +234,9 @@ produces `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 and a W+X `mprotect` are denied. Private anonymous pages are allocated on demand
 and reclaimed on `munmap` and task exit. Shared mappings and per-domain mapping
 quotas, cross-process shared eventfd counters, nested epoll watches, full
-inotify, high-resolution timers, siginfo/ucontext, and the user-space `linuxd`
-protocol remain missing. Gate 2 remains partial.
+inotify, high-resolution timers, stopped/continued waits, signal stopping,
+remaining `siginfo` variants, and the user-space `linuxd` protocol remain
+missing. Gate 2 remains partial.
 
 ### Gate 3 — Headless GridCraft
 
@@ -267,9 +280,12 @@ revocation tests, and a compatibility record no better than the suite supports.
    `fork()` returns `ENOSYS` while a shared mapping exists. There are no
    per-domain mapping quotas.
 4. Full inotify, cross-process eventfd counters, nested epoll watches,
-   high-resolution timers, and complete siginfo/ucontext semantics remain
-   absent; blocking/finite poll, epoll, pipe, sleep, and timerfd slices are
-   present for the tested same-task and pipe `fork` cases.
+   high-resolution timers, stopped/continued waits, signal stopping, queued
+   real-time signals, and the remaining `siginfo`/`clone3`/`rseq` variants
+   remain absent. Blocking/finite poll, epoll, pipe, sleep, and timerfd slices
+   are present for the tested same-task and pipe `fork` cases, and the
+   implemented `siginfo`/`ucontext`, alt-stack, restart, robust-futex, and
+   `clone3` thread subset is bounded and fixture-tested.
 5. No populated and pinned glibc/Mesa/Wayland runtime rootfs, Wayland service,
    or software renderer.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.
