@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Console shell.
 //!
-//! The shell runs in the idle task at ring 0 and therefore has no application
-//! authority of its own: it can list and read files through the filesystem
-//! service root, but it cannot inspect another process's capability table.
-//! Commands are intentionally small and bounded; the shell is a diagnostic
-//! surface, not a privileged policy engine.
+//! The shell runs in the idle task at ring 0. It is a **diagnostic surface
+//! with the kernel's ambient authority**: filesystem commands act through the
+//! filesystem service's kernel console root and can read, replace, and delete
+//! any file, and `portal revoke` changes grant state. This is why the shell
+//! is not the ordinary-user terminal the specification requires: it provides
+//! no elevation boundary, no per-user identity, and no scoping. The
+//! specification's user terminal is a planned user-space component; until it
+//! exists, administrative commands must be treated as system administration.
+//!
+//! Commands are intentionally small and bounded; the shell never accepts a
+//! capability from an application and cannot inspect another process's
+//! capability table.
 
 use crate::arch::x86_64::serial;
 use crate::serial_line;
-use crate::{apps, fs, scheduler, supervisor};
+use crate::{apps, fs, scheduler, supervisor, syscall};
 
 const MAX_LINE: usize = 128;
 
@@ -97,6 +104,7 @@ fn execute_line() {
         "portal" => portal_command(argument),
         "security" => security(),
         "input" => serial_line!("input: dropped={}", crate::input::dropped()),
+        "mem" => memory(),
         "uptime" => serial_line!("uptime: {} ticks", scheduler::ticks()),
         "recovery" => recovery(),
         "packages" => crate::packaging::print_status(),
@@ -120,6 +128,7 @@ fn print_help() {
     serial_line!("  portal revoke N  revoke grant N (open handles stay valid)");
     serial_line!("  security         permission and sandbox status");
     serial_line!("  input            keyboard queue status");
+    serial_line!("  mem              memory pressure (MiB free/total)");
     serial_line!("  uptime           timer ticks");
     serial_line!("  recovery         system image and rollback status");
     serial_line!("  packages         installed package and verification status");
@@ -200,22 +209,39 @@ fn portal_command(arguments: &str) {
 
 fn security() {
     serial_line!(
-        "security: open_files={} escapes_denied={} access_denied={}",
+        "security: open_files={} escapes_denied={} access_denied={} quota_denied={}",
         fs::open_count(),
         fs::escape_denials(),
-        fs::access_denials()
+        fs::access_denials(),
+        fs::quota_denials()
     );
     serial_line!(
         "security: demo_root={} other_root={}",
         fs::DEMO_ROOT,
         fs::OTHER_ROOT
     );
-    serial_line!("security: portal_grants={}", crate::portal::grant_count());
+    serial_line!(
+        "security: portal_grants={} portal_uses={} portal_denied={}",
+        crate::portal::grant_count(),
+        crate::portal::grant_uses(),
+        crate::portal::denials()
+    );
+    serial_line!(
+        "security: user_exits={} user_faults={} ipc_denied={}",
+        scheduler::user_exits(),
+        scheduler::user_faults(),
+        syscall::ipc_denials()
+    );
     supervisor::print_security();
     crate::portal::print_grants();
     apps::print_table();
     crate::desktop::redraw();
     serial_line!("security: desktop_focus={}", crate::desktop::focus());
+}
+
+fn memory() {
+    let (free, total) = scheduler::mem_status();
+    serial_line!("mem: free={free}MiB total={total}MiB");
 }
 
 fn recovery() {
