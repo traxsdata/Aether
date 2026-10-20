@@ -228,13 +228,46 @@ _start:
     cmp %rax, (%r15)
     jne fail_vma
 
-    /* munmap the file mapping, then MAP_FIXED an anonymous page over it. */
+    /* munmap the private file mapping. */
     mov $11, %rax
     mov %r15, %rdi
     mov $4096, %rsi
     syscall
     test %rax, %rax
     js fail_vma
+
+    /* File-backed MAP_SHARED: read the same rootfs bytes from the shared page
+     * cache and confirm that msync fails closed instead of claiming writeback. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $1, %rdx                /* PROT_READ */
+    mov $1, %r10                /* MAP_SHARED */
+    mov %r13, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_vma
+    mov %rax, %r15
+    movabs $0x4c5f524548544541, %rax  /* "AETHER_L" */
+    cmp %rax, (%r15)
+    jne fail_vma
+    mov $26, %rax               /* msync(page, 4096, MS_SYNC) */
+    mov %r15, %rdi
+    mov $4096, %rsi
+    mov $4, %rdx
+    syscall
+    cmp $-95, %rax              /* -EOPNOTSUPP: no writeback to the root */
+    jne fail_vma
+    mov $11, %rax
+    mov %r15, %rdi
+    mov $4096, %rsi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea map_shared_file_message(%rip), %rsi
+    mov $map_shared_file_message_len, %rdx
+    syscall
 
     mov $9, %rax
     mov %r15, %rdi
@@ -859,10 +892,6 @@ thread_done:
     jne fail_thread
     cmpl $1, 16(%r12)
     jne fail_thread
-    mov $57, %rax               /* fork is explicitly unsupported here */
-    syscall
-    cmp $-38, %rax
-    jne fail_thread
     add $16, %rsp
     mov %r12, %rdi
     mov $4096, %rsi
@@ -878,7 +907,118 @@ thread_done:
     lea shared_mmap_message(%rip), %rsi
     mov $shared_mmap_message_len, %rdx
     syscall
+
+    /* MAP_SHARED|MAP_ANONYMOUS across fork: one physical frame is shared,
+     * while a neighbouring private page keeps its own copy. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx                /* PROT_READ|PROT_WRITE */
+    mov $0x21, %r10             /* MAP_SHARED|MAP_ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_shared_fork
+    mov %rax, %r12
+    movq $0, 0(%r12)
+    movq $0, 8(%r12)
+
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10             /* MAP_PRIVATE|MAP_ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_shared_fork
+    mov %rax, %r13
+    movq $0xaa, 0(%r13)
+
+    mov $57, %rax               /* fork */
+    syscall
+    test %rax, %rax
+    js fail_shared_fork
+    jz shared_fork_child
+    mov %rax, %r14
+    movq $0xbb, 0(%r13)         /* private write after fork */
+    movq $1, 0(%r12)            /* shared write after fork */
+    mov $202, %rax              /* wake the child waiting on the shared page */
+    mov %r12, %rdi
+    mov $1, %rsi
+    mov $1, %rdx
+    syscall
+shared_fork_wait:
+    mov 8(%r12), %rax
+    test %rax, %rax
+    jnz shared_fork_reaped
+    mov $202, %rax
+    lea 8(%r12), %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    syscall
+    jmp shared_fork_wait
+shared_fork_reaped:
+    cmpq $0x1234, 8(%r12)       /* the child's shared write is visible here */
+    jne fail_shared_fork
+    cmpq $1, 0(%r12)
+    jne fail_shared_fork
+    cmpq $0xbb, 0(%r13)         /* the parent's private page is unchanged */
+    jne fail_shared_fork
+    sub $16, %rsp
+    mov $61, %rax               /* wait4(child, &status, 0, NULL) */
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_shared_fork
+    cmpl $0, (%rsp)
+    jne fail_shared_fork
+    add $16, %rsp
+    mov $11, %rax
+    mov %r12, %rdi
+    mov $4096, %rsi
+    syscall
+    mov $11, %rax
+    mov %r13, %rdi
+    mov $4096, %rsi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea shared_fork_message(%rip), %rsi
+    mov $shared_fork_message_len, %rdx
+    syscall
     jmp after_thread
+
+shared_fork_child:
+shared_fork_child_wait:
+    cmpq $0, 0(%r12)
+    jne shared_fork_child_ready
+    mov $202, %rax
+    mov %r12, %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    syscall
+    jmp shared_fork_child_wait
+shared_fork_child_ready:
+    cmpq $1, 0(%r12)            /* the parent's shared write is visible here */
+    jne fail_shared_fork
+    cmpq $0xaa, 0(%r13)         /* the parent's private write must not leak */
+    jne fail_shared_fork
+    movq $0x1234, 8(%r12)
+    mov $202, %rax
+    lea 8(%r12), %rdi
+    mov $1, %rsi
+    mov $1, %rdx
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+    jmp shared_fork_child
 
 child_thread:
     movq $1, 16(%r12)
@@ -3255,6 +3395,51 @@ g2_fd_close:
     inc %r15
     jmp g2_fd_close
 g2_fd_closed:
+    /* Per-domain shared VMA quota: 16 shared mappings, then ENOMEM. */
+    xor %r13, %r13
+g2_shared_vma_loop:
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x21, %r10             /* MAP_SHARED|MAP_ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js g2_shared_vma_done
+    mov %rax, (%rsp,%r13,8)
+    inc %r13
+    cmp $17, %r13
+    jb g2_shared_vma_loop
+    jmp g2_fail_shared_vma
+g2_shared_vma_done:
+    cmp $-12, %rax              /* -ENOMEM */
+    jne g2_fail_shared_vma
+    xor %r15, %r15
+g2_shared_vma_unmap:
+    cmp %r13, %r15
+    jae g2_shared_vma_closed
+    mov (%rsp,%r15,8), %rdi
+    mov $4096, %rsi
+    mov $11, %rax
+    syscall
+    inc %r15
+    jmp g2_shared_vma_unmap
+g2_shared_vma_closed:
+    /* Per-domain shared-page quota: 257 pages exceeds the 256-page limit. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $1052672, %rsi          /* 257 * 4096 */
+    mov $3, %rdx
+    mov $0x21, %r10             /* MAP_SHARED|MAP_ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    cmp $-12, %rax              /* -ENOMEM */
+    jne g2_fail_shared_pages
+
+    /* Private VMA quota. */
     xor %r13, %r13
 g2_vma_loop:
     mov $9, %rax
@@ -3360,6 +3545,14 @@ g2_fail_denial:
 g2_fail_quota:
     lea g2_quota_failure(%rip), %rsi
     mov $g2_quota_failure_len, %rdx
+    jmp report_failure
+g2_fail_shared_vma:
+    lea g2_shared_vma_failure(%rip), %rsi
+    mov $g2_shared_vma_failure_len, %rdx
+    jmp report_failure
+g2_fail_shared_pages:
+    lea g2_shared_pages_failure(%rip), %rsi
+    mov $g2_shared_pages_failure_len, %rdx
     jmp report_failure
 g2_extras_done:
     mov $1, %rax                /* write */
@@ -3491,6 +3684,10 @@ fail_inotify_event_mask:
 fail_thread:
     lea thread_failure(%rip), %rsi
     mov $thread_failure_len, %rdx
+    jmp report_failure
+fail_shared_fork:
+    lea shared_fork_failure(%rip), %rsi
+    mov $shared_fork_failure_len, %rdx
     jmp report_failure
 fail_mremap:
     lea mremap_failure(%rip), %rsi
@@ -3933,7 +4130,7 @@ g2_denial_message:
     .ascii "AETHER_LINUX_DENIAL_OK path=ok rofs=ok device=denied\n"
     .set g2_denial_message_len, . - g2_denial_message
 g2_quota_message:
-    .ascii "AETHER_LINUX_QUOTA_OK overlay=enospc fd=emfile vma=enomem\n"
+    .ascii "AETHER_LINUX_QUOTA_OK overlay=enospc fd=emfile vma=enomem shared_vma=enomem shared_pages=enomem\n"
     .set g2_quota_message_len, . - g2_quota_message
 g2_inotify_failure:
     .ascii "AETHER_LINUX_INOTIFY_FAIL stage=advanced\n"
@@ -3956,6 +4153,12 @@ g2_denial_failure:
 g2_quota_failure:
     .ascii "AETHER_LINUX_QUOTA_FAIL\n"
     .set g2_quota_failure_len, . - g2_quota_failure
+g2_shared_vma_failure:
+    .ascii "AETHER_LINUX_QUOTA_FAIL stage=shared_vma\n"
+    .set g2_shared_vma_failure_len, . - g2_shared_vma_failure
+g2_shared_pages_failure:
+    .ascii "AETHER_LINUX_QUOTA_FAIL stage=shared_pages\n"
+    .set g2_shared_pages_failure_len, . - g2_shared_pages_failure
 message:
     .ascii "AETHER_LINUX_EXEC_OK source=static-linux-elf mmap=ok fs=ok overlay=ok\n"
     .set message_len, . - message
@@ -4041,8 +4244,17 @@ thread_message:
     .ascii "AETHER_LINUX_THREAD_OK clone=ok futex=ok join=ok\n"
     .set thread_message_len, . - thread_message
 shared_mmap_message:
-    .ascii "AETHER_LINUX_SHARED_MMAP_OK thread=visible fork=blocked\n"
+    .ascii "AETHER_LINUX_SHARED_MMAP_OK thread=visible\n"
     .set shared_mmap_message_len, . - shared_mmap_message
+shared_fork_message:
+    .ascii "AETHER_LINUX_SHARED_FORK_OK anon=shared private=private visible=both\n"
+    .set shared_fork_message_len, . - shared_fork_message
+map_shared_file_message:
+    .ascii "AETHER_LINUX_MAP_SHARED_FILE_OK file=rootfs read=ok msync=eopnotsupp\n"
+    .set map_shared_file_message_len, . - map_shared_file_message
+shared_fork_failure:
+    .ascii "AETHER_LINUX_SHARED_FORK_FAIL\n"
+    .set shared_fork_failure_len, . - shared_fork_failure
 thread_failure:
     .ascii "AETHER_LINUX_THREAD_FAIL\n"
     .set thread_failure_len, . - thread_failure

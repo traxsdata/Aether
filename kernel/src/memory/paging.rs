@@ -19,6 +19,8 @@ use aether_memory::{LARGE_PAGE_SIZE, PAGE_SIZE};
 use core::arch::asm;
 use core::ptr;
 
+use super::shared;
+
 /// Low region mapped with 4 KiB pages.
 const LOW_REGION_BYTES: u64 = LARGE_PAGE_SIZE;
 
@@ -362,8 +364,10 @@ pub fn map_allocated_user_page(
 
 /// Copies every present user page into a fresh address space.
 ///
-/// This is an eager fork copy, not copy-on-write. The caller owns the returned
-/// PML4 and is responsible for releasing its frames when the process exits.
+/// Private frames are eagerly copied. Frames registered as shared are retained
+/// and mapped into the child, preserving `MAP_SHARED` aliasing across `fork`.
+/// The caller owns the returned PML4 and is responsible for releasing its
+/// frames when the process exits.
 pub fn copy_user_address_space(
     allocator: &mut FrameAllocator<'_>,
     source: PhysFrame,
@@ -375,17 +379,29 @@ pub fn copy_user_address_space(
             && entry.is_present()
             && entry.flags().contains(PageFlags::USER)
         {
-            let frame = allocator.allocate().ok_or(PagingError::OutOfMemory)?;
-            // SAFETY: Both frames are identity-mapped and exclusively owned by
-            // their respective address spaces.
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    entry.address() as *const u8,
-                    frame.start_address() as *mut u8,
-                    PAGE_SIZE as usize,
-                );
+            let Some(shared_frame) = PhysFrame::from_address(entry.address()) else {
+                return Err(PagingError::UnrepresentableAddress(entry.address()));
+            };
+            if shared::retain(shared_frame) {
+                if let Err(error) =
+                    map_user_page(target, allocator, address, shared_frame, entry.flags())
+                {
+                    let _ = shared::release(allocator, shared_frame);
+                    return Err(error);
+                }
+            } else {
+                let frame = allocator.allocate().ok_or(PagingError::OutOfMemory)?;
+                // SAFETY: Both frames are identity-mapped and exclusively owned
+                // by their respective address spaces.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        entry.address() as *const u8,
+                        frame.start_address() as *mut u8,
+                        PAGE_SIZE as usize,
+                    );
+                }
+                map_user_page(target, allocator, address, frame, entry.flags())?;
             }
-            map_user_page(target, allocator, address, frame, entry.flags())?;
         }
         address += PAGE_SIZE;
     }
@@ -419,10 +435,56 @@ pub fn map_allocated_user_range(
     Ok(())
 }
 
+/// Allocates and maps an anonymous `MAP_SHARED` range.
+///
+/// Every page is zero-filled, registered in the shared-frame registry, and
+/// mapped with `flags`. The first reference is owned by the new mapping.
+/// Partial failure unmaps the pages already installed, which either releases
+/// shared references or returns unregistered frames to the allocator.
+pub fn map_shared_anonymous_range(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: PageFlags,
+    domain: u8,
+) -> Result<(), PagingError> {
+    let end = validate_user_range(start, length)?;
+    let mut address = start;
+    while address < end {
+        let Some(frame) = allocator.allocate() else {
+            let _ = unmap_user_range(allocator, pml4, start, address - start);
+            return Err(PagingError::OutOfMemory);
+        };
+        // SAFETY: The frame was just allocated, is identity-mapped, and is not
+        // reachable from any address space until `map_user_page` runs.
+        unsafe { ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize) };
+        if let Err(error) = map_user_page(pml4, allocator, address, frame, flags) {
+            let _ = allocator.deallocate(frame);
+            let _ = unmap_user_range(allocator, pml4, start, address - start);
+            return Err(error);
+        }
+        if shared::register(frame, domain, None).is_err() {
+            // The current page is mapped but unregistered; unmapping the range
+            // also releases the earlier registered pages.
+            let _ = unmap_user_range(
+                allocator,
+                pml4,
+                start,
+                address.saturating_add(PAGE_SIZE) - start,
+            );
+            return Err(PagingError::OutOfMemory);
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(())
+}
+
 /// Unmaps a user range and returns its frames to the allocator.
 ///
-/// Absent pages are skipped so a caller can release a partially populated
-/// range. The number of released frames is returned.
+/// Registered shared frames lose one reference and are freed only with their
+/// last owner. Absent pages are skipped so a caller can release a partially
+/// populated range. The number of released frames is returned.
 pub fn unmap_user_range(
     allocator: &mut FrameAllocator<'_>,
     pml4: PhysFrame,
@@ -437,7 +499,10 @@ pub fn unmap_user_range(
             && entry.is_present()
             && entry.flags().contains(PageFlags::USER)
         {
-            if let Some(frame) = PhysFrame::from_address(entry.address()) {
+            if let Some(frame) = PhysFrame::from_address(entry.address())
+                && !shared::release(allocator, frame)
+            {
+                // Not a registered shared frame: this address space owns it.
                 let _ = allocator.deallocate(frame);
             }
             if clear_user_leaf(pml4, address) {

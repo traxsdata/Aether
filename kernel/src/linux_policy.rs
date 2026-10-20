@@ -62,8 +62,8 @@ pub const fn classify(number: u64) -> Class {
         // fcntl, prlimit64, sched_getaffinity, inotify, exec/atexit helpers.
         0 | 1 | 3 | 4 | 5 | 6 | 8 | 17 | 20 | 21 | 28 | 32 | 33 | 72 | 78 | 79 | 80 | 89 | 204
         | 217 | 254 | 255 | 257 | 262 | 267 | 294 | 302 | 332 => Class::File,
-        // mmap, mprotect, munmap, brk, mremap, arch_prctl.
-        9 | 10 | 11 | 12 | 25 | 158 => Class::Memory,
+        // mmap, mprotect, munmap, brk, mremap, msync, arch_prctl.
+        9 | 10 | 11 | 12 | 25 | 26 | 158 => Class::Memory,
         // clone, fork, vfork, execve, exit, wait4, getpid, set/get groups,
         // set_tid_address and similar process bookkeeping.
         39 | 56 | 57 | 58 | 59 | 60 | 61 | 63 | 102 | 104 | 107 | 108 | 109 | 110 | 112 | 121

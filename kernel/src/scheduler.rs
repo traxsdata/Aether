@@ -41,6 +41,9 @@ pub const LINUX_DYN_TASK: usize = LINUX_TASK + 1;
 pub const APPIMAGE_TASK: usize = LINUX_DYN_TASK + 1;
 
 const MAX_TASKS: usize = WORKER_COUNT + 12;
+
+/// Maximum number of `MAP_SHARED` VMA entries per Linux application domain.
+const MAX_DOMAIN_SHARED_VMAS: usize = 16;
 const STACK_SIZE: usize = 16 * 1024;
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const ROUNDS: usize = 4;
@@ -1600,13 +1603,12 @@ pub fn linux_clone(
 pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
-    if tasks.iter().any(|task| {
-        task.state != TaskState::Empty
-            && task.state != TaskState::Done
-            && task.tgid == tasks[current].tgid
-            && !task.shared_vmas.is_empty()
-    }) {
-        return Err(LINUX_ENOSYS);
+    let domain = tasks[current].overlay_app;
+    let inherited_shared = tasks[current].shared_vmas.len();
+    if inherited_shared != 0
+        && shared_vma_usage(domain).saturating_add(inherited_shared) > MAX_DOMAIN_SHARED_VMAS
+    {
+        return Err(LINUX_ENOMEM);
     }
     let parent_pml4 = tasks[current].pml4;
     let Some(slot) = tasks.iter().position(|task| task.state == TaskState::Empty) else {
@@ -1737,6 +1739,7 @@ pub fn linux_replace_image(pml4: PhysFrame) {
     task.pml4 = pml4.start_address();
     task.vmas.reset();
     task.anonymous_vmas.reset();
+    task.shared_vmas.reset();
     task.brk = paging::LINUX_ARENA_BASE;
     task.fs_base = 0;
 }
@@ -4890,6 +4893,9 @@ pub fn linux_vma_insert(
     if task.abi != TaskAbi::Linux {
         return Err(VmaError::InvalidRange);
     }
+    if shared && shared_vma_usage(task.overlay_app) >= MAX_DOMAIN_SHARED_VMAS {
+        return Err(VmaError::OutOfSpace);
+    }
     let tgid = task.tgid;
     let pml4 = task.pml4;
     let mut current_vmas = task.vmas;
@@ -5052,8 +5058,47 @@ pub fn linux_vma_insert_shared(
     hint: u64,
     fixed: bool,
     no_replace: bool,
+    anonymous: bool,
 ) -> Result<u64, VmaError> {
-    linux_vma_insert(length, prot, hint, fixed, no_replace, true, true)
+    linux_vma_insert(length, prot, hint, fixed, no_replace, anonymous, true)
+}
+
+/// Returns the current Linux task's bounded application domain id.
+#[must_use]
+pub fn linux_shared_domain() -> u8 {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].overlay_app
+}
+
+/// Counts shared VMA entries in one domain, once per address space.
+///
+/// Threads in one `CLONE_VM` group share a PML4 and therefore one table in
+/// practice; counting it once avoids charging a thread group more than a
+/// process. A `fork` child has a new PML4 and is charged separately, matching
+/// its independent VMA table.
+fn shared_vma_usage(domain: u8) -> usize {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let mut seen = [0u64; MAX_TASKS];
+    let mut seen_count = 0usize;
+    let mut total = 0usize;
+    for task in tasks.iter() {
+        if task.state == TaskState::Empty
+            || task.state == TaskState::Done
+            || task.abi != TaskAbi::Linux
+            || task.overlay_app != domain
+        {
+            continue;
+        }
+        if seen.iter().take(seen_count).any(|pml4| *pml4 == task.pml4) {
+            continue;
+        }
+        if let Some(slot) = seen.get_mut(seen_count) {
+            *slot = task.pml4;
+            seen_count += 1;
+        }
+        total = total.saturating_add(task.shared_vmas.len());
+    }
+    total
 }
 
 pub fn linux_shared_vma(address: u64) -> bool {
@@ -5236,6 +5281,34 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
         LinuxFileSource::Pseudo(PseudoFile::ProcExe) => Ok(LINUX_ELF.len() as u64),
         LinuxFileSource::Pseudo(_) => Ok(0),
         LinuxFileSource::Inotify => Ok(0),
+    }
+}
+
+/// Returns a stable identity and length for a shared file-backed mapping.
+///
+/// The high 32 bits distinguish the read-only root from the writable overlay,
+/// and the low bits are the inode index. Pipes, events, and pseudo-files have
+/// no page-cache identity and are rejected with `EINVAL`.
+pub fn linux_file_identity(fd: u64) -> Result<(u64, u64), i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get(fd as usize).and_then(Option::as_ref) else {
+        return Err(LINUX_EBADF);
+    };
+    match slot.source {
+        LinuxFileSource::Root(index) => {
+            let file = crate::linux::file(index).ok_or(LINUX_EBADF)?;
+            Ok((index as u64, file.data.len() as u64))
+        }
+        LinuxFileSource::Overlay(index) => {
+            let store = unsafe { &*OVERLAYS.0.get() };
+            let entry = store
+                .get(index)
+                .and_then(Option::as_ref)
+                .ok_or(LINUX_EBADF)?;
+            Ok(((1u64 << 32) | index as u64, entry.len as u64))
+        }
+        _ => Err(LINUX_EINVAL),
     }
 }
 

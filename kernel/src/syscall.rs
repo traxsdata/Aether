@@ -11,11 +11,13 @@ use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::serial;
 use crate::linux_policy;
 use crate::memory::paging;
+use crate::memory::shared;
 use crate::scheduler;
 use crate::serial_line;
 use aether_abi::user::{MAX_SYSCALL_IO, Syscall, USER_LIMIT, USER_STACK_TOP, errno};
 use aether_ipc::{IpcError, MAX_MESSAGE_BYTES};
-use aether_memory::frame::PhysFrame;
+use aether_memory::PAGE_SIZE;
+use aether_memory::frame::{FrameAllocator, PhysFrame};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 static IPC_SENDS: AtomicUsize = AtomicUsize::new(0);
@@ -200,6 +202,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             unsafe { (*frame).rax = 0 };
             return scheduler::yield_current(frame);
         }
+        26 => linux_msync(first, second, third),
         25 => linux_mremap(
             pml4,
             first,
@@ -309,6 +312,7 @@ fn linux_result(frame: *mut InterruptFrame, result: i64) -> *mut InterruptFrame 
 }
 
 const LINUX_EFAULT: i64 = -14;
+const LINUX_EOPNOTSUPP: i64 = -95;
 const LINUX_EINTR: i64 = -4;
 const LINUX_EPIPE: i64 = -32;
 const LINUX_EINVAL: i64 = -22;
@@ -472,13 +476,13 @@ fn linux_mmap(
     let shared = flags & LINUX_MAP_SHARED != 0;
     if flags & LINUX_MAP_PRIVATE != 0 && shared
         || flags & (LINUX_MAP_PRIVATE | LINUX_MAP_SHARED) == 0
-        || shared && !anonymous
     {
-        return LINUX_ENOSYS;
+        return LINUX_EINVAL;
     }
     if protections & !7 != 0 || protections & 6 == 6 {
         return LINUX_EINVAL;
     }
+    let mut file_identity = None;
     if anonymous {
         // The fd argument is ignored for MAP_ANONYMOUS. glibc passes -1 as a
         // 32-bit value, so do not require the full 64-bit all-ones pattern.
@@ -486,13 +490,17 @@ fn linux_mmap(
             return LINUX_EINVAL;
         }
     } else {
-        if fd == u64::MAX
-            || fd == u64::from(u32::MAX)
-            || !offset.is_multiple_of(aether_memory::PAGE_SIZE)
-        {
+        if fd == u64::MAX || fd == u64::from(u32::MAX) || !offset.is_multiple_of(PAGE_SIZE) {
             return LINUX_EINVAL;
         }
-        if scheduler::linux_file_len(fd).is_err() {
+        if shared {
+            // A shared file mapping needs a stable page-cache identity. Pipes,
+            // events, and pseudo-files do not have one.
+            match scheduler::linux_file_identity(fd) {
+                Ok(identity) => file_identity = Some(identity),
+                Err(error) => return error,
+            }
+        } else if scheduler::linux_file_len(fd).is_err() {
             return LINUX_EBADF;
         }
     }
@@ -514,6 +522,7 @@ fn linux_mmap(
             address,
             fixed || no_replace,
             no_replace,
+            anonymous,
         )
     } else {
         scheduler::linux_vma_insert(
@@ -533,10 +542,45 @@ fn linux_mmap(
             return vma_errno(error);
         }
     };
+    let Some(page_flags) = linux_page_flags(protections) else {
+        let _ = scheduler::linux_vma_remove(start, length);
+        return LINUX_EINVAL;
+    };
+    if shared {
+        let domain = scheduler::linux_shared_domain();
+        let mapped = if anonymous {
+            crate::memory::with_frame_allocator(|allocator| {
+                paging::map_shared_anonymous_range(
+                    allocator, pml4, start, length, page_flags, domain,
+                )
+            })
+        } else {
+            let Some((key, _file_length)) = file_identity else {
+                let _ = scheduler::linux_vma_remove(start, length);
+                return LINUX_EINVAL;
+            };
+            crate::memory::with_frame_allocator(|allocator| {
+                map_shared_file_pages(
+                    allocator, pml4, start, length, page_flags, fd, offset, key, domain,
+                )
+                .map_err(|_| paging::PagingError::OutOfMemory)
+            })
+        };
+        let Some(mapped) = mapped else {
+            let _ = scheduler::linux_vma_remove(start, length);
+            return LINUX_ENOMEM;
+        };
+        if mapped.is_err() {
+            let _ = scheduler::linux_vma_remove(start, length);
+            return LINUX_ENOMEM;
+        }
+        return start as i64;
+    }
     if anonymous {
         return start as i64;
     }
-    // File-backed mappings remain eagerly populated while the kernel copies data.
+    // Private file-backed mappings remain eagerly populated with private
+    // frames; MAP_PRIVATE must never alias the page cache.
     let writable = aether_memory::paging::PageFlags::PRESENT
         | aether_memory::paging::PageFlags::USER
         | aether_memory::paging::PageFlags::WRITABLE
@@ -551,19 +595,81 @@ fn linux_mmap(
         let _ = scheduler::linux_vma_remove(start, length);
         return LINUX_ENOMEM;
     }
-    if !anonymous && let Err(error) = copy_file_range(pml4, fd, offset, start, length) {
+    if let Err(error) = copy_file_range(pml4, fd, offset, start, length) {
         let _ = scheduler::linux_vma_remove(start, length);
         return error;
     }
-    let Some(page_flags) = linux_page_flags(protections) else {
-        let _ = scheduler::linux_vma_remove(start, length);
-        return LINUX_EINVAL;
-    };
     if paging::protect_user_range(pml4, start, length, page_flags).is_err() {
         let _ = scheduler::linux_vma_remove(start, length);
         return LINUX_EINVAL;
     }
     start as i64
+}
+
+/// Maps a file range into a shared page cache and the caller's address space.
+///
+/// Existing cache pages are retained; a miss allocates one frame, fills it
+/// from the read-only source (zero beyond end-of-file), and registers it. The
+/// registry keeps the frame alive until the last mapping is removed, so
+/// unrelated processes mapping the same page alias one physical frame. Writes
+/// update that frame but are never written back to the root; `msync` reports
+/// `EOPNOTSUPP`.
+#[allow(clippy::too_many_arguments)]
+fn map_shared_file_pages(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: aether_memory::paging::PageFlags,
+    fd: u64,
+    file_offset: u64,
+    key: u64,
+    domain: u8,
+) -> Result<(), &'static str> {
+    let pages = length / PAGE_SIZE;
+    let mut page = 0u64;
+    while page < pages {
+        let Some(offset) = file_offset.checked_add(page.saturating_mul(PAGE_SIZE)) else {
+            let _ = paging::unmap_user_range(allocator, pml4, start, page * PAGE_SIZE);
+            return Err("offset");
+        };
+        let address = start + page * PAGE_SIZE;
+        if let Some(frame) = shared::find_file(key, offset) {
+            if paging::map_user_page(pml4, allocator, address, frame, flags).is_err() {
+                let _ = shared::release(allocator, frame);
+                let _ = paging::unmap_user_range(allocator, pml4, start, page * PAGE_SIZE);
+                return Err("map");
+            }
+        } else {
+            let Some(frame) = allocator.allocate() else {
+                let _ = paging::unmap_user_range(allocator, pml4, start, page * PAGE_SIZE);
+                return Err("memory");
+            };
+            // SAFETY: The frame was just allocated, is identity-mapped, and is
+            // not reachable from any address space yet. The kernel path has
+            // interrupts masked, so the slice cannot race with a user task.
+            let destination = unsafe {
+                core::slice::from_raw_parts_mut(
+                    frame.start_address() as *mut u8,
+                    PAGE_SIZE as usize,
+                )
+            };
+            destination.fill(0);
+            // A short read is normal at end-of-file; the tail stays zero.
+            let _ = scheduler::linux_file_read_at(fd, offset, destination);
+            if paging::map_user_page(pml4, allocator, address, frame, flags).is_err() {
+                let _ = allocator.deallocate(frame);
+                let _ = paging::unmap_user_range(allocator, pml4, start, page * PAGE_SIZE);
+                return Err("map");
+            }
+            if shared::register(frame, domain, Some((key, offset))).is_err() {
+                let _ = paging::unmap_user_range(allocator, pml4, start, (page + 1) * PAGE_SIZE);
+                return Err("quota");
+            }
+        }
+        page += 1;
+    }
+    Ok(())
 }
 
 fn linux_mremap(
@@ -593,6 +699,12 @@ fn linux_mremap(
     let Some(prot) = scheduler::linux_vma_prot(old_address) else {
         return LINUX_EINVAL;
     };
+    if scheduler::linux_shared_vma(old_address) {
+        // Moving or growing a shared mapping would need to preserve the same
+        // physical frames across processes. The bounded slice does not do
+        // that yet, so fail closed instead of silently unsharing it.
+        return LINUX_EOPNOTSUPP;
+    }
     if new_size <= old_size {
         let tail = old_size - new_size;
         if tail != 0 {
@@ -704,6 +816,43 @@ fn linux_mremap(
         paging::unmap_user_range(allocator, pml4, old_address, old_size)
     });
     new_start as i64
+}
+
+/// Reports the bounded shared-file writeback policy.
+///
+/// Anonymous shared mappings have nothing to write back and report success.
+/// A shared file mapping is read-shared: writes update the in-memory cache but
+/// are never persisted to the read-only imported root, so `msync` fails closed
+/// with `EOPNOTSUPP` instead of pretending the file was synchronized.
+fn linux_msync(address: u64, length: u64, flags: u64) -> i64 {
+    const MS_ASYNC: u64 = 1;
+    const MS_INVALIDATE: u64 = 2;
+    const MS_SYNC: u64 = 4;
+    if flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0
+        || flags & (MS_ASYNC | MS_SYNC) == (MS_ASYNC | MS_SYNC)
+        || !address.is_multiple_of(PAGE_SIZE)
+    {
+        return LINUX_EINVAL;
+    }
+    let Some(length) = length
+        .checked_add(PAGE_SIZE - 1)
+        .map(|v| v & !(PAGE_SIZE - 1))
+    else {
+        return LINUX_EINVAL;
+    };
+    if length == 0 {
+        return 0;
+    }
+    if !scheduler::linux_vma_covers(address, length) {
+        return LINUX_ENOMEM;
+    }
+    if scheduler::linux_shared_vma(address)
+        && scheduler::linux_anonymous_vma_prot(address).is_none()
+    {
+        LINUX_EOPNOTSUPP
+    } else {
+        0
+    }
 }
 
 fn linux_munmap(pml4: PhysFrame, address: u64, length: u64) -> i64 {

@@ -3,6 +3,7 @@
 
 mod heap;
 pub mod paging;
+pub mod shared;
 
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, FrameStats};

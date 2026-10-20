@@ -65,7 +65,7 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | ELF and libraries | `PT_INTERP`, `PT_LOAD`, `PT_DYNAMIC`, relocations, TLS, `ld.so` | Linux address-space loader and shared-library service | Partial: static and dynamic exec fixtures propagate bounded argv/envp; a `PT_INTERP` fixture, opt-in host-glibc hello, and a host-derived pinned glibc/loader profile run; Mesa/Wayland libraries and a cross-host reproducible pin remain missing |
 | Process creation | `clone`/`fork`/`execve`, wait, exit, process groups | User-space process API over the kernel task model | Partial: eager-copy fork, blocking `wait4` with nonchild/selector checks, bounded same-session process groups with `setpgid`/`getpgid`/`getsid`/`setsid` validation, static/dynamic exec, and bounded `clone3` thread creation; stopped/continued waits and group selectors return `ENOSYS`/`EINVAL` |
 | Threads and TLS | `clone` with thread flags, `set_tid_address`, `arch_prctl`, `rseq` | Thread API and per-thread kernel state | Partial: `clone` and `clone3` threads, per-thread stacks/TLS, clear-child-tid join, and bounded `rseq` registration/validation (CPU id always 0, no abort notifications); detach and affinity remain |
-| Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: bounded demand paging for anonymous mappings; `MAP_SHARED|MAP_ANONYMOUS` is supported only among threads sharing one `CLONE_VM` address space, with thread-group VMA metadata kept in sync. File-backed shared mappings remain unsupported. `fork()` returns `ENOSYS` while such a mapping exists because cross-process shared-frame ownership is not implemented. |
+| Memory | `mmap`/`munmap`/`mprotect`/`brk`, file mappings, shared memory | Memory-object capabilities and user mapping syscalls | Partial: bounded demand paging for private anonymous mappings; `MAP_SHARED|MAP_ANONYMOUS` uses a reference-counted physical-frame registry, so contents survive `fork` and are visible to parent and child while private mappings stay private. A bounded in-memory page cache backs read-shared file mappings keyed by rootfs/overlay inode and page offset, including aliasing across unrelated processes; writes are never persisted to the read-only root and `msync` returns `EOPNOTSUPP`. Shared mappings are limited to 16 VMA entries and 256 physical pages per application domain, with `ENOMEM` on exhaustion. `mremap` of a shared mapping returns `EOPNOTSUPP`. |
 | Synchronization | `futex`, robust lists, condition variables, `eventfd` | Futex wait/wake primitive and timeout service | Partial: futex wait/wake queues, timeout (`ETIMEDOUT`), clear-child-tid join, robust-futex registration and exit-time `FUTEX_OWNER_DIED` wakeup for the exact 24-byte x86-64 head layout, and eventfd counters shared by threads in one tgid; condition variables, semaphores, and other robust-list layouts remain |
 | Signals | Handler delivery, `sigaltstack`, `rt_sigreturn`, fault-to-signal | Fault delivery and signal runtime | Partial: x86-64 `rt_sigframe` with `siginfo_t`/`ucontext_t`, `SA_SIGINFO`, `SA_ONSTACK` with fallback, GPR/mask restore, `SA_RESTART` for `wait4`, self/group and cross-process SIGUSR1 handlers, and default `SIGKILL`/`SIGTERM`/`SIGCHLD`; stopping, queued real-time signals, and most `siginfo` variants remain |
 | Time | `clock_gettime`, `nanosleep`, timers, `poll`/`epoll` | High-resolution time and wait services | Partial: `clock_gettime` from the 100 Hz tick; relative/absolute `nanosleep`/`clock_nanosleep` with `EINTR`; bounded `timerfd_create`/`settime`/`gettime` for `CLOCK_MONOTONIC`, one-shot and periodic, with poll/epoll integration. High-resolution clocks and `CLOCK_REALTIME` remain absent |
@@ -257,14 +257,21 @@ root, create/write/read through the `/tmp` overlay, `write`, and `exit`. It
 produces `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 `AETHER_LINUX_VMA_OK`, plus `AETHER_LINUX_OK`; a writable+executable mapping
 and a W+X `mprotect` are denied. Private anonymous pages are allocated on demand
-and reclaimed on `munmap` and task exit. Per-domain VMA, descriptor, and
-overlay-byte quotas are enforced with denial evidence
-(`AETHER_LINUX_QUOTA_OK`), as are default-deny syscall classification and
-path/device denials (`AETHER_LINUX_SYSCALL_POLICY_OK`,
-`AETHER_LINUX_DENIAL_OK`). Cross-process shared mappings, nested epoll watches,
-complete inotify semantics, high-resolution timers, stopped/continued waits,
-signal stopping, remaining `siginfo` variants, and the user-space `linuxd`
-protocol remain missing. Gate 2 remains partial.
+and reclaimed on `munmap` and task exit. A parent and child share one
+`MAP_SHARED|MAP_ANONYMOUS` page and observe writes in both directions while a
+neighbouring private page keeps its pre-fork contents
+(`AETHER_LINUX_SHARED_FORK_OK`); the shared frame is reference-counted and is
+reclaimed without a double free when both mappings disappear. A read-shared
+mapping of the rootfs `/etc/motd` returns the expected bytes and reports
+`EOPNOTSUPP` from `msync` (`AETHER_LINUX_MAP_SHARED_FILE_OK`). Per-domain VMA,
+descriptor, overlay-byte, shared-VMA, and shared-page quotas are enforced with
+denial evidence (`AETHER_LINUX_QUOTA_OK`), as are default-deny syscall
+classification and path/device denials (`AETHER_LINUX_SYSCALL_POLICY_OK`,
+`AETHER_LINUX_DENIAL_OK`). Nested epoll watches, complete inotify semantics,
+high-resolution timers, stopped/continued waits, signal stopping, remaining
+`siginfo` variants, and the user-space `linuxd` protocol remain missing.
+True writeback for shared file mappings and cross-process `mremap` of shared
+regions remain unsupported. Gate 2 remains partial.
 
 ### Gate 3 — Headless GridCraft
 
@@ -305,11 +312,14 @@ revocation tests, and a compatibility record no better than the suite supports.
 2. `linuxd` is a kernel-side supervisor prototype. The ring-3 service,
    syscall-remoting ABI, and removal of Linux dispatch from the kernel remain
    unimplemented.
-3. Shared mappings are limited to `MAP_SHARED|MAP_ANONYMOUS` within one
-   `CLONE_VM` thread group. File-backed shared mappings are unsupported, and
-   `fork()` returns `ENOSYS` while a shared mapping exists. Per-domain VMA,
-   descriptor, and overlay-byte quotas exist; persistent quotas that survive a
-   crash do not.
+3. Shared mappings are bounded and in-memory. `MAP_SHARED|MAP_ANONYMOUS`
+   survives `fork` through reference-counted frames, and read-shared file
+   mappings alias a bounded page cache across processes. There is no writeback
+   to the read-only root (`msync` returns `EOPNOTSUPP`), shared `mremap` is
+   rejected, and shared VMA/page quotas (16 entries and 256 pages per
+   application domain) are released on unmap and task exit but not persisted
+   across a crash. Per-domain VMA, descriptor, and overlay-byte quotas also
+   exist.
 4. Inotify is bounded: no recursive watches, move/delete/unmount events, or
    cross-process watch sharing; `/sys` and non-synthetic device nodes are
    absent. Cross-process eventfd counters, nested epoll watches,

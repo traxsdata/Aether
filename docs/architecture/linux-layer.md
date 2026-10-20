@@ -140,17 +140,30 @@ exact AppImage digest, and the runtime version.
   `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`,
   `IN_IGNORED`), a bounded eight-event queue with `IN_Q_OVERFLOW`, and blocking
   reads woken by another `CLONE_VM` thread. Threads share the per-tgid queue;
-  `fork` takes a snapshot, so cross-process sharing is not implemented. A
-  bounded synthetic `/proc/self/{exe,maps,status,fd}`, `/proc/aether/syscalls`,
-  and `/dev/{null,zero,random,urandom}` are served through
-  open/read/stat/readdir; `/sys` and other device nodes are absent. Named
-  fixture markers are enumerated in the roadmap and host-interface inventory.
-  Shared mappings, cross-process eventfd counters, nested epoll watches,
-  recursive/move/delete inotify events, high-resolution timers,
-  stopped/continued `wait4`, and signal stopping remain missing.
+  `fork` takes a snapshot, so cross-process inotify sharing is not implemented.
+  A bounded synthetic `/proc/self/{exe,maps,status,fd}`,
+  `/proc/aether/syscalls`, and `/dev/{null,zero,random,urandom}` are served
+  through open/read/stat/readdir; `/sys` and other device nodes are absent.
+  Named fixture markers are enumerated in the roadmap and host-interface
+  inventory. Shared anonymous mapping contents survive `fork` through a
+  reference-counted physical-frame registry: the child aliases the parent's
+  frames while private pages are copied, so writes are visible in both
+  directions and neither process frees a frame still owned by the other.
+  Read-shared file mappings use a bounded page cache keyed by rootfs/overlay
+  inode and page offset, so unrelated processes mapping the same page alias one
+  frame. The cache is RAM-only: writes are not written back to the read-only
+  root, and `msync` returns `EOPNOTSUPP` for file-backed shared mappings.
+  `MAP_PRIVATE` file mappings stay eager private copies. Cross-process eventfd
+  counters, nested epoll watches, recursive/move/delete inotify events,
+  high-resolution timers, stopped/continued `wait4`, and signal stopping remain
+  missing.
 - A fixed per-task VMA table tracks ranges and rejects writable+executable
   mappings. Anonymous private pages are faulted in on demand with bounded
   allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.
+  Shared mappings have per-domain quotas of 16 shared VMA entries and 256
+  shared physical pages. Exceeding either returns `ENOMEM`; page charges are
+  released when the last reference goes away, and VMA charges disappear with
+  the task's address space, including fault and exit paths.
   The root is imported read-only. `/tmp`, `/settings`, and `/logs` map to a
   per-application overlay store with a 1 KiB quota per application and a
   512-byte per-file limit. The store is shared by processes of the same
