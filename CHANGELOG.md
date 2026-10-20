@@ -73,6 +73,12 @@ versioning scheme until the kernel ABI stabilises.
   `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
   host-interface inventory for GridCraft 0.8.0, security controls, and staged
   gates. GridCraft is recorded as `unsupported`.
+- Linux file-metadata and descriptor slice: `stat`, `fstat`, `newfstatat`,
+  `statx`, `readlink` for `/proc/self/{exe,cwd}`, `fcntl`, `dup`, and `dup2`,
+  plus signal/affinity/limit stubs needed by a dynamic loader. The boot fixture
+  checks stat size, fstat on an open descriptor, `F_GETFD`, duplication, and
+  `readlink` (`AETHER_LINUX_FILEMETA_OK`). Directory listing, pipes, and polling
+  remain missing.
 - Dynamic Linux loader slice: `aether-linux-elf` is a host-tested, allocation-
   free parser for `ET_EXEC`/`ET_DYN` images with bounded `PT_LOAD` segments and
   `PT_INTERP`. `kernel/src/linux_loader.rs` maps a main image and interpreter

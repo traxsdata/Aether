@@ -212,8 +212,10 @@ user space. It is not a VM. The target and security gates are in
   (`AETHER_LINUX_DYN_*`).
 - [ ] `ld.so`/glibc, relocations, shared-library search, and
   `LD_LIBRARY_PATH` restrictions.
-- [ ] File syscalls: `stat`/`fstat`/`statx`, `readlink`, `getdents64`, `fcntl`,
-  `dup`, `pipe`, `poll`/`epoll`, `eventfd`, `inotify` (bounded).
+- [x] File metadata and descriptor calls: `stat`/`fstat`/`newfstatat`/`statx`,
+  `readlink`, `fcntl`, `dup`, `dup2`, and descriptor table cleanup.
+- [ ] Remaining file calls: `getdents64`, `pipe`, `poll`/`epoll`, `eventfd`,
+  `inotify` (bounded).
 - [ ] Process and thread syscalls: `clone`, `clone3`, `wait4`, `execve`,
   `set_tid_address`, `set_robust_list`, `rseq`, thread-local storage.
 - [ ] Synchronization: real futex wait/wake queues, timeouts, robust lists;
@@ -294,12 +296,13 @@ The Linux track has completed the Gate 1 inventory and has partial Gate 2
 evidence: the kernel verifies and imports an embedded signed rootfs, a static
 Linux ELF runs at CPL3 through the Linux `syscall` path with a per-task VMA
 table, file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk`, FS-based
-TLS, read-only root files, a bounded `/tmp` overlay, and a dynamic
-`ET_DYN`/`PT_INTERP` loader with auxv
+TLS, read-only root files, a bounded `/tmp` overlay, stat/statx/readlink and
+descriptor duplication, and a dynamic `ET_DYN`/`PT_INTERP` loader with auxv
 (`AETHER_LINUX_IMPORT_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
-`AETHER_LINUX_VMA_OK`, `AETHER_LINUX_DYN_INTERP_OK`,
-`AETHER_LINUX_DYN_MAIN_OK`, `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`), and the
-native ABI is denied to Linux tasks. This is a test
+`AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`,
+`AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
+`AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`), and the native ABI is denied to
+Linux tasks. This is a test
 fixture, not an AppImage: the dynamic loader, glibc/`ld.so`, threads, signals,
 Wayland, software Vulkan, and a user-supplied import path are still missing.
 

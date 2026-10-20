@@ -251,6 +251,73 @@ _start:
     cmpb $0x5a, 8191(%r14)
     jne fail_vma
 
+    sub $256, %rsp
+    /* newfstatat(AT_FDCWD, "/etc/motd", &stat, 0) */
+    mov $262, %rax
+    mov $-100, %rdi
+    lea motd_path(%rip), %rsi
+    mov %rsp, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_meta
+    cmpq $0, 48(%rsp)           /* st_size */
+    jle fail_meta
+
+    /* open, fstat, fcntl(F_GETFD), dup */
+    mov $257, %rax
+    mov $-100, %rdi
+    lea motd_path(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_meta
+    mov %rax, %r13
+    mov $5, %rax                /* fstat */
+    mov %r13, %rdi
+    mov %rsp, %rsi
+    syscall
+    test %rax, %rax
+    jne fail_meta
+    cmpq $0, 48(%rsp)
+    jle fail_meta
+    mov $72, %rax               /* fcntl */
+    mov %r13, %rdi
+    mov $1, %rsi                /* F_GETFD */
+    xor %rdx, %rdx
+    syscall
+    test %rax, %rax
+    jne fail_meta
+    mov $32, %rax               /* dup */
+    mov %r13, %rdi
+    syscall
+    test %rax, %rax
+    js fail_meta
+    mov %rax, %r14
+    mov $3, %rax
+    mov %r14, %rdi
+    syscall
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+
+    /* readlink("/proc/self/exe", stack, 64) */
+    mov $89, %rax
+    lea proc_exe(%rip), %rdi
+    mov %rsp, %rsi
+    mov $64, %rdx
+    syscall
+    test %rax, %rax
+    jle fail_meta
+    add $256, %rsp
+
+    mov $1, %rax                /* write */
+    mov $1, %rdi                /* stdout */
+    lea meta_message(%rip), %rsi
+    mov $meta_message_len, %rdx
+    syscall
+
     mov $1, %rax                /* write */
     mov $1, %rdi                /* stdout */
     lea vma_message(%rip), %rsi
@@ -288,6 +355,10 @@ fail_overlay:
 fail_vma:
     lea vma_failure(%rip), %rsi
     mov $vma_failure_len, %rdx
+    jmp report_failure
+fail_meta:
+    lea meta_failure(%rip), %rsi
+    mov $meta_failure_len, %rdx
 report_failure:
     mov $1, %rax
     mov $1, %rdi
@@ -308,6 +379,14 @@ vma_message:
 vma_failure:
     .ascii "AETHER_LINUX_VMA_FAIL\n"
     .set vma_failure_len, . - vma_failure
+meta_message:
+    .ascii "AETHER_LINUX_FILEMETA_OK stat=ok fd=ok dup=ok link=ok\n"
+    .set meta_message_len, . - meta_message
+meta_failure:
+    .ascii "AETHER_LINUX_FILEMETA_FAIL\n"
+    .set meta_failure_len, . - meta_failure
+proc_exe:
+    .asciz "/proc/self/exe"
 mmap_failure:
     .ascii "AETHER_LINUX_EXEC_FAIL stage=mmap\n"
     .set mmap_failure_len, . - mmap_failure

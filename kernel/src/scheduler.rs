@@ -1275,6 +1275,76 @@ pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), Vma
     task.vmas.protect(address, length, prot)
 }
 
+/// Returns metadata for a Linux path: `(size, inode, mode)`.
+///
+/// The root is a flat imported tree, so regular files have a stable inode
+/// derived from their index and a synthetic mode.
+pub fn linux_stat_path(path: &str) -> Option<(u64, u64, u32)> {
+    let index = crate::linux::lookup(path)?;
+    let file = crate::linux::file(index)?;
+    Some((file.data.len() as u64, index as u64 + 1, 0o100644))
+}
+
+/// Returns metadata for an open Linux descriptor.
+pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(slot) = task.linux_fds.get(fd as usize).and_then(Option::as_ref) else {
+        return Err(LINUX_EBADF);
+    };
+    match slot.source {
+        LinuxFileSource::Root(index) => {
+            let file = crate::linux::file(index).ok_or(LINUX_EBADF)?;
+            Ok((file.data.len() as u64, index as u64 + 1, 0o100644))
+        }
+        LinuxFileSource::Overlay(index) => {
+            let entry = task
+                .linux_overlay
+                .get(index)
+                .and_then(Option::as_ref)
+                .ok_or(LINUX_EBADF)?;
+            Ok((entry.len as u64, index as u64 + 1, 0o100644))
+        }
+    }
+}
+
+/// Duplicates a Linux descriptor into the lowest free slot.
+pub fn linux_dup(fd: u64) -> Result<u64, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(source) = task.linux_fds.get(fd as usize).copied().flatten() else {
+        return Err(LINUX_EBADF);
+    };
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(source);
+            return Ok(descriptor as u64);
+        }
+    }
+    Err(LINUX_EMFILE)
+}
+
+/// Duplicates `old` onto `new`, closing an existing target first.
+pub fn linux_dup2(old: u64, new: u64) -> Result<u64, i64> {
+    if old == new {
+        return if linux_stat_fd(old).is_ok() {
+            Ok(new)
+        } else {
+            Err(LINUX_EBADF)
+        };
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(source) = task.linux_fds.get(old as usize).copied().flatten() else {
+        return Err(LINUX_EBADF);
+    };
+    let Some(slot) = task.linux_fds.get_mut(new as usize) else {
+        return Err(LINUX_EBADF);
+    };
+    *slot = Some(source);
+    Ok(new)
+}
+
 /// Returns the bytes in a Linux file descriptor, independent of its offset.
 pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
     let tasks = unsafe { &*TASKS.0.get() };

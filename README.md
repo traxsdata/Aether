@@ -129,10 +129,12 @@ grants, and the desktop is not a security authority.
   tracks a bounded per-task VMA table and supports file-backed `mmap`,
   `munmap` reuse, `mprotect`, and a growing `brk`, with write+execute mappings
   rejected (`AETHER_LINUX_VMA_OK`). Pages are allocated on demand and returned
-  on unmap or task exit. A dynamic `ET_DYN`/`PT_INTERP` loader maps a main image
-  and its interpreter, builds auxv, and hands control from the interpreter to
-  the main entry (`AETHER_LINUX_DYN_*`). glibc/`ld.so`, threads, Wayland, and
-  Vulkan are still missing.
+  on unmap or task exit. File metadata (`stat`/`fstat`/`newfstatat`/`statx`),
+  `readlink`, `fcntl`, and descriptor duplication are implemented
+  (`AETHER_LINUX_FILEMETA_OK`). A dynamic `ET_DYN`/`PT_INTERP` loader maps a
+  main image and its interpreter, builds auxv, and hands control from the
+  interpreter to the main entry (`AETHER_LINUX_DYN_*`). glibc/`ld.so`, threads,
+  Wayland, and Vulkan are still missing.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,
@@ -162,7 +164,7 @@ grants, and the desktop is not a security authority.
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
   `AETHER_FILES_OK`, `AETHER_WM_OK`, `AETHER_POINTER_OK`,
   `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_IMPORT_OK`,
-  `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`,
+  `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`,
   `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
   `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`,
   `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,

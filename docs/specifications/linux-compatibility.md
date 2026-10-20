@@ -143,7 +143,7 @@ interface, with owners and test cases.
 **Evidence:** [the Linux host-interface inventory](linux-host-interface-inventory.md)
 maps 32 facilities from the pinned GUI and CLI payloads to an interface, owner,
 and test ID, with decisions for X11, D-Bus, process spawning, clipboard, paths,
-locale, GPU, and network. **Met:** 2 facilities are existing, 8 partial, 17
+locale, GPU, and network. **Met:** 2 facilities are existing, 9 partial, 16
 missing, 2 deliberately denied, and 3 deferred. The inventory is complete; the
 missing interfaces are Gate 2 work and their absence does not invalidate the
 mapping. Do not claim compatibility.
@@ -162,8 +162,10 @@ with ambient authority.
 a dynamically linked test image is mapped through `PT_INTERP` into an `ET_DYN`
 address space, receives argc/argv/envp/auxv, and hands control from a test
 interpreter to the main entry (`AETHER_LINUX_DYN_INTERP_OK`,
-`AETHER_LINUX_DYN_MAIN_OK`, `AETHER_LINUX_DYN_OK`). A static freestanding Linux
-ELF also runs at CPL3, exercises anonymous and
+`AETHER_LINUX_DYN_MAIN_OK`, `AETHER_LINUX_DYN_OK`). File metadata, `readlink`,
+`fcntl`, and descriptor duplication are also exercised
+(`AETHER_LINUX_FILEMETA_OK`). A static freestanding Linux ELF runs at CPL3,
+exercises anonymous and
 file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only
 root, create/write/read through the `/tmp` overlay, `write`, and `exit`. It

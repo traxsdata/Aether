@@ -56,8 +56,8 @@ acceptance checklist are recorded below. Implementation status is uneven:
 | Status | Meaning | Facilities |
 |---|---|---:|
 | Existing | A tested interface exists and can be used by the runtime | 2 |
-| Partial | Some interface or host tests exist; the runtime cannot use it yet | 8 |
-| Missing | No interface exists | 17 |
+| Partial | Some interface or host tests exist; the runtime cannot use it yet | 9 |
+| Missing | No interface exists | 16 |
 | Denied | Deliberate absence; the runtime must fail closed | 2 |
 | Deferred | Not required for Gate 3 or Gate 4 | 3 |
 
@@ -86,7 +86,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 
 | ID | Facility and artifact evidence | Aether interface | Owner | Test | Status |
 |---|---|---|---|---|---|
-| HI-08 | Metadata and directories: `stat64`, `statx`, `fstat64`, `readlink`, `mkdir`, `unlink`, `rename`, `opendir`, `readdir64`, `closedir`, `dirfd` | Filesystem service operations with per-domain roots | `kernel/fs`, `kernel/src/fs.rs` | HI-T08 | missing |
+| HI-08 | Metadata and directories: `stat64`, `statx`, `fstat64`, `newfstatat`, `readlink`, `mkdir`, `unlink`, `rename`, `opendir`, `readdir64`, `closedir`, `dirfd` | Synthetic stat/statx for root files and `/proc/self` links; filesystem service operations with per-domain roots for the rest | `kernel/src/syscall.rs`, `kernel/fs`, planned `user/linuxd` | HI-T08 | partial |
 | HI-09 | User files: `HOME`, `open` of workbook paths, `org.freedesktop.portal.FileChooser`, save dialogs | Portal grant handles and `/run/aether/portal/<grant>` paths; `/home/user` is the private overlay | `kernel/src/portal.rs`, planned `user/portald` | HI-T09 | missing |
 | HI-10 | Memory: `mmap64`, `mprotect`, `munmap`, `brk`, file mappings, W^X | Per-task VMA table over the boot arena; file-backed `mmap`, `munmap` reuse, `mprotect`, growing `brk` | `kernel/src/memory`, `kernel/src/scheduler.rs`, `kernel/src/syscall.rs` | HI-T10 | partial |
 | HI-11 | Synchronization: `futex`, pthread mutex/condition variables, robust lists, `eventfd` | Futex wait/wake queues with timeouts | `kernel/src/scheduler.rs`, `kernel/src/ipc.rs` | HI-T11 | partial |
@@ -135,8 +135,8 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T04 | planned `make linux-proc-test` | Spawn, wait, exit status, descriptor inheritance, and denied spawn outside the domain | planned |
 | HI-T05 | planned `make linux-thread-test` | Create/join/detach, per-thread TLS, affinity mask, timeout, and clean domain exit | planned |
 | HI-T06 | planned `make linux-env-test` | Synthetic environment, auxv, `uname`, passwd substitute, and no host path leakage | planned |
-| HI-T07 | planned `make linux-fd-test` | Read/write/seek/dup/pipe/poll on read-only root and overlay; bad descriptor rejection | planned |
-| HI-T08 | planned `make linux-fs-test` | Stat/readdir/readlink/mkdir/unlink/rename within the domain root; outside paths denied | planned |
+| HI-T07 | `make test`; planned `make linux-fd-test` | Boot fixture exercises open/read/seek/dup/fcntl/close; pipe/poll and bad-descriptor matrices remain planned | partial |
+| HI-T08 | `make test`; planned `make linux-fs-test` | Boot fixture exercises newfstatat/fstat/statx/readlink; readdir/mkdir/unlink/rename and outside-path denial remain planned | partial |
 | HI-T09 | planned `make linux-portal-test` | File chooser grant, exact-file open, revocation, denial, and no ambient home | planned |
 | HI-T10 | `make test`, `make unittest` | VMA host tests; boot fixture maps a file, unmaps and reuses an address, grows `brk`, and denies W+X; frames are allocated at map time and reclaimed on unmap | partial |
 | HI-T11 | planned `make linux-sync-test` | Futex wait/wake, timeout, robust list, eventfd, and thread wake ordering | planned |

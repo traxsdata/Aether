@@ -154,8 +154,28 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         1 => linux_write(pml4, first, second, third),
         3 => scheduler::linux_close(first),
         8 => scheduler::linux_lseek(first, second as i64, third),
+        4 | 6 => linux_stat(pml4, first, second),
+        5 => linux_fstat(pml4, first, second),
+        13 | 14 | 131 => 0,
         17 => linux_pread(pml4, first, second, third, unsafe { (*frame).r10 }),
         21 => linux_access(pml4, first, second),
+        28 => 0,
+        32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
+        33 => scheduler::linux_dup2(first, second).map_or_else(|error| error, |fd| fd as i64),
+        72 => linux_fcntl(first, second, third),
+        89 => linux_readlink(pml4, first, second, third, 0),
+        204 => linux_sched_getaffinity(pml4, first, second, third),
+        262 => linux_newfstatat(pml4, first, second, third),
+        267 => linux_readlink(pml4, second, third, unsafe { (*frame).r10 }, first),
+        302 => linux_prlimit(pml4, first, second, unsafe { (*frame).r10 }),
+        332 => linux_statx(
+            pml4,
+            first,
+            second,
+            third,
+            unsafe { (*frame).r10 },
+            unsafe { (*frame).r8 },
+        ),
         9 => linux_mmap(
             pml4,
             first,
@@ -390,6 +410,132 @@ fn linux_mprotect(pml4: PhysFrame, address: u64, length: u64, protections: u64) 
         Ok(()) => 0,
         Err(_) => LINUX_EINVAL,
     }
+}
+
+fn linux_stat(pml4: PhysFrame, path_pointer: u64, stat_pointer: u64) -> i64 {
+    let Some(path) = user_cstr(pml4, path_pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    let Some((size, inode, mode)) = scheduler::linux_stat_path(path) else {
+        return LINUX_ENOENT;
+    };
+    write_stat(pml4, stat_pointer, size, inode, mode)
+}
+
+fn linux_fstat(pml4: PhysFrame, fd: u64, stat_pointer: u64) -> i64 {
+    let Ok((size, inode, mode)) = scheduler::linux_stat_fd(fd) else {
+        return LINUX_EBADF;
+    };
+    write_stat(pml4, stat_pointer, size, inode, mode)
+}
+
+fn linux_newfstatat(pml4: PhysFrame, directory: u64, path_pointer: u64, stat_pointer: u64) -> i64 {
+    let Some(path) = user_cstr(pml4, path_pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    if path.is_empty() {
+        return linux_fstat(pml4, directory, stat_pointer);
+    }
+    linux_stat(pml4, path_pointer, stat_pointer)
+}
+
+fn write_stat(pml4: PhysFrame, pointer: u64, size: u64, inode: u64, mode: u32) -> i64 {
+    let mut buffer = [0u8; 144];
+    buffer[8..16].copy_from_slice(&inode.to_le_bytes());
+    buffer[16..24].copy_from_slice(&1u64.to_le_bytes());
+    buffer[24..28].copy_from_slice(&mode.to_le_bytes());
+    buffer[28..32].copy_from_slice(&1000u32.to_le_bytes());
+    buffer[32..36].copy_from_slice(&1000u32.to_le_bytes());
+    buffer[48..56].copy_from_slice(&size.to_le_bytes());
+    buffer[56..64].copy_from_slice(&4096i64.to_le_bytes());
+    buffer[64..72].copy_from_slice(&size.div_ceil(512).to_le_bytes());
+    write_user_bytes(pml4, pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
+}
+
+fn linux_statx(
+    pml4: PhysFrame,
+    directory: u64,
+    path_pointer: u64,
+    _flags: u64,
+    _mask: u64,
+    statx_pointer: u64,
+) -> i64 {
+    let mut buffer = [0u8; 256];
+    let (size, inode, mode, uid, gid) = if path_pointer == 0 {
+        let Ok((size, inode, mode)) = scheduler::linux_stat_fd(directory) else {
+            return LINUX_EBADF;
+        };
+        (size, inode, mode, 1000u32, 1000u32)
+    } else {
+        let Some(path) = user_cstr(pml4, path_pointer, 256) else {
+            return LINUX_EFAULT;
+        };
+        let Some((size, inode, mode)) = scheduler::linux_stat_path(path) else {
+            return LINUX_ENOENT;
+        };
+        (size, inode, mode, 1000u32, 1000u32)
+    };
+    buffer[0..4].copy_from_slice(&0x7ffu32.to_le_bytes());
+    buffer[4..8].copy_from_slice(&4096u32.to_le_bytes());
+    buffer[16..20].copy_from_slice(&1u32.to_le_bytes());
+    buffer[20..24].copy_from_slice(&uid.to_le_bytes());
+    buffer[24..28].copy_from_slice(&gid.to_le_bytes());
+    buffer[28..30].copy_from_slice(&(mode as u16).to_le_bytes());
+    buffer[32..40].copy_from_slice(&inode.to_le_bytes());
+    buffer[40..48].copy_from_slice(&size.to_le_bytes());
+    buffer[48..56].copy_from_slice(&size.div_ceil(512).to_le_bytes());
+    write_user_bytes(pml4, statx_pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
+}
+
+fn linux_readlink(
+    pml4: PhysFrame,
+    path_pointer: u64,
+    buffer_pointer: u64,
+    buffer_length: u64,
+    _directory: u64,
+) -> i64 {
+    let Some(path) = user_cstr(pml4, path_pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    let target: &[u8] = match path {
+        "/proc/self/exe" | "/proc/thread-self/exe" => b"/usr/bin/aether-linux",
+        "/proc/self/cwd" | "/proc/thread-self/cwd" => b"/",
+        _ => return LINUX_EINVAL,
+    };
+    if buffer_length as usize > MAX_SYSCALL_IO {
+        return LINUX_EINVAL;
+    }
+    let length = target.len().min(buffer_length as usize);
+    write_user_bytes(pml4, buffer_pointer, &target[..length])
+        .map_or(LINUX_EFAULT, |()| length as i64)
+}
+
+fn linux_fcntl(fd: u64, command: u64, _argument: u64) -> i64 {
+    if scheduler::linux_stat_fd(fd).is_err() {
+        return LINUX_EBADF;
+    }
+    match command {
+        0 | 1030 => scheduler::linux_dup(fd).map_or_else(|error| error, |new| new as i64),
+        1..=4 => 0,
+        _ => LINUX_EINVAL,
+    }
+}
+
+fn linux_sched_getaffinity(pml4: PhysFrame, _pid: u64, length: u64, pointer: u64) -> i64 {
+    if length < 8 {
+        return LINUX_EINVAL;
+    }
+    write_user_bytes(pml4, pointer, &1u64.to_le_bytes()).map_or(LINUX_EFAULT, |()| 8)
+}
+
+fn linux_prlimit(pml4: PhysFrame, _resource: u64, _new_limit: u64, old_limit: u64) -> i64 {
+    if old_limit == 0 {
+        return 0;
+    }
+    let mut limits = [0u8; 16];
+    limits[..8].copy_from_slice(&(8 * 1024 * 1024u64).to_le_bytes());
+    limits[8..].copy_from_slice(&(8 * 1024 * 1024u64).to_le_bytes());
+    write_user_bytes(pml4, old_limit, &limits).map_or(LINUX_EFAULT, |()| 0)
 }
 
 fn vma_errno(error: aether_memory::vma::VmaError) -> i64 {
