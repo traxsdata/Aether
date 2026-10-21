@@ -721,8 +721,9 @@ impl LinuxFileState {
     }
 }
 
-static FILE_STATE: Global<[LinuxFileState; MAX_TASKS]> =
-    Global(UnsafeCell::new([const { LinuxFileState::new() }; MAX_TASKS]));
+static FILE_STATE: Global<[LinuxFileState; MAX_TASKS]> = Global(UnsafeCell::new(
+    [const { LinuxFileState::new() }; MAX_TASKS],
+));
 
 /// Declares a view of one shared descriptor slot table.
 ///
@@ -2361,6 +2362,10 @@ pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -
     (woken + moved) as i64
 }
 
+#[cfg(not(feature = "gate4-gui-test"))]
+#[allow(unused_variables)]
+pub fn futex_trace(command: u64, address: u64, value: u32, arg4: u64, target: u64, result: i64) {}
+
 /// Bounded Gate 4 diagnostic: one line per distinct futex command and result.
 ///
 /// The GUI application exercises futex intensively, so the trace aggregates
@@ -2369,17 +2374,17 @@ pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -
 /// stays bounded no matter how busy the render loop becomes.
 #[cfg(feature = "gate4-gui-test")]
 pub fn futex_trace(command: u64, address: u64, value: u32, arg4: u64, target: u64, result: i64) {
-    // Bounded pairs: every supported command plus one overflow slot.
-    const PAIRS: usize = 16;
-    // SAFETY: Single CPU; the trace is called with interrupts masked.
-    static mut PAIRS: [u64; PAIRS] = [0; PAIRS];
-    let pairs = unsafe { &mut *core::ptr::addr_of_mut!(PAIRS) };
-    let slot = command as usize % PAIRS;
-    pairs[slot] = pairs[slot].wrapping_add(1);
+    // Bounded counters, one slot per supported command plus an overflow slot.
+    static SEEN: [AtomicU64; 16] = {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const NEW: AtomicU64 = AtomicU64::new(0);
+        [NEW; 16]
+    };
+    let slot = (command as usize).min(SEEN.len() - 1);
+    let count = SEEN[slot].fetch_add(1, Ordering::Relaxed) + 1;
     // The first sighting of a command and every 4096-th repeat produce one
-    // line, which keeps even a pathological caller to a handful of lines per
-    // boot.
-    if pairs[slot] == 1 || pairs[slot] % 4096 == 0 {
+    // line, which keeps even a pathological caller at a handful of lines.
+    if count == 1 || count % 4096 == 0 {
         serial_line!(
             "linux: futex cmd={} addr={:#x} val={} arg4={:#x} target={:#x} result={} seen={}",
             command,
@@ -2388,7 +2393,7 @@ pub fn futex_trace(command: u64, address: u64, value: u32, arg4: u64, target: u6
             arg4,
             target,
             result,
-            pairs[slot]
+            count
         );
     }
 }

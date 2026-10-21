@@ -2195,16 +2195,16 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
             }
             // SAFETY: The four-byte user word was validated above.
             let old = unsafe { core::ptr::read(uaddr2 as *const u32) };
-            let command = (arg5 >> 28) & 0xf;
+            let wake_op_cmd = (arg5 >> 28) & 0xf;
             let compare = (arg5 >> 24) & 0xf;
             let operand = (arg5 >> 12) & 0xfff;
             let comparand = arg5 & 0xfff;
-            let new_word = match command {
-                0 => operand,                             // FUTEX_OP_SET
-                1 => old.wrapping_add(operand),           // FUTEX_OP_ADD
-                2 => old | operand,                       // FUTEX_OP_OR
-                3 => !old & operand,                      // FUTEX_OP_ANDN
-                4 => old ^ operand,                       // FUTEX_OP_XOR
+            let new_word = match wake_op_cmd {
+                0 => operand,                   // FUTEX_OP_SET
+                1 => old.wrapping_add(operand), // FUTEX_OP_ADD
+                2 => old | operand,             // FUTEX_OP_OR
+                3 => !old & operand,            // FUTEX_OP_ANDN
+                4 => old ^ operand,             // FUTEX_OP_XOR
                 _ => {
                     scheduler::futex_trace(command, uaddr, value, arg4, uaddr2, -22);
                     return linux_result(frame, LINUX_ENOSYS);
@@ -2233,11 +2233,18 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
                 0
             };
             let second_woken = if matched {
-                scheduler::linux_futex_wake(uaddr2, u64::from(arg4))
+                scheduler::linux_futex_wake(uaddr2, arg4)
             } else {
                 0
             };
-            scheduler::futex_trace(command, uaddr, value, arg4, uaddr2, first_woken + second_woken);
+            scheduler::futex_trace(
+                command,
+                uaddr,
+                value,
+                arg4,
+                uaddr2,
+                first_woken + second_woken,
+            );
             linux_result(frame, first_woken + second_woken)
         }
         _ => {
