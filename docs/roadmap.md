@@ -155,7 +155,7 @@ user space. It is not a VM. The target and security gates are in
   kernel primitives, signed import path, and ring-3 `linuxd` launch policy are
   boot-tested. Evidence includes demand paging, cross-process shared anonymous
   mappings, read-shared rootfs mappings with per-domain quotas, `mremap`, W^X
-  denial, static and dynamic `execve` with argv/envp, blocking `wait4` and
+  enforcement on `mprotect`, static and dynamic `execve` with argv/envp, blocking `wait4` and
   process groups, `siginfo`/`ucontext`/alt-stack/`SA_RESTART`, robust futex,
   `clone3`/`rseq`, blocking and finite `poll`/`epoll_wait`, cross-process pipes,
   `nanosleep`/`timerfd`, bounded pseudo-files and synthetic devices, inotify
@@ -165,8 +165,8 @@ user space. It is not a VM. The target and security gates are in
   approve the launch. The dynamic `ET_DYN`/`PT_INTERP` path and an opt-in
   host-glibc `ld.so` hello also pass. This is a prototype, not production
   compatibility: Linux syscall dispatch, ELF/library mapping, and VMA
-  management remain in the kernel, Mesa/Wayland content is absent, the overlay
-  is RAM-backed, and an installed AppImage cannot yet be selected from a
+  management remain in the kernel, Mesa/Wayland content comes from the separate
+  Gate 4 profile, the overlay is RAM-backed, and an installed AppImage cannot yet be selected from a
   persistent device.
 - [ ] Gate 2 production follow-up: move Linux ABI emulation, ELF/library
   loading, and syscall remoting into the ring-3 `linuxd`, pin a reproducible
