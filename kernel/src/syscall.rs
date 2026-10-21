@@ -354,6 +354,18 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         60 | 231 => return scheduler::linux_exit(first),
         _ => LINUX_ENOSYS,
     };
+    #[cfg(feature = "gate4-gui-test")]
+    if scheduler::linux_is_appimage_task() && matches!(number, 283 | 286 | 287 | 319) {
+        // The Gate 4 trace records the descriptor calls of the GUI so a
+        // missing or failing call is visible instead of looking like an
+        // application hang.
+        serial_line!(
+            "linux: fdcall nr={} fd={} result={}",
+            number,
+            first,
+            result
+        );
+    }
     // SAFETY: The assembly stub passes a live frame on this task's kernel
     // stack and keeps it valid until iretq.
     unsafe { (*frame).rax = result as u64 };

@@ -2382,7 +2382,7 @@ pub fn linux_is_appimage_task() -> bool {
 fn trace_block(kind: &str) {
     let tasks = unsafe { &*TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
-    if current >= tasks.len() {
+    if current >= tasks.len() || tasks[current].tgid != APPIMAGE_TASK {
         return;
     }
     let task = &tasks[current];
