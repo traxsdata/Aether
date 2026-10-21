@@ -258,7 +258,7 @@ user space. It is not a VM. The target and security gates are in
     all three deny. The windowed GridCraft target consumes this feature with
     the same namespace path as argv. The contract was green at the portal-only
     commit. An intermediate integrated rerun at `7ba2e51` hit
-    `AETHER_LINUX_RESTART_FAIL`; the final revalidation at `716dcb4` passed
+    `AETHER_LINUX_RESTART_FAIL`; the final revalidation at `ba6544c` passed
     `AETHER_LINUX_RESTART_OK` and the full Gate 4 marker set, so the earlier
     failure is historical.
   - [x] Gate 4 runtime rootfs packaging (QEMU prototype scope): `make
@@ -616,8 +616,9 @@ The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
 (QEMU scope), the **Gate 3 headless GridCraft run** (QEMU prototype scope), the
 **Gate 4 portal slice** (QEMU prototype scope), the **Gate 4 runtime rootfs
 packaging slice** (QEMU prototype scope), and the **Gate 4 windowed GridCraft
-run** (QEMU prototype scope, complete at tested commit `716dcb4` on
-2026-10-21). Boot markers cover signed
+run** (QEMU prototype scope, complete at tested commit `716dcb4` and
+revalidated at docs-only descendant `ba6544c` on 2026-10-21). Boot markers
+cover signed
 embedded-rootfs and loader-staged AppImage import, the pinned host-glibc runtime
 manifest, ring-3 `linuxd` launch approval and denial, demand paging,
 cross-process shared anonymous mappings, read-shared rootfs mappings,
@@ -629,9 +630,10 @@ static/dynamic exec, the `PT_INTERP` loader, and the real GridCraft CLI CSV
 round trip. The Gate 4 runtime slice adds a loader-staged `BootInfo` v5 rootfs
 with Mesa lavapipe, LLVM, Wayland client libraries, `libxkbcommon`, and a
 kernel-verified 40-file manifest. `make gate3-test` passes with the pinned
-19 MiB AppImage. `make gate4-test` passed at tested code commit `716dcb4`, and
-`make ci` (lint, unit/tooling tests, QEMU boot, ISO/desktop/Files,
-fault/rollback/negative paths, release checks, and the runtime-packaging tests)
+19 MiB AppImage. `make gate4-test` passed at tested code commit `716dcb4` and
+was revalidated at `ba6544c`; `make ci` (lint, unit/tooling tests, QEMU boot,
+ISO/desktop/Files, fault/rollback/negative paths, release checks, and the
+runtime-packaging tests)
 passed at the same commit when the shared host's VNC `:9` collision was
 isolated with `bwrap --unshare-net`; the plain command aborted at boot only
 because another QEMU process already owned `127.0.0.1:5909`. The exact commit
@@ -654,10 +656,11 @@ immediately after validating the committed ZIP/XLSX bytes, and performs the
 post-exit revocation and fresh read/write/rename denials in the kernel. The
 Gate 4 windowed slice adds the Wayland bridge and the `make gate4-test`
 harness for the real `/usr/bin/gridcraft` GUI against the signed AppImage and
-the Mesa/lavapipe runtime rootfs. The completed run recorded
+the Mesa/lavapipe runtime rootfs. The completed run, revalidated at `ba6544c`,
+recorded
 `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
 `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
-`AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3`, a 4,093-byte save from a
+`AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`, a 4,093-byte save from a
 4,089-byte portal read (`AETHER_GATE4_SAVE_OK`), the matching
 `AETHER_GATE4_PORTAL_OK` and `AETHER_GATE4_REVOKE_OK` markers with one read
 and one write denial, and `AETHER_BOOT_OK stage=kernel version=0.1.0`. The

@@ -357,7 +357,7 @@ its window in the Aether compositor, accept keyboard and pointer input, and
 open/save a workbook through the portal.
 
 **Status: met at QEMU prototype scope** on 2026-10-21 at tested code commit
-`716dcb4` (this documentation change is a docs-only descendant), on
+`716dcb4`, revalidated at `ba6544c` (a docs-only descendant), on
 `qemu-q35-ovmf` with software VGA, no GPU, and no X11/D-Bus.
 `make gate4-portal-test` builds a signed AppImage fixture, seeds an exact-file
 read+write grant for the demo root, and runs the fixture as a Linux task.
@@ -443,7 +443,7 @@ window, and requires the post-exit revocation. The kernel-owned markers were:
 ```text
 AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900
 AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux
-AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3
+AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3
 AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093 staging=sctmp+rename source=kernel
 AETHER_GATE4_PORTAL_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_bytes=4089 source=kernel
 AETHER_GATE4_REVOKE_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_denials=1 write_denials=1 source=kernel
@@ -535,8 +535,9 @@ injects a real PS/2 key and mouse packet through the input queue after the first
 present; the kernel only emits `INPUT_OK` after the guest has read key, pointer,
 and focus records.
 
-**Completed windowed run:** the `make gate4-test` run on 2026-10-21 at tested
-code commit `716dcb4` recorded the marker transcript, screenshot evidence, and
+**Completed windowed run:** the `make gate4-test` revalidation at `ba6544c`
+(a docs-only descendant of `716dcb4`) on 2026-10-21 recorded the marker
+transcript, screenshot evidence, and
 tested platform in the [Gate 4 status](#gate-4--windowed-gridcraft) above. The
 bridge, keymap delivery, frame-callback timing, Mesa/lavapipe content, and the
 workbook open/save portal path are exercised by that run. The endpoint remains
