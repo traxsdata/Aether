@@ -40,10 +40,14 @@ extern crate alloc;
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
 use core::panic::PanicInfo;
 
-/// Size of the initial kernel stack in bytes. The Linux import path walks
-/// SquashFS metadata and decompression frames on the boot stack; 64 KiB was
-/// not enough for feature builds with additional recovery calls.
-const KERNEL_STACK_SIZE: usize = 256 * 1024;
+/// Size of the initial kernel stack in bytes.
+///
+/// The Linux import path walks SquashFS metadata and decompression frames on
+/// the boot stack, and the feature builds add recovery and verification
+/// frames. The `.bss.stack` section is placed next to the IDT, so an overflow
+/// corrupts interrupt state instead of faulting cleanly; keep enough headroom
+/// for the largest runtime rootfs.
+const KERNEL_STACK_SIZE: usize = 512 * 1024;
 
 /// Kernel boot stack. Firmware boot-services stacks are not reused.
 ///
