@@ -842,6 +842,8 @@ static GATE4_REVOKED: AtomicUsize = AtomicUsize::new(0);
 static GATE4_GUI_READ_BYTES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "gate4-gui-test")]
 static GATE4_GUI_SAVE_MARKER: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "gate4-gui-test")]
+static GATE4_GUI_POST_EXIT: AtomicUsize = AtomicUsize::new(0);
 
 /// Scheduler initialization failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -921,6 +923,15 @@ pub fn run() -> ! {
             && LINUXD_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize
         {
             timer::disable_interrupts();
+            #[cfg(feature = "gate4-gui-test")]
+            if APPIMAGE_RESULT.load(Ordering::Acquire) == UserTestResult::Passed as usize {
+                // The GUI's save/revoke evidence is self-contained: it only
+                // needs the verified AppImage task to have exited. Emit it
+                // before the unrelated static Linux fixture result is
+                // checked, so a pre-existing fixture failure cannot hide the
+                // kernel-owned portal evidence.
+                crate::linuxd::post_app_exit();
+            }
             let denied = DENIED.load(Ordering::Acquire);
             let messages = MESSAGES.load(Ordering::Acquire);
             if denied != 2 || messages != 3 {
@@ -4016,6 +4027,9 @@ pub fn gate4_portal_post_exit() {
 #[cfg(feature = "gate4-gui-test")]
 pub fn gate4_gui_post_exit() {
     use aether_abi::user::FileRights;
+    if GATE4_GUI_POST_EXIT.swap(1, Ordering::AcqRel) != 0 {
+        return;
+    }
     let read_bytes = GATE4_GUI_READ_BYTES.load(Ordering::Acquire);
     if read_bytes == 0 {
         serial_line!("AETHER_BOOT_FAILED reason=gate4-gui portal read not observed");

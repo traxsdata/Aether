@@ -368,6 +368,10 @@ struct wl_display {
     struct wl_event_queue default_queue;
     struct wl_event_queue *queues;
     struct wl_proxy *proxies;
+    /* Copies made by wl_proxy_create_wrapper are not part of the display's
+     * proxy table (the client owns them), but input has to reach them when
+     * that is the proxy the client dispatches on. */
+    struct wl_proxy *wrappers;
     int aether;
     int pending_configure;
     int width;
@@ -594,6 +598,54 @@ static void queue_event_broadcast(struct wl_display *dpy,
         queue_event_raw(q, target, opcode, args, nargs);
 }
 
+/* Delivers an input event to every proxy for one object id.
+ *
+ * Input objects are not swapchain buffers: the app may listen through the
+ * original proxy, through a wrapper on another queue, or through both. Send
+ * the event to each of them so the queue the app actually dispatches carries
+ * it. The same queue can hold the original and a wrapper, in which case the
+ * listener sees the event twice; prototype input is idempotent enough for
+ * that, and it is preferable to dropping the event on the wrong queue.
+ */
+static void input_event_broadcast(struct wl_display *dpy,
+                                  struct wl_proxy *base, uint32_t opcode,
+                                  const union wl_argument *args, int nargs) {
+    const char *name;
+    struct wl_proxy *p;
+    if (!dpy || !base)
+        return;
+    name = iface_name(base);
+    for (p = dpy->proxies; p; p = p->next) {
+        if (p->id == base->id && strcmp(iface_name(p), name) == 0)
+            queue_event_raw(p->queue, p, opcode, args, nargs);
+    }
+    for (p = dpy->wrappers; p; p = p->next) {
+        if (p->id == base->id && strcmp(iface_name(p), name) == 0)
+            queue_event_raw(p->queue, p, opcode, args, nargs);
+    }
+}
+
+/* Variadic form of input_event_broadcast, matching emit_n's argument style. */
+static void emit_input_n(struct wl_display *dpy, struct wl_proxy *base,
+                         uint32_t opcode, int nargs, ...) {
+    union wl_argument args[MAX_ARGS];
+    va_list ap;
+    int n = 0;
+    memset(args, 0, sizeof(args));
+    if (!dpy || !base)
+        return;
+    if (nargs > MAX_ARGS)
+        nargs = MAX_ARGS;
+    va_start(ap, nargs);
+    while (n < nargs) {
+        uintptr_t word = va_arg(ap, uintptr_t);
+        memcpy(&args[n], &word, sizeof(word));
+        n++;
+    }
+    va_end(ap);
+    input_event_broadcast(dpy, base, opcode, args, n);
+}
+
 static struct wl_event *queue_pop(struct wl_event_queue *q) {
     struct wl_event *ev = q->head;
     if (!ev)
@@ -709,6 +761,9 @@ static void aether_title(struct wl_display *dpy, const char *title) {
     if (length > 64)
         length = 64;
     aether_write_request(dpy, &req, title, length);
+    if (getenv("G4_SHIM_TRACE"))
+        shim_log("AETHER_BRIDGE_TITLE title=%.*s\n", (int)length,
+                 title ? title : "");
 }
 
 static void aether_destroy(struct wl_display *dpy) {
@@ -951,16 +1006,70 @@ static int32_t bridge_fixed(double value) {
 }
 
 static uint32_t bridge_evdev(uint32_t code) {
-    if (code >= 'a' && code <= 'z')
-        return 30u + (code - 'a');
+    /* The kernel decoder hands over ASCII for printable keys; the Wayland
+     * key event carries the Linux evdev scancode, whose layout is not
+     * alphabetic (a=30, b=48, ...). Use the real US evdev table. */
+    char c;
     if (code >= 'A' && code <= 'Z')
-        return 30u + (code - 'A');
-    if (code >= '1' && code <= '9')
-        return 2u + (code - '1');
-    if (code == '0')
-        return 11;
-    if (code == ' ')
-        return 57;
+        c = (char)(code - 'A' + 'a');
+    else if (code < 0x80)
+        c = (char)code;
+    else
+        c = 0;
+    switch (c) {
+    case '1': return 2;
+    case '2': return 3;
+    case '3': return 4;
+    case '4': return 5;
+    case '5': return 6;
+    case '6': return 7;
+    case '7': return 8;
+    case '8': return 9;
+    case '9': return 10;
+    case '0': return 11;
+    case '-': return 12;
+    case '=': return 13;
+    case 'q': return 16;
+    case 'w': return 17;
+    case 'e': return 18;
+    case 'r': return 19;
+    case 't': return 20;
+    case 'y': return 21;
+    case 'u': return 22;
+    case 'i': return 23;
+    case 'o': return 24;
+    case 'p': return 25;
+    case '[': return 26;
+    case ']': return 27;
+    case 'a': return 30;
+    case 's': return 31;
+    case 'd': return 32;
+    case 'f': return 33;
+    case 'g': return 34;
+    case 'h': return 35;
+    case 'j': return 36;
+    case 'k': return 37;
+    case 'l': return 38;
+    case ';': return 39;
+    case '\'': return 40;
+    case '`': return 41;
+    case '\\': return 43;
+    case 'z': return 44;
+    case 'x': return 45;
+    case 'c': return 46;
+    case 'v': return 47;
+    case 'b': return 48;
+    case 'n': return 49;
+    case 'm': return 50;
+    case ',': return 51;
+    case '.': return 52;
+    case '/': return 53;
+    case ' ': return 57;
+    case '\t': return 15;
+    case '\n': return 28;
+    default:
+        break;
+    }
     switch (code) {
     case 0x1000: return 28; /* Enter */
     case 0x1001: return 14; /* Backspace */
@@ -996,18 +1105,18 @@ static void aether_focus(struct wl_display *dpy, int entered,
             continue;
         if (dpy->keyboard) {
             if (entered)
-                emit_n(dpy->keyboard, 1, 3, (uintptr_t)serial,
+                emit_input_n(dpy, dpy->keyboard, 1, 3, (uintptr_t)serial,
                        (uintptr_t)p, (uintptr_t)&empty_keys);
             else
-                emit_n(dpy->keyboard, 2, 2, (uintptr_t)serial, (uintptr_t)p);
+                emit_input_n(dpy, dpy->keyboard, 2, 2, (uintptr_t)serial, (uintptr_t)p);
         }
         if (dpy->pointer) {
             if (entered)
-                emit_n(dpy->pointer, 0, 5, (uintptr_t)serial, (uintptr_t)p,
+                emit_input_n(dpy, dpy->pointer, 0, 5, (uintptr_t)serial, (uintptr_t)p,
                        (uintptr_t)bridge_fixed(x), (uintptr_t)bridge_fixed(y));
             else
-                emit_n(dpy->pointer, 1, 2, (uintptr_t)serial, (uintptr_t)p);
-            emit_n(dpy->pointer, 5, 0); /* frame */
+                emit_input_n(dpy, dpy->pointer, 1, 2, (uintptr_t)serial, (uintptr_t)p);
+            emit_input_n(dpy, dpy->pointer, 5, 0); /* frame */
         }
     }
 }
@@ -1025,11 +1134,11 @@ static void aether_key(struct wl_display *dpy,
     if (ev->modifiers & 2) depressed |= 4;   /* ctrl */
     if (ev->modifiers & 4) depressed |= 8;   /* alt */
     if (ev->modifiers & 8) depressed |= 64;  /* super */
-    emit_n(dpy->keyboard, 4, 5, (uintptr_t)serial, (uintptr_t)depressed,
+    emit_input_n(dpy, dpy->keyboard, 4, 5, (uintptr_t)serial, (uintptr_t)depressed,
            (uintptr_t)0, (uintptr_t)0, (uintptr_t)0);
-    emit_n(dpy->keyboard, 3, 4, (uintptr_t)serial, (uintptr_t)ev->serial,
+    emit_input_n(dpy, dpy->keyboard, 3, 4, (uintptr_t)serial, (uintptr_t)ev->serial,
            (uintptr_t)key, (uintptr_t)1);
-    emit_n(dpy->keyboard, 3, 4, (uintptr_t)serial, (uintptr_t)ev->serial,
+    emit_input_n(dpy, dpy->keyboard, 3, 4, (uintptr_t)serial, (uintptr_t)ev->serial,
            (uintptr_t)key, (uintptr_t)0);
 }
 
@@ -1074,10 +1183,10 @@ static int aether_read_events(struct wl_display *dpy) {
         case AETHER_EV_POINTER_MOTION:
             aether_focus(dpy, 1, ev.x, ev.y);
             if (dpy->pointer) {
-                emit_n(dpy->pointer, 2, 3, (uintptr_t)ev.serial,
+                emit_input_n(dpy, dpy->pointer, 2, 3, (uintptr_t)ev.serial,
                        (uintptr_t)bridge_fixed(ev.x),
                        (uintptr_t)bridge_fixed(ev.y));
-                emit_n(dpy->pointer, 5, 0);
+                emit_input_n(dpy, dpy->pointer, 5, 0);
             }
             break;
         case AETHER_EV_LEAVE:
@@ -1089,22 +1198,22 @@ static int aether_read_events(struct wl_display *dpy) {
         case AETHER_EV_POINTER_BUTTON:
             if (dpy->pointer) {
                 uint32_t button = 0x110u + (ev.code > 0 ? ev.code - 1u : 0u);
-                emit_n(dpy->pointer, 3, 4, (uintptr_t)ev.serial,
+                emit_input_n(dpy, dpy->pointer, 3, 4, (uintptr_t)ev.serial,
                        (uintptr_t)ev.serial, (uintptr_t)button,
                        (uintptr_t)(ev.state ? 1u : 0u));
-                emit_n(dpy->pointer, 5, 0);
+                emit_input_n(dpy, dpy->pointer, 5, 0);
             }
             break;
         case AETHER_EV_POINTER_AXIS:
             if (dpy->pointer) {
-                emit_n(dpy->pointer, 4, 3, (uintptr_t)ev.serial,
+                emit_input_n(dpy, dpy->pointer, 4, 3, (uintptr_t)ev.serial,
                        (uintptr_t)0, (uintptr_t)(intptr_t)(ev.x * 256));
-                emit_n(dpy->pointer, 5, 0);
+                emit_input_n(dpy, dpy->pointer, 5, 0);
             }
             break;
         case AETHER_EV_CLOSE:
             if (dpy->toplevel)
-                emit_n(dpy->toplevel, 1, 0); /* xdg_toplevel.close */
+                emit_input_n(dpy, dpy->toplevel, 1, 0); /* xdg_toplevel.close */
             break;
         default:
             break;
@@ -1790,12 +1899,28 @@ EXPORT struct wl_proxy *wl_proxy_create_wrapper(struct wl_proxy *proxy) {
     w->listener = NULL;
     w->dispatcher = NULL;
     w->user_data = NULL;
+    pthread_mutex_lock(&proxy->display->lock);
+    w->next = proxy->display->wrappers;
+    proxy->display->wrappers = w;
+    pthread_mutex_unlock(&proxy->display->lock);
     return w;
 }
 
 EXPORT void wl_proxy_wrapper_destroy(struct wl_proxy *proxy) {
-    if (proxy)
-        free(proxy);
+    if (!proxy)
+        return;
+    if (proxy->display && proxy->is_wrapper) {
+        struct wl_proxy **pp;
+        pthread_mutex_lock(&proxy->display->lock);
+        for (pp = &proxy->display->wrappers; *pp; pp = &(*pp)->next) {
+            if (*pp == proxy) {
+                *pp = proxy->next;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&proxy->display->lock);
+    }
+    free(proxy);
 }
 
 EXPORT void wl_proxy_destroy(struct wl_proxy *proxy) {

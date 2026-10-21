@@ -36,6 +36,7 @@ IMAGE = Path(os.environ.get("AETHER_GATE4_IMAGE", BUILD / "aether.img"))
 OUT = Path(os.environ.get("AETHER_GATE4_OUT", BUILD / "gate4"))
 TIMEOUT = int(os.environ.get("AETHER_GATE4_TIMEOUT", "300"))
 SCREENSHOT = Path(os.environ.get("AETHER_GATE4_SCREENSHOT", OUT / "gate4.ppm"))
+POST_INPUT_SCREENSHOT = os.environ.get("AETHER_GATE4_POST_INPUT_SCREENSHOT", "")
 CLICK = os.environ.get("AETHER_GATE4_CLICK", "")
 KEYS = [key for key in os.environ.get("AETHER_GATE4_KEYS", "").split(",") if key]
 WAIT_SAVE = os.environ.get("AETHER_GATE4_WAIT_SAVE", "1") != "0"
@@ -176,6 +177,22 @@ def main() -> int:
             print(f"PASS: screenshot {width}x{height} nonblack={nonblack} path={SCREENSHOT}")
 
         if CLICK:
+            # The first presented frame can be an empty swapchain image; the
+            # workbook is ready once the application sets its document title.
+            # Clicking before that point loses the selection even though the
+            # kernel delivers the pointer events.
+            deadline = time.monotonic() + 90
+            ready = False
+            while time.monotonic() < deadline:
+                text = serial.read_text(errors="replace")
+                if "AETHER_BRIDGE_TITLE title=" in text and "gate4-gui" in text.lower():
+                    ready = True
+                    break
+                time.sleep(0.25)
+            if not ready:
+                print("WARN: workbook title not observed before input", file=sys.stderr)
+            else:
+                time.sleep(1.0)
             # The PS/2 pointer starts at the screen centre. Move to the
             # requested screen coordinate in bounded relative packets, then
             # click twice: the first click focuses the Linux window, the
@@ -196,10 +213,17 @@ def main() -> int:
                 dx -= step_x
                 dy -= step_y
                 time.sleep(0.02)
+            # Give the app time to process the final motion and update its
+            # hover state before the press.
+            time.sleep(0.5)
+            # First click focuses the Linux window; the desktop focus change
+            # is asynchronous, so pause before the click that selects a cell.
             send_hmp(qmp_file, "mouse_button 1")
+            time.sleep(0.15)
             send_hmp(qmp_file, "mouse_button 0")
-            time.sleep(0.05)
+            time.sleep(0.8)
             send_hmp(qmp_file, "mouse_button 1")
+            time.sleep(0.15)
             send_hmp(qmp_file, "mouse_button 0")
             # The first real UI frame (fonts, workbook, cursor theme) can take
             # a few seconds on the software Vulkan path. Drive the editing keys
@@ -233,6 +257,17 @@ def main() -> int:
                 print(text)
                 print("FAIL: input marker did not appear", file=sys.stderr)
                 return 1
+
+        if POST_INPUT_SCREENSHOT:
+            # Let the application process the queued key and pointer events
+            # and present the resulting frame before capturing the UI.
+            time.sleep(4.0)
+            send_qmp(
+                qmp_file,
+                "screendump",
+                {"filename": POST_INPUT_SCREENSHOT},
+            )
+            print(f"PASS: post-input screenshot path={POST_INPUT_SCREENSHOT}")
 
         if WAIT_SAVE:
             # Save first; the app stays open until the harness closes it. The

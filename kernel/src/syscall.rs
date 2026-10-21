@@ -368,6 +368,13 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         _ => LINUX_ENOSYS,
     };
     #[cfg(feature = "gate4-gui-test")]
+    if scheduler::linux_is_appimage_task() && matches!(number, 257 | 82 | 87) {
+        // The save transaction is only observable through the paths the
+        // application chooses. Trace the bounded set of interesting path
+        // calls so a direct write or a different staging suffix is visible.
+        gate4_trace_path_call(number, pml4, first, second, third, result);
+    }
+    #[cfg(feature = "gate4-gui-test")]
     if scheduler::linux_is_appimage_task() && matches!(number, 283 | 286 | 287 | 319) {
         // The Gate 4 trace records the descriptor calls of the GUI so a
         // missing or failing call is visible instead of looking like an
@@ -608,6 +615,56 @@ fn user_cstr<'a>(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<&'a str>
         scanned += chunk;
     }
     None
+}
+
+/// Traces the path arguments of the Gate 4 GUI save transaction.
+///
+/// Only paths that name the workbook or a staging file are printed, so the
+/// application's normal startup opens do not exhaust the bounded trace.
+#[cfg(feature = "gate4-gui-test")]
+fn gate4_trace_path_call(
+    number: u64,
+    pml4: PhysFrame,
+    first: u64,
+    second: u64,
+    third: u64,
+    result: i64,
+) {
+    const TRACE_LIMIT: usize = 48;
+    static TRACED: AtomicUsize = AtomicUsize::new(0);
+    let interesting =
+        |path: &str| path.contains(".xlsx") || path.contains("portal") || path.contains(".tmp");
+    let (from, to) = match number {
+        257 => (user_cstr(pml4, second, 256), None),
+        82 => (user_cstr(pml4, first, 256), user_cstr(pml4, second, 256)),
+        87 => (user_cstr(pml4, first, 256), None),
+        _ => (None, None),
+    };
+    if !from.is_some_and(interesting) && !to.is_some_and(interesting) {
+        return;
+    }
+    if TRACED.fetch_add(1, Ordering::Relaxed) >= TRACE_LIMIT {
+        return;
+    }
+    match number {
+        257 => serial_line!(
+            "linux: openat path={} flags={:#x} result={}",
+            from.unwrap_or("?"),
+            third,
+            result
+        ),
+        82 => serial_line!(
+            "linux: rename from={} to={} result={}",
+            from.unwrap_or("?"),
+            to.unwrap_or("?"),
+            result
+        ),
+        _ => serial_line!(
+            "linux: unlink path={} result={}",
+            from.unwrap_or("?"),
+            result
+        ),
+    }
 }
 
 const LINUX_MAP_SHARED: u64 = 0x01;
