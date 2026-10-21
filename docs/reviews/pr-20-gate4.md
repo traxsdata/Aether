@@ -78,10 +78,10 @@ AETHER_BOOT_OK stage=kernel version=0.1.0
 - [x] QEMU screenshots:
       `build/gate4/gridcraft.ppm` — 1280x800, 1,024,000 non-black pixels,
       sha256
-      `37547030161a3db4f0f0ffe9abb0e9afc54f5a8609958c5549467b6a962d782c`;
+      `492127ee13607b711d248c583d3760753d1eb897293953119b2a9bfc35ebbebb`;
       `build/gate4/gridcraft-after-input.ppm` — 1280x800, 1,023,989 non-black
       pixels, sha256
-      `dea314b57ab4d3a460afa243fffc173167103f071f971e9894826702fa7af55b`.
+      `c81760ff9a8c6830a54eef3719f6bee9a682704e54103d2b9ab373dbb6d80b4e`.
       The post-input screenshot shows the real workbook with `GATE4-GUI.XLSX`
       in the title.
 - [x] `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`. The harness waited
@@ -102,9 +102,17 @@ AETHER_BOOT_OK stage=kernel version=0.1.0
       `linux.gridcraft.portal.revoke` with platform `qemu-q35-ovmf` and date
       `2026-10-21`. The classification stays `limited` because the Gate 2
       production follow-up is open.
-- [ ] `make ci` result and anything not run: final CI awaits the orchestrator;
-      this change does not claim a CI pass. The Gate 4 command above is the
-      windowed evidence.
+- [x] `make ci` passed at `2b6ce00` when run with the host's VNC `:9` collision
+      isolated (`bwrap --unshare-net env AETHER_ISO_TIMEOUT=300 make ci`). The
+      plain command in the shared host environment aborted at the boot step
+      because a pre-existing QEMU process owned `127.0.0.1:5909` (VNC display
+      `:9`); that is an environment conflict, not a code failure. In the
+      isolated run, lint, docs-check, license-check, unittest (326 host tests
+      plus 8 Python tests), compat, AppImage, SquashFS, update, boot, ISO/desktop
+      on VGA and VMware SVGA, VMware VMX generation, shell, fault, rollback,
+      negative, and release-tamper steps all passed. `make gate4-test` was run
+      separately and passed with the marker transcript above. `make docs-check`
+      and `make license-check` also pass directly.
 
 ## Known limitations
 

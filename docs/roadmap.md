@@ -216,10 +216,10 @@ user space. It is not a VM. The target and security gates are in
   waited for the save, closed the window, and verified post-exit revocation.
   QEMU screenshots: `build/gate4/gridcraft.ppm` (1280x800, 1,024,000
   non-black pixels, sha256
-  `37547030161a3db4f0f0ffe9abb0e9afc54f5a8609958c5549467b6a962d782c`) and
+  `492127ee13607b711d248c583d3760753d1eb897293953119b2a9bfc35ebbebb`) and
   `build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989 non-black
   pixels, sha256
-  `dea314b57ab4d3a460afa243fffc173167103f071f971e9894826702fa7af55b`); the
+  `c81760ff9a8c6830a54eef3719f6bee9a682704e54103d2b9ab373dbb6d80b4e`); the
   post-input screenshot shows the real workbook with `GATE4-GUI.XLSX` in the
   title. This proves that the unmodified GridCraft GUI starts through the
   in-tree Wayland bridge, presents a real frame, receives keyboard and
@@ -626,10 +626,14 @@ static/dynamic exec, the `PT_INTERP` loader, and the real GridCraft CLI CSV
 round trip. The Gate 4 runtime slice adds a loader-staged `BootInfo` v5 rootfs
 with Mesa lavapipe, LLVM, Wayland client libraries, `libxkbcommon`, and a
 kernel-verified 40-file manifest. `make gate3-test` passes with the pinned
-19 MiB AppImage, and `make ci` (including lint, unit/tooling tests, QEMU boot,
-ISO/desktop/Files, fault/rollback/negative paths, release checks, and the
-runtime-packaging tests) passes at the commit that adds this run. The exact
-commit and marker transcript belong in the PR, not this planning file.
+19 MiB AppImage. `make gate4-test` passed at tested code commit `2b6ce00`, and
+`make ci` (lint, unit/tooling tests, QEMU boot, ISO/desktop/Files,
+fault/rollback/negative paths, release checks, and the runtime-packaging tests)
+passed at the same commit when the shared host's VNC `:9` collision was
+isolated with `bwrap --unshare-net`; the plain command aborted at boot only
+because another QEMU process already owned `127.0.0.1:5909`. The exact commit
+and marker transcript are recorded in
+[the Gate 4 review](reviews/pr-20-gate4.md).
 
 `make gate4-portal-test` covers the portal half of Gate 4: a Linux AppImage
 fixture opens a seeded workbook through

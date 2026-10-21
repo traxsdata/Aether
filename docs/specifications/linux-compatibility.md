@@ -451,9 +451,9 @@ AETHER_BOOT_OK stage=kernel version=0.1.0
 
 The screenshots are `build/gate4/gridcraft.ppm` (1280x800, 1,024,000
 non-black pixels, sha256
-`37547030161a3db4f0f0ffe9abb0e9afc54f5a8609958c5549467b6a962d782c`) and
+`492127ee13607b711d248c583d3760753d1eb897293953119b2a9bfc35ebbebb`) and
 `build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989 non-black pixels,
-sha256 `dea314b57ab4d3a460afa243fffc173167103f071f971e9894826702fa7af55b`);
+sha256 `c81760ff9a8c6830a54eef3719f6bee9a682704e54103d2b9ab373dbb6d80b4e`);
 the post-input screenshot shows the real workbook with `GATE4-GUI.XLSX` in the
 title. The run also passes `AETHER_LINUX_RESTART_OK` after the fixture
 synchronization fix.
