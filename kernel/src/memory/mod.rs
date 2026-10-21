@@ -7,6 +7,17 @@ pub mod shared;
 
 pub use heap::used_bytes as heap_used_bytes;
 
+/// Reserves the bootstrap heap from the frame allocator.
+///
+/// Must run after the kernel has switched to its own page tables and released
+/// boot-services memory, so the arena comes from ordinary usable RAM rather
+/// than a fixed range in the kernel ELF.
+pub fn init_heap() -> Option<(usize, usize)> {
+    let bytes = heap::requested_bytes();
+    let start = with_frame_allocator(|frames| heap::init(frames, bytes))??;
+    Some((start, bytes))
+}
+
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, FrameStats};
 use core::cell::UnsafeCell;

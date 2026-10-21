@@ -5,12 +5,12 @@ through OVMF can be attached to a VMware Workstation virtual machine; the ISO
 carries a FAT EFI system image containing `/EFI/BOOT/BOOTX64.EFI` (8 MiB for
 the standard fixture, 128 MiB for the GridCraft demo).
 
-The GridCraft demo ISO links a 1.5 GiB static import heap into the kernel, so
-the loader must allocate roughly 1.6 GiB for the kernel image before the OS
-starts. A 2048 MiB VM fails with `AETHER_LOADER_FAILED error=page allocation
-failed (status 0x800000000000000e)`; that is EFI out-of-resources, not an ISO
-or VMware defect. Give the demo VM at least 4096 MiB; the generated VMX uses
-8192 MiB. The standard fixture ISO remains usable with 2048 MiB.
+The GridCraft demo needs room for a 1.5 GiB import heap in addition to the
+164 MiB runtime rootfs and the imported AppImage. The kernel now reserves that
+heap from its frame allocator after it takes over, so the UEFI loader only
+allocates the small kernel image. Give the demo VM at least 4096 MiB; the
+generated VMX uses 8192 MiB. A 2048 MiB guest is too small for the demo and can
+fail during import. The standard fixture ISO remains usable with 2048 MiB.
 
 The kernel is embedded in the loader, so the ISO does not need a disk. Storage,
 networking, audio, USB HID, and GPU acceleration are not used by this prototype;
