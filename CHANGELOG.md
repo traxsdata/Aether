@@ -7,6 +7,18 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- GridCraft interaction performance for the Gate 4 prototype: the compositor
+  clips the Linux blit to damage once, copies opaque rows as packed words,
+  uses exact shift-based alpha division, hashes only the first presented
+  frame, and repaints only the content rectangle for a surface present.
+  Linux-surface damage is separate from clock/diagnostics, windows outside the
+  damage rectangle are skipped, an opaque surface avoids the wallpaper restore
+  and content fill, and drag/resize suppresses shadows and uses an opaque base.
+  The scheduler prefers the compositor after a present, and long surface
+  copies service the PS/2 controller so keystrokes are not dropped. Wayland
+  per-request tracing is off by default. The kernel reports
+  `AETHER_GATE4_PERF` at endpoint close and `make gate4-test` still passes the
+  present/input/save/revoke markers.
 - Linux Gate 4 windowed GridCraft is complete at QEMU prototype scope:
   `runtime/wayland/wayland_shim.c` builds as a drop-in
   `libwayland-client.so.0` (plus a `libwayland-cursor.so.0` stub and an

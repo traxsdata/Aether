@@ -337,6 +337,65 @@ user space. It is not a VM. The target and security gates are in
   specification](specifications/linux-compatibility.md) forbids raising the
   record until that follow-up closes.
 
+#### GridCraft interaction performance (PR #20)
+
+Gate 4 proved the windowed path but interactive use was slow. A full window
+repaint blended two shadow layers and the glass body over roughly 1.4 million
+pixels, copied the guest surface, and hashed it on every frame. A once-per-second
+clock tick re-blitted an idle Linux window, and long interrupt-masked surface
+copies could drop PS/2 keystrokes. The performance slice changes the hot path
+without changing the Gate 4 markers or the security checks:
+
+- [x] Clip the Linux blit once to the damage rectangle instead of asking every
+  source pixel to reject itself.
+- [x] Copy opaque guest rows as packed words and replace per-channel integer
+  division with exact shift-based division in the alpha blend.
+- [x] Hash the presented surface only for the first-frame evidence marker.
+- [x] Copy a tightly packed surface in 64 KiB chunks with one page-table pass,
+  and service the PS/2 controller between chunks; the compositor does the same
+  while blitting, so a key that arrives during a surface copy is not lost.
+- [x] Separate Linux-surface damage from clock/diagnostic damage. A present
+  repaints only the content rectangle, a clock tick repaints only the menu bar,
+  and windows outside the damage rectangle are not walked.
+- [x] Skip the wallpaper restore and content fill when an opaque surface will
+  overwrite the rectangle.
+- [x] Suppress window shadows and use an opaque base during drag/resize, when
+  the gesture moves too fast to read them; the gesture end restores both.
+- [x] Give the compositor a scheduler slice after a present, not only after
+  input, so a continuously rendering guest cannot starve presentation.
+- [x] Disable per-request Wayland tracing by default and rate-limit the
+  per-frame bridge log; title changes stay unconditional for readiness.
+- [x] Add a kernel-owned `AETHER_GATE4_PERF` summary of presentation and
+  compositor counts, paint durations, and fast (under 30 ms) / slow (over
+  100 ms) paint buckets.
+
+Evidence at tested code commit `3092b50` (`make gate4-test`, `qemu-q35-ovmf`,
+software VGA, 2026-10-21) reproduced the Gate 4 markers with the same pinned
+AppImage and runtime profile: `AETHER_GATE4_PRESENT_OK frames=1
+checksum=0x7b2cafc5 source=linux`, `AETHER_GATE4_INPUT_OK keys=1 pointer=18
+focus=3`, the 4,089-byte save and portal read, and post-exit revocation. The
+kernel summary was:
+
+```text
+AETHER_GATE4_PERF frames=6 scene_paints=23 cursor_paints=16 last_paint_ms=230 max_paint_ms=550 fast_paints=15 slow_paints=8
+```
+
+Fifteen of 23 window-active paints completed in under 30 ms. The eight
+remaining paints were full-window transitions (startup, title/focus changes,
+and close) that still take over 100 ms under TCG, with a 550 ms maximum. The
+final `last_paint_ms=230` is one of those full-window transitions, not a
+content-only frame. `make lint`, `make docs-check`, and `make unittest` pass at
+the same commit. The screenshots are 1920x1200 with 2,304,000 and 2,303,983
+non-black pixels (`sha256
+ccd46fc0993ab92cf51f272260b0f2c6c733d341e80a669888a5d60e2dae3bdb` and
+`a3c8b2da8ea17c064ba0447e0642b7fa8eb673632789e780668967719a0736c3`).
+
+The remaining gaps are that lavapipe still rasterizes the application on the
+single emulated CPU, every present copies the full 1440x900 surface because the
+bridge ABI has no damage list, full-window paints still exceed one 10 ms timer
+tick, window shadows and the translucent body are approximated during a drag
+gesture, and there is no GPU service.
+
 #### Import and runtime root
 
 - [x] Validate AppImage type 2, ELF runtime, SquashFS bounds, and table offsets.
@@ -621,8 +680,9 @@ The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
 (QEMU scope), the **Gate 3 headless GridCraft run** (QEMU prototype scope), the
 **Gate 4 portal slice** (QEMU prototype scope), the **Gate 4 runtime rootfs
 packaging slice** (QEMU prototype scope), and the **Gate 4 windowed GridCraft
-run** (QEMU prototype scope, complete at tested commit `716dcb4` and
-revalidated at docs-only descendant `ba6544c` on 2026-10-21). Boot markers
+run** (QEMU prototype scope, complete at tested commit `716dcb4`, revalidated
+at docs-only descendant `ba6544c`, and extended by the interaction-performance
+slice at `3092b50` on 2026-10-21). Boot markers
 cover signed
 embedded-rootfs and loader-staged AppImage import, the pinned host-glibc runtime
 manifest, ring-3 `linuxd` launch approval and denial, demand paging,

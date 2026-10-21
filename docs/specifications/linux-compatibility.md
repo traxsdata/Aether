@@ -357,8 +357,9 @@ its window in the Aether compositor, accept keyboard and pointer input, and
 open/save a workbook through the portal.
 
 **Status: met at QEMU prototype scope** on 2026-10-21 at tested code commit
-`716dcb4`, revalidated at `ba6544c` (a docs-only descendant), on
-`qemu-q35-ovmf` with software VGA, no GPU, and no X11/D-Bus.
+`716dcb4`, revalidated at `ba6544c` (a docs-only descendant), and extended by
+the interaction-performance slice at `3092b50`, on `qemu-q35-ovmf` with
+software VGA, no GPU, and no X11/D-Bus.
 `make gate4-portal-test` builds a signed AppImage fixture, seeds an exact-file
 read+write grant for the demo root, and runs the fixture as a Linux task.
 The fixture opens
@@ -450,17 +451,35 @@ AETHER_GATE4_REVOKE_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx r
 AETHER_BOOT_OK stage=kernel version=0.1.0
 ```
 
-The screenshots are `build/gate4/gridcraft.ppm` (1280x800, 1,024,000
-non-black pixels, sha256
-`492127ee13607b711d248c583d3760753d1eb897293953119b2a9bfc35ebbebb`) and
-`build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989 non-black pixels,
-sha256 `6d877f91ebe36e30b6bdf7ec4e00215fcce002fbe9530ec44223ffd9e162cba8`);
-the post-input screenshot shows the real workbook with `GATE4-GUI.XLSX` in the
-title. The run also passes `AETHER_LINUX_RESTART_OK` after the fixture
+The latest `3092b50` screenshots are `build/gate4/gridcraft.ppm` (1920x1200,
+2,304,000 non-black pixels, sha256
+`ccd46fc0993ab92cf51f272260b0f2c6c733d341e80a669888a5d60e2dae3bdb`) and
+`build/gate4/gridcraft-after-input.ppm` (1920x1200, 2,303,983 non-black
+pixels, sha256
+`a3c8b2da8ea17c064ba0447e0642b7fa8eb673632789e780668967719a0736c3`); the
+post-input screenshot shows the real workbook with `GATE4-GUI.XLSX` in the
+title. The original Gate 4 run used the 1280x800 artifacts listed in the
+review record. The run also passes `AETHER_LINUX_RESTART_OK` after the fixture
 synchronization fix.
 
 This proves only the named windowed tests at QEMU prototype scope. It is not a
 general GUI or Linux compatibility claim.
+
+**Interaction performance (prototype):** the compositor now clips the Linux
+blit to the damage rectangle, copies opaque rows as packed words, hashes only
+the first presented frame, and repaints only the content rectangle for a
+surface present. Clock damage is limited to the menu bar, windows outside the
+damage rectangle are not walked, and the scheduler gives the compositor a
+slice after a present. Long surface copies service the PS/2 controller between
+chunks so keystrokes are not lost while interrupts are masked. During a
+drag/resize gesture the window uses an opaque base and omits its shadow; the
+gesture end repaints the full frame. The kernel reports
+`AETHER_GATE4_PERF frames=... scene_paints=... cursor_paints=...
+last_paint_ms=... max_paint_ms=... fast_paints=... slow_paints=...` at
+endpoint close. This is a latency
+improvement, not a throughput claim: lavapipe still rasterizes on the single
+emulated CPU, every present still copies the full 1440x900 surface because the
+bridge ABI has no damage list, and no GPU service exists.
 
 **Still open after Gate 4:** a real desktop file chooser/D-Bus portal,
 clipboard, interactive resize and window chrome, broader keymaps and cursor
@@ -499,8 +518,10 @@ mesa=lavapipe-26.0.8-1ubuntu0.3 wayland=1.24.0-2`, and runs the real AppImage's
 
 **Measured limitation:** the allocation-only bootstrap importer needs about
 1.04 GiB for this 164 MiB tree because decompression scratch is never
-reclaimed. The Gate 4 profile therefore builds with a 1.5 GiB heap and a 3 GiB
-guest. This is a packaging/boot prototype, not a production runtime size.
+reclaimed. The Gate 4 profile therefore builds with a 1.5 GiB heap; the
+statistics below measure the current `make gate4-test` harness, which uses a
+4 GiB guest. This is a packaging/boot prototype, not a production runtime
+size.
 
 **Production follow-up not yet met:** the GUI launch, Wayland bridge,
 compositor presentation, input, portal workbook open/save, and pixel checksum
