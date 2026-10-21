@@ -29,6 +29,12 @@ pub use aether_memory::memfd::{MAX_MEMFDS, MAX_PAGES, MAX_TOTAL_PAGES, pages_for
 /// use the low 32 bits; the 1<<48 tag leaves those untouched.
 const MEMFD_KEY_TAG: u64 = 1 << 48;
 
+/// Returns `true` when a page-cache file key belongs to a memfd object.
+#[must_use]
+pub const fn is_file_key(key: u64) -> bool {
+    key & MEMFD_KEY_TAG != 0
+}
+
 const ENOMEM: i64 = -12;
 const EINVAL: i64 = -22;
 const ENOSPC: i64 = -28;

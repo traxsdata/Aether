@@ -826,7 +826,12 @@ fn map_shared_file_pages(
                 let _ = paging::unmap_user_range(allocator, pml4, start, page * PAGE_SIZE);
                 return Err("map");
             }
-            if shared::register(frame, domain, Some((key, offset))).is_err() {
+            let registered = if crate::memfd::is_file_key(key) {
+                shared::register_memfd(frame, domain, (key, offset))
+            } else {
+                shared::register(frame, domain, Some((key, offset)))
+            };
+            if registered.is_err() {
                 let _ = paging::unmap_user_range(allocator, pml4, start, (page + 1) * PAGE_SIZE);
                 return Err("quota");
             }
