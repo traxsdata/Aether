@@ -77,7 +77,7 @@ pub const fn classify(number: u64) -> Class {
         // clock_gettime, nanosleep, clock_nanosleep, timerfd.
         35 | 228 | 230 | 283 | 286 | 287 => Class::Time,
         // poll/yield/futex/epoll/eventfd/pipe.
-        7 | 24 | 202 | 232 | 233 | 290 | 291 | 293 => Class::Sync,
+        7 | 24 | 202 | 232 | 233 | 281 | 290 | 291 | 293 => Class::Sync,
         // Network sockets and socket options: denied, never reach a stack.
         41..=55 | 288 | 299 | 307 => Class::Network,
         // Device, module, mount, tracing, and privileged kernel facilities.

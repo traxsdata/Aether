@@ -217,6 +217,12 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     match class {
         linux_policy::Class::Unknown => {
             linux_policy::record_unknown();
+            #[cfg(feature = "gate4-gui-test")]
+            if scheduler::linux_is_appimage_task() {
+                // The bounded trace names the calls the application needs and
+                // the prototype does not implement yet.
+                scheduler::linux_trace_enosys(number);
+            }
             // SAFETY: The assembly stub passes a live frame on this task's
             // kernel stack for the duration of the dispatcher call.
             unsafe { (*frame).rax = LINUX_ENOSYS as u64 };
@@ -269,7 +275,14 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             unsafe { (*frame).r10 },
             unsafe { (*frame).r8 },
         ),
-        232 => return linux_epoll_wait(frame, pml4, first, second, third, unsafe { (*frame).r10 }),
+        // epoll_wait and epoll_pwait share the first four arguments; the
+        // signal mask of epoll_pwait is not needed because the prototype
+        // serves one signal at a time.
+        232 | 281 => {
+            return linux_epoll_wait(frame, pml4, number, first, second, third, unsafe {
+                (*frame).r10
+            });
+        }
         233 => linux_epoll_ctl(pml4, first, second, third, unsafe { (*frame).r10 }),
         28 => 0,
         32 => scheduler::linux_dup(first).map_or_else(|error| error, |fd| fd as i64),
@@ -361,6 +374,13 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         // application hang. The line count is bounded because the emulated
         // serial port is slow.
         scheduler::linux_trace_fdcall(number, first, result);
+    }
+    #[cfg(feature = "gate4-gui-test")]
+    if scheduler::linux_is_appimage_task() {
+        scheduler::linux_trace_syscall_result(number, result);
+        if result < 0 {
+            scheduler::linux_trace_error(number, result);
+        }
     }
     // SAFETY: The assembly stub passes a live frame on this task's kernel
     // stack and keeps it valid until iretq.
@@ -1228,6 +1248,7 @@ fn linux_poll_deadline(timeout: i64) -> Option<u64> {
 fn linux_epoll_wait(
     frame: *mut InterruptFrame,
     pml4: PhysFrame,
+    number: u64,
     epoll_fd: u64,
     events_pointer: u64,
     max_events: u64,
@@ -1237,7 +1258,7 @@ fn linux_epoll_wait(
         return linux_result(frame, LINUX_EINVAL);
     }
     let timeout = timeout as i64;
-    let deadline = match scheduler::linux_take_restart(232) {
+    let deadline = match scheduler::linux_take_restart(number) {
         Some(deadline) => deadline,
         None => linux_poll_deadline(timeout),
     };
@@ -1264,7 +1285,7 @@ fn linux_epoll_wait(
     if scheduler::linux_signal_pending() {
         return linux_result(frame, LINUX_EINTR);
     }
-    scheduler::linux_park(frame, 232, scheduler::LinuxWait::Poll, deadline)
+    scheduler::linux_park(frame, number, scheduler::LinuxWait::Poll, deadline)
 }
 
 fn linux_pipe2(pml4: PhysFrame, fds_pointer: u64, _flags: u64) -> i64 {

@@ -2401,15 +2401,17 @@ pub fn futex_trace(command: u64, address: u64, value: u32, arg4: u64, target: u6
     // The first sighting of a command and every 4096-th repeat produce one
     // line, which keeps even a pathological caller at a handful of lines.
     if count == 1 || count % 4096 == 0 {
+        let task = current_task();
         serial_line!(
-            "linux: futex cmd={} addr={:#x} val={} arg4={:#x} target={:#x} result={} seen={}",
+            "linux: futex cmd={} addr={:#x} val={} arg4={:#x} target={:#x} result={} seen={} task={}",
             command,
             address,
             value,
             arg4,
             target,
             result,
-            count
+            count,
+            task
         );
     }
 }
@@ -2434,6 +2436,71 @@ pub fn linux_set_last_syscall(number: u64) {
     }
     let task = &mut tasks[current];
     task.last_syscall = number;
+}
+
+/// Traces a system call the Gate 4 GUI application needs and the prototype
+/// does not implement.
+///
+/// The trace is bounded: the emulated serial port cannot carry an unbounded
+/// number of lines.
+#[cfg(feature = "gate4-gui-test")]
+pub fn linux_trace_enosys(number: u64) {
+    const TRACE_LIMIT: usize = 32;
+    static TRACED: AtomicUsize = AtomicUsize::new(0);
+    if TRACED.fetch_add(1, Ordering::Relaxed) >= TRACE_LIMIT {
+        return;
+    }
+    let task = current_task();
+    serial_line!("linux: enosys nr={number} task={task}");
+}
+
+/// Traces a system call of the Gate 4 GUI application that failed.
+///
+/// The trace is bounded: the emulated serial port cannot carry an unbounded
+/// number of lines.
+#[cfg(feature = "gate4-gui-test")]
+pub fn linux_trace_error(number: u64, result: i64) {
+    const TRACE_LIMIT: usize = 64;
+    static TRACED: AtomicUsize = AtomicUsize::new(0);
+    if TRACED.fetch_add(1, Ordering::Relaxed) >= TRACE_LIMIT {
+        return;
+    }
+    let task = current_task();
+    serial_line!("linux: err nr={number} task={task} result={result}");
+}
+
+/// Traces one system call of the Gate 4 GUI application.///
+/// The trace is bounded: the emulated serial port cannot carry an unbounded
+/// number of lines, and the application may repeat a call in a loop. Calls
+/// that only move memory around are skipped because they are too noisy to
+/// show where the application stops.
+#[cfg(feature = "gate4-gui-test")]
+pub fn linux_trace_syscall(number: u64, a0: u64, a1: u64) {
+    const TRACE_LIMIT: usize = 1024;
+    const QUIET: [u64; 6] = [9, 10, 11, 25, 26, 12];
+    static TRACED: AtomicUsize = AtomicUsize::new(0);
+    if QUIET.contains(&number) {
+        return;
+    }
+    if TRACED.fetch_add(1, Ordering::Relaxed) >= TRACE_LIMIT {
+        return;
+    }
+    let task = current_task();
+    serial_line!("linux: sc nr={number} task={task} a0={a0:#x} a1={a1:#x}");
+}
+
+/// Traces the result of one system call of the Gate 4 GUI application.
+///
+/// The trace is bounded like [`linux_trace_syscall`].
+#[cfg(feature = "gate4-gui-test")]
+pub fn linux_trace_syscall_result(number: u64, result: i64) {
+    const TRACE_LIMIT: usize = 1024;
+    static TRACED: AtomicUsize = AtomicUsize::new(0);
+    if TRACED.fetch_add(1, Ordering::Relaxed) >= TRACE_LIMIT {
+        return;
+    }
+    let task = current_task();
+    serial_line!("linux: sc result nr={number} task={task} result={result}");
 }
 
 /// Traces one descriptor call of the Gate 4 GUI application.
