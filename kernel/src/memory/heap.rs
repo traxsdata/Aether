@@ -55,6 +55,13 @@ unsafe impl GlobalAlloc for BumpAllocator {
                 return core::ptr::null_mut();
             };
             if end > HEAP_BYTES {
+                crate::serial_line!(
+                    "heap: allocation failed size={} align={} used={} capacity={}",
+                    layout.size(),
+                    align,
+                    current,
+                    HEAP_BYTES
+                );
                 return core::ptr::null_mut();
             }
             match OFFSET.compare_exchange(current, end, Ordering::SeqCst, Ordering::Relaxed) {

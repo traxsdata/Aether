@@ -667,7 +667,6 @@ static int aether_write_request(struct wl_display *dpy,
 }
 
 static void aether_create(struct wl_display *dpy) {
-    shim_log("AETHER_BRIDGE_CREATE_BEGIN fd=%d aether=%d\n", dpy->fd, dpy->aether);
     struct aether_display_request req;
     memset(&req, 0, sizeof(req));
     req.kind = AETHER_REQ_CREATE;
@@ -675,8 +674,7 @@ static void aether_create(struct wl_display *dpy) {
     req.height = (uint32_t)dpy->height;
     req.format = 1; /* ARGB8888 */
     const char *title = "GridCraft";
-    int rc = aether_write_request(dpy, &req, title, strlen(title));
-    shim_log("AETHER_BRIDGE_CREATE_RC rc=%d errno=%d\n", rc, errno);
+    aether_write_request(dpy, &req, title, strlen(title));
     if (getenv("G4_SHIM_TRACE")) shim_log("AETHER_BRIDGE_CREATE size=%dx%d\n", dpy->width, dpy->height);
 }
 
@@ -812,8 +810,6 @@ static void present_buffer(struct wl_display *dpy,
 /* ------------------------------------------------------------------ */
 
 static void send_xdg_configure(struct wl_proxy *xdg) {
-    shim_log("AETHER_BRIDGE_CONFIGURE xdg=%p toplevel=%p\n", (void *)xdg,
-             xdg && xdg->state ? (void *)((struct xdg_state *)xdg->state)->toplevel : NULL);
     static struct wl_array empty_states = { 0, 0, NULL };
     struct xdg_state *xs = xdg ? xdg->state : NULL;
     if (!xs)
@@ -1148,11 +1144,10 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
             return;
         }
         if (strcmp(name, "xdg_wm_base") == 0 && opcode == 2) {
-            shim_log("AETHER_BRIDGE_GET_XDG surface=%p new=%u\n", args[1].o,
-                     created ? created->id : 0);
             struct xdg_state *xs = calloc(1, sizeof(*xs));
             if (xs) {
                 xs->surface = args[1].o;
+                dpy->main_surface = args[1].o;
                 created->state = xs;
                 created->kind = KIND_XDG;
                 if (xs->surface)
@@ -1162,8 +1157,6 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
             return;
         }
         if (strcmp(name, "xdg_surface") == 0 && opcode == 1) { /* get_toplevel */
-            shim_log("AETHER_BRIDGE_GET_TOPLEVEL xdg=%u new=%u\n", proxy->id,
-                     created ? created->id : 0);
             struct xdg_state *xs = proxy->state;
             if (xs)
                 xs->toplevel = created;

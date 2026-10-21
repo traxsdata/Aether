@@ -56,13 +56,15 @@ acceptance checklist are recorded below. Implementation status is uneven:
 | Status | Meaning | Facilities |
 |---|---|---:|
 | Existing | A tested interface exists and can be used by the runtime | 2 |
-| Partial | Some interface or host tests exist; the runtime cannot use it yet | 15 |
-| Missing | No interface exists | 10 |
+| Partial | Some interface or host tests exist; the runtime cannot fully use it yet | 16 |
+| Missing | No interface exists | 9 |
 | Denied | Deliberate absence; the runtime must fail closed | 2 |
 | Deferred | Not required for Gate 3 or Gate 4 | 3 |
 
-These counts are the planning baseline. They do not claim that the existing
-interfaces are sufficient for GridCraft: Gate 2 proves that by running binaries.
+These counts are the Gate 1 planning baseline, refreshed where Gate 4 code
+changes the answer (HI-19, HI-20, HI-24). They do not claim that the existing
+interfaces are sufficient for GridCraft: the gates prove that by running
+binaries.
 
 ## Facility inventory
 
@@ -102,12 +104,12 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 
 | ID | Facility and artifact evidence | Aether interface | Owner | Test | Status |
 |---|---|---|---|---|---|
-| HI-19 | Wayland client transport: `libwayland-client.so.0`, `wl_display_connect`, `wl_display_*`, event queues, fd passing | Prototype synthetic `/dev/aether-display` endpoint: one descriptor per granted Linux task, fixed request/event records, `poll` readiness, no socket or fd passing. The libwayland client bridge is absent; the Gate 4 rootfs packages the host client library with a verified closure | `kernel/src/display.rs`, `tools/build-gate4-runtime.sh`, planned `user/waylandd` | HI-T19, `make gate4-display-test` | partial |
-| HI-20 | Wayland protocols: `wl_compositor`, `wl_surface`, `wl_shm`, `wl_region`, `wl_callback`, `wl_seat`, `wl_keyboard`, `wl_pointer`, `wl_output`, `xdg_shell`, `xdg_popup`, `xdg_activation`, `wp_viewporter`, `wp_fractional_scale`, `wp_cursor_shape` | Protocol objects and the client-side bridge are absent. The endpoint models create/present/destroy plus key, pointer, enter/leave, configure, and frame events without claiming protocol compatibility; clipboard protocols remain excluded by D-04 | planned `user/waylandd` | HI-T20 | missing |
+| HI-19 | Wayland client transport: `libwayland-client.so.0`, `wl_display_connect`, `wl_display_*`, event queues, fd passing | Prototype synthetic `/dev/aether-display` endpoint: one descriptor per granted Linux task, fixed request/event records, `poll` readiness, no socket or fd passing. The in-app client bridge (`runtime/wayland/wayland_shim.c`) now implements the `libwayland-client.so.0` ABI, and `make gate4-runtime` installs it at the host library's SONAME path in the Gate 4 rootfs; fd passing remains absent and the bridge is exercised only by the pending `make gate4-test` run | `runtime/wayland/wayland_shim.c`, `kernel/src/display.rs`, `tools/build-gate4-runtime.sh` | HI-T19, `make gate4-display-test`, `make gate4-test` | partial |
+| HI-20 | Wayland protocols: `wl_compositor`, `wl_surface`, `wl_shm`, `wl_region`, `wl_callback`, `wl_seat`, `wl_keyboard`, `wl_pointer`, `wl_output`, `xdg_shell`, `xdg_popup`, `xdg_activation`, `wp_viewporter`, `wp_fractional_scale`, `wp_cursor_shape` | The client-side bridge implements the tested subset at QEMU prototype scope: compositor, surface, shm pools over `memfd`, seat keyboard/pointer with an embedded keymap, xdg-shell toplevel configure, frame callbacks, and a cursor stub. Unsupported Wayland requests fail closed and the endpoint does not claim protocol compatibility; clipboard protocols remain excluded by D-04 | `runtime/wayland/wayland_shim.c`, `kernel/src/display.rs` | HI-T20, `make gate4-test` | partial |
 | HI-21 | Shared-memory buffers: `wl_shm`, `wl_shm_pool`, `wl_buffer`, `wl_egl_window_*` | `memfd_create`/`ftruncate`/`fstat`/`mmap(MAP_SHARED)` with 16 MiB per object, four objects per task, bounded stride/range validation on present, copy into a kernel-owned surface, and clipped/scaled painting in the Linux window; `wl_shm` pool objects are absent | `kernel/src/memfd.rs`, `kernel/src/display.rs`, `kernel/src/desktop.rs` | HI-T21, `make gate4-display-test` | partial |
 | HI-22 | Input: keyboard, pointer, touch, keymap from `libxkbcommon`, cursor themes (`libXcursor`, `wp_cursor_shape`) | PS/2 keyboard and pointer events are routed to the focused Linux window as bounded endpoint records with surface-pixel coordinates, modifier bits, and key press/release pairs; enter/leave and configure are sent on focus change. Touch, keymap data, and cursor-theme protocols are absent | `kernel/src/input.rs`, `kernel/src/display.rs`, planned `user/waylandd` | HI-T22, `make gate4-display-test` | partial |
 | HI-23 | EGL/OpenGL ES: `libEGL.so.1`, `EGL_*` platform extensions, `wl_egl_window` | Software GL service (llvmpipe) over the Wayland surface | `kernel/src/graphics.rs`, planned graphics service | HI-T23 | missing |
-| HI-24 | Vulkan: `libvulkan.so.1`, `VK_KHR_surface`, `VK_KHR_wayland_surface`, `VK_KHR_swapchain`, lavapipe | Gate 4 rootfs packages `libvulkan.so.1`, `libvulkan_lvp.so`, `lvp_icd.json`, LLVM, and dependencies with a verified closure; surface/swapchain integration with the Aether compositor and a GPU service remain missing | planned graphics service, `user/linuxd`, `tools/build-gate4-runtime.sh` | HI-T24 | partial |
+| HI-24 | Vulkan: `libvulkan.so.1`, `VK_KHR_surface`, `VK_KHR_wayland_surface`, `VK_KHR_swapchain`, lavapipe | Gate 4 rootfs packages `libvulkan.so.1`, `libvulkan_lvp.so`, `lvp_icd.json`, LLVM, and dependencies with a verified closure; the Wayland WSI resolves through the in-app client bridge to the `/dev/aether-display` endpoint, and a GPU service remains missing | `tools/build-gate4-runtime.sh`, `runtime/wayland/wayland_shim.c` | HI-T24, `make gate4-test` | partial |
 | HI-25 | X11/XCB fallback: `libX11.so.6`, `libX11-xcb.so.1`, `libxcb.so.1`, `libXcursor`, `libXi`, `libxkbcommon-x11`, `DISPLAY` | No X11 server; Wayland-only policy with a clean failure | planned `user/linuxd` | HI-T25 | deferred |
 | HI-32 | Clipboard: `wl_data_device_manager`, `wl_data_source`, `wl_data_offer`, `arboard` | Revocable clipboard grant; absent in the first profile (D-04) | planned `user/waylandd`, `kernel/src/desktop.rs` | HI-T32 | deferred |
 

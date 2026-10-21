@@ -80,7 +80,12 @@ their own threat-model review before they land.
 `winit`/`egui`: registry, compositor, shared memory, xdg-shell, seat, output,
 and clipboard. Buffers are validated for size, stride, format, and lifetime
 before the Aether compositor presents them. The application does not receive a
-framebuffer, a DRM device, or a GPU command stream.
+framebuffer, a DRM device, or a GPU command stream. The implemented Gate 4
+slice realizes this subset as an in-app client bridge
+(`runtime/wayland/wayland_shim.c`) over the narrow `/dev/aether-display`
+endpoint, without a Wayland wire socket; the ring-3 `waylandd` service split
+remains the design target. See
+[the Wayland bridge document](wayland-bridge.md).
 
 ### Graphics
 
@@ -244,11 +249,14 @@ exact AppImage digest, and the runtime version.
   no file, device, portal, or endpoint-creation capability. Linux syscall
   dispatch, ELF mapping, and library loading are still kernel-side; syscall
   remoting is not implemented and is not claimed.
-- Wayland bridge, compositor presentation, and GUI rendering are not
-  implemented. The Gate 4 runtime packages host `libwayland-client`/cursor,
-  `libxkbcommon`, the Vulkan loader, and Mesa lavapipe, but the bridge that
-  replaces the client library and presents frames in the Aether compositor is
-  the next Gate 4 slice.
+- Wayland client bridge and windowed-GridCraft path: implemented at QEMU
+  prototype scope. `runtime/wayland/wayland_shim.c` builds as a drop-in
+  `libwayland-client.so.0` (with a `libwayland-cursor.so.0` stub and an
+  embedded US keymap) installed at the host library's SONAME path in the Gate
+  4 rootfs; it presents surfaces and receives input through the
+  `/dev/aether-display` endpoint, and `make gate4-test` launches the windowed
+  `/usr/bin/gridcraft` from the signed AppImage. The completed windowed run
+  and its marker/screenshot evidence are still pending.
 
 The compatibility database records GridCraft 0.8.0 as `unsupported` until these
 gates pass. A static test program is not an ArtCraft application.

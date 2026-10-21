@@ -50,15 +50,21 @@ Aether.
 
 ## Evidence to fill in
 
-- [ ] Exact commit tested.
+- [ ] Exact commit tested. (EVIDENCE-PENDING: tested commit hash)
 - [ ] `make gate4-test` pass/fail and marker transcript.
+      (EVIDENCE-PENDING: marker transcript)
 - [ ] `AETHER_GATE4_PRESENT_OK frames=... checksum=...`
-- [ ] QEMU screenshot path/dimensions/sha256 (if the interactive harness runs).
+      (EVIDENCE-PENDING: present marker values)
+- [ ] QEMU screenshot path/dimensions/sha256 and non-black pixel count at
+      `build/gate4/gridcraft.ppm`
+      (EVIDENCE-PENDING: screenshot path, dimensions, and non-black pixel count)
 - [ ] `AETHER_GATE4_INPUT_OK keys=... pointer=... focus=...`
+      (EVIDENCE-PENDING: input marker values)
 - [ ] `AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_SAVE_OK`,
-      `AETHER_GATE4_REVOKE_OK`.
-- [ ] Compatibility database record after the run.
-- [ ] `make ci` result and anything not run.
+      `AETHER_GATE4_REVOKE_OK`. (EVIDENCE-PENDING: portal/save/revoke marker values)
+- [ ] Compatibility database record after the run. (EVIDENCE-PENDING: windowed
+      record digest, runtime profile, named tests, platform, and test date)
+- [ ] `make ci` result and anything not run. (EVIDENCE-PENDING: ci result)
 
 ## Known limitations
 

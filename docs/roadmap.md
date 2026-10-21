@@ -169,8 +169,9 @@ user space. It is not a VM. The target and security gates are in
   is RAM-backed, and an installed AppImage cannot yet be selected from a
   persistent device.
 - [ ] Gate 2 production follow-up: move Linux ABI emulation, ELF/library
-  loading, and syscall remoting into the ring-3 `linuxd`, pin a
-  Mesa/lavapipe/Wayland runtime rootfs, and make AppImage installation and the
+  loading, and syscall remoting into the ring-3 `linuxd`, pin a reproducible
+  Mesa/lavapipe/Wayland runtime rootfs (the host-derived Gate 4 profile with
+  the in-tree bridge is a first step), and make AppImage installation and the
   overlay durable on a persistent block device. These remain required for a
   production compatibility claim; the Gate 3 prototype run below does not
   satisfy them.
@@ -191,7 +192,11 @@ user space. It is not a VM. The target and security gates are in
   not a production claim.
 - [ ] Gate 4 — windowed GridCraft: run `usr/bin/gridcraft` with Wayland,
   software rendering, keyboard/pointer input, and workbook open/save through
-  the portal.
+  the portal. The code slice is in the tree — the Wayland bridge, the kernel
+  display endpoint, the GUI portal contract, and the `make gate4-test` target
+  — but the gate completes only when that target passes with the full
+  kernel-owned marker set and the screenshot, which has not happened yet.
+  (EVIDENCE-PENDING: gate4-test marker transcript and tested commit hash)
   - [x] Gate 4 portal slice (QEMU prototype scope): `make gate4-portal-test`
     seeds an exact-file read+write grant for
     `/run/aether/portal/dd8f879ba78d207c/gate4.xlsx`, launches a small static
@@ -224,7 +229,10 @@ user space. It is not a VM. The target and security gates are in
   - [x] Gate 4 runtime rootfs packaging (QEMU prototype scope): `make
     gate4-runtime` assembles and signs a host-derived rootfs with glibc,
     libwayland-client/cursor, libxkbcommon, the Vulkan loader, Mesa lavapipe,
-    LLVM and the full dynamic-library closure. `make gate4-runtime-test` boots
+    LLVM and the full dynamic-library closure; in this build the in-tree
+    Wayland bridge is installed at the `libwayland-client.so.0`/
+    `libwayland-cursor.so.0` SONAME paths in place of the host libraries.
+    `make gate4-runtime-test` boots
     it from the loader through a `BootInfo` v5 runtime-rootfs extent, verifies
     the manifest and all 40 file digests in the kernel, emits
     `AETHER_GATE4_RUNTIME_OK profile=gate4-host-lavapipe
@@ -233,10 +241,20 @@ user space. It is not a VM. The target and security gates are in
     0.8.0`) through that rootfs. The compressed image is 45,268,992 bytes
     (164,543,720 bytes imported). Tampered and missing runtime images fail
     closed.
-  - [ ] The Gate 4 GUI launch, Wayland bridge, compositor presentation, input,
-    portal workbook open/save, and pixel/checksum evidence remain open. The
-    in-tree `libwayland-client.so.0` is the host library until the bridge
-    replaces it at the same SONAME path.
+  - [x] Gate 4 Wayland bridge slice (QEMU prototype scope): the bridge at
+    `runtime/wayland/wayland_shim.c` builds as a drop-in
+    `libwayland-client.so.0` (plus a `libwayland-cursor.so.0` stub and an
+    embedded US keymap), and `make gate4-runtime` installs it at the host
+    client libraries' SONAME path inside the signed Gate 4 rootfs, so the
+    unmodified GUI resolves the bridge instead of the host client. The bridge
+    keeps the Wayland client object model — registry, `wl_compositor`,
+    `wl_shm` pools over `memfd`, `wl_seat` keyboard/pointer, xdg-shell
+    toplevel configure, and frame callbacks — and maps presentation and input
+    to fixed `PRESENT`/input records through `/dev/aether-display`. It is not
+    a Wayland wire server; see
+    [the Wayland bridge](architecture/wayland-bridge.md). It is exercised end
+    to end only by the pending `make gate4-test` run.
+    (EVIDENCE-PENDING: end-to-end bridge exercise in the Gate 4 run)
   - [x] Kernel display endpoint slice (QEMU prototype scope): `/dev/aether-display`
     with bounded `CREATE`/`PRESENT`/`DESTROY`, a Linux window in the ring-0
     compositor, focused-window input routing, and kernel-owned evidence
@@ -245,16 +263,27 @@ user space. It is not a VM. The target and security gates are in
   - [x] `memfd_create`, `ftruncate`, `fstat`, and `mmap(MAP_SHARED)` for bounded
     anonymous shared buffers (16 MiB per object, four per task,
     reference-counted and released on task exit).
-  - [ ] Wayland bridge (`libwayland-client.so.0`), Mesa/lavapipe surface WSI,
-    xdg-shell, keymap, frame callbacks, and the real windowed GridCraft GUI.
-    The endpoint is not a Wayland wire server and this slice does not claim GUI
-    completion.
+  - [x] Gate 4 windowed-run harness (QEMU prototype scope): `make gate4-test`
+    stages the pinned GridCraft 0.8.0 AppImage, launches the real
+    `/usr/bin/gridcraft` from the signed import path against the Gate 4
+    runtime rootfs (bridge plus Mesa lavapipe software Vulkan) with the portal
+    workbook namespace as argv, and `tools/gate4_smoke.py` waits for the
+    kernel-owned `AETHER_GATE4_PRESENT_OK`, `AETHER_GATE4_INPUT_OK`,
+    `AETHER_GATE4_SAVE_OK`, and `AETHER_GATE4_REVOKE_OK` markers, takes a QEMU
+    screenshot at `build/gate4/gridcraft.ppm` with a non-black pixel check,
+    clicks the window, sends the keys `4`, `2`, `ctrl-s` through the emulated
+    PS/2 path, closes the window, and requires the post-exit revocation. The
+    completed run has not happened yet; the transcript and screenshot are the
+    remaining evidence. (EVIDENCE-PENDING: marker transcript)
+    (EVIDENCE-PENDING: screenshot path and non-black pixel count)
 - [x] Moved the GridCraft record from `unsupported` to `limited` after the
   Gate 3 run, with the exact digest, runtime profile, named tests, platform,
   and date.
 - [ ] Raise the GridCraft record above `limited` only after the relevant gate
   has a completed run, named tests, the exact AppImage digest, the runtime
-  version, and the platform/date. Gate 4 is still required for the GUI.
+  version, and the platform/date. The GUI record upgrade is pending the
+  `make gate4-test` run. (EVIDENCE-PENDING: windowed-record digest, runtime
+  profile, named tests, platform, and test date)
 
 #### Import and runtime root
 
@@ -297,7 +326,9 @@ user space. It is not a VM. The target and security gates are in
   host-derived glibc/`ld.so` profile with a SHA-256 version/build manifest and a
   signed `linux-rootfs` record; the kernel recomputes the manifest digest and
   reports the exact glibc version (`AETHER_RUNTIME_ROOT_OK`). The compatibility
-  database records the profile. Mesa/lavapipe/Wayland content is still absent.
+  database records the profile. This is the glibc-only Gate 3 profile;
+  Mesa/lavapipe/Wayland content with the bridge lives in the separate Gate 4
+  profile.
 - [x] Loader-staged signed AppImage: the UEFI loader reads a distinct
   `\linux\app.AppImage` and its import record from the boot volume, publishes
   them through the boot ABI, and the kernel verifies digest and publisher
@@ -361,9 +392,11 @@ user space. It is not a VM. The target and security gates are in
   the host glibc and runs a dynamically linked hello through `ld.so`,
   relocations, and shared `libc` (`AETHER_GLIBC_OK`). This is not the pinned
   production runtime.
-- [ ] Mesa/lavapipe/Wayland runtime content, package channel, broader
-  `dlopen`/library coverage, and `LD_LIBRARY_PATH` policy. The pinned
-  host-glibc runtime itself is implemented.
+- [ ] Reproducible package channel, broader `dlopen`/library coverage, and
+  `LD_LIBRARY_PATH` policy. Mesa/lavapipe/Wayland runtime content — including
+  the in-tree `libwayland-client.so.0` bridge and Mesa lavapipe — is packaged
+  in the Gate 4 profile, but the pin is host-derived and not reproducible
+  across hosts.
 - [x] File metadata and descriptor calls: `stat`/`fstat`/`newfstatat`/`statx`,
   `readlink`, `getdents64`, `fcntl`, `dup`, `dup2`, `pipe2`, non-blocking
   `poll`, and descriptor table cleanup.
@@ -443,15 +476,31 @@ user space. It is not a VM. The target and security gates are in
 
 #### Display, input, and media
 
-- [ ] Wayland service: registry, `wl_compositor`, `wl_surface`, `wl_shm`,
-  xdg-shell, seat/keyboard/pointer, output, and clipboard.
-- [ ] Validate shared-memory buffers (size, stride, format, lifetime) before the
-  compositor presents them; no framebuffer or DRM/PCI access from the app.
+- [x] Wayland client bridge subset: registry, `wl_compositor`, `wl_surface`,
+  `wl_shm`, xdg-shell toplevel configure, and seat keyboard/pointer through
+  the drop-in `libwayland-client.so.0` bridge (`runtime/wayland/wayland_shim.c`)
+  over `/dev/aether-display`. Clipboard, a Wayland wire server, and output
+  globals beyond the bridge's fixed configuration remain unimplemented, and
+  the completed windowed run is pending.
+- [ ] Validate shared-memory buffers (size, stride, format, lifetime) before
+  the compositor presents them; no framebuffer or DRM/PCI access from the
+  app. Partial: the kernel display endpoint validates the guest range and
+  stride per `PRESENT` and copies into a kernel-owned surface; validation
+  beyond the tested formats remains open.
 - [ ] Input focus, keyboard layout, pointer capture, and drag-and-drop policy.
-- [ ] XDG desktop portal subset for file open/save; all user files through
-  `fsd`/portal grants, never an ambient home directory.
-- [ ] Software renderer: bundle Mesa lavapipe (Vulkan) or llvmpipe (GL), expose
-  `VK_KHR_wayland_surface`/EGL, and select it explicitly in the runtime profile.
+  Partial: focused Linux windows receive kernel-encoded key/pointer records,
+  and the bridge embeds a US keymap; pointer capture, drag-and-drop, and
+  broader layouts remain.
+- [x] Exact-file portal open/save for the Linux domain:
+  `/run/aether/portal/<grant-id>/<file>` with bounded `.sctmp` staging/commit
+  and revocation (`AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_SAVE_OK`,
+  `AETHER_GATE4_REVOKE_OK`); there is never an ambient home directory. The
+  XDG desktop portal chooser over D-Bus remains unimplemented.
+- [x] Software renderer bundled at QEMU prototype scope: the Gate 4 runtime
+  rootfs packages Mesa lavapipe (Vulkan), its ICD, and LLVM, selected
+  explicitly by the runtime profile; the Wayland WSI resolves through the
+  bridge to the display endpoint. Exercised only by the pending `make
+  gate4-test` run.
 - [ ] Accelerated GPU service is a later optimization, not a dependency for the
   first GridCraft run.
 
@@ -516,10 +565,11 @@ without touching user data. VMware Workstation itself has not yet been
 smoke-tested.
 
 The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
-The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
 (QEMU scope), the **Gate 3 headless GridCraft run** (QEMU prototype scope), the
-**Gate 4 portal slice** (QEMU prototype scope), and the **Gate 4 runtime rootfs
-packaging slice** (QEMU prototype scope). Boot markers cover signed
+**Gate 4 portal slice** (QEMU prototype scope), the **Gate 4 runtime rootfs
+packaging slice** (QEMU prototype scope), and the **Gate 4 Wayland-bridge and
+windowed-run slice** (QEMU prototype scope; the completed windowed run is
+pending). Boot markers cover signed
 embedded-rootfs and loader-staged AppImage import, the pinned host-glibc runtime
 manifest, ring-3 `linuxd` launch approval and denial, demand paging,
 cross-process shared anonymous mappings, read-shared rootfs mappings,
@@ -550,24 +600,34 @@ bytes in its filesystem, and the denials. The GUI feature
 `/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx`), emits the save marker
 immediately after validating the committed ZIP/XLSX bytes, and performs the
 post-exit revocation and fresh read/write/rename denials in the kernel. The
-GUI, Wayland bridge, software renderer, input routing, and a real windowed
-GridCraft run remain open; the compatibility record stays `limited`.
+Gate 4 windowed slice adds the Wayland bridge and the `make gate4-test`
+harness for the real `/usr/bin/gridcraft` GUI against the signed AppImage and
+the Mesa/lavapipe runtime rootfs. The completed windowed run — marker
+transcript, screenshot, and input trace — is still pending
+(EVIDENCE-PENDING: gate4-test marker transcript)
+(EVIDENCE-PENDING: screenshot path and non-black pixel count), and the
+compatibility record stays `limited` until that run.
 
-Neither the Gate 2 prototype, the Gate 3 run, the Gate 4 portal slice, nor
-the Gate 4 runtime packaging slice is a production compatibility claim. Linux
-syscall dispatch, ELF/library mapping, and VMA management remain in the kernel,
-so `linuxd` is a ring-3 launch-policy manager rather than the full ABI service
-described by the architecture. The imported AppImage tree is not yet merged
-into a per-application visible root, and the runtime pin is host-derived: the
-Gate 4 rootfs bundles the build host's Mesa/LLVM/Wayland libraries and is not
-reproducible across hosts until a signed package channel exists. The Gate 4
-import is also allocation-heavy (a 1.5 GiB boot heap and 3 GiB guest for the
-164 MiB uncompressed tree) because the bootstrap allocator never reclaims.
-Durable storage, a user-installed AppImage picker, complete
-inotify/signal/epoll semantics, the Wayland bridge/portal/renderer integration,
-and GUI evidence remain open. These are tracked as the Gate 2 production
-follow-up and Gate 4 work; the packaged runtime and portal do not make the GUI
-or arbitrary Linux applications compatible.
+Neither the Gate 2 prototype, the Gate 3 run, the Gate 4 portal slice, the
+Gate 4 runtime packaging slice, nor the Gate 4 windowed slice is a production
+compatibility claim. Linux syscall dispatch, ELF/library mapping, and VMA
+management remain in the kernel, so `linuxd` is a ring-3 launch-policy manager
+rather than the full ABI service described by the architecture. The imported
+AppImage tree is not yet merged into a per-application visible root, and the
+runtime pin is host-derived: the Gate 4 rootfs bundles the build host's
+Mesa/LLVM/Wayland client libraries and the in-tree bridge, and is not
+reproducible across hosts until a signed package channel exists; the Mesa
+version is recorded by the build rather than pinned as a release artifact. The
+Gate 4 import is also allocation-heavy (a 1.5 GiB boot heap and a 3 GiB guest
+for the runtime test, 8 GiB for the windowed smoke run, for the 164 MiB
+uncompressed tree) because the bootstrap allocator never reclaims. Durable
+overlay storage on a persistent device, a user-installed AppImage picker,
+nested epoll, complete inotify/signal semantics, high-resolution timers,
+file-backed shared writeback, clipboard, interactive resize and window chrome,
+a desktop file chooser/D-Bus portal, and the completed windowed `make
+gate4-test` run remain open. These are tracked as the Gate 2 production
+follow-up and Gate 4 work; the bridge, the packaged runtime, and the portal do
+not make the GUI or arbitrary Linux applications compatible.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
 durable block store, network/audio services, the Wayland/software-renderer

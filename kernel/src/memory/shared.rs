@@ -27,7 +27,10 @@ use core::cell::UnsafeCell;
 /// (4096 pages) and four such objects may coexist. Memfd pages keep their own
 /// global budget (see `memfd.rs`) and do not consume the per-domain anonymous
 /// page quota, so this table must cover both pools.
+#[cfg(feature = "gate4-gui-test")]
 pub const MAX_SHARED_FRAMES: usize = 512 + 131_072;
+#[cfg(not(feature = "gate4-gui-test"))]
+pub const MAX_SHARED_FRAMES: usize = 512 + 16_384;
 /// Linux application domains are identified by the bounded overlay app id.
 pub const MAX_DOMAINS: usize = 256;
 /// Shared physical pages charged to one application domain.

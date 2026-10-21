@@ -38,4 +38,4 @@ gate4-portal-test = []
 gate4-runtime = []
 # Boot the Gate 4 GUI portal slice with a real XLSX grant, immediate save
 # evidence, and kernel-driven post-exit revocation checks.
-gate4-gui-test = []
+gate4-gui-test = ["aether-memory/gate4"]

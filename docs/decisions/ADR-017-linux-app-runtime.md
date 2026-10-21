@@ -1,7 +1,8 @@
 # ADR-017: Linux application and AppImage runtime
 
 - **Status:** Accepted; Gate 3 headless GridCraft CLI runs at QEMU prototype
-  scope, production runtime and GUI incomplete
+  scope; the Gate 4 windowed slice is implemented in the tree with its
+  completed run pending; the production runtime remains incomplete
 - **Date:** 2026-10-20
 - **Supersedes:** none
 - **Related:** [Linux compatibility](../specifications/linux-compatibility.md),
@@ -74,8 +75,47 @@ inventory) is complete in
 [`../specifications/linux-host-interface-inventory.md`](../specifications/linux-host-interface-inventory.md);
 its missing interfaces are Gate 2 work. Gate 3 now runs the pinned
 `gridcraft-cli` from the AppImage headlessly at QEMU prototype scope (formula
-evaluation and a CSV round trip through the private overlay). The production
-runtime, a merged per-application AppImage root, and Gate 4's GUI remain open.
+evaluation and a CSV round trip through the private overlay). The Gate 4
+windowed slice — the in-app Wayland client bridge, the kernel display
+endpoint, the GUI portal contract, and the `make gate4-test` harness — is
+implemented at QEMU prototype scope with the completed windowed run pending
+(see the Gate 4 status section below). The production runtime and a merged
+per-application AppImage root remain open.
+
+## Gate 4 windowed prototype (status)
+
+The Gate 4 slice keeps this ADR's shape: no Linux graphics driver, no
+hypervisor, no Wayland wire server in the kernel, and no host GPU access. What
+exists in the tree:
+
+- **Wayland client bridge.** `runtime/wayland/wayland_shim.c` builds as a
+  drop-in `libwayland-client.so.0` (plus a `libwayland-cursor.so.0` stub and
+  an embedded US keymap). `make gate4-runtime` installs it at the host
+  client's SONAME path inside the signed Gate 4 rootfs, so the unmodified
+  GridCraft GUI resolves the bridge instead of the host client. It keeps the
+  Wayland client object model (registry, compositor, `wl_shm` pools over
+  `memfd`, seat keyboard/pointer, xdg-shell toplevel configure, frame
+  callbacks) and maps presentation and input onto `/dev/aether-display`.
+- **Kernel display endpoint.** Bounded `CREATE`/`PRESENT`/`SET_TITLE`
+  /`DESTROY` records and focus-scoped input routing into the ring-0
+  compositor (`make gate4-display-test`).
+- **GUI portal contract.** The `gate4-gui-test` feature seeds the real XLSX
+  workbook behind `/run/aether/portal/<grant-id>/gate4-gui.xlsx`, validates
+  the committed bytes, and revokes the grant after exit.
+- **Run harness.** `make gate4-test` launches `/usr/bin/gridcraft` from the
+  signed AppImage against that rootfs and drives the window with a pointer
+  click and the keys `4`, `2`, `ctrl-s`, requiring the kernel-owned present,
+  input, save, and revoke markers plus a non-blank screenshot.
+
+The completed windowed run — marker transcript, screenshot, and the tested
+commit — has not happened yet
+(EVIDENCE-PENDING: tested commit hash and marker transcript). Until it does,
+GridCraft stays `limited`, this is not Wayland or GUI compatibility, and
+arbitrary Linux applications remain unsupported. The limits that follow the
+run are unchanged: clipboard, interactive resize and window chrome, a D-Bus
+desktop file chooser, high-resolution timers, file-backed shared writeback,
+durable overlay storage, a user-supplied AppImage picker, a reproducible
+cross-host runtime pin, nested epoll, and complete inotify/signal semantics.
 
 ## Consequences
 
@@ -88,8 +128,10 @@ runtime, a merged per-application AppImage root, and Gate 4's GUI remain open.
   Mesa/lavapipe stack is preferred over writing a Vulkan implementation.
 - AppImage import needs a SquashFS reader with zstd support. FUSE is not
   required and should not be added just for this.
-- The compatibility database receives an `unsupported` GridCraft record until
-  the gates pass; a record is evidence, not a roadmap promise.
+- The compatibility database carries a GridCraft record no stronger than the
+  named tests: `unsupported` before the gates, `limited` after the Gate 3
+  headless run, and no GUI upgrade until the Gate 4 windowed run completes. A
+  record is evidence, not a roadmap promise.
 
 ## Alternatives considered
 

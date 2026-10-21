@@ -7,6 +7,27 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Linux Gate 4 windowed-GridCraft slice (QEMU prototype scope; the completed
+  run is pending): `runtime/wayland/wayland_shim.c` builds as a drop-in
+  `libwayland-client.so.0` (plus a `libwayland-cursor.so.0` stub and an
+  embedded US keymap) implementing the client ABI that winit/Smithay and Mesa's
+  Vulkan Wayland WSI use, and `make gate4-runtime` installs it at the host
+  libraries' SONAME path inside the signed Gate 4 rootfs, so the unmodified
+  GUI resolves the bridge instead of the host client. The bridge keeps the
+  Wayland client object model — registry, `wl_compositor`, `wl_shm` pools over
+  `memfd`, `wl_seat` keyboard/pointer, xdg-shell toplevel configure, and frame
+  callbacks — and maps presentation and input to fixed `PRESENT`/input records
+  on the existing `/dev/aether-display` endpoint. The new `make gate4-test`
+  target stages the pinned GridCraft 0.8.0 AppImage, launches `/usr/bin/gridcraft`
+  from the signed import path against that rootfs with the portal workbook
+  namespace as argv, and `tools/gate4_smoke.py` waits for the kernel-owned
+  `AETHER_GATE4_PRESENT_OK`, `AETHER_GATE4_INPUT_OK`, `AETHER_GATE4_SAVE_OK`,
+  and `AETHER_GATE4_REVOKE_OK` markers, captures a QEMU screenshot at
+  `build/gate4/gridcraft.ppm` with a non-black pixel check, drives a pointer
+  click plus the keys `4`, `2`, `ctrl-s` through the emulated PS/2 path, and
+  requires the post-exit revocation after the window close. This is not a
+  Wayland wire server, not a GUI compatibility claim, and the completed
+  windowed run with its marker/screenshot evidence is still pending.
 - Gate 4 kernel display slice: `/dev/aether-display` request/event records, a
   `WindowKind::Linux` compositor window with a kernel-owned presented surface,
   focus-scoped keyboard/pointer routing with window-relative coordinates, and
@@ -14,8 +35,9 @@ versioning scheme until the kernel ABI stabilises.
   buffers. `make gate4-display-test` requires the kernel-owned create, present
   (with checksum), and input markers after a static Linux fixture presents a
   deterministic pattern and reads a synthetic event routed through the real
-  PS/2/desktop path. This is the display endpoint only; the Wayland bridge,
-  Mesa, and the real GUI remain future work.
+  PS/2/desktop path. This is the display endpoint only; the windowed-GridCraft
+  entry above adds the Wayland client bridge and the Mesa/GUI path on top of
+  it.
 - Per-object capability revocation: `revoke_object` invalidates every alias in
   a table and advances slot generations. Endpoints now have explicit close and
   destroy semantics, task exit/fault releases endpoint aliases and destroys
@@ -61,7 +83,8 @@ versioning scheme until the kernel ABI stabilises.
   entry, emits `AETHER_GATE4_RUNTIME_OK`, and runs the real GridCraft AppImage's
   `gridcraft-cli --version` through the rootfs. Missing and tampered runtime
   images fail closed. The allocation-only importer needs a 1.5 GiB heap and a
-  3 GiB guest for this tree; the Wayland bridge and GUI launch remain open.
+  3 GiB guest for this tree; the Wayland bridge and GUI launch were still open
+  at this slice and are covered by the windowed-GridCraft entry above.
 - Linux Gate 2 prototype: blocking/finite `poll`/`epoll_wait` and
   cross-process pipes, `nanosleep`/`clock_nanosleep`/`timerfd`, full-enough
   inotify (blocking mode, directory watches, overflow), `siginfo`/`ucontext`,

@@ -1,7 +1,11 @@
 # Linux application compatibility
 
 **Document ID:** AETHER-LINUX-001
-**Status:** Gate 3 headless CLI run and the Gate 4 runtime rootfs packaging slice are implemented at QEMU prototype scope; the GUI and general application compatibility are not claimed
+**Status:** Gate 3 headless CLI run, the Gate 4 runtime rootfs packaging, the
+kernel display endpoint, the GUI portal contract, and the Gate 4 Wayland
+bridge and windowed-run harness are implemented at QEMU prototype scope; the
+completed windowed run is still pending, and general application compatibility
+is not claimed
 **Related:** [ADR-017](../decisions/ADR-017-linux-app-runtime.md), technical
 specification §7 (compatibility)
 
@@ -73,9 +77,9 @@ cases in [the Linux host-interface inventory](linux-host-interface-inventory.md)
 | Files | `openat`, `statx`, `readlink`, `rename`, `unlink`, `fsync`, inotify | Filesystem service API and portal grants | Partial: read-only embedded root, per-application `/tmp`, `/settings`, and `/logs` overlays with bounded `rename`/`unlink` confined to the current application, exact-file portal grants exposed as `/run/aether/portal/<grant-id>/<file>` for read and read+write opens with revocation, and inotify with blocking or nonblocking instances, four watches, file and directory events (`IN_MODIFY`, `IN_ATTRIB`, `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`, `IN_CREATE`, `IN_IGNORED`), bounded-queue `IN_Q_OVERFLOW`, and thread wakeups. Recursive watches, move/delete/unmount events, `renameat`/`unlinkat`, cross-process watch sharing, and deferred deletion for open descriptors are unsupported |
 | Multiplexing and notification | `poll`, `epoll`, `eventfd`, `inotify` | Blocking/finite `poll`/`epoll_wait`, same-tgid thread-shared eventfd, blocking pipes, and blocking/nonblocking inotify | Partial: `poll` and `epoll_wait` support finite and infinite timeouts with scheduler parking and deadlines; `epoll` is level-triggered by default with a bounded `EPOLLET` transition slice and honest `EPOLLONESHOT` re-arm via `EPOLL_CTL_MOD`; pipes block on empty read/full write across `fork`-inherited descriptors; inotify is bounded to one instance, four watches, and eight queued events per process. Full inotify, nested epoll watches, and cross-process eventfd sharing remain unsupported |
 | Dynamic files | `/proc/self/exe`, `/proc/self/maps`, `/proc/self/status`, `/proc/self/fd`, `/dev/urandom`, `/dev/zero`, `/dev/null` | Bounded Linux runtime pseudo-filesystem | **Implemented** in the kernel prototype through open/read/stat/readdir, plus a read-only `/proc/aether/syscalls` audit view. `/sys`, tty, input, and GPU nodes are absent. `/dev/random` and `/dev/urandom` return the same deterministic boot PRNG stream as `getrandom`, not host entropy |
-| Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Partial: `libwayland-client.so.0`/`libwayland-cursor.so.0` and `libxkbcommon.so.0` are packaged in the Gate 4 rootfs with a verified closure; a synthetic `/dev/aether-display` endpoint, memfd shared buffers, and a Linux compositor window are implemented. The in-app Wayland client bridge and xdg-shell/seat protocol objects are not implemented, so the host client library is still staged |
-| Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Partial: the Gate 4 rootfs packages the Vulkan loader, Mesa lavapipe, `libvulkan_lvp.so`, the ICD, LLVM, and dependencies; there is no surface/Wayland WSI integration or GPU service yet |
-| Input | Pointer, keyboard, focus, cursor, keymap | Compositor input protocol | Partial: PS/2 keyboard and mouse in the desktop; focused Linux windows receive kernel-encoded key/pointer records with surface-pixel coordinates, modifier bits, and press/release pairs. Keymap data and Wayland input objects are absent |
+| Wayland/X11 | `wl_display`, shm buffers, xdg-shell, seat, clipboard | Wayland compositor service over the Aether compositor | Partial: an in-app bridge (`runtime/wayland/wayland_shim.c`) implements the `libwayland-client.so.0` client ABI — registry, `wl_compositor`, `wl_shm` pools over `memfd`, `wl_seat` keyboard/pointer, xdg-shell toplevel configure, an embedded US keymap, and frame callbacks — plus a `libwayland-cursor.so.0` stub, and `make gate4-runtime` installs it at the host client libraries' SONAME path inside the signed rootfs. `libxkbcommon.so.0` is packaged with a verified closure, and the synthetic `/dev/aether-display` endpoint, memfd shared buffers, and the Linux compositor window are implemented. Clipboard, a Wayland wire server, and interactive resize are unimplemented, and the completed windowed run is pending |
+| Vulkan/GL | Vulkan loader/ICD or EGL/GLES; swapchain to a surface | GPU service or bundled software renderer | Partial: the Gate 4 rootfs packages the Vulkan loader, Mesa lavapipe, `libvulkan_lvp.so`, the ICD, LLVM, and dependencies, and the Wayland WSI resolves through the in-app bridge to the display endpoint; there is no GPU service, and the completed windowed render is pending |
+| Input | Pointer, keyboard, focus, cursor, keymap | Compositor input protocol | Partial: PS/2 keyboard and mouse in the desktop; focused Linux windows receive kernel-encoded key/pointer records with surface-pixel coordinates, modifier bits, and press/release pairs, which the bridge converts into Wayland keyboard/pointer events with an embedded US keymap. Broader layouts, cursor-surface handling, pointer capture, and drag-and-drop remain absent |
 | D-Bus / XDG portal | Session bus, file chooser portal | IPC bridge and portal integration | Not implemented |
 | Audio | ALSA/PipeWire | Audio service | Not implemented; not required for first milestone |
 | Network | Sockets, DNS | Network service and capability policy | Not implemented; denied by default |
@@ -128,7 +132,11 @@ private read-only root + private writable overlay
   drivers, or graphics stack.
 - `waylandd` exposes the Wayland subset used by `winit`/`egui`. It receives
   shared-memory buffers, validates their geometry, and asks the compositor to
-  present them in the application's window.
+  present them in the application's window. In the implemented Gate 4 slice
+  this subset lives in the in-app client bridge
+  (`runtime/wayland/wayland_shim.c`) over the `/dev/aether-display` endpoint
+  rather than in a socket service; the user-space `waylandd` split remains the
+  design target.
 - Graphics is the highest-risk component. The first GUI attempt will use a
   bundled Mesa software Vulkan (lavapipe) or software GL path, selected
   explicitly, with no host GPU passthrough. A GPU service is a later
@@ -168,9 +176,10 @@ interface, with owners and test cases.
 **Evidence:** [the Linux host-interface inventory](linux-host-interface-inventory.md)
 maps 32 facilities from the pinned GUI and CLI payloads to an interface, owner,
 and test ID, with decisions for X11, D-Bus, process spawning, clipboard, paths,
-locale, GPU, and network. **Met:** 2 facilities are existing, 15 partial, 10
+locale, GPU, and network. **Met at Gate 1 time; refreshed as Gate 4 code
+lands:** 2 facilities are existing, 16 partial, 9
 missing, 2 deliberately denied, and 3 deferred. The inventory is complete; the
-missing interfaces are Gate 2 work and their absence does not invalidate the
+remaining gaps are implementation work and their absence does not invalidate the
 mapping. Do not claim compatibility.
 
 The remaining gap is implementation, not planning. Gate 2 proceeds from the
@@ -343,7 +352,8 @@ Run `usr/bin/gridcraft` with the Wayland bridge and software renderer, present
 its window in the Aether compositor, accept keyboard and pointer input, and
 open/save a workbook through the portal.
 
-**Status: portal half met at QEMU prototype scope; GUI half open.**
+**Status: portal half met at QEMU prototype scope; windowed half implemented
+in the tree with its completed run pending.**
 `make gate4-portal-test` builds a signed AppImage fixture, seeds an exact-file
 read+write grant for the demo root, and runs the fixture as a Linux task.
 The fixture opens
@@ -411,11 +421,28 @@ path, and a dynamically linked GUI app can receive the same path through the
 existing `LINUX_APPIMAGE_ARGS` argv. The test fixture itself is static and uses
 the compiled namespace path.
 
-**Still open for Gate 4:** the Wayland bridge, compositor presentation,
-software Vulkan/GL, keyboard and pointer routing, the windowed
-`usr/bin/gridcraft` run, a screenshot or pixel checksum, an input trace, a real
-desktop file chooser/D-Bus portal, and a compatibility record stronger than
-`limited`. None of the GUI claims are made here.
+**Implemented in the tree (pending the completed run):** the Wayland bridge
+(`runtime/wayland/wayland_shim.c` as a drop-in `libwayland-client.so.0`), the
+presentation path through the `/dev/aether-display` endpoint into the ring-0
+compositor, the Mesa lavapipe software Vulkan path over the bridge's surface
+protocol, keyboard and pointer routing, the windowed `/usr/bin/gridcraft`
+launch, and the portal workbook open/save path. `make gate4-test` stages the
+signed GridCraft AppImage, boots the Gate 4 runtime rootfs, and
+`tools/gate4_smoke.py` requires the kernel-owned `AETHER_GATE4_PRESENT_OK`,
+`AETHER_GATE4_INPUT_OK`, `AETHER_GATE4_SAVE_OK`, and `AETHER_GATE4_REVOKE_OK`
+markers, a QEMU screenshot with a non-black pixel check, a harness pointer
+click and the keys `4`, `2`, `ctrl-s` through the emulated PS/2 path, and the
+post-exit revocation.
+
+**Evidence pending from that run:**
+(EVIDENCE-PENDING: marker transcript)
+(EVIDENCE-PENDING: screenshot path, dimensions, and non-black pixel count)
+(EVIDENCE-PENDING: tested commit hash, platform, and test date)
+
+**Still open after Gate 4:** a real desktop file chooser/D-Bus portal,
+clipboard, interactive resize and window chrome, broader keymaps and cursor
+surfaces, and any compatibility record stronger than `limited`. None of the
+GUI claims are made before the run completes.
 
 **Runtime rootfs packaging: met at QEMU prototype scope.** `make gate4-runtime`
 assembles `tools/build-gate4-runtime.sh` from pinned host libraries:
@@ -425,7 +452,7 @@ assembles `tools/build-gate4-runtime.sh` from pinned host libraries:
 | Profile | `gate4-host-lavapipe` |
 | glibc / loader | host glibc 2.43, `ld-linux-x86-64.so.2` |
 | Mesa | lavapipe 26.0.8-1ubuntu0.3 |
-| Wayland client | 1.24.0-2 (host `libwayland-client.so.0`; the bridge replaces it later at the same SONAME path) |
+| Wayland client | 1.24.0-2 baseline; the build installs the in-tree Wayland bridge (`runtime/wayland/wayland_shim.c`) and cursor stub at the same SONAME paths in place of the host client libraries |
 | Vulkan | loader 1.4.341.0-1, `libvulkan_lvp.so`, `lvp_icd.json` |
 | LLVM | `libLLVM.so.21.1`, 138,567,144 bytes |
 | Files / bytes | 40 files, 164,543,720 uncompressed bytes |
@@ -482,11 +509,15 @@ injects a real PS/2 key and mouse packet through the input queue after the first
 present; the kernel only emits `INPUT_OK` after the guest has read key, pointer,
 and focus records.
 
-**Still missing:** the in-app `libwayland-client.so.0` bridge, xdg-shell and
-seat/keyboard/pointer protocol objects, keymap delivery, frame-callback timing,
-Mesa/lavapipe content, the real GridCraft GUI run, and the workbook open/save
-portal path. The endpoint is deliberately narrower than a Wayland wire server
-and is not evidence of Wayland or GUI compatibility.
+**Still pending:** the completed `make gate4-test` windowed run — its marker
+transcript, screenshot, and tested commit are not yet on record
+(EVIDENCE-PENDING: marker transcript)
+(EVIDENCE-PENDING: screenshot path, dimensions, and non-black pixel count)
+(EVIDENCE-PENDING: tested commit hash, platform, and test date). The bridge,
+keymap delivery, frame-callback timing, Mesa/lavapipe content, and the
+workbook open/save portal path exist in the tree and are exercised only by
+that pending run. The endpoint remains deliberately narrower than a Wayland
+wire server, and no Wayland or GUI compatibility claim is made.
 
 ## Security acceptance criteria
 
@@ -529,9 +560,11 @@ and is not evidence of Wayland or GUI compatibility.
    implemented `siginfo`/`ucontext`, alt-stack, restart, robust-futex, and
    `clone3` thread subset is bounded and fixture-tested.
 5. The Gate 3 pinned runtime rootfs carries a host-derived glibc/loader
-   profile. The Gate 4 profile adds host-derived Mesa lavapipe/LLVM, Wayland
-   client libraries, `libxkbcommon`, and the Vulkan loader, but the Wayland
-   service/bridge and compositor presentation are still absent.
+   profile. The Gate 4 profile adds host-derived Mesa lavapipe/LLVM, the
+   Vulkan loader, `libxkbcommon`, and the in-tree Wayland client bridge
+   installed at the host `libwayland-client.so.0` SONAME path; presentation
+   goes through the `/dev/aether-display` endpoint into the ring-0
+   compositor, and the completed windowed run is still pending.
 6. No D-Bus broker or XDG portal bridge for the Linux domain.
 7. No persistent storage; the RAM disk and the application overlay are
    volatile, so overlay persistence is limited to one boot.

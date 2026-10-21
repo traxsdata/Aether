@@ -27,13 +27,17 @@ grants, and the desktop is not a security authority.
 > Ed25519 update verification with rollback protection, and a signed release
 > bundle plus qualification report.
 >
-> Windows compatibility, the Linux GUI layer, networking, persistent storage,
-> audio, GPU acceleration, a general installer, Secure Boot, and an external
-> security review are not implemented. The Linux track imports the pinned
-> GridCraft AppImage and runs its headless `gridcraft-cli` at QEMU prototype
-> scope (Gate 3); Wayland, software Vulkan, the windowed GUI, and general
-> application compatibility are not implemented. Do not use this tree for real
-> data.
+> Windows compatibility, networking, persistent storage, audio, GPU
+> acceleration, a general installer, Secure Boot, and an external security
+> review are not implemented. The Linux track imports the pinned GridCraft
+> AppImage and runs its headless `gridcraft-cli` at QEMU prototype scope
+> (Gate 3), and the Gate 4 windowed slice is in the tree: a drop-in
+> `libwayland-client.so.0` bridge over the `/dev/aether-display` endpoint,
+> Mesa lavapipe software Vulkan in the signed Gate 4 runtime rootfs, and a
+> `make gate4-test` windowed run with portal open/save. The completed windowed
+> run, its marker/screenshot evidence, and general application compatibility
+> are not demonstrated yet (EVIDENCE-PENDING: tested commit hash). Do not use
+> this tree for real data.
 
 ## What works today
 
@@ -156,8 +160,17 @@ grants, and the desktop is not a security authority.
   smoke test, not the pinned production runtime. Gate 3 uses the same loader
   path for the real `gridcraft-cli`: one process evaluates formulas, reads a
   CSV, writes it through the private `/tmp` overlay, and exits zero
-  (`make gate3-test`, `AETHER_GATE3_APP_OK`). Threads, Wayland, and Vulkan
-  are still missing.
+  (`make gate3-test`, `AETHER_GATE3_APP_OK`). For Gate 4,
+  `runtime/wayland/wayland_shim.c` builds as a drop-in
+  `libwayland-client.so.0` (with a `libwayland-cursor.so.0` stub and an
+  embedded US keymap) that `make gate4-runtime` installs at the host
+  library's SONAME path in the signed Gate 4 rootfs; it maps Wayland surfaces,
+  xdg-shell configure, seat input, and frame callbacks onto the
+  `/dev/aether-display` endpoint, beside Mesa lavapipe software Vulkan in the
+  same rootfs, and `make gate4-test` launches the windowed
+  `/usr/bin/gridcraft` from the AppImage with portal open/save
+  (EVIDENCE-PENDING: tested commit hash). The windowed run is pending, and
+  general Linux application compatibility is not implemented.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,

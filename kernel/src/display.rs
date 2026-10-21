@@ -62,6 +62,9 @@ const EVENT_POINTER_BUTTON: u32 = 4;
 const EVENT_POINTER_AXIS: u32 = 5;
 const EVENT_ENTER: u32 = 6;
 const EVENT_LEAVE: u32 = 7;
+// Only the Gate 4 GUI test path asks the bridge to close the toplevel; in
+// every other build nothing emits this event, so it stays compiled out.
+#[cfg(feature = "gate4-gui-test")]
 const EVENT_CLOSE: u32 = 8;
 const EVENT_FRAME: u32 = 9;
 
@@ -545,6 +548,7 @@ fn present(
 ///
 /// This is used by the Gate 4 GUI test path once the portal commit has landed;
 /// it is not an application-controlled close.
+#[cfg(feature = "gate4-gui-test")]
 pub fn request_close() {
     with_state(|state| {
         if state.open && state.window.is_some() {

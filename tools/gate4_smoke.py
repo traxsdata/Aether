@@ -29,8 +29,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
-IMAGE = BUILD / "aether.img"
-OUT = BUILD / "gate4"
+# The image and the run directory can be redirected so that two harnesses (or a
+# harness and a concurrent build) do not share the same QEMU image lock or
+# serial log. The defaults are unchanged.
+IMAGE = Path(os.environ.get("AETHER_GATE4_IMAGE", BUILD / "aether.img"))
+OUT = Path(os.environ.get("AETHER_GATE4_OUT", BUILD / "gate4"))
 TIMEOUT = int(os.environ.get("AETHER_GATE4_TIMEOUT", "300"))
 SCREENSHOT = Path(os.environ.get("AETHER_GATE4_SCREENSHOT", OUT / "gate4.ppm"))
 CLICK = os.environ.get("AETHER_GATE4_CLICK", "")
@@ -100,7 +103,7 @@ def main() -> int:
         "qemu-system-x86_64",
         "-machine", "q35,accel=tcg",
         "-cpu", "max",
-        "-m", "8G",
+        "-m", "4G",
         "-display", "none",
         "-device", "VGA",
         "-no-reboot",
@@ -115,7 +118,8 @@ def main() -> int:
         ]
     else:
         command += ["-bios", str(code)]
-    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    qemu_err = (OUT / "qemu.err").open("w")
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=qemu_err)
     qmp_socket = None
     qmp_file = None
     try:
@@ -223,6 +227,7 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+        qemu_err.close()
         qmp_path.unlink(missing_ok=True)
 
 

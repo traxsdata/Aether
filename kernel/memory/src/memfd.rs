@@ -6,7 +6,10 @@
 //! boundary and the tests.
 
 /// Maximum number of live memfd objects (also the per-task descriptor limit).
+#[cfg(feature = "gate4")]
 pub const MAX_MEMFDS: usize = 32;
+#[cfg(not(feature = "gate4"))]
+pub const MAX_MEMFDS: usize = 4;
 /// Maximum bytes in one memfd object (16 MiB).
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum pages in one memfd object.

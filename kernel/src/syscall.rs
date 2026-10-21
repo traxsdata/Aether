@@ -200,6 +200,8 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     }
     let number = unsafe { (*frame).rax };
     scheduler::linux_begin_syscall(number);
+    #[cfg(feature = "gate4-gui-test")]
+    scheduler::linux_set_last_syscall(number);
     let first = unsafe { (*frame).rdi };
     let second = unsafe { (*frame).rsi };
     let third = unsafe { (*frame).rdx };
@@ -352,22 +354,6 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         60 | 231 => return scheduler::linux_exit(first),
         _ => LINUX_ENOSYS,
     };
-    #[cfg(feature = "gate4-gui-test")]
-    if (result == LINUX_EINVAL || result == LINUX_ENOMEM)
-        && matches!(number, 1 | 3 | 9 | 77 | 257 | 319 | 12)
-    {
-        serial_line!(
-            "linux: err={} nr={} a={:#x} b={:#x} c={:#x} d={:#x} e={:#x} f={:#x}",
-            result,
-            number,
-            first,
-            second,
-            third,
-            unsafe { (*frame).r10 },
-            unsafe { (*frame).r8 },
-            unsafe { (*frame).r9 }
-        );
-    }
     // SAFETY: The assembly stub passes a live frame on this task's kernel
     // stack and keeps it valid until iretq.
     unsafe { (*frame).rax = result as u64 };
@@ -712,13 +698,10 @@ fn linux_mmap(
                 // whole page. Linux permits a page-aligned mapping of that
                 // page; only reject ranges beyond the rounded object size.
                 let rounded = file_length
-                    .checked_add(aether_memory::PAGE_SIZE as u64 - 1)
-                    .map(|value| value & !(aether_memory::PAGE_SIZE as u64 - 1))
+                    .checked_add(aether_memory::PAGE_SIZE - 1)
+                    .map(|value| value & !(aether_memory::PAGE_SIZE - 1))
                     .unwrap_or(file_length);
-                if offset
-                    .checked_add(length)
-                    .is_none_or(|end| end > rounded)
-                {
+                if offset.checked_add(length).is_none_or(|end| end > rounded) {
                     let _ = scheduler::linux_vma_remove(start, length);
                     return LINUX_EINVAL;
                 }

@@ -42,12 +42,21 @@ pub const APPIMAGE_TASK: usize = LINUX_DYN_TASK + 1;
 /// Task index of the ring-3 `linuxd` launch-policy service.
 pub const LINUXD_TASK: usize = APPIMAGE_TASK + 1;
 
+#[cfg(feature = "gate4-gui-test")]
 const MAX_TASKS: usize = WORKER_COUNT + 96;
+#[cfg(not(feature = "gate4-gui-test"))]
+const MAX_TASKS: usize = WORKER_COUNT + 12;
 
 /// Maximum number of `MAP_SHARED` VMA entries per Linux application domain.
+#[cfg(feature = "gate4-gui-test")]
 const MAX_DOMAIN_SHARED_VMAS: usize = 64;
+#[cfg(not(feature = "gate4-gui-test"))]
+const MAX_DOMAIN_SHARED_VMAS: usize = 16;
 const STACK_SIZE: usize = 16 * 1024;
+#[cfg(feature = "gate4-gui-test")]
 const KERNEL_STACK_SIZE: usize = 256 * 1024;
+#[cfg(not(feature = "gate4-gui-test"))]
+const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const ROUNDS: usize = 4;
 const MAGIC_PREFIX: u64 = 0xa5a5_0000_0000_0000;
 
@@ -144,11 +153,23 @@ const PORTAL_PATH_BYTES: usize = aether_fs::MAX_PATH;
 const PIPE_BYTES: usize = 512;
 /// Global pipe slots. Forked processes share the same slot, so a write on one
 /// side is visible to the other.
+#[cfg(feature = "gate4-gui-test")]
 const MAX_PIPES: usize = 16;
+#[cfg(not(feature = "gate4-gui-test"))]
+const MAX_PIPES: usize = 4;
+#[cfg(feature = "gate4-gui-test")]
 const MAX_EVENTFDS: usize = 16;
+#[cfg(not(feature = "gate4-gui-test"))]
+const MAX_EVENTFDS: usize = 2;
+#[cfg(feature = "gate4-gui-test")]
 const MAX_EPOLLS: usize = 8;
+#[cfg(not(feature = "gate4-gui-test"))]
+const MAX_EPOLLS: usize = 1;
 const MAX_EPOLL_WATCH: usize = 8;
+#[cfg(feature = "gate4-gui-test")]
 const MAX_TIMERFDS: usize = 8;
+#[cfg(not(feature = "gate4-gui-test"))]
+const MAX_TIMERFDS: usize = 2;
 const POLL_IN: i16 = 1;
 const POLL_OUT: i16 = 4;
 const POLL_ERR: i16 = 8;
@@ -537,6 +558,12 @@ struct Task {
     linux_epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
     linux_timerfds: [Option<LinuxTimerFd>; MAX_TIMERFDS],
     wait_kind: LinuxWaitKind,
+    /// Most recent Linux system call number; used by the Gate 4 block trace.
+    #[allow(dead_code)]
+    last_syscall: u64,
+    /// Last system call number printed by the Gate 4 call trace.
+    #[allow(dead_code)]
+    traced_syscall: u64,
     wait_deadline: u64,
     restart_syscall: u64,
     restart_deadline: u64,
@@ -600,6 +627,8 @@ impl Task {
             linux_epolls: [None; MAX_EPOLLS],
             linux_timerfds: [None; MAX_TIMERFDS],
             wait_kind: LinuxWaitKind::None,
+            last_syscall: u64::MAX,
+            traced_syscall: u64::MAX,
             wait_deadline: 0,
             restart_syscall: u64::MAX,
             restart_deadline: 0,
@@ -1305,7 +1334,6 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             "WGPU_BACKEND=vulkan",
             "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json",
             "GRIDCRAFT_NO_PREFS=1",
-            "G4_SHIM_TRACE=1",
             "LANG=C.UTF-8",
             "LC_ALL=C.UTF-8",
             "TZ=UTC",
@@ -2146,6 +2174,8 @@ pub fn linux_wait4_block(
     let current = CURRENT.load(Ordering::Relaxed);
     tasks[current].wait_pid = pid;
     tasks[current].wait_status_pointer = status_pointer;
+    #[cfg(feature = "gate4-gui-test")]
+    trace_block("wait4");
     tasks[current].state = TaskState::Blocked;
     yield_current(frame)
 }
@@ -2196,6 +2226,8 @@ pub fn linux_futex_wait(
     tasks[current].futex_deadline = timeout_ticks
         .and_then(|ticks| TICKS.load(Ordering::Relaxed).checked_add(ticks))
         .unwrap_or(0);
+    #[cfg(feature = "gate4-gui-test")]
+    trace_block("futex");
     tasks[current].state = TaskState::Blocked;
     yield_current(frame)
 }
@@ -2223,6 +2255,66 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
 /// and the handler resumes with its stored absolute deadline. This is the
 /// kernel's blocking model: a syscall never continues on the kernel stack
 /// after handing control to another task.
+/// Records the most recent Linux system call number for the current task.
+///
+/// Only the Gate 4 test build uses this: it makes a blocked GUI thread
+/// identifiable from the serial log without a debugger. The trace prints one
+/// line whenever the call number changes, so a burst of identical calls
+/// collapses into a single line.
+#[cfg(feature = "gate4-gui-test")]
+pub fn linux_set_last_syscall(number: u64) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    if current >= tasks.len() {
+        return;
+    }
+    let task = &mut tasks[current];
+    task.last_syscall = number;
+    if task.tgid != APPIMAGE_TASK {
+        return;
+    }
+    if task.traced_syscall == number {
+        return;
+    }
+    task.traced_syscall = number;
+    serial_line!(
+        "linux: syscall task={} tgid={} nr={}",
+        current,
+        task.tgid,
+        number
+    );
+}
+
+/// Returns `true` when the current task belongs to the Gate 4 GUI program.
+#[cfg(feature = "gate4-gui-test")]
+pub fn linux_is_appimage_task() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    current < tasks.len() && tasks[current].tgid == APPIMAGE_TASK
+}
+
+/// Traces a task that is about to block, with the system call it is in.
+///
+/// This is a bounded diagnostic for the Gate 4 GUI test only. It prints one
+/// line per block, which is enough to identify the wait the application is
+/// stuck in without flooding the serial log.
+#[cfg(feature = "gate4-gui-test")]
+fn trace_block(kind: &str) {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    if current >= tasks.len() {
+        return;
+    }
+    let task = &tasks[current];
+    serial_line!(
+        "linux: block task={} tgid={} kind={} syscall={}",
+        current,
+        task.tgid,
+        kind,
+        task.last_syscall
+    );
+}
+
 pub fn linux_park(
     frame: *mut InterruptFrame,
     syscall: u64,
@@ -2241,6 +2333,8 @@ pub fn linux_park(
     tasks[current].restart_syscall = syscall;
     tasks[current].restart_deadline = deadline.unwrap_or(0);
     tasks[current].restart_infinite = deadline.is_none();
+    #[cfg(feature = "gate4-gui-test")]
+    trace_block("park");
     tasks[current].state = TaskState::Blocked;
     // SAFETY: `frame` is the live Linux syscall frame on the current task's
     // kernel stack; the Linux entry stub is always reached through `syscall`
@@ -5583,6 +5677,8 @@ pub fn linux_inotify_block(
     let current = CURRENT.load(Ordering::Relaxed);
     tasks[current].inotify_wait_pointer = pointer;
     tasks[current].inotify_wait_length = length;
+    #[cfg(feature = "gate4-gui-test")]
+    trace_block("inotify");
     tasks[current].state = TaskState::Blocked;
     // A signal can wake a blocked task without an event; report EINTR unless
     // the event waker overwrites this value first.

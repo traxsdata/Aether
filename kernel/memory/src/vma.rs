@@ -13,7 +13,10 @@
 use crate::{PAGE_SIZE, align_up};
 
 /// Maximum number of tracked areas.
+#[cfg(feature = "gate4")]
 pub const MAX_VMAS: usize = 512;
+#[cfg(not(feature = "gate4"))]
+pub const MAX_VMAS: usize = 32;
 /// Fragment scratch capacity for split operations.
 const MAX_FRAGMENTS: usize = MAX_VMAS * 2 + 1;
 
