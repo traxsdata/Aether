@@ -510,6 +510,9 @@ fn present(
         state.presented = true;
         state.format = format;
         state.frames = state.frames.saturating_add(1);
+        // A newly presented frame is damage for the Linux window: the
+        // compositor must sample the fresh pixels on its next idle pass.
+        crate::desktop::mark_live_dirty();
         if !state.present_marker {
             state.present_marker = true;
             serial_line!(

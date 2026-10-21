@@ -879,10 +879,26 @@ static void send_keyboard(struct wl_proxy *kb) {
     int fd = (int)syscall(SYS_memfd_create, "aether-xkb-keymap", MFD_CLOEXEC);
     if (fd < 0)
         return;
-    if (ftruncate(fd, (off_t)len) != 0 ||
-        write(fd, km_start, len) != (ssize_t)len) {
+    if (ftruncate(fd, (off_t)len) != 0) {
         close(fd);
         return;
+    }
+    /* A single write may be short (the kernel caps one syscall's I/O), so
+     * copy the whole keymap before handing the descriptor to the client. */
+    size_t written = 0;
+    while (written < len) {
+        ssize_t n = write(fd, km_start + written, len - written);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            close(fd);
+            return;
+        }
+        if (n == 0) {
+            close(fd);
+            return;
+        }
+        written += (size_t)n;
     }
     lseek(fd, 0, SEEK_SET);
     emit_n(kb, 0, 3, (uintptr_t)1, (uintptr_t)fd, (uintptr_t)len); /* keymap */
@@ -966,23 +982,33 @@ static void aether_focus(struct wl_display *dpy, int entered,
                          int32_t x, int32_t y) {
     static struct wl_array empty_keys = { 0, 0, NULL };
     uint32_t serial = ++dpy->serial;
-    if (dpy->keyboard && dpy->main_surface) {
-        if (entered)
-            emit_n(dpy->keyboard, 1, 3, (uintptr_t)serial,
-                   (uintptr_t)dpy->main_surface, (uintptr_t)&empty_keys);
-        else
-            emit_n(dpy->keyboard, 2, 2, (uintptr_t)serial,
-                   (uintptr_t)dpy->main_surface);
-    }
-    if (dpy->pointer && dpy->main_surface) {
-        if (entered)
-            emit_n(dpy->pointer, 0, 5, (uintptr_t)serial,
-                   (uintptr_t)dpy->main_surface,
-                   (uintptr_t)bridge_fixed(x), (uintptr_t)bridge_fixed(y));
-        else
-            emit_n(dpy->pointer, 1, 2, (uintptr_t)serial,
-                   (uintptr_t)dpy->main_surface);
-        emit_n(dpy->pointer, 5, 0); /* frame */
+    /* A surface only becomes a window once it has an xdg role. Focus has to
+     * name that window's surface proxy; cursor surfaces and other helper
+     * surfaces must not take keyboard or pointer focus. The client may hold
+     * more than one proxy for the same surface (wrappers), so announce the
+     * focus for every role-bearing proxy. */
+    struct wl_proxy *p;
+    for (p = dpy->proxies; p; p = p->next) {
+        if (strcmp(iface_name(p), "wl_surface") != 0 || !p->state)
+            continue;
+        struct surface_state *ss = p->state;
+        if (!ss->xdg)
+            continue;
+        if (dpy->keyboard) {
+            if (entered)
+                emit_n(dpy->keyboard, 1, 3, (uintptr_t)serial,
+                       (uintptr_t)p, (uintptr_t)&empty_keys);
+            else
+                emit_n(dpy->keyboard, 2, 2, (uintptr_t)serial, (uintptr_t)p);
+        }
+        if (dpy->pointer) {
+            if (entered)
+                emit_n(dpy->pointer, 0, 5, (uintptr_t)serial, (uintptr_t)p,
+                       (uintptr_t)bridge_fixed(x), (uintptr_t)bridge_fixed(y));
+            else
+                emit_n(dpy->pointer, 1, 2, (uintptr_t)serial, (uintptr_t)p);
+            emit_n(dpy->pointer, 5, 0); /* frame */
+        }
     }
 }
 

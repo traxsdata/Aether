@@ -136,7 +136,10 @@ def main() -> int:
                 print(text)
                 print("FAIL: boot reported a failure", file=sys.stderr)
                 return 1
-            if all(marker in text for marker in REQUIRED):
+            # Input is driven only after the frame is on screen, so the boot
+            # wait can only require the presentation marker. Waiting for the
+            # input marker here would deadlock before the harness clicks.
+            if "AETHER_GATE4_PRESENT_OK" in text:
                 break
             if process.poll() is not None:
                 print(text)
@@ -152,8 +155,14 @@ def main() -> int:
 
         text = serial.read_text(errors="replace")
         if "AETHER_GATE4_PRESENT_OK" in text:
+            # Let the application finish initialising (fonts, first UI frame)
+            # before driving input: the first presented frame can be the
+            # cleared swapchain image.
+            time.sleep(4.0)
+        text = serial.read_text(errors="replace")
+        if "AETHER_GATE4_PRESENT_OK" in text:
             # Let the compositor finish the frame before the dump.
-            time.sleep(1.0)
+            time.sleep(0.5)
             send_qmp(qmp_file, "screendump", {"filename": str(SCREENSHOT)})
             width, height, pixels = read_ppm(SCREENSHOT)
             nonblack = sum(
@@ -167,20 +176,63 @@ def main() -> int:
             print(f"PASS: screenshot {width}x{height} nonblack={nonblack} path={SCREENSHOT}")
 
         if CLICK:
-            # The PS/2 driver starts the pointer at the screen centre. Move up
-            # and left in bounded relative packets, then click twice: the first
-            # click focuses the Linux window, the second selects a cell.
-            for _ in range(10):
-                send_hmp(qmp_file, "mouse_move -30 30")
+            # The PS/2 pointer starts at the screen centre. Move to the
+            # requested screen coordinate in bounded relative packets, then
+            # click twice: the first click focuses the Linux window, the
+            # second selects a cell. The legacy "1" value selects a cell in
+            # the middle of the visible sheet rather than the scrollbar.
+            target_x, target_y = 120, 240
+            parts = CLICK.split(",")
+            if len(parts) == 2:
+                try:
+                    target_x, target_y = int(parts[0]), int(parts[1])
+                except ValueError:
+                    pass
+            dx, dy = target_x - 640, target_y - 400
+            while dx or dy:
+                step_x = max(-30, min(30, dx))
+                step_y = max(-30, min(30, dy))
+                send_hmp(qmp_file, f"mouse_move {step_x} {step_y}")
+                dx -= step_x
+                dy -= step_y
                 time.sleep(0.02)
             send_hmp(qmp_file, "mouse_button 1")
             send_hmp(qmp_file, "mouse_button 0")
             time.sleep(0.05)
             send_hmp(qmp_file, "mouse_button 1")
             send_hmp(qmp_file, "mouse_button 0")
+            # The first real UI frame (fonts, workbook, cursor theme) can take
+            # a few seconds on the software Vulkan path. Drive the editing keys
+            # only after the application has presented a post-click frame.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                text = serial.read_text(errors="replace")
+                if "AETHER_BRIDGE_PRESENT frames=2" in text:
+                    break
+                time.sleep(0.25)
+            time.sleep(1.0)
         for key in KEYS:
             send_hmp(qmp_file, f"sendkey {key} 20")
-            time.sleep(0.08)
+            time.sleep(0.5)
+
+        post = os.environ.get("AETHER_GATE4_POST")
+        if post:
+            time.sleep(2.0)
+            send_qmp(qmp_file, "screendump", {"filename": post})
+
+        if CLICK or KEYS:
+            # The kernel raises INPUT_OK only after it has read a pointer, a
+            # key and a focus event through the Linux window endpoint.
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                text = serial.read_text(errors="replace")
+                if "AETHER_GATE4_INPUT_OK" in text:
+                    break
+                time.sleep(0.25)
+            else:
+                print(text)
+                print("FAIL: input marker did not appear", file=sys.stderr)
+                return 1
 
         if WAIT_SAVE:
             # Save first; the app stays open until the harness closes it. The
