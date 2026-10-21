@@ -276,6 +276,11 @@ user space. It is not a VM. The target and security gates are in
     0.8.0`) through that rootfs. The compressed image is 45,268,992 bytes
     (164,543,720 bytes imported). Tampered and missing runtime images fail
     closed.
+  - [x] Gate 4 demo ISO (QEMU prototype scope): `make iso-gridcraft` stages the
+    signed GridCraft AppImage and the Gate 4 runtime rootfs into the El Torito
+    EFI image and builds `build/ISOs/aether-gridcraft-<timestamp>.iso`. The
+    image boots the unmodified windowed GUI; it is a prototype demo, not a
+    general Linux distribution image.
   - [x] Gate 4 Wayland bridge slice (QEMU prototype scope): the bridge at
     `runtime/wayland/wayland_shim.c` builds as a drop-in
     `libwayland-client.so.0` (plus a `libwayland-cursor.so.0` stub and an

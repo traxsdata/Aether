@@ -86,11 +86,34 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
 all: image
+
+# Bootable demo ISO: the signed GridCraft AppImage, the Gate 4 Mesa/lavapipe
+# runtime rootfs, and the windowed GUI launch path. This is a QEMU/VMware
+# prototype image, not a general Linux compatibility release.
+iso-gridcraft: gate4-runtime
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		KERNEL_FEATURES="gate4-runtime gate4-gui-test" \
+		LINUX_RUNTIME_PIN=$(GATE4_RUNTIME_PIN) \
+		STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_ROOTFS) \
+		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+		LINUX_APPIMAGE_PROGRAM=$(GATE4_GUI_PROGRAM) \
+		LINUX_APPIMAGE_ARGS='$(GATE4_GUI_ARGS)' \
+		STAGED_APPIMAGE=$(GATECRAFT_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) \
+		IMAGE_SIZE=128M image
+	AETHER_ISO_SKIP_IMAGE=1 \
+		EFI_IMAGE_SIZE=128M \
+		ISO_PREFIX=aether-gridcraft \
+		STAGED_APPIMAGE=$(GATECRAFT_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) \
+		STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_ROOTFS) \
+		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+		sh tools/make-iso.sh
 
 user:
 	@mkdir -p $(BUILD)
