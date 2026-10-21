@@ -1141,10 +1141,11 @@ static void aether_key(struct wl_display *dpy,
     if (ev->modifiers & 8) depressed |= 64;  /* super */
     emit_input_n(dpy, dpy->keyboard, 4, 5, (uintptr_t)serial, (uintptr_t)depressed,
            (uintptr_t)0, (uintptr_t)0, (uintptr_t)0);
+    /* The kernel already sends one press and one release per physical key.
+     * Forward the record's state; synthesizing both here would type every
+     * character twice. */
     emit_input_n(dpy, dpy->keyboard, 3, 4, (uintptr_t)serial, (uintptr_t)ev->serial,
-           (uintptr_t)key, (uintptr_t)1);
-    emit_input_n(dpy, dpy->keyboard, 3, 4, (uintptr_t)serial, (uintptr_t)ev->serial,
-           (uintptr_t)key, (uintptr_t)0);
+           (uintptr_t)key, (uintptr_t)(ev->state ? 1u : 0u));
 }
 
 static int aether_read_events(struct wl_display *dpy) {
