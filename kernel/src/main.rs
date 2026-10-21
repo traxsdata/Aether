@@ -168,6 +168,14 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         arch::x86_64::halt();
     }
     serial_line!("boot: cpu: NX and write-protect enabled");
+    // SAFETY: Boot is single-threaded, interrupts are disabled, and no user
+    // task has run vector code yet.
+    let xsave = unsafe { arch::x86_64::cpu::enable_extended_state() };
+    scheduler::init_fpu(xsave);
+    serial_line!(
+        "boot: fpu: {} vector state",
+        if xsave { "xsave" } else { "fxsave" }
+    );
 
     memory::init_frame_allocator();
     memory::with_frame_allocator(|frames| {

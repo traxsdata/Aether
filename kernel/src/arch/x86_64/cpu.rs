@@ -25,10 +25,13 @@ const IA32_FMASK: u32 = 0xc000_0084;
 const IA32_FS_BASE: u32 = 0xc000_0100;
 
 const CR0_WP: u64 = 1 << 16;
+const CR4_OSXSAVE: u64 = 1 << 18;
 
 const CPUID_EXTENDED_MAX: u32 = 0x8000_0000;
 const CPUID_EXTENDED_FEATURES: u32 = 0x8000_0001;
 const CPUID_FEATURE_NX: u32 = 1 << 20;
+const CPUID_XSAVE: u32 = 1 << 26;
+const CPUID_AVX: u32 = 1 << 28;
 
 /// CPU features required by the kernel are unavailable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +97,38 @@ pub unsafe fn init() -> Result<(), CpuError> {
     Ok(())
 }
 
+/// Enables the extended processor state used by SSE and AVX.
+///
+/// Returns `true` when the XSAVE area holds the upper halves of the YMM
+/// registers as well, so a context switch can preserve all vector state with
+/// `xsave64`/`xrstor64`. When the processor only implements FXSAVE the caller
+/// falls back to the legacy 512-byte layout.
+///
+/// # Safety
+///
+/// Must run once at boot, at CPL0, with interrupts disabled and before any
+/// user task executes vector code.
+pub unsafe fn enable_extended_state() -> bool {
+    let features = __cpuid(1).ecx;
+    if features & (CPUID_XSAVE | CPUID_AVX) != (CPUID_XSAVE | CPUID_AVX) {
+        return false;
+    }
+    // SAFETY: CR4 and XCR0 are architectural at CPL0. Setting OSXSAVE makes
+    // XGETBV/XSETBV available; the enabled components (x87, SSE, AVX) are the
+    // ones reported by CPUID leaf 1 and leaf 0xD on this processor.
+    unsafe {
+        write_cr4(read_cr4() | CR4_OSXSAVE);
+        asm!(
+            "xsetbv",
+            in("ecx") 0u32,
+            in("eax") 0b111u32,
+            in("edx") 0u32,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    true
+}
+
 unsafe fn read_msr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
@@ -119,6 +154,31 @@ unsafe fn write_msr(msr: u32, value: u64) {
             in("ecx") msr,
             in("eax") value as u32,
             in("edx") (value >> 32) as u32,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+}
+
+unsafe fn read_cr4() -> u64 {
+    let value: u64;
+    // SAFETY: Reading CR4 is valid at CPL0 and has no side effects.
+    unsafe {
+        asm!(
+            "mov {value}, cr4",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    value
+}
+
+unsafe fn write_cr4(value: u64) {
+    // SAFETY: The caller supplies a value that preserves the required paging
+    // and protected-mode bits already set by firmware.
+    unsafe {
+        asm!(
+            "mov cr4, {value}",
+            value = in(reg) value,
             options(nomem, nostack, preserves_flags)
         );
     }

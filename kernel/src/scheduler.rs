@@ -25,9 +25,10 @@ use aether_memory::frame::{FrameAllocator, PhysFrame};
 use aether_memory::vma::{VmaError, VmaTable};
 use aether_services::ServiceError;
 use aether_services::runtime::RuntimeError;
+use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// Number of ring-0 worker tasks in the isolation test.
 pub const WORKER_COUNT: usize = 3;
@@ -687,6 +688,18 @@ static TASKS: Global<[Task; MAX_TASKS]> =
 /// cycle because the filesystem service has no persistent block device.
 static OVERLAYS: Global<[Option<LinuxOverlay>; OVERLAY_FILES]> =
     Global(UnsafeCell::new([None; OVERLAY_FILES]));
+/// Saved extended processor state, one area per task.
+///
+/// The area is large enough for the legacy FXSAVE block, the XSAVE header and
+/// the 256-byte YMM upper-half component (832 bytes); 1024 bytes leaves the
+/// required 64-byte alignment headroom.
+#[repr(align(64))]
+#[derive(Clone, Copy)]
+struct FpuState([u8; 1024]);
+const FPU_STATE_ZERO: FpuState = FpuState([0; 1024]);
+static FPU_STATES: Global<[FpuState; MAX_TASKS]> =
+    Global(UnsafeCell::new([FPU_STATE_ZERO; MAX_TASKS]));
+static FPU_XSAVE: AtomicBool = AtomicBool::new(false);
 static EVENTFD_COUNTERS: Global<[[Option<u64>; MAX_EVENTFDS]; MAX_TASKS]> =
     Global(UnsafeCell::new([[None; MAX_EVENTFDS]; MAX_TASKS]));
 /// Pipe storage is global so `fork`-inherited descriptors share one buffer.
@@ -1433,6 +1446,9 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             // The bridge trace is a Gate 4 diagnostic only: it shows the
             // Wayland requests the unmodified application makes.
             "G4_SHIM_TRACE=1",
+            // Lavapipe runs one rasterizer thread; the prototype schedules a
+            // single CPU, and the extra worker adds contention without gain.
+            "LP_NUM_THREADS=1",
             "LANG=C.UTF-8",
             "LC_ALL=C.UTF-8",
             "TZ=UTC",
@@ -6527,6 +6543,19 @@ pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), Vma
 /// The root is a flat imported tree, so regular files have a stable inode
 /// derived from their index and a synthetic mode.
 pub fn linux_stat_path(path: &str) -> Option<(u64, u64, u32)> {
+    if path.starts_with(aether_services::portal_store::PORTAL_PREFIX) {
+        // The portal namespace is a grant-backed view, not an imported file.
+        // Applications probe the path before opening it, so stat must resolve
+        // it through the same exact-file grant as openat.
+        use aether_abi::user::FileRights;
+        let root = {
+            let tasks = unsafe { &*TASKS.0.get() };
+            tasks[CURRENT.load(Ordering::Relaxed)].root
+        };
+        let grant = crate::portal::check_namespace(root, path, FileRights::READ).ok()?;
+        let size = crate::fs::portal_size(grant.path()).ok()?;
+        return Some((size as u64, 3, 0o100644));
+    }
     if let Some(kind) = pseudo_file(path) {
         return Some(pseudo_stat(kind));
     }
@@ -7088,7 +7117,70 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
     schedule_next(current)
 }
 
+/// Selects the save format for the per-task vector state.
+pub fn init_fpu(xsave: bool) {
+    FPU_XSAVE.store(xsave, Ordering::Relaxed);
+}
+
+/// Saves the live vector registers into a task's state area.
+///
+/// # Safety
+///
+/// Runs at CPL0 with interrupts masked, as part of a context switch.
+unsafe fn fpu_save(task: usize) {
+    let ptr = unsafe { FPU_STATES.0.get().cast::<FpuState>().add(task) }.cast::<u8>();
+    // SAFETY: The area is 64-byte aligned and large enough for either format.
+    // The caller serializes against user execution.
+    unsafe {
+        if FPU_XSAVE.load(Ordering::Relaxed) {
+            asm!(
+                "xsave64 [{ptr}]",
+                ptr = in(reg) ptr,
+                in("eax") 0b111u32,
+                in("edx") 0u32,
+                options(nostack, preserves_flags)
+            );
+        } else {
+            asm!(
+                "fxsave64 [{ptr}]",
+                ptr = in(reg) ptr,
+                options(nostack, preserves_flags)
+            );
+        }
+    }
+}
+
+/// Restores a task's vector registers.
+///
+/// # Safety
+///
+/// Runs at CPL0 with interrupts masked, immediately before returning to the
+/// task whose area was saved by [`fpu_save`].
+unsafe fn fpu_restore(task: usize) {
+    let ptr = unsafe { FPU_STATES.0.get().cast::<FpuState>().add(task) }.cast::<u8>();
+    // SAFETY: Same area and serialization invariant as `fpu_save`.
+    unsafe {
+        if FPU_XSAVE.load(Ordering::Relaxed) {
+            asm!(
+                "xrstor64 [{ptr}]",
+                ptr = in(reg) ptr,
+                in("eax") 0b111u32,
+                in("edx") 0u32,
+                options(nostack, preserves_flags)
+            );
+        } else {
+            asm!(
+                "fxrstor64 [{ptr}]",
+                ptr = in(reg) ptr,
+                options(nostack, preserves_flags)
+            );
+        }
+    }
+}
+
 fn schedule_next(current: usize) -> *mut InterruptFrame {
+    // SAFETY: Context switches run at CPL0 with interrupts masked.
+    unsafe { fpu_save(current) };
     let tasks = unsafe { &mut *TASKS.0.get() };
     let mut next = 0usize;
     for step in 1..=MAX_TASKS {
@@ -7112,6 +7204,8 @@ fn schedule_next(current: usize) -> *mut InterruptFrame {
     if let Some(pml4) = PhysFrame::from_address(tasks[next].pml4) {
         paging::activate(pml4);
     }
+    // SAFETY: The selected task is about to resume on this CPU.
+    unsafe { fpu_restore(next) };
     tasks[next].saved_rsp as *mut InterruptFrame
 }
 
@@ -7199,6 +7293,8 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     }
 
     tasks[current].saved_rsp = frame as u64;
+    // SAFETY: The timer path runs at CPL0 with interrupts masked.
+    unsafe { fpu_save(current) };
     if tasks[current].state == TaskState::Running {
         tasks[current].state = TaskState::Ready;
     }
@@ -7234,5 +7330,7 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         paging::activate(pml4);
     }
 
+    // SAFETY: The selected task is about to resume on this CPU.
+    unsafe { fpu_restore(next) };
     tasks[next].saved_rsp as *mut InterruptFrame
 }
