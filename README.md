@@ -143,7 +143,7 @@ grants, and the desktop is not a security authority.
   validated user pointer, and exits cleanly (`AETHER_LINUX_OK`). The layer now
   tracks a bounded per-task VMA table and supports file-backed `mmap`,
   `munmap` reuse, `mprotect`, and a growing `brk`, with write+execute mappings
-  rejected (`AETHER_LINUX_VMA_OK`). Pages are allocated on demand and returned
+  permitted for LLVM's JIT (`AETHER_LINUX_VMA_OK`). Pages are allocated on demand and returned
   on unmap or task exit. File metadata (`stat`/`fstat`/`newfstatat`/`statx`),
   `readlink`, `fcntl`, and descriptor duplication are implemented
   (`AETHER_LINUX_FILEMETA_OK`). Directory enumeration, bounded pipes, non-blocking `poll`, `eventfd`, basic

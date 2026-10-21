@@ -761,7 +761,7 @@ fn linux_mmap(
             return vma_errno(error);
         }
     };
-    let Some(page_flags) = linux_page_flags(protections) else {
+    let Some(page_flags) = linux_mmap_page_flags(protections) else {
         let _ = scheduler::linux_vma_remove(start, length);
         return LINUX_EINVAL;
     };
@@ -1476,10 +1476,7 @@ fn vma_errno(error: aether_memory::vma::VmaError) -> i64 {
     }
 }
 
-fn linux_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags> {
-    if protections & !7 != 0 {
-        return None;
-    }
+fn page_flags_from_protections(protections: u64) -> aether_memory::paging::PageFlags {
     let mut flags =
         aether_memory::paging::PageFlags::PRESENT | aether_memory::paging::PageFlags::USER;
     if protections & 2 != 0 {
@@ -1488,7 +1485,28 @@ fn linux_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags
     if protections & 4 == 0 {
         flags = flags | aether_memory::paging::PageFlags::NO_EXECUTE;
     }
-    Some(flags)
+    flags
+}
+
+fn linux_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags> {
+    // mprotect must not add write to an executable mapping: the LLVM JIT
+    // flips a W+X mapping to read+execute, never the other way around.
+    if protections & !7 != 0 || protections & 6 == 6 {
+        return None;
+    }
+    Some(page_flags_from_protections(protections))
+}
+
+/// Page flags for the initial `mmap`.
+///
+/// An initial mapping may be writable+executable: Linux permits it and the
+/// LLVM section allocator used by lavapipe asks for it directly. The stricter
+/// [`linux_page_flags`] applies to later protection changes.
+fn linux_mmap_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags> {
+    if protections & !7 != 0 {
+        return None;
+    }
+    Some(page_flags_from_protections(protections))
 }
 
 fn copy_file_range(

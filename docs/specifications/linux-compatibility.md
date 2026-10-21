@@ -286,8 +286,9 @@ file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 `brk`, FS-based TLS, `openat`/`read`/`close` against a validated read-only
 root, create/write/read through the `/tmp` overlay, `write`, and `exit`. It
 produces `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
-`AETHER_LINUX_VMA_OK`, plus `AETHER_LINUX_OK`; a writable+executable mapping
-and a W+X `mprotect` are denied. Private anonymous pages are allocated on demand
+`AETHER_LINUX_VMA_OK`, plus `AETHER_LINUX_OK`; a writable+executable
+mapping is permitted because the LLVM section allocator used by lavapipe
+requests it, while a W+X `mprotect` is denied. Private anonymous pages are allocated on demand
 and reclaimed on `munmap` and task exit. A parent and child share one
 `MAP_SHARED|MAP_ANONYMOUS` page and observe writes in both directions while a
 neighbouring private page keeps its pre-fork contents
