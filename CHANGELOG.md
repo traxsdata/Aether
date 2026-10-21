@@ -29,7 +29,7 @@ versioning scheme until the kernel ABI stabilises.
   at tested commit `716dcb4` (2026-10-21, `qemu-q35-ovmf`) recorded
   `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
   `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
-  `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`,
+  `AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3`,
   `AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093
   staging=sctmp+rename source=kernel`, the matching portal and revoke markers,
   and `AETHER_BOOT_OK stage=kernel version=0.1.0`, with screenshots at

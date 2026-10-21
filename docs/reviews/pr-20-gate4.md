@@ -66,7 +66,7 @@ Aether.
 ```text
 AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900
 AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux
-AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3
+AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3
 AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093 staging=sctmp+rename source=kernel
 AETHER_GATE4_PORTAL_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_bytes=4089 source=kernel
 AETHER_GATE4_REVOKE_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_denials=1 write_denials=1 source=kernel
@@ -81,10 +81,10 @@ AETHER_BOOT_OK stage=kernel version=0.1.0
       `492127ee13607b711d248c583d3760753d1eb897293953119b2a9bfc35ebbebb`;
       `build/gate4/gridcraft-after-input.ppm` — 1280x800, 1,023,989 non-black
       pixels, sha256
-      `c81760ff9a8c6830a54eef3719f6bee9a682704e54103d2b9ab373dbb6d80b4e`.
+      `6d877f91ebe36e30b6bdf7ec4e00215fcce002fbe9530ec44223ffd9e162cba8`.
       The post-input screenshot shows the real workbook with `GATE4-GUI.XLSX`
       in the title.
-- [x] `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`. The harness waited
+- [x] `AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3`. The harness waited
       for document-title readiness, clicked the window, and sent `4`, `2`,
       `ctrl-s` through the emulated PS/2 path.
 - [x] Portal, save, and revoke markers recorded above. The kernel read 4,089

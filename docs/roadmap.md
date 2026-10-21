@@ -202,7 +202,7 @@ user space. It is not a VM. The target and security gates are in
   markers were:
   `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
   `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
-  `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`,
+  `AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3`,
   `AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093
   staging=sctmp+rename source=kernel`,
   `AETHER_GATE4_PORTAL_OK
@@ -219,7 +219,7 @@ user space. It is not a VM. The target and security gates are in
   `492127ee13607b711d248c583d3760753d1eb897293953119b2a9bfc35ebbebb`) and
   `build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989 non-black
   pixels, sha256
-  `c81760ff9a8c6830a54eef3719f6bee9a682704e54103d2b9ab373dbb6d80b4e`); the
+  `6d877f91ebe36e30b6bdf7ec4e00215fcce002fbe9530ec44223ffd9e162cba8`); the
   post-input screenshot shows the real workbook with `GATE4-GUI.XLSX` in the
   title. This proves that the unmodified GridCraft GUI starts through the
   in-tree Wayland bridge, presents a real frame, receives keyboard and
@@ -307,7 +307,7 @@ user space. It is not a VM. The target and security gates are in
     clicks the window, sends the keys `4`, `2`, `ctrl-s` through the emulated
     PS/2 path, closes the window, and requires the post-exit revocation. The
     completed run recorded `frames=1`, `checksum=0x7b2cafc5`, `keys=1`,
-    `pointer=24`, `focus=3`, a 4,093-byte save from a 4,089-byte portal read,
+    `pointer=23`, `focus=3`, a 4,093-byte save from a 4,089-byte portal read,
     and one read and one write denial after revocation. Screenshot evidence is
     `build/gate4/gridcraft.ppm` (1280x800, 1,024,000 non-black pixels) and
     `build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989 non-black
@@ -654,7 +654,7 @@ harness for the real `/usr/bin/gridcraft` GUI against the signed AppImage and
 the Mesa/lavapipe runtime rootfs. The completed run recorded
 `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
 `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
-`AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`, a 4,093-byte save from a
+`AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3`, a 4,093-byte save from a
 4,089-byte portal read (`AETHER_GATE4_SAVE_OK`), the matching
 `AETHER_GATE4_PORTAL_OK` and `AETHER_GATE4_REVOKE_OK` markers with one read
 and one write denial, and `AETHER_BOOT_OK stage=kernel version=0.1.0`. The
