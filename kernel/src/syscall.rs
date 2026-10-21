@@ -1054,6 +1054,11 @@ fn linux_mprotect(pml4: PhysFrame, address: u64, length: u64, protections: u64) 
     if length == 0 {
         return 0;
     }
+    // Linux accepts the advisory growth flags and the pkey bit in mprotect;
+    // they change the VMA policy, not the page protection. The prototype
+    // keeps the read/write/execute protection and drops the rest.
+    const PROTECTION_MASK: u64 = 0x7;
+    let protections = protections & PROTECTION_MASK;
     let Some(length) = length.checked_add(0xfff).map(|value| value & !0xfff) else {
         return LINUX_EINVAL;
     };
