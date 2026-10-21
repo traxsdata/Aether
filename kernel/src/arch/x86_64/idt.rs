@@ -8,6 +8,7 @@
 //! a user fault terminates only the faulting task.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::serial_line;
 
@@ -210,6 +211,78 @@ irq_common:
     add rsp, 16
     iretq
 
+/* Linux `syscall` entry.
+ *
+ * The CPU enters with the user stack, so the stub first saves the user RSP in
+ * a fixed kernel slot and switches to the task's kernel stack. Interrupts are
+ * masked by IA32_FMASK. The frame matches InterruptFrame so the shared pop
+ * sequence and iretq can return to ring 3.
+ */
+.section .bss
+.p2align 3
+.global linux_syscall_stack
+linux_syscall_stack:
+    .quad 0
+.p2align 3
+linux_syscall_user_rsp:
+    .quad 0
+
+.section .text
+.global linux_syscall_entry
+.type linux_syscall_entry, @function
+linux_syscall_entry:
+    mov [rip + linux_syscall_user_rsp], rsp
+    mov rsp, [rip + linux_syscall_stack]
+
+    push 0x1b
+    push qword ptr [rip + linux_syscall_user_rsp]
+    push r11
+    push 0x23
+    push rcx
+    push 0
+    push 128
+
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rbp, rsp
+    and rsp, -16
+    mov rdi, rbp
+    call {linux_syscall_handler}
+    mov rsp, rax
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    add rsp, 16
+    iretq
+
 /* Ring-3 system call gate. */
 .global syscall_entry
 .type syscall_entry, @function
@@ -266,6 +339,7 @@ syscall_common:
     exception_handler = sym exception_handler,
     irq_handler = sym irq_handler,
     syscall_handler = sym syscall_handler,
+    linux_syscall_handler = sym crate::syscall::linux_dispatch,
 );
 
 unsafe extern "C" {
@@ -305,6 +379,7 @@ unsafe extern "C" {
     fn irq_1();
     fn irq_12();
     fn syscall_entry();
+    fn linux_syscall_entry();
 }
 
 /// Saved general-purpose and interrupt-return context.
@@ -375,6 +450,22 @@ const HANDLERS: [unsafe extern "C" fn(); 32] = [
     isr_25, isr_26, isr_27, isr_28, isr_29, isr_30, isr_31,
 ];
 
+/// Updates the kernel stack used by the Linux `syscall` instruction.
+///
+/// # Safety
+///
+/// `top` must be the exclusive top of the current task's writable kernel
+/// stack. The caller must serialize this with context switches.
+pub unsafe fn set_linux_syscall_stack(top: u64) {
+    unsafe extern "C" {
+        static mut linux_syscall_stack: u64;
+    }
+    // SAFETY: The caller guarantees a valid stack and serialized access.
+    unsafe {
+        core::ptr::addr_of_mut!(linux_syscall_stack).write_unaligned(top);
+    }
+}
+
 /// Installs the exception handlers, timer, and syscall gate, then loads the IDT.
 pub fn init() {
     // SAFETY: Boot is single-threaded, interrupts are disabled, and this is
@@ -415,6 +506,11 @@ pub fn init() {
             pointer = in(reg) &pointer,
             options(readonly, nostack, preserves_flags)
         );
+        crate::arch::x86_64::cpu::enable_syscall(
+            linux_syscall_entry as *const () as usize as u64,
+            crate::arch::x86_64::gdt::KERNEL_CODE_SELECTOR,
+            crate::arch::x86_64::gdt::USER_CODE_SELECTOR,
+        );
     }
 }
 
@@ -445,25 +541,37 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
         );
     }
 
-    serial_line!(
-        "KERNEL EXCEPTION: {} ({}) error={:#x} rip={:#018x} cs={:#x} rflags={:#018x} cr2={:#018x}",
-        exception_name(saved_vector),
-        saved_vector,
-        saved_error,
-        saved_rip,
-        saved_cs,
-        saved_rflags,
-        cr2
-    );
+    static DEMAND_LOGS: AtomicUsize = AtomicUsize::new(0);
+    let user_demand = is_user && saved_vector == 14;
+    if !user_demand {
+        serial_line!(
+            "KERNEL EXCEPTION: {} ({}) error={:#x} rip={:#018x} cs={:#x} rflags={:#018x} cr2={:#018x}",
+            exception_name(saved_vector),
+            saved_vector,
+            saved_error,
+            saved_rip,
+            saved_cs,
+            saved_rflags,
+            cr2
+        );
+    }
 
     if is_user {
+        if saved_vector == 14
+            && crate::scheduler::resolve_linux_demand_fault(frame, cr2, saved_error)
+        {
+            if DEMAND_LOGS.fetch_add(1, Ordering::Relaxed) < 32 {
+                serial_line!("user: demand page mapped address={:#018x}", cr2);
+            }
+            return frame;
+        }
         serial_line!(
             "user: fault terminated task vector={} rip={:#018x} cr2={:#018x}",
             saved_vector,
             saved_rip,
             cr2
         );
-        return crate::scheduler::on_user_fault(frame, saved_vector);
+        return crate::scheduler::on_user_fault(frame, saved_vector, cr2);
     }
 
     serial_line!(

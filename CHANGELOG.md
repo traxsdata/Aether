@@ -7,6 +7,62 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- GridCraft interaction performance for the Gate 4 prototype: the compositor
+  clips the Linux blit to damage once, copies opaque rows as packed words,
+  uses exact shift-based alpha division, hashes only the first presented
+  frame, and repaints only the content rectangle for a surface present.
+  Linux-surface damage is separate from clock/diagnostics, windows outside the
+  damage rectangle are skipped, an opaque surface avoids the wallpaper restore
+  and content fill, and drag/resize suppresses shadows and uses an opaque base.
+  The scheduler prefers the compositor after a present, and long surface
+  copies service the PS/2 controller so keystrokes are not dropped. Wayland
+  per-request tracing is off by default. The kernel reports
+  `AETHER_GATE4_PERF` at endpoint close and `make gate4-test` still passes the
+  present/input/save/revoke markers.
+- Linux Gate 4 windowed GridCraft is complete at QEMU prototype scope:
+  `runtime/wayland/wayland_shim.c` builds as a drop-in
+  `libwayland-client.so.0` (plus a `libwayland-cursor.so.0` stub and an
+  embedded US keymap) implementing the client ABI that winit/Smithay and Mesa's
+  Vulkan Wayland WSI use, and `make gate4-runtime` installs it at the host
+  libraries' SONAME path inside the signed Gate 4 rootfs, so the unmodified
+  GUI resolves the bridge instead of the host client. The bridge keeps the
+  Wayland client object model — registry, `wl_compositor`, `wl_shm` pools over
+  `memfd`, `wl_seat` keyboard/pointer, xdg-shell toplevel configure, and frame
+  callbacks — and maps presentation and input to fixed `PRESENT`/input records
+  on the existing `/dev/aether-display` endpoint. The new `make gate4-test`
+  target stages the pinned GridCraft 0.8.0 AppImage, launches `/usr/bin/gridcraft`
+  from the signed import path against that rootfs with the portal workbook
+  namespace as argv, and `tools/gate4_smoke.py` waits for the kernel-owned
+  `AETHER_GATE4_PRESENT_OK`, `AETHER_GATE4_INPUT_OK`, `AETHER_GATE4_SAVE_OK`,
+  and `AETHER_GATE4_REVOKE_OK` markers, captures a QEMU screenshot at
+  `build/gate4/gridcraft.ppm` with a non-black pixel check, drives a pointer
+  click plus the keys `4`, `2`, `ctrl-s` through the emulated PS/2 path, and
+  requires the post-exit revocation after the window close. The completed run
+  at tested commit `716dcb4`, revalidated at `ba6544c` (2026-10-21,
+  `qemu-q35-ovmf`), recorded
+  `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
+  `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
+  `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`,
+  `AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093
+  staging=sctmp+rename source=kernel`, the matching portal and revoke markers,
+  and `AETHER_BOOT_OK stage=kernel version=0.1.0`, with screenshots at
+  `build/gate4/gridcraft.ppm` and `build/gate4/gridcraft-after-input.ppm`.
+  Known prototype behavior: `ctrl-s` produces two staging/rename cycles because
+  press and release both translate, and input delivery is broadcast to matching
+  proxies/wrappers. This is not a Wayland wire server and not general Linux or
+  GUI compatibility; the GridCraft record remains `limited` because the Gate 2
+  production follow-up (ring-3 ABI/ELF/VMA, reproducible runtime pin, durable
+  AppImage install/overlay) is open.
+- Gate 4 kernel display slice: `/dev/aether-display` request/event records, a
+  `WindowKind::Linux` compositor window with a kernel-owned presented surface,
+  focus-scoped keyboard/pointer routing with window-relative coordinates, and
+  `memfd_create`/`ftruncate`/`fstat`/`mmap(MAP_SHARED)` bounded shared
+  buffers. `make gate4-display-test` requires the kernel-owned create, present
+  (with checksum), and input markers after a static Linux fixture presents a
+  deterministic pattern and reads a synthetic event routed through the real
+  PS/2/desktop path. This is the display endpoint only; the windowed-GridCraft
+  entry above adds the Wayland client bridge and the Mesa/GUI path on top of
+  it.
 - Per-object capability revocation: `revoke_object` invalidates every alias in
   a table and advances slot generations. Endpoints now have explicit close and
   destroy semantics, task exit/fault releases endpoint aliases and destroys
@@ -29,26 +85,174 @@ versioning scheme until the kernel ABI stabilises.
 - Host tests for revocation aliases/generation reuse, grant-record parsing and
   corruption rejection, filesystem copy/rename/delete, browser mutations, and
   the Delete scancode.
-
-### Changed
-
-- Portal grant records are fixed-size validated records rather than
-  `&'static str` boot seeds. Corrupt or duplicate stores fail closed instead of
-  loading partially.
-- The system ABI documents calls 18–20 and `ETIMEDOUT`; the SDK exposes
-  `endpoint_close`, `endpoint_receive_timeout`, `syscall5`, and
-  `portal_request`.
-
-### Known limitations
-
-- Grant records live on the RAM disk, so they survive service restarts but not
-  a power cycle until a durable block device exists.
-- Blocking IPC uses timer-driven scheduler wakeups rather than a per-endpoint
-  wait list; cancellation and SMP wake IPIs remain follow-up work.
-- Files tabs/split panes, safe import/export, ring-3 compositor surfaces,
-  higher-half mapping, durable storage, networking, audio, and accelerated
-  graphics remain unimplemented.
-
+- Linux Gate 3 headless GridCraft prototype: `make gate3-test` stages the
+  pinned 19,024,376-byte GridCraft 0.8.0 AppImage, verifies its signed import
+  record and SHA-256, imports the SquashFS payload, and launches the bundled
+  `gridcraft-cli` through `PT_INTERP` with a configured argv. One process
+  evaluates `=1+1` (`2.0`) and `=SUM(B2:B3)` (`3`) and writes a 38-byte CSV
+  through the private `/tmp` overlay (`wrote /tmp/gate3-out.csv`). The kernel
+  emits `AETHER_GATE3_APP_OK` only after a zero exit and derives
+  `AETHER_GATE3_DENIAL_OK portal=none native=denied root=readonly
+  overlay=private` from the task table. Supporting changes include dynamic
+  AppImage launch, an argv-string stack-layout fix, `mprotect` over
+  demand-paged ranges, bounded overlay `rename`/`unlink`, short `read`/`write`
+  counts, and a 16-entry/4 KiB-per-file overlay. The imported AppImage tree is
+  not yet merged into a per-app root, the runtime pin is host-derived, and the
+  overlay is RAM-backed; the GUI remains Gate 4.
+- Linux Gate 4 runtime rootfs packaging: `make gate4-runtime` builds and signs
+  a host-derived Mesa lavapipe/LLVM/Wayland-client rootfs (40 files,
+  164,543,720 bytes uncompressed, 45,268,992 bytes compressed) and
+  `make gate4-runtime-test` boots it through a new `BootInfo` v5
+  runtime-rootfs extent staged by the UEFI loader. The kernel verifies the
+  signed `linux-rootfs` record, the manifest pin, and every `file_sha256`
+  entry, emits `AETHER_GATE4_RUNTIME_OK`, and runs the real GridCraft AppImage's
+  `gridcraft-cli --version` through the rootfs. Missing and tampered runtime
+  images fail closed. The allocation-only importer needs a 1.5 GiB heap and a
+  3 GiB guest for this tree; the Wayland bridge and GUI launch were still open
+  at this slice and are covered by the windowed-GridCraft entry above.
+- Linux Gate 2 prototype: blocking/finite `poll`/`epoll_wait` and
+  cross-process pipes, `nanosleep`/`clock_nanosleep`/`timerfd`, full-enough
+  inotify (blocking mode, directory watches, overflow), `siginfo`/`ucontext`,
+  alternate stacks, `SA_RESTART`, `clone3`, robust futex lists, `rseq`,
+  pseudo-files and synthetic devices, a default-deny syscall classifier with
+  audit counters and quotas, cross-process shared anonymous and read-shared
+  rootfs mappings, a digest-pinned host-glibc runtime rootfs, a signed AppImage
+  staged through the UEFI loader, and a ring-3 `linuxd` launch-policy manager.
+  Linux syscall dispatch and ELF/library mapping remain kernel-side; Mesa/
+  Wayland content, durable storage, and user-installed AppImage selection
+  remain open. The boot gate now covers the new markers and a larger boot stack
+  for the deeper import path.
+- Added a narrow Linux inotify prototype: one nonblocking instance per task and
+  one exact existing `/tmp` watch for `IN_MODIFY`. `inotify_init1` accepts only
+  `IN_NONBLOCK`; default blocking mode and blocking reads are unsupported. The
+  boot fixture checks rejection of flags 0, `EAGAIN` with no pending event, and
+  the 16-byte event record (`AETHER_LINUX_INOTIFY_OK`). Directory/rootfs watches,
+  other masks, event overflow, and shared-thread identity remain unsupported.
+- `aether-appimage`: a `no_std`, `unsafe`-free, allocation-free AppImage type 2
+  container inspector. It validates the ELF runtime, locates a structurally
+  valid SquashFS 4 superblock (rejecting false magic in runtime code), and
+  checks compression, block geometry, filesystem size, and table offsets. A
+  host `appimage-inspect` binary reports the metadata without executing the
+  image. This is Gate 0 of the Linux layer; no Linux binary runs yet.
+- The first Linux ABI execution slice: a static freestanding x86-64 ELF runs at
+  CPL3 in a private PML4, enters through the architectural `syscall`
+  instruction, calls `write` with a validated user pointer, exits cleanly, and
+  gates the boot with `AETHER_LINUX_OK`. The native `int 0x80` ABI is denied to
+  Linux tasks. Dynamic libraries, threads, futex, signals, Wayland, and Vulkan
+  are not implemented.
+- Linux memory and TLS primitives for the layer: a boot-reserved anonymous
+  arena, `mmap`/`mprotect`/`brk`, FS base through `arch_prctl` with context
+  switching, single-task futex, `clock_gettime`, `getrandom`, and `uname`. The
+  boot fixture now exercises allocation, TLS, write, and exit in one run.
+  Real threads remain missing.
+- Linux VMA and mapping slice: `aether-memory::vma` is a host-tested,
+  fixed-capacity range table that rejects overlaps and writable+executable
+  mappings. Each Linux task tracks its own areas; `mmap` supports anonymous and
+  file-backed private mappings, fixed-address reuse, and executable file maps;
+  `munmap` removes and clears ranges; `mprotect` updates permissions; `brk`
+  grows a reserved heap window. The boot fixture maps `/etc/motd`, reuses a
+  fixed address after `munmap`, grows the break, and proves W^X denial
+  (`AETHER_LINUX_VMA_OK`). The frame allocator is now reachable at runtime:
+  `mmap` and `brk` allocate zeroed frames on demand, and `munmap`, task exit,
+  and faults unmap the range, flush the TLB, and return the frames. `mremap`,
+  page-fault handling, and shared mappings remain missing.
+- Linux read-only root and file syscalls for the compatibility layer:
+  validated absolute paths, a fixed embedded file set, `openat`, `read`,
+  `pread64`, `close`, `lseek`, and `access`, with a per-task descriptor table
+  cleared on exit and fault. The static fixture now reads `/etc/motd` and the
+  boot gate requires `AETHER_LINUX_ROOT_OK`. No writable root, directories,
+  `stat`, or portal integration yet.
+- `aether-squashfs`: a bounded, `unsafe`-free, `no_std` SquashFS 4 reader with
+  zstd, gzip, lz4, lzo, xz, and lzma metadata/data/fragment decompression, basic and extended
+  file/directory inodes, symlinks, directory validation, extraction limits, and
+  a host `squashfs-extract` tool. Import rejects duplicate paths and escaping
+  symlinks, marks hardlinks and copies their data per path, strips
+  setuid/setgid/sticky bits, and counts/drops xattrs. It extracts 16 files
+  (48,350,419 bytes) and two symlinks from the tested GridCraft AppImage.
+  in-OS integration and persistent overlay storage remain missing.
+- Per-task Linux writable overlay prototype: bounded `/tmp` entries created,
+  truncated, read, and written through the Linux file descriptors, with
+  `AETHER_LINUX_OVERLAY_OK` boot evidence. The overlay is cleared on exit/fault;
+  persistence, settings/logs paths, and user-visible erasure remain follow-up.
+- In-OS signed rootfs import: a 4 MiB kernel bootstrap bump heap, Ed25519 record
+  verification against the test trust store, SquashFS import at boot, and Linux
+  file opens served from the imported tree (`AETHER_LINUX_IMPORT_OK`). The
+  image is the embedded boot fixture, not yet a user-supplied AppImage.
+- Runtime rootfs packaging and signing: `tools/build-runtime-rootfs.sh` builds
+  a zstd SquashFS image and signs it as a `linux-rootfs` import record. The
+  populated glibc/Mesa/Wayland rootfs and in-OS consumption remain follow-up.
+- Signed AppImage import records: identity, version, runtime, digest, and
+  publisher are covered by Ed25519; verification checks the publisher key and
+  name against a trust store before comparing the image digest.
+  `appimage-manifest sign|verify` is the host tooling.
+- Pinned SHA-256 verification for AppImage import (`Digest`,
+  `parse_verified`) and an optional digest argument to `appimage-inspect`.
+  A mismatch is rejected before the container is parsed. Publisher signatures
+  and the trust store remain runtime-manager work.
+- `docs/decisions/ADR-017-linux-app-runtime.md`,
+  `docs/specifications/linux-compatibility.md`, and
+  `docs/architecture/linux-layer.md`: the no-VM Linux compatibility layer,
+  host-interface inventory for GridCraft 0.8.0, security controls, and staged
+  gates. GridCraft is recorded as `unsupported`.
+- Linux `execve` slice: resolve a static `ET_EXEC` image from the verified
+  rootfs, build a fresh address space and stack, and enter its entry point.
+  The boot fixture execs `/usr/bin/exec` and reports
+  `AETHER_LINUX_EXECVE_OK image=ok`. Dynamic exec, argv/envp propagation, and
+  close-on-exec remain missing.
+- Linux process slice: eager-copy `fork` into a fresh address space, a child
+  task table with descriptor inheritance, and `wait4` status/reap (polled with
+  `sched_yield`). The boot fixture forks, exits 42 in the child, and reaps the
+  encoded status in the parent (`AETHER_LINUX_FORK_OK`). `execve`, blocking
+  waits, and process groups remain missing.
+- Linux signal slice: `rt_sigaction`, `rt_sigprocmask`, `sigaltstack`, self and
+  thread-group `kill`/`tgkill`, user-stack signal frames, `rt_sigreturn`, and
+  fault-to-signal delivery. The boot fixture installs SIGUSR1, raises it, runs
+  the handler, and returns through the restorer (`AETHER_LINUX_SIGNAL_OK`).
+  siginfo/ucontext completeness, alt-stack delivery, and cross-process signals
+  remain missing.
+- Linux `mremap` slice: grow a mapping in place when possible, otherwise
+  move it to a new VMA and preserve its contents; shrinking releases the tail.
+  The boot fixture grows a 4 KiB mapping to 8 KiB and checks both pages
+  (`AETHER_LINUX_MREMAP_OK`). Page-fault and shared mappings remain missing.
+- Linux thread and futex slice: `clone` with `CLONE_VM|CLONE_THREAD`,
+  per-thread kernel stacks, TLS, tgid/tid, and clear-child-tid join; real
+  `FUTEX_WAIT`/`FUTEX_WAKE` queues that block and wake tasks. The boot fixture
+  creates a thread, signals through futex, joins it, and exits
+  (`AETHER_LINUX_THREAD_OK`). File/capability tables are copied per thread for
+  now, and fork/exec/signals remain missing.
+- Linux notification slice: `eventfd2` counters and basic
+  `epoll_create1`/`epoll_ctl`/`epoll_wait` over files, directories, and pipes.
+  The boot fixture watches an eventfd through epoll and reads it back
+  (`AETHER_LINUX_EVENT_OK`). Blocking waits and inotify remain missing.
+- Linux directory and pipe slice: `getdents64` over the imported root,
+  bounded `pipe2` rings, and non-blocking `poll` for files, directories, and
+  pipes. The boot fixture enumerates `/` and `/usr/bin`, writes and reads a
+  pipe, and polls it (`AETHER_LINUX_DIR_OK`, `AETHER_LINUX_PIPE_OK`). Blocking
+  waits, epoll, eventfd, and inotify remain missing.
+- Linux runtime-rootfs and glibc proof: the build stages a signed runtime
+  rootfs, imports it at boot, and the loader resolves `PT_INTERP` through it
+  instead of embedded interpreter bytes. `make glibc-test` packages the host
+  glibc and a dynamically linked hello, then boots it through `ld.so`,
+  relocations, and shared `libc` (`AETHER_GLIBC_OK`). This is an opt-in
+  host-ABI smoke test; the pinned production runtime rootfs is still missing.
+- Linux file-metadata and descriptor slice: `stat`, `fstat`, `newfstatat`,
+  `statx`, `readlink` for `/proc/self/{exe,cwd}`, `fcntl`, `dup`, and `dup2`,
+  plus signal/affinity/limit stubs needed by a dynamic loader. The boot fixture
+  checks stat size, fstat on an open descriptor, `F_GETFD`, duplication, and
+  `readlink` (`AETHER_LINUX_FILEMETA_OK`). Directory listing, pipes, and polling
+  remain missing.
+- Dynamic Linux loader slice: `aether-linux-elf` is a host-tested, allocation-
+  free parser for `ET_EXEC`/`ET_DYN` images with bounded `PT_LOAD` segments and
+  `PT_INTERP`. `kernel/src/linux_loader.rs` maps a main image and interpreter
+  into a fresh address space, builds argc/argv/envp/auxv, and enters the
+  interpreter. A test interpreter validates the auxv and jumps to the main
+  image's `AT_ENTRY` (`AETHER_LINUX_DYN_INTERP_OK`,
+  `AETHER_LINUX_DYN_MAIN_OK`, `AETHER_LINUX_DYN_OK`). glibc, relocations,
+  shared-library loading, and a user-supplied interpreter remain missing.
+- `docs/specifications/linux-host-interface-inventory.md`: the completed Gate 1
+  mapping from the pinned GridCraft GUI and CLI payloads to 32 Aether
+  interfaces, with an owner, test ID, implementation status, and an accepted
+  decision for each policy question.
 - `aether-wm`, a `no_std`, `unsafe`-free, allocation-free window-manager crate:
   geometry, responsive layout, window and workspace state, focus and z-order,
   menus, dock targeting, Spotlight-style search, settings, hit testing, and
@@ -219,6 +423,12 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Changed
 
+- Portal grant records are fixed-size validated records rather than
+  `&'static str` boot seeds. Corrupt or duplicate stores fail closed instead of
+  loading partially.
+- The system ABI documents calls 18–20 and `ETIMEDOUT`; the SDK exposes
+  `endpoint_close`, `endpoint_receive_timeout`, `syscall5`, and
+  `portal_request`.
 - The desktop paints through a bounded back buffer where possible and presents
   damaged regions. The graphics service honors both UEFI RGBX/BGRX layouts;
   assuming BGRX for both codes hid an incorrect ABI enum instead of fixing it.
@@ -340,6 +550,13 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Known limitations
 
+- Grant records live on the RAM disk, so they survive service restarts but not
+  a power cycle until a durable block device exists.
+- Blocking IPC uses timer-driven scheduler wakeups rather than a per-endpoint
+  wait list; cancellation and SMP wake IPIs remain follow-up work.
+- Files tabs/split panes, safe import/export, ring-3 compositor surfaces,
+  higher-half mapping, durable storage, networking, audio, and accelerated
+  graphics remain unimplemented.
 - Services and the desktop still execute as kernel modules; only the native
   application runs at CPL3. Moving service bodies into supervised user
   processes is follow-up work.
@@ -351,13 +568,8 @@ versioning scheme until the kernel ABI stabilises.
   networking, audio, GPU acceleration, or general graphical package manager.
 - The filesystem is a bring-up format: 32 inodes, 4 KiB per file, one
   directory block per directory, and no crash-consistency protocol.
-- Portal grants are seeded at boot and can be revoked from the console; there
-  is no interactive consent UI, persistent grant store, or graphical revocation
-  control, and revocation does not invalidate an already-open capability.
-- The scheduler has no priorities, sleeping/wakeup queues, or dynamic task
-  creation; IPC is polled rather than blocking.
-- Capability revocation, endpoint destruction, and complete object-lifetime
-  behavior are not implemented.
+- The scheduler has no priorities or dynamic task creation; blocking IPC uses
+  timer-driven wakeups rather than per-endpoint wait lists.
 - Identity map only; no higher-half kernel, guard pages, or kernel heap.
 - No IST for double-fault and stack-overflow recovery.
 - The kernel image is embedded in the loader, so updating the kernel requires

@@ -55,7 +55,7 @@ For every message the kernel verifies:
 Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
 
 - Two endpoint objects in the boot test, each with a four-message queue.
-- 32-byte payload limit; messages carry sender identity and an optional
+- 64-byte payload limit; messages carry sender identity and an optional
   capability transfer.
 - Send/receive require the corresponding endpoint capability right, and the
   capability's object identity must match the endpoint being operated on.
@@ -91,8 +91,8 @@ Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
   negative path from user mode; the kernel prints `AETHER_IPC_USER_OK` with
   the counters when the gate passes.
 
-The endpoint object pool is fixed at four objects for the whole boot; the
-fifth `endpoint_create` fails with `ENOSPC` instead of growing kernel memory,
+The endpoint object pool is fixed at eight objects for the whole boot; the
+next `endpoint_create` fails with `ENOSPC` instead of growing kernel memory,
 so queue memory is bounded by construction. Blocking waits are implemented as
 timer-driven scheduler wakeups rather than a per-endpoint wait list; this keeps
 the current single-CPU design simple and still stops the task from spinning in

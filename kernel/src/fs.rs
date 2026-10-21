@@ -42,6 +42,44 @@ pub const DEMO_ROOT: &str = "/apps/org.aether.demo";
 /// Root directory of the sibling application used by the sandbox test.
 pub const OTHER_ROOT: &str = "/apps/other";
 
+/// Exact workbook backing file used by the Gate 4 portal test.
+#[cfg(feature = "gate4-portal-test")]
+pub const GATE4_WORKBOOK: &str = "/home/gate4.xlsx";
+/// Linux-visible portal path for the Gate 4 workbook grant.
+#[cfg(feature = "gate4-portal-test")]
+pub const GATE4_NAMESPACE: &str = "/run/aether/portal/dd8f879ba78d207c/gate4.xlsx";
+/// Test-only control path that revokes the Gate 4 workbook grant.
+#[cfg(feature = "gate4-portal-test")]
+pub const GATE4_REVOKE_PATH: &str = "/run/aether/gate4/revoke";
+/// Initial workbook fixture seeded into the kernel filesystem.
+#[cfg(feature = "gate4-portal-test")]
+pub const GATE4_WORKBOOK_FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/gate4/workbook.csv");
+/// Bytes the Gate 4 fixture saves through the portal.
+#[cfg(feature = "gate4-portal-test")]
+pub const GATE4_SAVED_FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/gate4/saved.csv");
+/// Environment entry that names the portal workbook for a GUI launch.
+#[cfg(feature = "gate4-portal-test")]
+pub const GATE4_ENVIRONMENT: &str =
+    "AETHER_PORTAL_WORKBOOK=/run/aether/portal/dd8f879ba78d207c/gate4.xlsx";
+
+/// Real XLSX workbook backing file used by the Gate 4 GUI test.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_WORKBOOK: &str = "/home/gate4-gui.xlsx";
+/// Linux-visible namespace for the Gate 4 GUI workbook grant.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_NAMESPACE: &str = "/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx";
+/// Staging sibling used by the GUI save transaction.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_TEMP_NAMESPACE: &str =
+    "/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx.sctmp";
+/// Real XLSX bytes seeded into the kernel filesystem.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/gate4/workbook-gui.xlsx");
+/// Environment entry that names the GUI portal workbook for argv/Makefile use.
+#[cfg(feature = "gate4-gui-test")]
+pub const GATE4_GUI_ENVIRONMENT: &str =
+    "AETHER_PORTAL_WORKBOOK=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx";
+
 /// Formats and seeds the virtual volume.
 pub fn init() -> Result<(), FsError> {
     let _guard = InterruptGuard::enter();
@@ -80,6 +118,10 @@ pub fn init() -> Result<(), FsError> {
     )?;
     filesystem.write_file("/", "/home/welcome.txt", b"welcome to aether\n")?;
     filesystem.write_file("/", "/portal/README.txt", b"file portal grants\n")?;
+    #[cfg(feature = "gate4-portal-test")]
+    filesystem.write_file("/", GATE4_WORKBOOK, GATE4_WORKBOOK_FIXTURE)?;
+    #[cfg(feature = "gate4-gui-test")]
+    filesystem.write_file("/", GATE4_GUI_WORKBOOK, GATE4_GUI_FIXTURE)?;
 
     Ok(())
 }
@@ -231,7 +273,7 @@ fn profile_for_root(root: &str) -> Option<RuntimeProfile<'static>> {
 /// permissions decide whether it may use the portal contract at all. A task
 /// with no registered profile (for example the kernel console) has no profile
 /// gate.
-fn portal_permission(root: &str, rights: u64) -> Result<(), i64> {
+pub(crate) fn portal_permission(root: &str, rights: u64) -> Result<(), i64> {
     let Some(profile) = profile_for_root(root) else {
         return Ok(());
     };
@@ -601,6 +643,46 @@ fn browser_error(error: FsError) -> aether_wm::browser::BrowserError {
         FsError::PathTooLong | FsError::NameTooLong | FsError::Corrupt => BrowserError::InvalidData,
         _ => BrowserError::Unavailable,
     }
+}
+
+/// Reads a granted backing file's size.
+pub fn portal_size(path: &str) -> Result<usize, FsError> {
+    with_fs(|filesystem| filesystem.stat("/", path))
+}
+
+/// Reads a granted backing file at `offset`.
+pub fn portal_read_at(path: &str, offset: usize, out: &mut [u8]) -> Result<usize, FsError> {
+    let mut data = [0u8; aether_fs::MAX_FILE_BYTES];
+    let length = with_fs(|filesystem| filesystem.read_file("/", path, &mut data))?;
+    let offset = offset.min(length);
+    let count = (length - offset).min(out.len());
+    out[..count].copy_from_slice(&data[offset..offset + count]);
+    Ok(count)
+}
+
+/// Writes a granted backing file at `offset`, extending it when needed.
+///
+/// Portal writes are bounded by the filesystem's maximum file size. The bytes
+/// stay in the kernel filesystem, so the kernel can observe a save without
+/// trusting anything the guest prints.
+pub fn portal_write_at(path: &str, offset: usize, data: &[u8]) -> Result<usize, FsError> {
+    let end = offset
+        .checked_add(data.len())
+        .ok_or(FsError::FileTooLarge)?;
+    if end > aether_fs::MAX_FILE_BYTES {
+        return Err(FsError::FileTooLarge);
+    }
+    let mut buffer = [0u8; aether_fs::MAX_FILE_BYTES];
+    let length = with_fs(|filesystem| filesystem.read_file("/", path, &mut buffer))?;
+    buffer[offset..end].copy_from_slice(data);
+    let size = end.max(length);
+    with_fs(|filesystem| filesystem.write_file("/", path, &buffer[..size]))?;
+    Ok(data.len())
+}
+
+/// Empties a granted backing file for an `O_TRUNC` portal open.
+pub fn portal_truncate(path: &str) -> Result<(), FsError> {
+    write_path(path, &[])
 }
 
 /// Replaces a file for the kernel console.

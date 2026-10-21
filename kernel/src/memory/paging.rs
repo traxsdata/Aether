@@ -19,6 +19,8 @@ use aether_memory::{LARGE_PAGE_SIZE, PAGE_SIZE};
 use core::arch::asm;
 use core::ptr;
 
+use super::shared;
+
 /// Low region mapped with 4 KiB pages.
 const LOW_REGION_BYTES: u64 = LARGE_PAGE_SIZE;
 
@@ -193,17 +195,7 @@ pub fn create_user_address_space(
     image: &Image,
     bytes: &[u8],
 ) -> Result<PhysFrame, PagingError> {
-    let kernel_pml4 = current_pml4().ok_or(PagingError::MissingKernelMapping)?;
-    let kernel_entry = unsafe { (*table_ptr(kernel_pml4)).entry(0) };
-    if !kernel_entry.is_present() {
-        return Err(PagingError::MissingKernelMapping);
-    }
-
-    let pml4 = allocate_table(allocator)?;
-    // SAFETY: The table was just allocated and zeroed. The kernel entry is
-    // copied unchanged so kernel text, data, stacks, and the identity map stay
-    // supervisor-only in the new address space.
-    unsafe { (*table_ptr(pml4)).set_entry(0, kernel_entry) };
+    let pml4 = create_empty_user_address_space(allocator)?;
 
     for segment in image.segments() {
         let physical_end = segment
@@ -264,6 +256,34 @@ pub fn create_user_address_space(
         }
     }
 
+    map_user_stack(allocator, pml4)?;
+
+    Ok(pml4)
+}
+
+/// Creates an empty ring-3 address space sharing the kernel identity map.
+pub fn create_empty_user_address_space(
+    allocator: &mut FrameAllocator<'_>,
+) -> Result<PhysFrame, PagingError> {
+    let kernel_pml4 = current_pml4().ok_or(PagingError::MissingKernelMapping)?;
+    let kernel_entry = unsafe { (*table_ptr(kernel_pml4)).entry(0) };
+    if !kernel_entry.is_present() {
+        return Err(PagingError::MissingKernelMapping);
+    }
+
+    let pml4 = allocate_table(allocator)?;
+    // SAFETY: The table was just allocated and zeroed. The kernel entry is
+    // copied unchanged so kernel text, data, stacks, and the identity map stay
+    // supervisor-only in the new address space.
+    unsafe { (*table_ptr(pml4)).set_entry(0, kernel_entry) };
+    Ok(pml4)
+}
+
+/// Maps the fixed user stack window into an address space.
+pub fn map_user_stack(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+) -> Result<(), PagingError> {
     for page in 0..USER_STACK_PAGES {
         let address = USER_STACK_TOP - (page + 1) * PAGE_SIZE;
         let frame = allocate_table(allocator)?;
@@ -277,8 +297,7 @@ pub fn create_user_address_space(
             PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE,
         )?;
     }
-
-    Ok(pml4)
+    Ok(())
 }
 
 fn user_segment_flags(flags: u32) -> PageFlags {
@@ -324,7 +343,235 @@ pub fn map_user_page(
     )?;
     // SAFETY: `pt` was validated or allocated above and is identity-mapped.
     unsafe { (*table_ptr(pt)).set_entry(pt_index, entry) };
+    flush_page(virtual_address);
     Ok(())
+}
+
+/// Allocates, zeroes, and maps one user page with the supplied permissions.
+pub fn map_allocated_user_page(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    virtual_address: u64,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    let frame = allocate_table(allocator)?;
+    if let Err(error) = map_user_page(pml4, allocator, virtual_address, frame, flags) {
+        let _ = allocator.deallocate(frame);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Copies every present user page into a fresh address space.
+///
+/// Private frames are eagerly copied. Frames registered as shared are retained
+/// and mapped into the child, preserving `MAP_SHARED` aliasing across `fork`.
+/// The caller owns the returned PML4 and is responsible for releasing its
+/// frames when the process exits.
+pub fn copy_user_address_space(
+    allocator: &mut FrameAllocator<'_>,
+    source: PhysFrame,
+) -> Result<PhysFrame, PagingError> {
+    let target = create_empty_user_address_space(allocator)?;
+    let mut address = USER_BASE;
+    while address < USER_LIMIT {
+        if let Some(entry) = user_leaf_entry(source, address)
+            && entry.is_present()
+            && entry.flags().contains(PageFlags::USER)
+        {
+            let Some(shared_frame) = PhysFrame::from_address(entry.address()) else {
+                return Err(PagingError::UnrepresentableAddress(entry.address()));
+            };
+            if shared::retain(shared_frame) {
+                if let Err(error) =
+                    map_user_page(target, allocator, address, shared_frame, entry.flags())
+                {
+                    let _ = shared::release(allocator, shared_frame);
+                    return Err(error);
+                }
+            } else {
+                let frame = allocator.allocate().ok_or(PagingError::OutOfMemory)?;
+                // SAFETY: Both frames are identity-mapped and exclusively owned
+                // by their respective address spaces.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        entry.address() as *const u8,
+                        frame.start_address() as *mut u8,
+                        PAGE_SIZE as usize,
+                    );
+                }
+                map_user_page(target, allocator, address, frame, entry.flags())?;
+            }
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(target)
+}
+
+/// Allocates and maps a user range eagerly.
+///
+/// Every page gets its own zeroed frame. On failure the pages mapped so far are
+/// unmapped and their frames are returned to the allocator.
+pub fn map_allocated_user_range(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    let end = validate_user_range(start, length)?;
+    let mut address = start;
+    while address < end {
+        let frame = allocator.allocate().ok_or(PagingError::OutOfMemory)?;
+        // SAFETY: The frame is exclusively owned and identity-mapped.
+        unsafe { ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize) };
+        if let Err(error) = map_user_page(pml4, allocator, address, frame, flags) {
+            let _ = allocator.deallocate(frame);
+            let _ = unmap_user_range(allocator, pml4, start, address - start);
+            return Err(error);
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(())
+}
+
+/// Allocates and maps an anonymous `MAP_SHARED` range.
+///
+/// Every page is zero-filled, registered in the shared-frame registry, and
+/// mapped with `flags`. The first reference is owned by the new mapping.
+/// Partial failure unmaps the pages already installed, which either releases
+/// shared references or returns unregistered frames to the allocator.
+pub fn map_shared_anonymous_range(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: PageFlags,
+    domain: u8,
+) -> Result<(), PagingError> {
+    let end = validate_user_range(start, length)?;
+    let mut address = start;
+    while address < end {
+        let Some(frame) = allocator.allocate() else {
+            let _ = unmap_user_range(allocator, pml4, start, address - start);
+            return Err(PagingError::OutOfMemory);
+        };
+        // SAFETY: The frame was just allocated, is identity-mapped, and is not
+        // reachable from any address space until `map_user_page` runs.
+        unsafe { ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize) };
+        if let Err(error) = map_user_page(pml4, allocator, address, frame, flags) {
+            let _ = allocator.deallocate(frame);
+            let _ = unmap_user_range(allocator, pml4, start, address - start);
+            return Err(error);
+        }
+        if shared::register(frame, domain, None).is_err() {
+            // The current page is mapped but unregistered; unmapping the range
+            // also releases the earlier registered pages.
+            let _ = unmap_user_range(
+                allocator,
+                pml4,
+                start,
+                address.saturating_add(PAGE_SIZE) - start,
+            );
+            return Err(PagingError::OutOfMemory);
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(())
+}
+
+/// Unmaps a user range and returns its frames to the allocator.
+///
+/// Registered shared frames lose one reference and are freed only with their
+/// last owner. Absent pages are skipped so a caller can release a partially
+/// populated range. The number of released frames is returned.
+pub fn unmap_user_range(
+    allocator: &mut FrameAllocator<'_>,
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+) -> Result<usize, PagingError> {
+    let end = validate_user_range(start, length)?;
+    let mut released = 0usize;
+    let mut address = start;
+    while address < end {
+        if let Some(entry) = user_leaf_entry(pml4, address)
+            && entry.is_present()
+            && entry.flags().contains(PageFlags::USER)
+        {
+            if let Some(frame) = PhysFrame::from_address(entry.address())
+                && !shared::release(allocator, frame)
+            {
+                // Not a registered shared frame: this address space owns it.
+                let _ = allocator.deallocate(frame);
+            }
+            if clear_user_leaf(pml4, address) {
+                flush_page(address);
+                released += 1;
+            }
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(released)
+}
+
+fn validate_user_range(start: u64, length: u64) -> Result<u64, PagingError> {
+    if length == 0
+        || !start.is_multiple_of(PAGE_SIZE)
+        || !length.is_multiple_of(PAGE_SIZE)
+        || start < USER_BASE
+    {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    let end = start
+        .checked_add(length)
+        .ok_or(PagingError::UserImageOutsideWindow)?;
+    if end > USER_LIMIT {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    Ok(end)
+}
+
+fn clear_user_leaf(pml4: PhysFrame, address: u64) -> bool {
+    let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+    // SAFETY: The PML4 and child tables are task-owned and identity-mapped.
+    unsafe {
+        let pml4_entry = (*table_ptr(pml4)).entry(pml4_index);
+        if !pml4_entry.is_present() || pml4_entry.is_huge() {
+            return false;
+        }
+        let Some(pdpt) = PhysFrame::from_address(pml4_entry.address()) else {
+            return false;
+        };
+        let pdpt_entry = (*table_ptr(pdpt)).entry(pdpt_index);
+        if !pdpt_entry.is_present() || pdpt_entry.is_huge() {
+            return false;
+        }
+        let Some(pd) = PhysFrame::from_address(pdpt_entry.address()) else {
+            return false;
+        };
+        let pd_entry = (*table_ptr(pd)).entry(pd_index);
+        if !pd_entry.is_present() || pd_entry.is_huge() {
+            return false;
+        }
+        let Some(pt) = PhysFrame::from_address(pd_entry.address()) else {
+            return false;
+        };
+        (*table_ptr(pt)).set_entry(pt_index, PageTableEntry::EMPTY);
+    }
+    true
+}
+
+fn flush_page(address: u64) {
+    // SAFETY: INVLPG is valid at CPL0 for a mapped or unmapped user page. It
+    // only invalidates a TLB entry and has no memory side effects.
+    unsafe {
+        asm!(
+            "invlpg [{address}]",
+            address = in(reg) address,
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 fn ensure_user_table(
@@ -347,6 +594,140 @@ fn ensure_user_table(
     // this address space.
     unsafe { (*table_ptr(parent)).set_entry(index, link) };
     Ok(child)
+}
+
+/// Base of the Linux virtual-memory window.
+///
+/// The window is reserved address space, not pre-mapped memory. `mmap` and
+/// `brk` allocate frames on demand; `munmap` returns them to the allocator.
+pub const LINUX_ARENA_BASE: u64 = USER_BASE + 256 * 1024 * 1024;
+/// Number of pages in the Linux arena (32 MiB).
+pub const LINUX_ARENA_PAGES: u64 = 262_144;
+/// Pages reserved for the Linux `brk` heap at the start of the arena (1 MiB).
+pub const LINUX_HEAP_PAGES: u64 = 4096;
+/// First address available to Linux `mmap` after the heap window.
+pub const LINUX_MMAP_BASE: u64 = LINUX_ARENA_BASE + LINUX_HEAP_PAGES * PAGE_SIZE;
+
+/// Changes permissions on an existing user range.
+pub fn protect_user_range(
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    if length == 0
+        || !start.is_multiple_of(PAGE_SIZE)
+        || !length.is_multiple_of(PAGE_SIZE)
+        || start < USER_BASE
+        || start.saturating_add(length) > USER_LIMIT
+    {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    let mut address = start;
+    while address < start + length {
+        let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+        let pml4e = unsafe { (*table_ptr(pml4)).entry(pml4_index) };
+        if !pml4e.is_present() || pml4e.is_huge() {
+            return Err(PagingError::MissingKernelMapping);
+        }
+        let pdpt = PhysFrame::from_address(pml4e.address())
+            .ok_or(PagingError::UnrepresentableAddress(pml4e.address()))?;
+        let pdpte = unsafe { (*table_ptr(pdpt)).entry(pdpt_index) };
+        if !pdpte.is_present() || pdpte.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        let pd = PhysFrame::from_address(pdpte.address())
+            .ok_or(PagingError::UnrepresentableAddress(pdpte.address()))?;
+        let pde = unsafe { (*table_ptr(pd)).entry(pd_index) };
+        if !pde.is_present() || pde.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        let pt = PhysFrame::from_address(pde.address())
+            .ok_or(PagingError::UnrepresentableAddress(pde.address()))?;
+        let entry = unsafe { (*table_ptr(pt)).entry(pt_index) };
+        if !entry.is_present() {
+            return Err(PagingError::MissingKernelMapping);
+        }
+        let address_phys = entry.address();
+        let updated =
+            PageTableEntry::new(address_phys, flags | PageFlags::USER | PageFlags::PRESENT)
+                .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
+        unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
+        flush_page(address);
+        address += PAGE_SIZE;
+    }
+    Ok(())
+}
+
+/// Changes the protections of the present pages in a user range.
+///
+/// Anonymous VMAs are demand-paged, so `mprotect` may legally run before any
+/// page has been faulted in. Missing leaf entries are skipped; the VMA table
+/// carries the new protection for the fault path to apply later. This mirrors
+/// `protect_user_range`, which remains strict for callers that require every
+/// page to be mapped.
+pub fn protect_user_range_if_present(
+    pml4: PhysFrame,
+    start: u64,
+    length: u64,
+    flags: PageFlags,
+) -> Result<(), PagingError> {
+    if length == 0
+        || !start.is_multiple_of(PAGE_SIZE)
+        || !length.is_multiple_of(PAGE_SIZE)
+        || start < USER_BASE
+        || start.saturating_add(length) > USER_LIMIT
+    {
+        return Err(PagingError::UserImageOutsideWindow);
+    }
+    let mut address = start;
+    while address < start + length {
+        let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+        let pml4e = unsafe { (*table_ptr(pml4)).entry(pml4_index) };
+        if !pml4e.is_present() {
+            // A demand-paged range may not have allocated its intermediate
+            // tables yet. That is not an error: the VMA already records the
+            // protection and the fault path installs the page later.
+            address += PAGE_SIZE;
+            continue;
+        }
+        if pml4e.is_huge() {
+            return Err(PagingError::MissingKernelMapping);
+        }
+        let pdpt = PhysFrame::from_address(pml4e.address())
+            .ok_or(PagingError::UnrepresentableAddress(pml4e.address()))?;
+        let pdpte = unsafe { (*table_ptr(pdpt)).entry(pdpt_index) };
+        if !pdpte.is_present() {
+            address += PAGE_SIZE;
+            continue;
+        }
+        if pdpte.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        let pd = PhysFrame::from_address(pdpte.address())
+            .ok_or(PagingError::UnrepresentableAddress(pdpte.address()))?;
+        let pde = unsafe { (*table_ptr(pd)).entry(pd_index) };
+        if !pde.is_present() {
+            address += PAGE_SIZE;
+            continue;
+        }
+        if pde.is_huge() {
+            return Err(PagingError::UnexpectedUserHugePage);
+        }
+        let pt = PhysFrame::from_address(pde.address())
+            .ok_or(PagingError::UnrepresentableAddress(pde.address()))?;
+        let entry = unsafe { (*table_ptr(pt)).entry(pt_index) };
+        if entry.is_present() {
+            let address_phys = entry.address();
+            let updated =
+                PageTableEntry::new(address_phys, flags | PageFlags::USER | PageFlags::PRESENT)
+                    .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
+            unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
+            flush_page(address);
+        }
+        address += PAGE_SIZE;
+    }
+    Ok(())
 }
 
 /// Validates that `address..address+len` lies in the user window and is mapped
@@ -379,6 +760,109 @@ pub fn user_range_valid(pml4: PhysFrame, address: u64, len: u64, write: bool) ->
             return false;
         }
         page = page.saturating_add(PAGE_SIZE);
+    }
+    true
+}
+
+/// Writes a short kernel-owned byte slice into a task's validated user mapping
+/// without changing CR3. This is used when completing a blocked syscall for a
+/// process other than the currently scheduled one.
+pub fn write_user_bytes(pml4: PhysFrame, address: u64, bytes: &[u8]) -> bool {
+    if !user_range_valid(pml4, address, bytes.len() as u64, true) {
+        return false;
+    }
+    let mut copied = 0usize;
+    while copied < bytes.len() {
+        let virtual_address = address + copied as u64;
+        let Some(entry) = user_leaf_entry(pml4, virtual_address) else {
+            return false;
+        };
+        let page_offset = (virtual_address & (PAGE_SIZE - 1)) as usize;
+        let length = (PAGE_SIZE as usize - page_offset).min(bytes.len() - copied);
+        let physical = entry.address() + page_offset as u64;
+        // SAFETY: The page-table walk validated this task's user writable
+        // mapping, and the identity map covers allocated physical frames.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes[copied..copied + length].as_ptr(),
+                physical as *mut u8,
+                length,
+            );
+        }
+        copied += length;
+    }
+    true
+}
+
+/// Copies a user byte range into a kernel buffer while validating each page in
+/// the same pass.
+///
+/// This is the bulk form for large, already-bounded transfers such as a
+/// presented surface. Unlike [`read_user_bytes`], it does not pre-walk the
+/// whole range and then walk it again to copy. A failure may have copied a
+/// prefix into `bytes`; callers must discard the buffer on `false`.
+#[must_use]
+pub fn read_user_bytes_checked(pml4: PhysFrame, address: u64, bytes: &mut [u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let Some(end) = address.checked_add(bytes.len() as u64) else {
+        return false;
+    };
+    if address < USER_BASE || end > USER_LIMIT {
+        return false;
+    }
+    let mut copied = 0usize;
+    while copied < bytes.len() {
+        let virtual_address = address + copied as u64;
+        let Some(entry) = user_leaf_entry(pml4, virtual_address) else {
+            return false;
+        };
+        if !entry.is_present() || !entry.flags().contains(PageFlags::USER) {
+            return false;
+        }
+        let page_offset = (virtual_address & (PAGE_SIZE - 1)) as usize;
+        let length = (PAGE_SIZE as usize - page_offset).min(bytes.len() - copied);
+        let physical = entry.address() + page_offset as u64;
+        // SAFETY: The leaf entry was checked present and user-readable above,
+        // and the kernel identity map covers allocated physical frames.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                physical as *const u8,
+                bytes[copied..copied + length].as_mut_ptr(),
+                length,
+            );
+        }
+        copied += length;
+    }
+    true
+}
+
+/// Copies a short user byte range into a kernel buffer without changing CR3.
+/// The range must be present and readable in the supplied address space.
+pub fn read_user_bytes(pml4: PhysFrame, address: u64, bytes: &mut [u8]) -> bool {
+    if !user_range_valid(pml4, address, bytes.len() as u64, false) {
+        return false;
+    }
+    let mut copied = 0usize;
+    while copied < bytes.len() {
+        let virtual_address = address + copied as u64;
+        let Some(entry) = user_leaf_entry(pml4, virtual_address) else {
+            return false;
+        };
+        let page_offset = (virtual_address & (PAGE_SIZE - 1)) as usize;
+        let length = (PAGE_SIZE as usize - page_offset).min(bytes.len() - copied);
+        let physical = entry.address() + page_offset as u64;
+        // SAFETY: The page-table walk validated this task's user readable
+        // mapping, and the identity map covers allocated physical frames.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                physical as *const u8,
+                bytes[copied..copied + length].as_mut_ptr(),
+                length,
+            );
+        }
+        copied += length;
     }
     true
 }

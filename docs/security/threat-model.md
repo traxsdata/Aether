@@ -67,7 +67,7 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
 | Kernel memory | Kernel text writable or data executable | 4 KiB W^X page permissions, NX enabled, `CR0.WP` enabled | Implemented; fault-injection test pending |
 | Kernel task → task | One task reads or writes another task's memory | Per-task PML4 and private frame at the same virtual address; CR3 switch on context switch; boot-time isolation test | Implemented, QEMU-tested |
 | Kernel task → object | Forged handle, stale slot, wrong endpoint, or insufficient rights | Generation-checked handles; per-task tables; endpoint identity checks; rights checks | Implemented, host- and QEMU-tested |
-| Kernel task → IPC | Oversized message, queue exhaustion, capability forgery, table exhaustion, sender impersonation | 32-byte bound, four-message queues, critical sections, `TRANSFER` check, atomic receive, kernel-supplied sender identity | Implemented, host- and QEMU-tested |
+| Kernel task → IPC | Oversized message, queue exhaustion, capability forgery, table exhaustion, sender impersonation | 64-byte bound, four-message queues, critical sections, `TRANSFER` check, atomic receive, kernel-supplied sender identity | Implemented, host- and QEMU-tested |
 | Kernel → user | User reads or writes kernel memory | CPL3, user-only PML4 window, supervisor-only identity map, syscall range validation | Implemented, QEMU-tested |
 | User → kernel | Malformed syscall pointer, length, handle, or generation | Whole-range page validation, generation/type/right checks, bounded copy | Implemented, QEMU-tested |
 | User → user | App reads a sibling's private data | Kernel-owned root, `..` rejection, per-task file capabilities | Implemented, QEMU-tested |

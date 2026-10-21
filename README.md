@@ -29,7 +29,17 @@ grants, and the desktop is not a security authority.
 >
 > Windows compatibility, networking, persistent storage, audio, GPU
 > acceleration, a general installer, Secure Boot, and an external security
-> review are not implemented. Do not use this tree for real data.
+> review are not implemented. The Linux track imports the pinned GridCraft
+> AppImage and runs its headless `gridcraft-cli` at QEMU prototype scope
+> (Gate 3), and Gate 4 windowed GridCraft is complete at QEMU prototype scope:
+> a drop-in `libwayland-client.so.0` bridge over the `/dev/aether-display`
+> endpoint, Mesa lavapipe software Vulkan in the signed Gate 4 runtime rootfs,
+> and a passing `make gate4-test` windowed run with portal open/save at tested
+> commit `716dcb4` (2026-10-21). The run recorded the kernel-owned present,
+> input, save, portal, revoke, and boot markers and QEMU screenshots; this is
+> still not general Linux application compatibility, and the GridCraft record
+> remains `limited` because the Gate 2 production follow-up is open. Do not
+> use this tree for real data.
 
 ## What works today
 
@@ -115,6 +125,59 @@ grants, and the desktop is not a security authority.
 - Per-application runtime profiles (`aether-services::runtime`) with derived
   prefixes, declared permissions and limits, path containment, and explicit
   consent for prefix sharing (`AETHER_RUNTIME_OK`).
+- A bounded AppImage type 2 container inspector (`aether-appimage`): ELF and
+  SquashFS bounds, compression, and table-offset validation, with a host
+  diagnostic. It does not execute or mount the image; see
+  [`docs/specifications/linux-compatibility.md`](docs/specifications/linux-compatibility.md).
+- Signed AppImage and runtime-rootfs import records (`appimage-manifest`)
+  binding identity, version, runtime, digest, and publisher with Ed25519,
+  verified against a trust store. `tools/build-runtime-rootfs.sh` packages and
+  signs a zstd SquashFS runtime rootfs.
+- A bounded `no_std` SquashFS 4 reader (`aether-squashfs`) with zstd, gzip,
+  lz4, lzo, xz, and lzma decompression, symlink/hardlink policy, and a host extractor. It
+  extracts the real GridCraft AppImage tree. The kernel imports an embedded
+  signed rootfs and serves Linux file opens from it. The UEFI loader also
+  stages the pinned real GridCraft AppImage; the kernel verifies and launches
+  its headless CLI through `PT_INTERP` (`make gate3-test`). User-selected
+  AppImage import and persistent overlay storage remain pending.
+- A first Linux ABI slice: a static freestanding x86-64 Linux ELF is loaded
+  into its own PML4, enters through the `syscall` instruction, writes through a
+  validated user pointer, and exits cleanly (`AETHER_LINUX_OK`). The layer now
+  tracks a bounded per-task VMA table and supports file-backed `mmap`,
+  `munmap` reuse, `mprotect`, and a growing `brk`, with write+execute mappings
+  permitted for LLVM's JIT (`AETHER_LINUX_VMA_OK`). Pages are allocated on demand and returned
+  on unmap or task exit. File metadata (`stat`/`fstat`/`newfstatat`/`statx`),
+  `readlink`, `fcntl`, and descriptor duplication are implemented
+  (`AETHER_LINUX_FILEMETA_OK`). Directory enumeration, bounded pipes, non-blocking `poll`, `eventfd`, basic
+  `epoll`, threads through `clone`, `fork`/`wait4`/`execve` (static and dynamic, with bounded argv/envp propagation), futex wait/wake/join,
+  `mremap`, and basic signal handlers are available (`AETHER_LINUX_DIR_OK`,
+  `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`, `AETHER_LINUX_THREAD_OK`,
+  `AETHER_LINUX_MREMAP_OK`, `AETHER_LINUX_SIGNAL_OK`,
+  `AETHER_LINUX_FORK_OK`, `AETHER_LINUX_EXECVE_OK`, `AETHER_LINUX_EXECVE_DYN_OK`). A dynamic `ET_DYN`/`PT_INTERP` loader maps a
+  main image and its interpreter from the verified runtime rootfs, builds
+  auxv, and hands control from the interpreter to the main entry
+  (`AETHER_LINUX_DYN_*`). `make glibc-test` packages the host glibc in a signed
+  runtime rootfs and runs a dynamically linked hello through `ld.so`,
+  relocations, and shared `libc` (`AETHER_GLIBC_OK`). That is an opt-in host-ABI
+  smoke test, not the pinned production runtime. Gate 3 uses the same loader
+  path for the real `gridcraft-cli`: one process evaluates formulas, reads a
+  CSV, writes it through the private `/tmp` overlay, and exits zero
+  (`make gate3-test`, `AETHER_GATE3_APP_OK`). For Gate 4,
+  `runtime/wayland/wayland_shim.c` builds as a drop-in
+  `libwayland-client.so.0` (with a `libwayland-cursor.so.0` stub and an
+  embedded US keymap) that `make gate4-runtime` installs at the host
+  library's SONAME path in the signed Gate 4 rootfs; it maps Wayland surfaces,
+  xdg-shell configure, seat input, and frame callbacks onto the
+  `/dev/aether-display` endpoint, beside Mesa lavapipe software Vulkan in the
+  same rootfs. `make gate4-test` launches the windowed
+  `/usr/bin/gridcraft` from the AppImage with portal open/save and passed at
+  tested commit `716dcb4` (2026-10-21), recording
+  `AETHER_GATE4_DISPLAY_CREATE_OK`, `AETHER_GATE4_PRESENT_OK`,
+  `AETHER_GATE4_INPUT_OK`, `AETHER_GATE4_SAVE_OK`,
+  `AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_REVOKE_OK`, and
+  `AETHER_BOOT_OK`. The GridCraft record remains `limited` because the Gate 2
+  production follow-up is open; general Linux application compatibility is
+  not implemented.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,
@@ -143,8 +206,15 @@ grants, and the desktop is not a security authority.
   `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,
   `AETHER_FILES_OK`, `AETHER_FILES_MUTATE_OK`, `AETHER_WM_OK`,
-  `AETHER_POINTER_OK`, `AETHER_INPUT_OK`, `AETHER_PORTAL_OK`,
-  `AETHER_PORTAL_CONSENT_OK`, `AETHER_SHELL_OK`, and `AETHER_BOOT_OK`.
+  `AETHER_POINTER_OK`, `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_IMPORT_OK`,
+  `AETHER_LINUX_OVERLAY_OK`, `AETHER_LINUX_VMA_OK`, `AETHER_LINUX_FILEMETA_OK`,
+  `AETHER_LINUX_DIR_OK`, `AETHER_LINUX_PIPE_OK`, `AETHER_LINUX_EVENT_OK`,
+  `AETHER_LINUX_THREAD_OK`, `AETHER_LINUX_MREMAP_OK`, `AETHER_LINUX_SIGNAL_OK`,
+  `AETHER_LINUX_FORK_OK`, `AETHER_LINUX_EXECVE_OK`,
+  `AETHER_LINUX_DYN_INTERP_OK`, `AETHER_LINUX_DYN_MAIN_OK`,
+  `AETHER_LINUX_DYN_OK`, `AETHER_LINUX_OK`, `AETHER_INPUT_OK`,
+  `AETHER_PORTAL_OK`, `AETHER_PORTAL_CONSENT_OK`, `AETHER_SHELL_OK`, and
+  `AETHER_BOOT_OK`.
 - `make iso-test`, which boots the generated ISO through UEFI El Torito and
   requires the full boot/security marker set. It drives real PS/2 window and
   Files interactions on VGA and QEMU's VMware SVGA device, checks RGB colors and
@@ -269,6 +339,8 @@ Prerequisites on a Linux host:
   (pinned by `rust-toolchain.toml`).
 - `mtools` (`mformat`, `mmd`, `mcopy`).
 - QEMU (`qemu-system-x86_64`) and OVMF firmware for `make test`.
+- `mksquashfs` (`squashfs-tools`) to build the signed Linux runtime rootfs.
+- A host C compiler and glibc only for the opt-in `make glibc-test`.
 - GNU Make and Python 3.11 or later.
 - `xorriso` for `make iso`.
 
@@ -295,8 +367,11 @@ make unittest      # host unit tests (ABI, ELF, filesystem, services, IPC,
                    # memory, window manager, crypto, packages, updates,
                    # compatibility)
 make compat-test   # compatibility database and classification rules
+make appimage-test # AppImage container inspection tests
+make squashfs-test # SquashFS importer and real-image structure tests
 make update-test   # package and update policy crates
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
+make glibc-test    # opt-in host-glibc rootfs + dynamically linked hello boot
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # exception-path test: int3 after paging must reach the IDT
 make rollback-test # recovery rollback branch test with its own marker
@@ -355,6 +430,9 @@ kernel/              Aether kernel (no_std, target x86_64-unknown-none)
   src/recovery.rs    current/previous image selection
 sdk/                 native application SDK
 tests/fixtures/      test keys and signed package/update fixtures
+apps/linux/appimage/ AppImage container inspector for the Linux layer
+apps/linux/elf/      defensive Linux ELF64 parser for the dynamic loader
+apps/linux/squashfs/ SquashFS 4 reader and host extractor for AppImage import
 tests/compatibility/ compatibility database and classification harness
 tests/rendering/     host harness for the actual kernel graphics module
 tools/               boot, shell, ISO, release, and qualification harnesses
@@ -477,6 +555,9 @@ Further reading: [memory and paging](docs/architecture/memory.md),
 [package format](docs/specifications/package-format.md),
 [signed updates](docs/architecture/updates.md),
 [compatibility database](docs/specifications/compatibility.md),
+[Linux application compatibility](docs/specifications/linux-compatibility.md),
+[Linux host-interface inventory](docs/specifications/linux-host-interface-inventory.md),
+[Linux layer](docs/architecture/linux-layer.md),
 [supported hardware](docs/reference/supported-hardware.md),
 [VMware Workstation](docs/reference/vmware-workstation.md),
 [installer and recovery](docs/reference/installer-and-recovery.md),

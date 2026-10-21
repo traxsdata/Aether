@@ -174,6 +174,44 @@ impl<'a> FrameAllocator<'a> {
         Some(PhysFrame::from_index(index))
     }
 
+    /// Allocates `count` physically contiguous frames.
+    ///
+    /// The kernel identity map lets a caller treat the returned run as a
+    /// contiguous byte buffer. Returns `None` when no free run is large enough
+    /// or `count` is zero.
+    pub fn allocate_contiguous(&mut self, count: u64) -> Option<PhysFrame> {
+        if count == 0 || count > self.free_frames {
+            return None;
+        }
+        let mut run_start = 0;
+        let mut run_len = 0;
+        let mut index = 0;
+        while index < self.frame_count {
+            if self.is_used(index) {
+                run_len = 0;
+                index += 1;
+                continue;
+            }
+            if run_len == 0 {
+                run_start = index;
+            }
+            run_len += 1;
+            if run_len == count {
+                for frame in run_start..run_start + count {
+                    self.set_used(frame);
+                }
+                self.next_hint = if run_start + count >= self.frame_count {
+                    0
+                } else {
+                    run_start + count
+                };
+                return Some(PhysFrame::from_index(run_start));
+            }
+            index += 1;
+        }
+        None
+    }
+
     /// Releases a previously allocated frame.
     pub fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
         if frame.index() >= self.frame_count {
@@ -387,6 +425,31 @@ mod tests {
             frames.deallocate(PhysFrame::from_index(u64::MAX)),
             Err(FrameError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn allocates_a_contiguous_run_and_rejects_when_too_large() {
+        let mut bitmap = allocator(64); // 512 frames = 2 MiB
+        let regions = [region(0, 8 * MIB, MemoryKind::Usable)];
+        let mut frames = FrameAllocator::new(&mut bitmap);
+        frames.initialize(&regions, 0, 0);
+
+        // Reserve a frame in the middle of the low free range to force the
+        // contiguous search to skip over it.
+        let hole = frames.allocate().expect("frame");
+        frames.allocate().expect("frame");
+        frames.allocate().expect("frame");
+        let before = frames.stats().free_frames;
+        let run = frames.allocate_contiguous(4).expect("contiguous run");
+        assert_eq!(run.start_address() % PAGE_SIZE, 0);
+        assert!(
+            !(run.start_address()..run.start_address() + 4 * PAGE_SIZE)
+                .contains(&hole.start_address())
+        );
+        assert_eq!(frames.stats().free_frames, before - 4);
+
+        assert!(frames.allocate_contiguous(0).is_none());
+        assert!(frames.allocate_contiguous(before).is_none());
     }
 
     #[test]

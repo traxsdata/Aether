@@ -24,13 +24,34 @@ pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"AETHEROS");
 ///
 /// Bump this for any layout or semantic change. The kernel refuses versions it
 /// does not implement.
-pub const BOOT_INFO_VERSION: u32 = 3;
+pub const BOOT_INFO_VERSION: u32 = 5;
 
 /// Maximum number of memory regions passed to the kernel.
 ///
 /// The bound keeps both sides allocation-free. The loader fails closed if
 /// firmware reports more regions than this.
 pub const MAX_MEMORY_REGIONS: usize = 256;
+
+/// Largest AppImage the loader will stage into memory (32 MiB).
+///
+/// The fixture and the current compatibility target are far smaller. The bound
+/// keeps both the loader's allocation and the kernel's slice construction
+/// finite; a larger file is rejected before it is read.
+pub const MAX_STAGED_APPIMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Largest signed import record the loader will stage (64 KiB).
+///
+/// Records are a small fixed header with a signature; anything larger is
+/// malformed or hostile.
+pub const MAX_STAGED_RECORD_BYTES: u64 = 64 * 1024;
+
+/// Largest runtime rootfs the loader will stage into memory (256 MiB).
+///
+/// The Gate 4 Mesa/lavapipe rootfs is far larger than the embedded Gate 3
+/// fixture because it carries LLVM and the Vulkan software driver. Staging it
+/// keeps the kernel image small; the bound keeps the loader allocation and the
+/// kernel slice construction finite.
+pub const MAX_STAGED_RUNTIME_ROOTFS_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Prototype bound on visible dimensions and scan-line stride.
 /// Keeps software-compositor arithmetic and firmware-driven work bounded.
@@ -244,6 +265,58 @@ impl FramebufferInfo {
     }
 }
 
+/// A loader-owned boot artifact, such as a staged AppImage.
+///
+/// The loader allocates the bytes below 4 GiB, keeps them allocated across
+/// `ExitBootServices`, and reports the physical address. They are only
+/// readable; the kernel verifies any signed record before parsing them.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootArtifact {
+    /// Physical address of the first byte, or zero when absent.
+    pub address: u64,
+    /// Length in bytes, or zero when absent.
+    pub length: u64,
+}
+
+impl BootArtifact {
+    /// An absent artifact.
+    pub const NONE: Self = Self {
+        address: 0,
+        length: 0,
+    };
+
+    /// Returns `true` when the artifact is present.
+    #[must_use]
+    pub const fn is_present(&self) -> bool {
+        self.address != 0 && self.length != 0
+    }
+
+    /// Validates an artifact against a caller-supplied size bound.
+    ///
+    /// An entirely zero descriptor is absent and accepted. A half-present,
+    /// misaligned, overflowing, or oversized descriptor is rejected. The
+    /// limit is a policy bound, not part of the shared layout.
+    #[must_use]
+    pub const fn validate(&self, max_bytes: u64) -> bool {
+        if self.address == 0 && self.length == 0 {
+            return true;
+        }
+        if self.address == 0
+            || self.length == 0
+            || self.length > max_bytes
+            || !self.address.is_multiple_of(align_of::<u64>() as u64)
+            || self.address >= (1u64 << 52)
+        {
+            return false;
+        }
+        match self.address.checked_add(self.length) {
+            Some(end) => end <= (1u64 << 52),
+            None => false,
+        }
+    }
+}
+
 /// One physical memory region.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,6 +389,14 @@ pub enum BootInfoError {
     OverlappingRegions { index: u64 },
     /// The framebuffer descriptor is inconsistent or unsupported.
     InvalidFramebuffer,
+    /// The loader-staged AppImage address or length is invalid.
+    InvalidStagedAppImage,
+    /// The loader-staged import record address or length is invalid.
+    InvalidStagedRecord,
+    /// The loader-staged runtime rootfs address or length is invalid.
+    InvalidStagedRuntimeRootfs,
+    /// The loader-staged runtime rootfs record address or length is invalid.
+    InvalidStagedRuntimeRootfsRecord,
 }
 
 impl fmt::Display for BootInfoError {
@@ -349,6 +430,16 @@ impl fmt::Display for BootInfoError {
                 write!(f, "memory region at index {index} overlaps its predecessor")
             }
             Self::InvalidFramebuffer => write!(f, "invalid framebuffer descriptor"),
+            Self::InvalidStagedAppImage => write!(f, "invalid loader-staged AppImage descriptor"),
+            Self::InvalidStagedRecord => {
+                write!(f, "invalid loader-staged import record descriptor")
+            }
+            Self::InvalidStagedRuntimeRootfs => {
+                write!(f, "invalid loader-staged runtime rootfs descriptor")
+            }
+            Self::InvalidStagedRuntimeRootfsRecord => {
+                write!(f, "invalid loader-staged runtime rootfs record descriptor")
+            }
         }
     }
 }
@@ -385,6 +476,16 @@ pub struct BootInfo {
     pub system_table: u64,
     /// Linear framebuffer, or [`FramebufferInfo::NONE`].
     pub framebuffer: FramebufferInfo,
+    /// Loader-staged user AppImage, or [`BootArtifact::NONE`].
+    pub linux_appimage: BootArtifact,
+    /// Signed import record for [`Self::linux_appimage`], or
+    /// [`BootArtifact::NONE`].
+    pub linux_appimage_record: BootArtifact,
+    /// Loader-staged runtime rootfs, or [`BootArtifact::NONE`].
+    pub linux_runtime_rootfs: BootArtifact,
+    /// Signed import record for [`Self::linux_runtime_rootfs`], or
+    /// [`BootArtifact::NONE`].
+    pub linux_runtime_rootfs_record: BootArtifact,
     /// Reserved; must be zero.
     pub reserved: [u64; 4],
 }
@@ -404,6 +505,10 @@ impl BootInfo {
             entry_point: 0,
             system_table: 0,
             framebuffer: FramebufferInfo::NONE,
+            linux_appimage: BootArtifact::NONE,
+            linux_appimage_record: BootArtifact::NONE,
+            linux_runtime_rootfs: BootArtifact::NONE,
+            linux_runtime_rootfs_record: BootArtifact::NONE,
             reserved: [0; 4],
         }
     }
@@ -459,6 +564,24 @@ impl BootInfo {
             return Err(BootInfoError::EntryOutsideKernel);
         }
         self.framebuffer.validate()?;
+        if !self.linux_appimage.validate(MAX_STAGED_APPIMAGE_BYTES) {
+            return Err(BootInfoError::InvalidStagedAppImage);
+        }
+        if !self.linux_appimage_record.validate(MAX_STAGED_RECORD_BYTES) {
+            return Err(BootInfoError::InvalidStagedRecord);
+        }
+        if !self
+            .linux_runtime_rootfs
+            .validate(MAX_STAGED_RUNTIME_ROOTFS_BYTES)
+        {
+            return Err(BootInfoError::InvalidStagedRuntimeRootfs);
+        }
+        if !self
+            .linux_runtime_rootfs_record
+            .validate(MAX_STAGED_RECORD_BYTES)
+        {
+            return Err(BootInfoError::InvalidStagedRuntimeRootfsRecord);
+        }
         Ok(())
     }
 
@@ -668,7 +791,100 @@ mod tests {
         assert_eq!(size_of::<MemoryKind>(), 4);
         assert_eq!(size_of::<MemoryRegion>(), 24);
         assert_eq!(size_of::<FramebufferInfo>(), 40);
-        assert_eq!(size_of::<BootInfo>(), 136);
+        assert_eq!(size_of::<BootArtifact>(), 16);
+        assert_eq!(size_of::<BootInfo>(), 200);
+    }
+
+    #[test]
+    fn staged_artifacts_are_bounded_and_paired() {
+        assert_eq!(
+            BootArtifact::NONE,
+            BootArtifact {
+                address: 0,
+                length: 0
+            }
+        );
+        assert!(!BootArtifact::NONE.is_present());
+        assert!(BootArtifact::NONE.validate(MAX_STAGED_APPIMAGE_BYTES));
+
+        let artifact = BootArtifact {
+            address: 0x10_0000,
+            length: 4096,
+        };
+        assert!(artifact.is_present());
+        assert!(artifact.validate(MAX_STAGED_APPIMAGE_BYTES));
+
+        assert!(
+            !BootArtifact {
+                address: 0x10_0000,
+                length: 0
+            }
+            .validate(4096)
+        );
+        assert!(
+            !BootArtifact {
+                address: 0,
+                length: 1
+            }
+            .validate(4096)
+        );
+        assert!(
+            !BootArtifact {
+                address: 0x10_0001,
+                length: 1,
+            }
+            .validate(4096)
+        );
+        assert!(
+            !BootArtifact {
+                address: 0x10_0000,
+                length: 4097,
+            }
+            .validate(4096)
+        );
+        assert!(
+            !BootArtifact {
+                address: u64::MAX - 7,
+                length: 16,
+            }
+            .validate(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_staged_artifact_descriptors() {
+        let mut info = header();
+        info.linux_appimage = BootArtifact {
+            address: 0x10_0001,
+            length: 1,
+        };
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidStagedAppImage));
+        info.linux_appimage = BootArtifact::NONE;
+        info.linux_appimage_record = BootArtifact {
+            address: 0x20_0000,
+            length: MAX_STAGED_RECORD_BYTES + 1,
+        };
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidStagedRecord));
+        info.linux_appimage_record = BootArtifact::NONE;
+        info.linux_runtime_rootfs = BootArtifact {
+            address: 0x30_0001,
+            length: 1,
+        };
+        assert_eq!(
+            info.validate(),
+            Err(BootInfoError::InvalidStagedRuntimeRootfs)
+        );
+        info.linux_runtime_rootfs = BootArtifact::NONE;
+        info.linux_runtime_rootfs_record = BootArtifact {
+            address: 0x40_0000,
+            length: MAX_STAGED_RECORD_BYTES + 1,
+        };
+        assert_eq!(
+            info.validate(),
+            Err(BootInfoError::InvalidStagedRuntimeRootfsRecord)
+        );
+        info.linux_runtime_rootfs_record = BootArtifact::NONE;
+        assert_eq!(info.validate(), Ok(()));
     }
 
     #[test]

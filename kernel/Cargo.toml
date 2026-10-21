@@ -10,6 +10,9 @@ authors.workspace = true
 
 [dependencies]
 aether-abi = { path = "../abi" }
+aether-appimage = { path = "../apps/linux/appimage" }
+aether-linux-elf = { path = "../apps/linux/elf" }
+aether-squashfs = { path = "../apps/linux/squashfs" }
 aether-boot-common = { path = "../boot/common" }
 aether-fs = { path = "fs" }
 aether-memory = { path = "memory" }
@@ -27,3 +30,12 @@ fault-selftest = []
 # Boot with a rollback self-test that removes the current image marker and
 # re-selects, exercising the lost-image branch on every test boot.
 recovery-rollback-selftest = []
+# Boot the Gate 4 portal slice with a seeded workbook grant and a test-only
+# revocation control path. Not part of the normal kernel feature set.
+gate4-portal-test = []
+# Gate 4 staged Mesa/lavapipe rootfs needs more import heap than the embedded
+# Gate 3 fixture. The boot image also needs more guest RAM.
+gate4-runtime = []
+# Boot the Gate 4 GUI portal slice with a real XLSX grant, immediate save
+# evidence, and kernel-driven post-exit revocation checks.
+gate4-gui-test = ["aether-memory/gate4"]

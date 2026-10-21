@@ -14,7 +14,7 @@
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::serial_line;
 use aether_abi::user::FileRights;
-use aether_services::portal_store::{self, PortalGrant};
+use aether_services::portal_store::{self, PortalEntry, PortalGrant};
 use core::cell::UnsafeCell;
 use core::fmt::{self, Write as _};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -64,11 +64,51 @@ static GRANTS: Global<[Slot; MAX_GRANTS]> = Global(UnsafeCell::new([Slot::EMPTY;
 static PENDING: Global<[Request; MAX_PENDING]> =
     Global(UnsafeCell::new([Request::EMPTY; MAX_PENDING]));
 
+const MAX_TEMP_BYTES: usize = portal_store::MAX_TEMP_BYTES;
+const MAX_TEMPS: usize = portal_store::MAX_ACTIVE_TEMPS;
+
+#[derive(Clone, Copy)]
+struct TempSlot {
+    key: Option<portal_store::TempKey>,
+    generation: u32,
+    len: usize,
+    data: [u8; MAX_TEMP_BYTES],
+}
+
+impl TempSlot {
+    const EMPTY: Self = Self {
+        key: None,
+        generation: 0,
+        len: 0,
+        data: [0; MAX_TEMP_BYTES],
+    };
+}
+
+struct TempStore {
+    slots: [TempSlot; MAX_TEMPS],
+}
+
+static TEMPS: Global<TempStore> = Global(UnsafeCell::new(TempStore {
+    slots: [TempSlot::EMPTY; MAX_TEMPS],
+}));
+
 /// Portal failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortalError {
     /// No grant matches the caller, path, and requested rights.
     NotGranted,
+    /// The matching grant was revoked.
+    Revoked,
+    /// A staging operation used the wrong path kind.
+    WrongKind,
+    /// A staging rename crossed grants.
+    CrossGrant,
+    /// Every bounded staging slot is in use.
+    TempFull,
+    /// A staging write would exceed the per-grant temp bound.
+    TempQuota,
+    /// No staging file exists for this grant.
+    NoTemp,
     /// The consent queue is full or the request index is stale.
     NoRequest,
     /// A grant record could not be represented or stored.
@@ -114,6 +154,11 @@ pub fn init() {
         }
     }
 
+    #[cfg(feature = "gate4-portal-test")]
+    let seeded_gate4 = seed_gate4_grant();
+    #[cfg(feature = "gate4-gui-test")]
+    let seeded_gate4_gui = seed_gate4_gui_grant();
+
     if corrupt {
         serial_line!("portal: grant store corrupt; no grants loaded");
     } else if loaded == 0 {
@@ -122,6 +167,102 @@ pub fn init() {
     } else {
         serial_line!("portal: restored {} grant record(s)", loaded);
     }
+    #[cfg(feature = "gate4-portal-test")]
+    if seeded_gate4 {
+        persist();
+        serial_line!(
+            "portal: seeded Gate 4 workbook grant root={} path={}",
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_WORKBOOK
+        );
+    }
+    #[cfg(feature = "gate4-gui-test")]
+    if seeded_gate4_gui {
+        persist();
+        let mut id = [0u8; portal_store::GRANT_ID_BYTES];
+        let Some(grant) = PortalGrant::new(
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_GUI_WORKBOOK,
+            portal_store::READ | portal_store::WRITE,
+        ) else {
+            return;
+        };
+        let id = portal_store::write_grant_id(portal_store::grant_id(&grant), &mut id);
+        serial_line!(
+            "portal: seeded Gate 4 GUI workbook grant root={} path={} id={} namespace={}",
+            crate::fs::DEMO_ROOT,
+            crate::fs::GATE4_GUI_WORKBOOK,
+            id,
+            crate::fs::GATE4_GUI_NAMESPACE
+        );
+    }
+}
+
+/// Seeds the test-only Gate 4 workbook grant.
+///
+/// The grant is exact-file and read+write. It exists only in the
+/// `gate4-portal-test` build; a normal boot keeps the Gate 3 grant table and
+/// behavior unchanged.
+#[cfg(feature = "gate4-portal-test")]
+fn seed_gate4_grant() -> bool {
+    let Some(grant) = PortalGrant::new(
+        crate::fs::DEMO_ROOT,
+        crate::fs::GATE4_WORKBOOK,
+        portal_store::READ | portal_store::WRITE,
+    ) else {
+        return false;
+    };
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and this runs once during boot.
+    let grants = unsafe { &mut *GRANTS.0.get() };
+    if grants.iter().any(|slot| {
+        !slot.grant.is_empty()
+            && slot.grant.root() == crate::fs::DEMO_ROOT
+            && slot.grant.path() == crate::fs::GATE4_WORKBOOK
+    }) {
+        return false;
+    }
+    let Some(free) = grants.iter().position(|slot| slot.grant.is_empty()) else {
+        return false;
+    };
+    grants[free] = Slot {
+        grant,
+        revoked: false,
+    };
+    true
+}
+
+/// Seeds the test-only Gate 4 GUI workbook grant.
+///
+/// The grant is exact-file and read+write. It exists only in the
+/// `gate4-gui-test` build; the static portal test never sees this path.
+#[cfg(feature = "gate4-gui-test")]
+fn seed_gate4_gui_grant() -> bool {
+    let Some(grant) = PortalGrant::new(
+        crate::fs::DEMO_ROOT,
+        crate::fs::GATE4_GUI_WORKBOOK,
+        portal_store::READ | portal_store::WRITE,
+    ) else {
+        return false;
+    };
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and this runs once during boot.
+    let grants = unsafe { &mut *GRANTS.0.get() };
+    if grants.iter().any(|slot| {
+        !slot.grant.is_empty()
+            && slot.grant.root() == crate::fs::DEMO_ROOT
+            && slot.grant.path() == crate::fs::GATE4_GUI_WORKBOOK
+    }) {
+        return false;
+    }
+    let Some(free) = grants.iter().position(|slot| slot.grant.is_empty()) else {
+        return false;
+    };
+    grants[free] = Slot {
+        grant,
+        revoked: false,
+    };
+    true
 }
 
 /// Checks whether `root` may open `path` with `rights` through the portal.
@@ -152,6 +293,206 @@ fn check_grant(root: &str, path: &str, rights: u64) -> Result<(), PortalError> {
         }
     }
     Err(PortalError::NotGranted)
+}
+
+/// Resolves a Linux `/run/aether/portal/<grant-id>/<file>` path.
+///
+/// The grant id, caller root, exact final file component, and requested rights
+/// are all matched by the host-tested policy in `aether-services`. A revoked
+/// matching record fails closed even if another record could otherwise match.
+/// The returned grant names the backing path the caller may open.
+pub fn check_namespace(
+    root: &str,
+    namespace: &str,
+    rights: u64,
+) -> Result<PortalGrant, PortalError> {
+    let outcome = resolve_namespace(root, namespace, rights);
+    if outcome.is_ok() {
+        GRANTED.fetch_add(1, Ordering::Release);
+    } else {
+        DENIED.fetch_add(1, Ordering::Release);
+    }
+    outcome
+}
+
+fn resolve_namespace(root: &str, namespace: &str, rights: u64) -> Result<PortalGrant, PortalError> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the snapshot.
+    let grants = unsafe { &*GRANTS.0.get() };
+    let entries: [PortalEntry; MAX_GRANTS] = core::array::from_fn(|index| PortalEntry {
+        grant: grants[index].grant,
+        revoked: grants[index].revoked,
+    });
+    portal_store::resolve(&entries, root, namespace, rights).map_err(map_path_error)
+}
+
+fn map_path_error(error: portal_store::PortalPathError) -> PortalError {
+    match error {
+        portal_store::PortalPathError::Revoked => PortalError::Revoked,
+        portal_store::PortalPathError::WrongKind => PortalError::WrongKind,
+        portal_store::PortalPathError::CrossGrant => PortalError::CrossGrant,
+        _ => PortalError::NotGranted,
+    }
+}
+
+fn resolve_temp_namespace(root: &str, namespace: &str) -> Result<PortalGrant, PortalError> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the snapshot.
+    let grants = unsafe { &*GRANTS.0.get() };
+    let entries: [PortalEntry; MAX_GRANTS] = core::array::from_fn(|index| PortalEntry {
+        grant: grants[index].grant,
+        revoked: grants[index].revoked,
+    });
+    portal_store::resolve_temp(&entries, root, namespace, portal_store::WRITE)
+        .map_err(map_path_error)
+}
+
+fn resolve_commit_namespace(root: &str, from: &str, to: &str) -> Result<PortalGrant, PortalError> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the snapshot.
+    let grants = unsafe { &*GRANTS.0.get() };
+    let entries: [PortalEntry; MAX_GRANTS] = core::array::from_fn(|index| PortalEntry {
+        grant: grants[index].grant,
+        revoked: grants[index].revoked,
+    });
+    portal_store::resolve_commit(&entries, root, from, to).map_err(map_path_error)
+}
+
+/// Opens or truncates the bounded staging slot for a write grant.
+///
+/// The namespace component must be `<file>.sctmp` for an active grant with
+/// write rights. The returned generation invalidates a descriptor if the slot
+/// is later reused for another file.
+pub fn open_temp(root: &str, namespace: &str, truncate: bool) -> Result<(usize, u32), PortalError> {
+    let grant = resolve_temp_namespace(root, namespace)?;
+    let key = portal_store::TempKey::new(&grant);
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and the temp table is kernel-owned.
+    let store = unsafe { &mut *TEMPS.0.get() };
+    let (index, existing) = match store.slots.iter().position(|slot| slot.key == Some(key)) {
+        Some(index) => (index, true),
+        None => {
+            let index = store
+                .slots
+                .iter()
+                .position(|slot| slot.key.is_none())
+                .ok_or(PortalError::TempFull)?;
+            (index, false)
+        }
+    };
+    let slot = store.slots.get_mut(index).ok_or(PortalError::TempFull)?;
+    if !existing {
+        slot.key = Some(key);
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        slot.len = 0;
+    } else if truncate {
+        slot.len = 0;
+    }
+    Ok((index, slot.generation))
+}
+
+/// Writes bytes into a staging slot, bounded by [`portal_store::MAX_TEMP_BYTES`].
+pub fn write_temp(
+    index: usize,
+    generation: u32,
+    offset: usize,
+    data: &[u8],
+) -> Result<usize, PortalError> {
+    if !portal_store::temp_write_fits(offset, data.len()) {
+        return Err(PortalError::TempQuota);
+    }
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and the temp table is kernel-owned.
+    let store = unsafe { &mut *TEMPS.0.get() };
+    let slot = store.slots.get_mut(index).ok_or(PortalError::NoTemp)?;
+    if slot.key.is_none() || slot.generation != generation {
+        return Err(PortalError::NoTemp);
+    }
+    let end = offset + data.len();
+    slot.data[offset..end].copy_from_slice(data);
+    slot.len = slot.len.max(end);
+    Ok(data.len())
+}
+
+/// Reads bytes from a live staging slot.
+pub fn read_temp(
+    index: usize,
+    generation: u32,
+    offset: usize,
+    out: &mut [u8],
+) -> Result<usize, PortalError> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and the temp table is kernel-owned.
+    let store = unsafe { &*TEMPS.0.get() };
+    let slot = store.slots.get(index).ok_or(PortalError::NoTemp)?;
+    if slot.key.is_none() || slot.generation != generation {
+        return Err(PortalError::NoTemp);
+    }
+    if offset >= slot.len {
+        return Ok(0);
+    }
+    let length = (slot.len - offset).min(out.len());
+    out[..length].copy_from_slice(&slot.data[offset..offset + length]);
+    Ok(length)
+}
+
+/// Returns the current staging size.
+pub fn temp_len(index: usize, generation: u32) -> Result<usize, PortalError> {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and the temp table is kernel-owned.
+    let store = unsafe { &*TEMPS.0.get() };
+    let slot = store.slots.get(index).ok_or(PortalError::NoTemp)?;
+    if slot.key.is_none() || slot.generation != generation {
+        return Err(PortalError::NoTemp);
+    }
+    Ok(slot.len)
+}
+
+/// Commits a staging file to the exact granted backing path.
+///
+/// The live grant table is checked again, so revoking the grant between the
+/// staging write and this call fails without touching the original file.
+pub fn commit_temp(root: &str, from: &str, to: &str) -> Result<(PortalGrant, usize), PortalError> {
+    let grant = resolve_commit_namespace(root, from, to)?;
+    let key = portal_store::TempKey::new(&grant);
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and the temp table is kernel-owned.
+    let store = unsafe { &mut *TEMPS.0.get() };
+    let index = store
+        .slots
+        .iter()
+        .position(|slot| slot.key == Some(key))
+        .ok_or(PortalError::NoTemp)?;
+    let slot = store.slots.get_mut(index).ok_or(PortalError::NoTemp)?;
+    let length = slot.len;
+    if crate::fs::write_path(grant.path(), &slot.data[..length]).is_err() {
+        return Err(PortalError::InvalidRecord);
+    }
+    slot.key = None;
+    slot.len = 0;
+    #[cfg(feature = "gate4-gui-test")]
+    if grant.path() == crate::fs::GATE4_GUI_WORKBOOK {
+        crate::display::request_close();
+    }
+    Ok((grant, length))
+}
+
+/// Discards a staging file without touching the granted backing file.
+pub fn discard_temp(root: &str, namespace: &str) -> Result<(), PortalError> {
+    let grant = resolve_temp_namespace(root, namespace)?;
+    let key = portal_store::TempKey::new(&grant);
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and the temp table is kernel-owned.
+    let store = unsafe { &mut *TEMPS.0.get() };
+    let index = store
+        .slots
+        .iter()
+        .position(|slot| slot.key == Some(key))
+        .ok_or(PortalError::NoTemp)?;
+    let slot = store.slots.get_mut(index).ok_or(PortalError::NoTemp)?;
+    slot.key = None;
+    slot.len = 0;
+    Ok(())
 }
 
 /// Queues an interactive consent request from an application.

@@ -30,7 +30,7 @@ displayName = "Aether"
 guestOS = "other-64"
 firmware = "efi"
 uefi.secureBoot.enabled = "FALSE"
-memsize = "2048"
+memsize = "8192"
 numvcpus = "2"
 cpuid.coresPerSocket = "2"
 

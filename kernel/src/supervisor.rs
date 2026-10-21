@@ -61,6 +61,10 @@ const SECURITY_PROFILE: CapabilityProfile = CapabilityProfile {
     name: "security",
     capabilities: &["policy.observe", "grant.observe"],
 };
+const LINUX_PROFILE: CapabilityProfile = CapabilityProfile {
+    name: "linux-manager",
+    capabilities: &["ipc.endpoint", "policy.observe", "launch.approve"],
+};
 const PROBE_PROFILE: CapabilityProfile = CapabilityProfile {
     name: "probe",
     capabilities: &[],
@@ -74,6 +78,7 @@ static DISPLAY_DEPS: [ServiceId; 1] = [4];
 static DESKTOP_DEPS: [ServiceId; 3] = [1, 2, 5];
 static PORTAL_DEPS: [ServiceId; 2] = [1, 6];
 static SECURITY_DEPS: [ServiceId; 2] = [1, 6];
+static LINUXD_DEPS: [ServiceId; 2] = [1, 2];
 
 /// Starts the Phase 3 services and runs the failure-policy self-test.
 pub fn init() -> Result<(), ServiceError> {
@@ -136,6 +141,12 @@ pub fn init() -> Result<(), ServiceError> {
         dependencies: &SECURITY_DEPS,
         restart_limit: 1,
     })?;
+    let linuxd = supervisor.register(ServiceSpec {
+        name: "linuxd",
+        profile: LINUX_PROFILE,
+        dependencies: &LINUXD_DEPS,
+        restart_limit: 1,
+    })?;
 
     supervisor.start(storage)?;
     supervisor.start(filesystem)?;
@@ -146,6 +157,7 @@ pub fn init() -> Result<(), ServiceError> {
     supervisor.start(desktop)?;
     supervisor.start(portal)?;
     supervisor.start(security)?;
+    supervisor.start(linuxd)?;
 
     // Failure-policy probe: one restart is allowed, then quarantine. This is a
     // deliberate boot-time test of the supervisor, not a production service.

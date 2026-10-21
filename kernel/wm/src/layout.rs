@@ -185,6 +185,7 @@ pub fn default_window_frame(kind: WindowKind, screen: Rect, cascade: i32) -> Rec
         WindowKind::Recovery => (42, 44),
         WindowKind::Log => (44, 44),
         WindowKind::Welcome => (36, 46),
+        WindowKind::Linux => (52, 62),
     };
     let width = (area.width * width_percent / 100)
         .max(MIN_WINDOW_WIDTH)
@@ -206,6 +207,10 @@ pub fn default_window_frame(kind: WindowKind, screen: Rect, cascade: i32) -> Rec
         WindowKind::Welcome => (
             area.x + (area.width - width) / 2 - cascade / 2,
             area.y + (area.height - height) / 2,
+        ),
+        WindowKind::Linux => (
+            area.x + (area.width - width) / 2 + cascade / 2,
+            area.y + (area.height - height) / 2 + cascade / 2,
         ),
     };
     Rect::new(x, y, width, height).clamp_inside(area)

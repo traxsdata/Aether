@@ -21,7 +21,7 @@ pub const SYSCALL_VECTOR: u8 = 0x80;
 pub const USER_BASE: u64 = 0x0000_0200_0000_0000;
 
 /// Size of the user address window (128 MiB).
-pub const USER_WINDOW_BYTES: u64 = 128 * 1024 * 1024;
+pub const USER_WINDOW_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Highest address a user pointer may name.
 pub const USER_LIMIT: u64 = USER_BASE + USER_WINDOW_BYTES;
@@ -30,7 +30,7 @@ pub const USER_LIMIT: u64 = USER_BASE + USER_WINDOW_BYTES;
 pub const USER_STACK_TOP: u64 = USER_BASE + 64 * 1024 * 1024;
 
 /// Number of stack pages mapped for a user task.
-pub const USER_STACK_PAGES: u64 = 16;
+pub const USER_STACK_PAGES: u64 = 1024;
 
 /// Maximum bytes copied by one syscall.
 pub const MAX_SYSCALL_IO: usize = 4096;
@@ -81,7 +81,7 @@ pub enum Syscall {
     /// Send a bounded IPC message through an endpoint capability owned by the
     /// caller. `arg1` is the endpoint capability handle, `arg2` the payload
     /// pointer, `arg3` the payload length (the kernel enforces the endpoint
-    /// message bound of 32 bytes), and `arg4` an optional capability handle
+    /// message bound of 64 bytes), and `arg4` an optional capability handle
     /// to transfer (0 = no transfer). The transferred capability must carry
     /// the `TRANSFER` right and loses it on arrival. Returns zero, or
     /// `EAGAIN` when the endpoint queue is full.

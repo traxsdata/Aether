@@ -43,11 +43,20 @@ struct DesktopState {
     wallpaper_high_contrast: Option<bool>,
     browser: Browser,
     files_dirty: bool,
+    /// A Linux surface changed; only the content rectangle needs repainting.
+    linux_dirty: bool,
+    /// A Linux title or window geometry changed; repaint the whole frame.
+    linux_frame_dirty: bool,
+    /// A menu-bar clock or diagnostic view needs repainting.
+    clock_dirty: bool,
+    /// Portal consent or other non-frame live content changed.
     live_dirty: bool,
     scene_paints: u64,
     cursor_paints: u64,
     last_paint_ticks: u64,
     max_paint_ticks: u64,
+    fast_paints: u64,
+    slow_paints: u64,
     rename: RenameState,
 }
 
@@ -80,11 +89,16 @@ impl DesktopState {
             wallpaper_high_contrast: None,
             browser: Browser::new(),
             files_dirty: true,
+            linux_dirty: true,
+            linux_frame_dirty: true,
+            clock_dirty: false,
             live_dirty: true,
             scene_paints: 0,
             cursor_paints: 0,
             last_paint_ticks: 0,
             max_paint_ticks: 0,
+            fast_paints: 0,
+            slow_paints: 0,
             rename: RenameState::new(),
         }
     }
@@ -165,11 +179,91 @@ fn mark_files_dirty() {
     }
 }
 
-fn mark_live_dirty() {
+/// Marks the live diagnostic regions for the next frame.
+pub fn mark_live_dirty() {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
     unsafe {
         (*DESKTOP.0.get()).live_dirty = true;
+    }
+}
+
+/// Marks only the Linux window for the next frame.
+///
+/// Linux presents are the highest-rate damage source. Keeping them separate
+/// from the clock and diagnostics avoids unioning the menu bar and every
+/// status window into each frame's damage rectangle.
+pub fn mark_linux_dirty() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
+    unsafe {
+        (*DESKTOP.0.get()).linux_dirty = true;
+    }
+}
+
+/// Marks the Linux title bar and frame for repainting.
+pub fn mark_linux_frame_dirty() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
+    unsafe {
+        (*DESKTOP.0.get()).linux_frame_dirty = true;
+    }
+}
+
+/// Returns compositor pass counts and the last/maximum paint duration in
+/// 10 ms ticks (the timer runs at 100 Hz).
+#[must_use]
+#[cfg(feature = "gate4-gui-test")]
+pub fn paint_stats() -> (u64, u64, u64, u64, u64, u64) {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized snapshot; IRQs never enter the desktop.
+    unsafe {
+        let state = &*DESKTOP.0.get();
+        (
+            state.scene_paints,
+            state.cursor_paints,
+            state.last_paint_ticks,
+            state.max_paint_ticks,
+            state.fast_paints,
+            state.slow_paints,
+        )
+    }
+}
+
+/// Clears the paint-duration high-water mark.
+///
+/// Gate 4 calls this when the Linux window opens so the summary describes
+/// interactive application frames, not the boot desktop paint.
+pub fn reset_paint_stats() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
+    unsafe {
+        let state = &mut *DESKTOP.0.get();
+        state.scene_paints = 0;
+        state.cursor_paints = 0;
+        state.last_paint_ticks = 0;
+        state.max_paint_ticks = 0;
+        state.fast_paints = 0;
+        state.slow_paints = 0;
+    }
+}
+
+/// Returns true when a compositor pass has pending damage.
+///
+/// The timer path uses this to give the idle/compositor task one bounded
+/// slice after a present instead of letting a continuously rendering guest
+/// starve presentation until its next block.
+pub fn frame_pending() -> bool {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized snapshot; IRQs never enter the desktop.
+    unsafe {
+        let state = &*DESKTOP.0.get();
+        state.wm.is_some()
+            && (state.linux_dirty
+                || state.linux_frame_dirty
+                || state.clock_dirty
+                || state.live_dirty
+                || state.files_dirty)
     }
 }
 
@@ -261,15 +355,26 @@ fn paint_frame(wm: &Wm, mut damage: Rect) {
     let old_cursor = graphics::restore_cursor_background();
     // SAFETY: The idle task is the only painter; no mutable reference escapes.
     let theme = unsafe { (*DESKTOP.0.get()).wallpaper_high_contrast };
-    if theme != Some(wm.settings().high_contrast)
-        || !graphics::restore_wallpaper(damage.x, damage.y, damage.width, damage.height)
+    let theme_changed = theme != Some(wm.settings().high_contrast);
+    // A pure present from an opaque Linux surface rewrites every pixel in its
+    // content rectangle. Restoring the wallpaper underneath it first is wasted
+    // bandwidth on every keystroke and hover frame.
+    let opaque_content = !theme_changed
+        && wm
+            .window_id(WindowKind::Linux)
+            .and_then(|id| wm.window_frame(id))
+            .is_some_and(|frame| layout::content_rect(frame) == damage)
+        && crate::display::surface_opaque();
+    if theme_changed
+        || (!opaque_content
+            && !graphics::restore_wallpaper(damage.x, damage.y, damage.width, damage.height))
     {
         damage = screen;
         paint_wallpaper(screen, palette, wm.settings().high_contrast);
         graphics::cache_wallpaper();
     }
     graphics::set_damage(damage.x, damage.y, damage.width, damage.height);
-    paint_windows(wm, palette);
+    paint_windows(wm, palette, damage);
     if wm.overview_open() || wm.overview_progress() > 0 {
         paint_overview(wm, palette);
     }
@@ -306,6 +411,9 @@ fn paint_frame(wm: &Wm, mut damage: Rect) {
         state.painted = Some(*wm);
         state.wallpaper_high_contrast = Some(wm.settings().high_contrast);
         state.files_dirty = false;
+        state.linux_dirty = false;
+        state.linux_frame_dirty = false;
+        state.clock_dirty = false;
         state.live_dirty = false;
         // Pace frame starts, not frame completions: painting already consumes
         // the frame budget and must not be followed by an extra 30 ms delay.
@@ -313,6 +421,11 @@ fn paint_frame(wm: &Wm, mut damage: Rect) {
         state.scene_paints = state.scene_paints.saturating_add(1);
         state.last_paint_ticks = finished.saturating_sub(started);
         state.max_paint_ticks = state.max_paint_ticks.max(state.last_paint_ticks);
+        if state.last_paint_ticks < 3 {
+            state.fast_paints = state.fast_paints.saturating_add(1);
+        } else if state.last_paint_ticks > 10 {
+            state.slow_paints = state.slow_paints.saturating_add(1);
+        }
     }
 }
 
@@ -367,13 +480,25 @@ pub fn tick() {
     for event in events.into_iter().flatten().chain(core::iter::once(mouse)) {
         route_pointer(&mut wm, &mut last_buttons, event, now);
     }
+    // Feed the Linux endpoint only while its window owns focus. Coordinates
+    // are translated to the window's client area here, not by the guest.
+    let linux = wm
+        .focused_window()
+        .filter(|window| window.kind == WindowKind::Linux)
+        .map(|window| window.id);
+    let content = linux
+        .and_then(|id| wm.window_frame(id))
+        .map(layout::content_rect);
+    let cursor = wm.cursor();
+    crate::display::sync_input(linux, content, cursor.x, cursor.y, mouse.buttons);
 
     let second = now / 100;
     let clock_changed = second != last_second;
     if clock_changed {
-        // SAFETY: Only the idle task writes desktop state.
+        // SAFETY: Only the idle task writes desktop state. A clock tick only
+        // changes the menu bar; it must not re-blit an idle Linux surface.
         unsafe {
-            (*DESKTOP.0.get()).live_dirty = true;
+            (*DESKTOP.0.get()).clock_dirty = true;
         }
     }
     store(wm, now, second, last_buttons);
@@ -382,10 +507,13 @@ pub fn tick() {
         damage = Some(damage.map_or(rect, |old| old.union(rect)));
     };
     // SAFETY: Only the idle task writes desktop state; IRQs only enqueue input.
-    let (files_dirty, live_dirty) = unsafe {
+    let (files_dirty, linux_dirty, linux_frame_dirty, live_dirty, clock_dirty) = unsafe {
         (
             (*DESKTOP.0.get()).files_dirty,
+            (*DESKTOP.0.get()).linux_dirty,
+            (*DESKTOP.0.get()).linux_frame_dirty,
             (*DESKTOP.0.get()).live_dirty,
+            (*DESKTOP.0.get()).clock_dirty,
         )
     };
     if files_dirty
@@ -393,6 +521,22 @@ pub fn tick() {
         && let Some(frame) = wm.window_frame(id)
     {
         include(frame);
+    }
+    if (linux_dirty || linux_frame_dirty)
+        && let Some(id) = wm.window_id(WindowKind::Linux)
+        && let Some(frame) = wm.window_frame(id)
+    {
+        // A pure surface present changes only the content rectangle. Keeping
+        // the damage inside it avoids repainting the title bar, body, and two
+        // shadow layers for every keystroke or hover frame.
+        if linux_frame_dirty {
+            include(frame);
+        } else {
+            include(layout::content_rect(frame));
+        }
+    }
+    if clock_dirty {
+        include(layout::menu_bar(wm.screen()));
     }
     if live_dirty {
         include(layout::menu_bar(wm.screen()));
@@ -481,6 +625,18 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
     let Some(mut wm) = current() else {
         return;
     };
+    // While the Linux surface owns focus, keys go to its endpoint instead of
+    // the native window manager. Overlays and menus keep native focus.
+    let linux_focused = wm
+        .focused_window()
+        .is_some_and(|window| window.kind == WindowKind::Linux)
+        && !wm.overview_open()
+        && !wm.spotlight_open()
+        && wm.menu_state().is_none();
+    if linux_focused {
+        crate::display::key(key, modifiers);
+        return;
+    }
     let translated = match key {
         Key::Char(byte) => WmKey::Char(byte),
         Key::Enter => WmKey::Enter,
@@ -570,6 +726,49 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
             serial_line!("desktop: action={label}");
         }
     }
+}
+
+/// Opens or resizes the single Linux surface window.
+///
+/// The frame is sized so its client area matches the requested surface within
+/// the compositor's work area. The surface is scaled by the painter when the
+/// frame is clamped smaller. Returns `None` when no desktop exists.
+pub fn open_linux_window(width: u32, height: u32, title: &str) -> Option<u8> {
+    let _ = title;
+    let mut wm = current()?;
+    let id = wm.open(WindowKind::Linux)?;
+    let area = layout::work_area(wm.screen());
+    let frame_width =
+        (i32::try_from(width).ok()?.saturating_add(2)).clamp(layout::MIN_WINDOW_WIDTH, area.width);
+    let frame_height = (i32::try_from(height)
+        .ok()?
+        .saturating_add(layout::TITLE_BAR_HEIGHT + 1))
+    .clamp(layout::MIN_WINDOW_HEIGHT, area.height);
+    let x = area.x + (area.width - frame_width) / 2;
+    let y = area.y + (area.height - frame_height) / 2;
+    wm.set_window_frame(id, Rect::new(x, y, frame_width, frame_height));
+    let now = scheduler::ticks();
+    store(wm, now, now / 100, input::mouse().buttons);
+    reset_paint_stats();
+    mark_linux_frame_dirty();
+    Some(id)
+}
+
+/// Retires the Linux window when the endpoint closes or the task exits.
+pub fn close_linux_window(id: u8) {
+    let Some(mut wm) = current() else {
+        return;
+    };
+    if wm
+        .window(id)
+        .is_none_or(|window| window.kind != WindowKind::Linux)
+    {
+        return;
+    }
+    wm.close_window(id);
+    let now = scheduler::ticks();
+    store(wm, now, now / 100, input::mouse().buttons);
+    mark_linux_frame_dirty();
 }
 
 /// Restores the welcome window as the focused, frontmost window.
@@ -922,15 +1121,34 @@ fn paint_wallpaper(screen: Rect, palette: aether_wm::Palette, high_contrast: boo
     graphics::blend_rect(screen.x, screen.y, screen.width, 2, palette.shadow, 40);
 }
 
-fn paint_windows(wm: &Wm, palette: aether_wm::Palette) {
+/// Bounds of the two-layer window shadow. Used to test whether a window can
+/// contribute to a damage rectangle before walking its surface.
+const SHADOW_MARGIN: i32 = 24;
+
+fn paint_windows(wm: &Wm, palette: aether_wm::Palette, damage: Rect) {
     let screen = wm.screen();
     for id in wm.order() {
         let Some(window) = wm.window(*id) else {
             continue;
         };
+        if !window.is_visible() {
+            continue;
+        }
         let Some(frame) = wm.window_frame(*id) else {
             continue;
         };
+        // The wallpaper restore already cleared the damage region. A window
+        // whose frame and shadow lie outside it has nothing to repaint, so do
+        // not walk its full surface just to have every pixel clipped.
+        let shadow = Rect::new(
+            frame.x - SHADOW_MARGIN,
+            frame.y - SHADOW_MARGIN,
+            frame.width + SHADOW_MARGIN * 2,
+            frame.height + SHADOW_MARGIN * 2,
+        );
+        if !shadow.intersects(damage) {
+            continue;
+        }
         paint_window(wm, window, frame, wm.focus_id() == Some(*id), palette);
     }
     if wm.transition().active {
@@ -960,32 +1178,43 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
     };
     let radius = layout::WINDOW_RADIUS;
 
-    // Layered shadow: darker nearest the frame, softer further away.
-    for (offset, spread, strength) in [(0, 10, 78u8), (4, 20, 34)] {
-        graphics::blend_round_rect(
-            frame.x - spread / 2,
-            frame.y + offset,
-            frame.width + spread,
-            frame.height + spread / 2,
-            radius + spread / 2,
-            palette.shadow,
-            strength,
-        );
+    // Layered shadow: darker nearest the frame, softer further away. Omit it
+    // during a drag/resize gesture: the two translucent layers cover several
+    // million pixels, and the window is moving too fast to read the shadow.
+    // The gesture end damages the whole frame, so the shadow returns.
+    if !wm.is_dragging() {
+        for (offset, spread, strength) in [(0, 10, 78u8), (4, 20, 34)] {
+            graphics::blend_round_rect(
+                frame.x - spread / 2,
+                frame.y + offset,
+                frame.width + spread,
+                frame.height + spread / 2,
+                radius + spread / 2,
+                palette.shadow,
+                strength,
+            );
+        }
     }
 
-    graphics::blend_round_rect(
-        frame.x,
-        frame.y,
-        frame.width,
-        frame.height,
-        radius,
-        if focused {
-            palette.window
-        } else {
-            palette.window_inactive
-        },
-        alpha,
-    );
+    let body = if focused {
+        palette.window
+    } else {
+        palette.window_inactive
+    };
+    if wm.is_dragging() {
+        // An opaque base avoids a full-window alpha blend on every drag step.
+        graphics::fill_round_rect(frame.x, frame.y, frame.width, frame.height, radius, body);
+    } else {
+        graphics::blend_round_rect(
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            radius,
+            body,
+            alpha,
+        );
+    }
 
     let title_color = if focused {
         palette.title
@@ -1035,13 +1264,16 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
 
     let content = layout::content_rect(frame);
     graphics::set_round_clip(frame.x, frame.y, frame.width, frame.height, radius);
-    graphics::fill_rect(
-        content.x,
-        content.y,
-        content.width,
-        content.height,
-        palette.window,
-    );
+    // An opaque Linux surface is about to overwrite this rectangle completely.
+    if window.kind != WindowKind::Linux || !crate::display::surface_opaque() {
+        graphics::fill_rect(
+            content.x,
+            content.y,
+            content.width,
+            content.height,
+            palette.window,
+        );
+    }
     graphics::set_clip(content.x, content.y, content.width, content.height);
     paint_content(wm, window, content, focused, palette);
     graphics::clear_clip();
@@ -1049,11 +1281,21 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
 
     let lights = layout::traffic_lights(frame);
     paint_traffic_lights(wm, &lights, focused, palette);
+    let title = if window.kind == WindowKind::Linux {
+        let requested = crate::display::title();
+        if requested.is_empty() {
+            window.kind.title()
+        } else {
+            requested
+        }
+    } else {
+        window.kind.title()
+    };
     draw_text_centered(
         frame.x + 72,
         frame.right() - 12,
         frame.y + 13,
-        window.kind.title(),
+        title,
         if focused { palette.text } else { palette.muted },
         1,
     );
@@ -1133,6 +1375,7 @@ fn paint_content(
         WindowKind::Recovery => paint_recovery(wm, content, palette),
         WindowKind::Log => paint_log(wm, content, palette),
         WindowKind::Welcome => paint_welcome(wm, content, focused, palette),
+        WindowKind::Linux => crate::display::paint_content(content),
     }
 }
 

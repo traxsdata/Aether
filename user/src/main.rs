@@ -156,10 +156,11 @@ fn write_note() {
 
 /// Exercises the ring-3 IPC contract end to end.
 ///
-/// The endpoint pool holds four objects and the kernel's own worker tasks
-/// own two, so this task can create exactly two endpoints; the fifth create
-/// is refused. Positive and negative paths alternate so the kernel's denial
-/// counters are driven from user mode, matching the boot gate.
+/// The endpoint pool holds eight objects: the kernel's workers own two and
+/// the ring-3 `linuxd` policy channel owns two. This task can create the
+/// remaining four; the next create is refused. Positive and negative paths
+/// alternate so the kernel's denial counters are driven from user mode,
+/// matching the boot gate.
 fn ipc_section() {
     let Ok(first) = sdk::endpoint_create() else {
         fail("first endpoint create was refused");
@@ -167,6 +168,11 @@ fn ipc_section() {
     let Ok(second) = sdk::endpoint_create() else {
         fail("second endpoint create was refused");
     };
+    for _ in 0..2 {
+        if sdk::endpoint_create().is_err() {
+            fail("reserve endpoint create was refused");
+        }
+    }
 
     // A message round trip.
     if sdk::endpoint_send(first, b"hello").is_err() {
@@ -284,9 +290,9 @@ fn ipc_section() {
         }
     }
 
-    // Pool exhaustion: two objects belong to the workers and two were
-    // created above, so the fifth create is refused instead of growing
-    // kernel memory.
+    // Pool exhaustion: two objects belong to the workers, two to `linuxd`,
+    // and four were created above, so the next create is refused instead of
+    // growing kernel memory.
     match sdk::endpoint_create() {
         Err(error) => require_denial("init: ipc-create-limit", error, "ENOSPC"),
         Ok(_) => fail("endpoint pool grew past its bound"),

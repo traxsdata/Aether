@@ -119,6 +119,12 @@ impl<T: Copy, const N: usize> EventQueue<T, N> {
         event
     }
 
+    /// Returns `true` when no event is queued.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Number of enqueue attempts, saturating at `u32::MAX`.
     #[must_use]
     pub const fn received(&self) -> u32 {

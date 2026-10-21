@@ -9,7 +9,7 @@
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::serial_line;
 use aether_input::{EventQueue, Keyboard, MouseDecoder};
-pub use aether_input::{Key, KeyEvent};
+pub use aether_input::{Key, KeyEvent, Modifiers};
 use core::cell::UnsafeCell;
 
 struct Global<T>(UnsafeCell<T>);
@@ -63,14 +63,17 @@ impl MouseState {
         let Some(packet) = self.decoder.push(byte) else {
             return false;
         };
+        // PS/2 counts are small at the supported 8 counts/mm resolution and
+        // 200 Hz rate; apply a fixed gain so normal pointer travel is usable.
+        const MOUSE_GAIN: i32 = 2;
         self.x = self
             .x
-            .saturating_add(i32::from(packet.dx))
+            .saturating_add(i32::from(packet.dx).saturating_mul(MOUSE_GAIN))
             .clamp(0, self.width - 1);
         // PS/2 reports positive Y upward; screen coordinates grow downward.
         self.y = self
             .y
-            .saturating_sub(i32::from(packet.dy))
+            .saturating_sub(i32::from(packet.dy).saturating_mul(MOUSE_GAIN))
             .clamp(0, self.height - 1);
         self.buttons = packet.buttons;
         self.packets = self.packets.saturating_add(1);
@@ -236,11 +239,12 @@ fn probe_mouse_inner() -> bool {
     let Some(mut config) = read_data(false) else {
         return false;
     };
-    // Preserve firmware's translation mode. Keep the keyboard clock disabled
-    // during the mouse exchange so a keystroke cannot be mistaken for an ACK.
+    // Preserve firmware's translation mode, enable both interrupt lines, and
+    // leave both device clocks enabled. Firmware may hand over with a clock
+    // disabled, which silently produces ACKs during probing but no IRQ12
+    // traffic on some hypervisors.
     config |= 0x03;
-    config |= 0x10;
-    config &= !0x20;
+    config &= !0x30;
     if !controller_command(0x60) || !controller_data(config) {
         return false;
     }
@@ -248,13 +252,59 @@ fn probe_mouse_inner() -> bool {
         return false;
     }
 
+    configure_mouse_reporting()
+}
+
+/// Programs a known mouse reporting mode.
+///
+/// Defaults are not enough on every virtual PS/2 controller: set the highest
+/// standard sample rate and 8 counts/mm before enabling reporting.
+fn configure_mouse_reporting() -> bool {
     if !mouse_command(0xf6) {
         return false; // set defaults
+    }
+    if !mouse_command_with_argument(0xf3, 200) {
+        return false; // set sample rate
+    }
+    if !mouse_command_with_argument(0xe8, 0x03) {
+        return false; // set resolution to 8 counts/mm
     }
     if !mouse_command(0xf4) {
         return false; // enable data reporting
     }
     true
+}
+
+/// Recovers the mouse after a long interrupt-disabled boot phase.
+///
+/// Kernel imports can run for seconds with interrupts masked. A user moving
+/// the mouse during that window overruns the controller's one-byte output
+/// register and desynchronizes the packet decoder. Discard stale bytes, reset
+/// the decoder, and re-send the reporting configuration before the Linux
+/// window starts accepting input.
+pub fn rearm_mouse() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and this is the only writer.
+    unsafe {
+        if !(*MOUSE.0.get()).available {
+            return;
+        }
+        flush_output();
+        (*MOUSE.0.get()).decoder.reset();
+    }
+    let ok = configure_mouse_reporting();
+    serial_line!("input: ps2 mouse rearmed={}", ok);
+}
+
+/// Sends a two-byte mouse command and waits for the device ACK.
+fn mouse_command_with_argument(command: u8, argument: u8) -> bool {
+    if !mouse_command(command) {
+        return false;
+    }
+    if !controller_command(0xd4) || !controller_data(argument) {
+        return false;
+    }
+    matches!(read_data(true), Some(0xfa))
 }
 
 /// Initializes the input queues and PS/2 mouse.
@@ -341,11 +391,44 @@ pub fn on_mouse_irq() {
     on_irq();
 }
 
+/// Drains the PS/2 output register while interrupts are masked.
+///
+/// Surface copies and the compositor hold interrupts off for millions of
+/// pixel operations. The controller has a one-byte output register, so a key
+/// or mouse packet arriving in that window is otherwise lost. Long loops call
+/// this between chunks to keep input loss bounded.
+pub fn service_controller() {
+    for _ in 0..QUEUE_LEN {
+        // SAFETY: Fixed ports, accessed with interrupts already masked by the
+        // caller (or from interrupt context).
+        let status = unsafe { inb(PS2_STATUS) };
+        if status & 1 == 0 {
+            return;
+        }
+        // SAFETY: A byte is available according to the status just read.
+        route_byte(status, unsafe { inb(PS2_DATA) });
+    }
+}
+
 /// Drains the next key event.
 pub fn next_event() -> Option<KeyEvent> {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the queue update.
     unsafe { (*QUEUE.0.get()).pop() }
+}
+
+/// Returns `true` when pointer motion is waiting for the desktop service.
+pub fn pointer_pending() -> bool {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked while the queue state is sampled.
+    unsafe { !(*POINTER_EVENTS.0.get()).is_empty() }
+}
+
+/// Returns `true` when a key is waiting for the desktop/shell service.
+pub fn key_pending() -> bool {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked while the queue state is sampled.
+    unsafe { !(*QUEUE.0.get()).is_empty() }
 }
 
 /// Drains queued keys into the desktop service.
@@ -485,7 +568,7 @@ fn mouse_decoder_self_test() -> bool {
     for byte in [0x00, 0x08, 12, 2] {
         mouse.push(byte);
     }
-    if (mouse.x, mouse.y) != (start.0 + 12, start.1 - 2) {
+    if (mouse.x, mouse.y) != (start.0 + 24, start.1 - 4) {
         return false;
     }
 

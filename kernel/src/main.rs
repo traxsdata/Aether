@@ -13,11 +13,17 @@
 mod apps;
 mod arch;
 mod desktop;
+mod display;
 mod fs;
 mod graphics;
 mod icons;
 mod input;
 mod ipc;
+mod linux;
+mod linux_loader;
+mod linux_policy;
+mod linuxd;
+mod memfd;
 mod memory;
 mod packaging;
 mod portal;
@@ -29,15 +35,31 @@ mod supervisor;
 mod syscall;
 mod updates;
 
+extern crate alloc;
+
 use aether_abi::{BootInfo, MemoryKind, MemoryRegion};
 use core::panic::PanicInfo;
 
 /// Size of the initial kernel stack in bytes.
-const KERNEL_STACK_SIZE: usize = 64 * 1024;
+///
+/// The Linux import path walks SquashFS metadata and decompression frames on
+/// the boot stack, and the feature builds add recovery and verification
+/// frames. The `.bss.stack` section is placed next to the IDT, so an overflow
+/// corrupts interrupt state instead of faulting cleanly; keep enough headroom
+/// for the largest runtime rootfs.
+const KERNEL_STACK_SIZE: usize = 512 * 1024;
 
 /// Kernel boot stack. Firmware boot-services stacks are not reused.
+///
+/// The wrapper guarantees 16-byte alignment for the initial RSP. Without it
+/// the linker may place this byte array directly after a smaller static,
+/// producing a misaligned stack and corrupting formatted output.
+#[repr(align(16))]
+#[allow(dead_code)]
+struct KernelStack([u8; KERNEL_STACK_SIZE]);
+
 #[unsafe(link_section = ".bss.stack")]
-static mut KERNEL_STACK: [u8; KERNEL_STACK_SIZE] = [0; KERNEL_STACK_SIZE];
+static mut KERNEL_STACK: KernelStack = KernelStack([0; KERNEL_STACK_SIZE]);
 
 core::arch::global_asm!(
     r#"
@@ -127,6 +149,16 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         info.kernel_end,
         info.entry_point
     );
+    // The loader stages the AppImage and record as EfiLoaderData. Refuse a
+    // present descriptor that does not fall inside a loader-owned region
+    // before the kernel ever forms a slice over it.
+    if !artifact_in_loader_memory(info.linux_appimage, regions)
+        || !artifact_in_loader_memory(info.linux_appimage_record, regions)
+        || !artifact_in_loader_memory(info.linux_runtime_rootfs, regions)
+        || !artifact_in_loader_memory(info.linux_runtime_rootfs_record, regions)
+    {
+        boot_failure("staged artifact outside loader memory");
+    }
 
     arch::x86_64::init();
     // SAFETY: Boot is single-threaded, interrupts are disabled, and this runs
@@ -136,44 +168,105 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         arch::x86_64::halt();
     }
     serial_line!("boot: cpu: NX and write-protect enabled");
+    // SAFETY: Boot is single-threaded, interrupts are disabled, and no user
+    // task has run vector code yet.
+    let xsave = unsafe { arch::x86_64::cpu::enable_extended_state() };
+    scheduler::init_fpu(xsave);
+    serial_line!(
+        "boot: fpu: {} vector state",
+        if xsave { "xsave" } else { "fxsave" }
+    );
 
-    let mut frames = memory::frame_allocator();
-    let _initial_stats = frames.initialize(regions, info.kernel_start, info.kernel_end);
+    memory::init_frame_allocator();
+    memory::with_frame_allocator(|frames| {
+        frames.initialize(regions, info.kernel_start, info.kernel_end)
+    });
 
     // The loader already reports these as loader-owned. Reserve them again so
     // a loader regression cannot hand the hand-off block to the allocator.
-    frames.reserve_range(boot_info as u64, core::mem::size_of::<BootInfo>() as u64);
-    let map_bytes = info
-        .memory_region_count
-        .saturating_mul(core::mem::size_of::<MemoryRegion>() as u64);
-    frames.reserve_range(info.memory_regions, map_bytes);
-
-    let framebuffer_mapped = match memory::paging::init(&mut frames, info, regions) {
-        Ok(paging) => {
-            serial_line!(
-                "boot: paging: identity map to {} MiB, {} page-table frames, CR3={:#018x}",
-                paging.mapped_bytes / (1024 * 1024),
-                paging.page_table_frames,
-                paging.pml4_address
+    memory::with_frame_allocator(|frames| {
+        frames.reserve_range(boot_info as u64, core::mem::size_of::<BootInfo>() as u64);
+        let map_bytes = info
+            .memory_region_count
+            .saturating_mul(core::mem::size_of::<MemoryRegion>() as u64);
+        frames.reserve_range(info.memory_regions, map_bytes);
+        // The loader retains the staged AppImage and its signed record. They
+        // are loader-owned in the firmware map; reserve them again so a loader
+        // regression cannot hand these pages to the allocator.
+        if info.linux_appimage.is_present() {
+            frames.reserve_range(info.linux_appimage.address, info.linux_appimage.length);
+        }
+        if info.linux_appimage_record.is_present() {
+            frames.reserve_range(
+                info.linux_appimage_record.address,
+                info.linux_appimage_record.length,
             );
-            if paging.framebuffer_mapped {
+        }
+        if info.linux_runtime_rootfs.is_present() {
+            frames.reserve_range(
+                info.linux_runtime_rootfs.address,
+                info.linux_runtime_rootfs.length,
+            );
+        }
+        if info.linux_runtime_rootfs_record.is_present() {
+            frames.reserve_range(
+                info.linux_runtime_rootfs_record.address,
+                info.linux_runtime_rootfs_record.length,
+            );
+        }
+    });
+
+    if info.linux_appimage.is_present() && info.linux_appimage_record.is_present() {
+        serial_line!(
+            "boot: loader staged AppImage address={:#x} length={} record={:#x} record_length={}",
+            info.linux_appimage.address,
+            info.linux_appimage.length,
+            info.linux_appimage_record.address,
+            info.linux_appimage_record.length
+        );
+    } else {
+        serial_line!("boot: no loader-staged AppImage in the hand-off");
+    }
+    if info.linux_runtime_rootfs.is_present() && info.linux_runtime_rootfs_record.is_present() {
+        serial_line!(
+            "boot: loader staged runtime rootfs address={:#x} length={} record={:#x} record_length={}",
+            info.linux_runtime_rootfs.address,
+            info.linux_runtime_rootfs.length,
+            info.linux_runtime_rootfs_record.address,
+            info.linux_runtime_rootfs_record.length
+        );
+    }
+    linux::stage_appimage(info.linux_appimage, info.linux_appimage_record);
+    linux::stage_runtime_rootfs(info.linux_runtime_rootfs, info.linux_runtime_rootfs_record);
+
+    let framebuffer_mapped =
+        match memory::with_frame_allocator(|frames| memory::paging::init(frames, info, regions)) {
+            Some(Ok(paging)) => {
                 serial_line!(
-                    "boot: framebuffer mapped {}x{} stride={} format={}",
-                    info.framebuffer.width,
-                    info.framebuffer.height,
-                    info.framebuffer.stride,
-                    info.framebuffer.format
+                    "boot: paging: identity map to {} MiB, {} page-table frames, CR3={:#018x}",
+                    paging.mapped_bytes / (1024 * 1024),
+                    paging.page_table_frames,
+                    paging.pml4_address
                 );
-            } else {
-                serial_line!("boot: framebuffer unavailable; graphics disabled");
+                if paging.framebuffer_mapped {
+                    serial_line!(
+                        "boot: framebuffer mapped {}x{} stride={} format={}",
+                        info.framebuffer.width,
+                        info.framebuffer.height,
+                        info.framebuffer.stride,
+                        info.framebuffer.format
+                    );
+                } else {
+                    serial_line!("boot: framebuffer unavailable; graphics disabled");
+                }
+                paging.framebuffer_mapped
             }
-            paging.framebuffer_mapped
-        }
-        Err(error) => {
-            serial_line!("AETHER_BOOT_FAILED reason=paging: {error:?}");
-            arch::x86_64::halt();
-        }
-    };
+            Some(Err(error)) => {
+                serial_line!("AETHER_BOOT_FAILED reason=paging: {error:?}");
+                arch::x86_64::halt();
+            }
+            None => boot_failure("frame allocator unavailable"),
+        };
 
     match graphics::init(&info.framebuffer, framebuffer_mapped) {
         Ok(true) => serial_line!("boot: graphics service ready"),
@@ -186,17 +279,29 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     // Boot-services memory is safe to reuse only after CR3 points at our own
     // tables. This includes any firmware page tables left behind by UEFI.
-    for region in regions {
-        if region.kind() == Some(MemoryKind::BootServices) {
-            frames.free_range(region.start, region.len);
+    memory::with_frame_allocator(|frames| {
+        for region in regions {
+            if region.kind() == Some(MemoryKind::BootServices) {
+                frames.free_range(region.start, region.len);
+            }
         }
-    }
-    let frame_stats = frames.stats();
+    });
+    let Some(frame_stats) = memory::frame_stats() else {
+        boot_failure("frame allocator unavailable");
+    };
     serial_line!(
         "boot: frame allocator: {} MiB free ({} frames), bitmap capacity {} MiB",
         frame_stats.free_bytes() / (1024 * 1024),
         frame_stats.free_frames,
         frame_stats.total_bytes() / (1024 * 1024)
+    );
+    let Some((heap_start, heap_bytes)) = memory::init_heap() else {
+        boot_failure("bootstrap heap allocation failed");
+    };
+    serial_line!(
+        "boot: bootstrap heap start={:#x} size={} MiB",
+        heap_start,
+        heap_bytes / (1024 * 1024)
     );
     serial_line!("AETHER_MM_OK");
 
@@ -209,10 +314,28 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
 
     serial_line!("boot: x86-64 execution environment ready");
-    scheduler::run(&mut frames)
+    scheduler::run()
 }
 
 fn boot_failure(reason: &str) -> ! {
     serial_line!("AETHER_BOOT_FAILED reason={reason}");
     arch::x86_64::halt()
+}
+
+/// Returns `true` when an absent artifact or a present artifact fully inside a
+/// loader-owned memory region. This prevents the import path from
+/// dereferencing a firmware-supplied address outside the identity-mapped
+/// loader allocation.
+fn artifact_in_loader_memory(artifact: aether_abi::BootArtifact, regions: &[MemoryRegion]) -> bool {
+    if !artifact.is_present() {
+        return true;
+    }
+    let Some(end) = artifact.address.checked_add(artifact.length) else {
+        return false;
+    };
+    regions.iter().any(|region| {
+        region.kind() == Some(MemoryKind::Loader)
+            && artifact.address >= region.start
+            && region.end().is_some_and(|region_end| end <= region_end)
+    })
 }

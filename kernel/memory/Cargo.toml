@@ -10,3 +10,6 @@ authors.workspace = true
 
 [dependencies]
 aether-abi = { path = "../../abi" }
+[features]
+# Larger Gate 4 GUI bounds; the standard kernel keeps the prototype limits.
+gate4 = []

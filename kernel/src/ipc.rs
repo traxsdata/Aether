@@ -9,7 +9,7 @@ use aether_ipc::{CapHandle, CapTable, Endpoint, IpcError, ObjectId, ReceivedMess
 use core::cell::UnsafeCell;
 
 /// Maximum number of endpoint objects.
-pub const MAX_ENDPOINTS: usize = 4;
+pub const MAX_ENDPOINTS: usize = 8;
 
 struct Slot {
     alive: bool,

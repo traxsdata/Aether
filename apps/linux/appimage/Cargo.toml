@@ -1,0 +1,29 @@
+[package]
+name = "aether-appimage"
+description = "Validated AppImage container inspection for the Aether Linux app runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aether-crypto = { path = "../../../crypto" }
+aether-packaging = { path = "../../../packaging" }
+
+[features]
+# Builds the host-only diagnostic binary. The library remains no_std.
+std = []
+
+[[bin]]
+name = "appimage-manifest"
+path = "src/bin/manifest.rs"
+
+[[bin]]
+name = "appimage-inspect"
+path = "src/bin/inspect.rs"
+required-features = ["std"]
+
+[lints.rust]
+unsafe_code = "forbid"

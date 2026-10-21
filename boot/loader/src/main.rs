@@ -12,7 +12,10 @@
 mod serial;
 mod uefi;
 
-use aether_abi::{BootInfo, FramebufferInfo, MAX_MEMORY_REGIONS, MemoryKind, MemoryRegion};
+use aether_abi::{
+    BootArtifact, BootInfo, FramebufferInfo, MAX_MEMORY_REGIONS, MAX_STAGED_APPIMAGE_BYTES,
+    MAX_STAGED_RECORD_BYTES, MAX_STAGED_RUNTIME_ROOTFS_BYTES, MemoryKind, MemoryRegion,
+};
 use aether_boot_common::elf;
 use aether_boot_common::{PAGE_SIZE, memory, pages_for};
 use core::ffi::c_void;
@@ -20,14 +23,51 @@ use core::fmt;
 use core::panic::PanicInfo;
 use core::ptr;
 use uefi::{
-    ALLOCATE_ADDRESS, ALLOCATE_MAX_ADDRESS, BUFFER_TOO_SMALL, BootServices, GRAPHICS_OUTPUT_GUID,
-    GraphicsOutput, Handle, MEMORY_TYPE_LOADER_DATA, MemoryDescriptor, SUCCESS, Status,
-    SystemTable,
+    ALLOCATE_ADDRESS, ALLOCATE_MAX_ADDRESS, BUFFER_TOO_SMALL, BootServices, FILE_INFO_GUID,
+    FILE_MODE_READ, FileProtocol, GRAPHICS_OUTPUT_GUID, GraphicsOutput, Handle, LOADED_IMAGE_GUID,
+    LoadedImage, MEMORY_TYPE_LOADER_DATA, MemoryDescriptor, SIMPLE_FILE_SYSTEM_GUID, SUCCESS,
+    SimpleFileSystem, Status, SystemTable,
 };
 
 /// Kernel image embedded by the build. The path is supplied by `build.rs`, so
 /// the image on disk and the image in the loader cannot drift apart.
 static KERNEL_ELF: &[u8] = include_bytes!(env!("AETHER_KERNEL_ELF"));
+
+/// Boot-volume paths of the staged application artifacts.
+///
+/// The loader reads these files, keeps their pages allocated across
+/// `ExitBootServices`, and publishes the physical extents in `BootInfo`. It
+/// never executes the AppImage runtime.
+const APPIMAGE_PATH: &[u16] = &[
+    0x005c, 0x006c, 0x0069, 0x006e, 0x0075, 0x0078, 0x005c, 0x0061, 0x0070, 0x0070, 0x002e, 0x0041,
+    0x0070, 0x0070, 0x0049, 0x006d, 0x0061, 0x0067, 0x0065, 0x0000,
+];
+const APPIMAGE_PATH_NAME: &str = "\\linux\\app.AppImage";
+const APPIMAGE_RECORD_PATH: &[u16] = &[
+    0x005c, 0x006c, 0x0069, 0x006e, 0x0075, 0x0078, 0x005c, 0x0061, 0x0070, 0x0070, 0x002e, 0x0069,
+    0x006d, 0x0070, 0x006f, 0x0072, 0x0074, 0x0000,
+];
+const APPIMAGE_RECORD_PATH_NAME: &str = "\\linux\\app.import";
+
+/// Boot-volume paths of the staged runtime rootfs.
+///
+/// Unlike the Gate 3 embedded fixture, the Gate 4 Mesa/lavapipe rootfs is too
+/// large to embed in the kernel image. The loader retains these pages and the
+/// kernel verifies the signed record before importing the tree.
+const RUNTIME_ROOTFS_PATH: &[u16] = &[
+    0x005c, 0x006c, 0x0069, 0x006e, 0x0075, 0x0078, 0x005c, 0x0072, 0x0075, 0x006e, 0x0074, 0x0069,
+    0x006d, 0x0065, 0x002e, 0x0073, 0x0071, 0x0066, 0x0073, 0x0000,
+];
+const RUNTIME_ROOTFS_PATH_NAME: &str = "\\linux\\runtime.sqfs";
+const RUNTIME_ROOTFS_RECORD_PATH: &[u16] = &[
+    0x005c, 0x006c, 0x0069, 0x006e, 0x0075, 0x0078, 0x005c, 0x0072, 0x0075, 0x006e, 0x0074, 0x0069,
+    0x006d, 0x0065, 0x002e, 0x0069, 0x006d, 0x0070, 0x006f, 0x0072, 0x0074, 0x0000,
+];
+const RUNTIME_ROOTFS_RECORD_PATH_NAME: &str = "\\linux\\runtime.import";
+
+/// Fixed buffer for the firmware file-info record. File names on the boot
+/// volume are short, so this comfortably exceeds the variable-length header.
+const FILE_INFO_BYTES: usize = 512;
 
 /// Fixed buffer for the firmware memory map. OVMF's map is a few kilobytes;
 /// 64 KiB leaves ample room for unusual firmware.
@@ -45,14 +85,50 @@ enum LoadError {
     NoBootServices,
     Image(elf::ParseError),
     BootInfo(aether_abi::BootInfoError),
-    Allocation { status: Status },
-    AddressMismatch { wanted: u64, got: u64 },
+    Allocation {
+        status: Status,
+    },
+    AddressMismatch {
+        wanted: u64,
+        got: u64,
+    },
     BadDescriptorSize(usize),
-    MemoryMap { status: Status },
+    MemoryMap {
+        status: Status,
+    },
     MemoryMapTooLarge,
     TooManyRegions(usize),
     ExitBootServices(Status),
     EntryPoint(u64),
+    Protocol {
+        name: &'static str,
+        status: Status,
+    },
+    BootFileMissing {
+        path: &'static str,
+        status: Status,
+    },
+    BootFileInfo {
+        path: &'static str,
+        status: Status,
+    },
+    BootFileEmpty {
+        path: &'static str,
+    },
+    BootFileTooLarge {
+        path: &'static str,
+        size: u64,
+        limit: u64,
+    },
+    BootFileRead {
+        path: &'static str,
+        status: Status,
+    },
+    BootFileShort {
+        path: &'static str,
+        expected: u64,
+        actual: u64,
+    },
 }
 
 impl fmt::Display for LoadError {
@@ -61,6 +137,11 @@ impl fmt::Display for LoadError {
             Self::NoBootServices => write!(f, "firmware did not provide boot services"),
             Self::Image(error) => write!(f, "kernel image rejected: {error:?}"),
             Self::BootInfo(error) => write!(f, "boot information rejected: {error}"),
+            Self::Allocation { status } if *status == uefi::OUT_OF_RESOURCES => write!(
+                f,
+                "page allocation failed (status {status:#x}): firmware is out of memory; \
+                 this kernel image needs more RAM"
+            ),
             Self::Allocation { status } => write!(f, "page allocation failed (status {status:#x})"),
             Self::AddressMismatch { wanted, got } => {
                 write!(f, "loaded at {got:#x}, kernel requires {wanted:#x}")
@@ -78,6 +159,40 @@ impl fmt::Display for LoadError {
                 write!(f, "ExitBootServices failed (status {status:#x})")
             }
             Self::EntryPoint(address) => write!(f, "invalid kernel entry point {address:#x}"),
+            Self::Protocol { name, status } => {
+                write!(f, "{name} protocol unavailable (status {status:#x})")
+            }
+            Self::BootFileMissing { path, status } => write!(
+                f,
+                "staged boot file {path} is missing or cannot be opened (status {status:#x})"
+            ),
+            Self::BootFileInfo { path, status } => {
+                write!(
+                    f,
+                    "cannot query staged boot file {path} (status {status:#x})"
+                )
+            }
+            Self::BootFileEmpty { path } => write!(f, "staged boot file {path} is empty"),
+            Self::BootFileTooLarge { path, size, limit } => {
+                write!(
+                    f,
+                    "staged boot file {path} is {size} bytes, limit is {limit}"
+                )
+            }
+            Self::BootFileRead { path, status } => {
+                write!(
+                    f,
+                    "cannot read staged boot file {path} (status {status:#x})"
+                )
+            }
+            Self::BootFileShort {
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "staged boot file {path} read {actual} bytes, expected {expected}"
+            ),
         }
     }
 }
@@ -155,6 +270,64 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
         }
     }
 
+    // Stage the application artifacts from the boot volume. These pages stay
+    // allocated across ExitBootServices; the kernel receives their physical
+    // extents and must verify the signed record before parsing the container.
+    // SAFETY: Boot services are active and `handle` is this image's handle.
+    let linux_appimage = unsafe {
+        load_staged_file(
+            services,
+            handle,
+            APPIMAGE_PATH,
+            APPIMAGE_PATH_NAME,
+            MAX_STAGED_APPIMAGE_BYTES,
+        )?
+    };
+    // SAFETY: Same contract as the AppImage read.
+    let linux_appimage_record = unsafe {
+        load_staged_file(
+            services,
+            handle,
+            APPIMAGE_RECORD_PATH,
+            APPIMAGE_RECORD_PATH_NAME,
+            MAX_STAGED_RECORD_BYTES,
+        )?
+    };
+    serial_line!(
+        "loader: staged appimage address={:#x} length={} record_address={:#x} record_length={}",
+        linux_appimage.address,
+        linux_appimage.length,
+        linux_appimage_record.address,
+        linux_appimage_record.length
+    );
+    // SAFETY: Boot services are active and `handle` is this image's handle.
+    let linux_runtime_rootfs = unsafe {
+        load_staged_file(
+            services,
+            handle,
+            RUNTIME_ROOTFS_PATH,
+            RUNTIME_ROOTFS_PATH_NAME,
+            MAX_STAGED_RUNTIME_ROOTFS_BYTES,
+        )?
+    };
+    // SAFETY: Same contract as the AppImage read.
+    let linux_runtime_rootfs_record = unsafe {
+        load_staged_file(
+            services,
+            handle,
+            RUNTIME_ROOTFS_RECORD_PATH,
+            RUNTIME_ROOTFS_RECORD_PATH_NAME,
+            MAX_STAGED_RECORD_BYTES,
+        )?
+    };
+    serial_line!(
+        "loader: staged runtime rootfs address={:#x} length={} record_address={:#x} record_length={}",
+        linux_runtime_rootfs.address,
+        linux_runtime_rootfs.length,
+        linux_runtime_rootfs_record.address,
+        linux_runtime_rootfs_record.length
+    );
+
     let boot_info_page = unsafe { allocate_below_4g(services, 1)? };
     let map_page =
         unsafe { allocate_below_4g(services, pages_for(MEMORY_MAP_BYTES as u64).unwrap())? };
@@ -194,6 +367,10 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
                 entry_point: kernel.entry(),
                 system_table: system_table as u64,
                 framebuffer,
+                linux_appimage,
+                linux_appimage_record,
+                linux_runtime_rootfs,
+                linux_runtime_rootfs_record,
                 reserved: [0; 4],
             },
         );
@@ -254,6 +431,155 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
     }
 
     Err(LoadError::ExitBootServices(last_status))
+}
+
+/// Reads a staged boot file into loader-owned pages.
+///
+/// The file size is queried first and bounded before allocation. The returned
+/// pages are never freed: their physical extent is published in `BootInfo` and
+/// the kernel treats them as loader-owned memory. Firmware strings, sizes, and
+/// the returned read length are all treated as untrusted.
+unsafe fn load_staged_file(
+    services: &BootServices,
+    image: Handle,
+    path: &[u16],
+    display_path: &'static str,
+    limit: u64,
+) -> Result<BootArtifact, LoadError> {
+    let mut loaded: *mut c_void = ptr::null_mut();
+    // SAFETY: Firmware contract. `image` is the loader's own image handle and
+    // the GUID is architectural.
+    let status = unsafe { (services.handle_protocol)(image, &LOADED_IMAGE_GUID, &mut loaded) };
+    if status != SUCCESS || loaded.is_null() {
+        return Err(LoadError::Protocol {
+            name: "loaded-image",
+            status,
+        });
+    }
+    // SAFETY: The loaded-image protocol is valid until boot services exit.
+    let device_handle = unsafe { (*(loaded as *const LoadedImage)).device_handle };
+
+    let mut filesystem: *mut c_void = ptr::null_mut();
+    // SAFETY: The device handle came from the loaded-image protocol and the
+    // simple-file-system GUID is architectural.
+    let status = unsafe {
+        (services.handle_protocol)(device_handle, &SIMPLE_FILE_SYSTEM_GUID, &mut filesystem)
+    };
+    if status != SUCCESS || filesystem.is_null() {
+        return Err(LoadError::Protocol {
+            name: "simple-file-system",
+            status,
+        });
+    }
+
+    let mut root: *mut FileProtocol = ptr::null_mut();
+    // SAFETY: `filesystem` points to a live simple-file-system interface.
+    let status = unsafe {
+        ((*(filesystem as *const SimpleFileSystem)).open_volume)(
+            filesystem as *mut SimpleFileSystem,
+            &mut root,
+        )
+    };
+    if status != SUCCESS || root.is_null() {
+        return Err(LoadError::Protocol {
+            name: "file-system-volume",
+            status,
+        });
+    }
+
+    let mut file: *mut FileProtocol = ptr::null_mut();
+    // SAFETY: `root` is a live file handle and `path` is NUL-terminated UTF-16.
+    let status = unsafe { ((*root).open)(root, &mut file, path.as_ptr(), FILE_MODE_READ, 0) };
+    // The root handle is no longer needed once the file is open.
+    // SAFETY: `root` is live and was opened by this function.
+    unsafe {
+        let _ = ((*root).close)(root);
+    }
+    if status != SUCCESS || file.is_null() {
+        return Err(LoadError::BootFileMissing {
+            path: display_path,
+            status,
+        });
+    }
+
+    let mut info = [0u8; FILE_INFO_BYTES];
+    let mut info_size = FILE_INFO_BYTES;
+    // SAFETY: `file` is live, `info` is writable for `info_size` bytes, and the
+    // file-info GUID is architectural.
+    let status = unsafe {
+        ((*file).get_info)(
+            file,
+            &FILE_INFO_GUID,
+            &mut info_size,
+            info.as_mut_ptr() as *mut c_void,
+        )
+    };
+    if status != SUCCESS || info_size < core::mem::size_of::<u64>() * 2 {
+        // SAFETY: `file` is live and opened by this function.
+        unsafe {
+            let _ = ((*file).close)(file);
+        }
+        return Err(LoadError::BootFileInfo {
+            path: display_path,
+            status,
+        });
+    }
+    // SAFETY: The firmware reported at least the fixed header. `file_size`
+    // follows `size`, and the read is unaligned because firmware buffers carry
+    // no Rust alignment guarantee.
+    let file_size = unsafe { ptr::read_unaligned(info.as_ptr().add(8) as *const u64) };
+    if file_size == 0 {
+        // SAFETY: `file` is live and opened by this function.
+        unsafe {
+            let _ = ((*file).close)(file);
+        }
+        return Err(LoadError::BootFileEmpty { path: display_path });
+    }
+    if file_size > limit {
+        // SAFETY: `file` is live and opened by this function.
+        unsafe {
+            let _ = ((*file).close)(file);
+        }
+        return Err(LoadError::BootFileTooLarge {
+            path: display_path,
+            size: file_size,
+            limit,
+        });
+    }
+
+    let pages = pages_for(file_size).ok_or(LoadError::BootFileTooLarge {
+        path: display_path,
+        size: file_size,
+        limit,
+    })?;
+    // SAFETY: Firmware contract; the allocation is retained for the hand-off.
+    let address = unsafe { allocate_below_4g(services, pages)? };
+    let mut read_size = file_size as usize;
+    // SAFETY: `address` is a live allocation of `pages` pages, which is at
+    // least `file_size` bytes, and `file` is live.
+    let status = unsafe { ((*file).read)(file, &mut read_size, address as *mut c_void) };
+    // SAFETY: `file` is live and opened by this function.
+    unsafe {
+        let _ = ((*file).close)(file);
+    }
+    if status != SUCCESS {
+        return Err(LoadError::BootFileRead {
+            path: display_path,
+            status,
+        });
+    }
+    if read_size as u64 != file_size {
+        return Err(LoadError::BootFileShort {
+            path: display_path,
+            expected: file_size,
+            actual: read_size as u64,
+        });
+    }
+
+    Ok(BootArtifact {
+        address,
+        length: file_size,
+    })
 }
 
 unsafe fn current_map_key(services: &BootServices, map_page: u64) -> Result<usize, LoadError> {
@@ -355,12 +681,71 @@ fn check_map_status(status: Status, size: usize) -> Result<(), LoadError> {
     }
 }
 
+/// Highest mode width the kernel back buffer is sized for.
+const MAX_GOP_WIDTH: u32 = 1920;
+/// Highest mode height the kernel back buffer is sized for.
+const MAX_GOP_HEIGHT: u32 = 1200;
+/// Bound on firmware mode enumeration.
+const MAX_GOP_MODES: u32 = 64;
+
+/// Picks the largest supported 4:3-or-wider mode within the back-buffer bounds.
+///
+/// Firmware often leaves the console at 1024x768 even when the adapter offers
+/// larger modes. Select a better mode explicitly; returning `None` keeps the
+/// current mode when firmware has nothing suitable.
+///
+/// # Safety
+///
+/// `gop` must be the live Graphics Output Protocol interface.
+unsafe fn preferred_gop_mode(gop: *mut GraphicsOutput) -> Option<u32> {
+    // SAFETY: The caller guarantees a live interface.
+    let current = unsafe { (*(*gop).mode).mode };
+    // SAFETY: Same invariant.
+    let max_mode = unsafe { (*(*gop).mode).max_mode }.min(MAX_GOP_MODES);
+    let mut best = None;
+    let mut best_area = 0u64;
+    for index in 0..max_mode {
+        let mut size = 0usize;
+        let mut info_pointer: *mut uefi::GraphicsOutputModeInformation = ptr::null_mut();
+        // SAFETY: GOP QueryMode fills the caller buffer information for a
+        // bounded mode index.
+        let status = unsafe { ((*gop).query_mode)(gop, index, &mut size, &mut info_pointer) };
+        if status != SUCCESS
+            || info_pointer.is_null()
+            || size < core::mem::size_of::<uefi::GraphicsOutputModeInformation>()
+        {
+            continue;
+        }
+        // SAFETY: QueryMode returned a valid descriptor of at least the
+        // expected size.
+        let info = unsafe { &*info_pointer };
+        if info.version != 0 || !matches!(info.pixel_format, 0 | 1) {
+            continue;
+        }
+        let width = info.horizontal_resolution;
+        let height = info.vertical_resolution;
+        if width < 1024
+            || height < 768
+            || width > MAX_GOP_WIDTH
+            || height > MAX_GOP_HEIGHT
+            || u64::from(width) * 3 < u64::from(height) * 4
+        {
+            continue;
+        }
+        let area = u64::from(width) * u64::from(height);
+        if area > best_area {
+            best_area = area;
+            best = Some(index);
+        }
+    }
+    best.filter(|mode| *mode != current)
+}
+
 /// Queries the firmware's linear framebuffer.
 ///
 /// Returns [`FramebufferInfo::NONE`] when GOP is absent or only supports
-/// blitting. The loader does not change the mode: the kernel accepts whatever
-/// mode the firmware selected, which keeps the boot path robust on real
-/// hardware and on QEMU.
+/// blitting. The loader requests the largest adapter mode within the kernel
+/// back-buffer bounds, then validates the firmware's reported aperture.
 unsafe fn query_framebuffer(services: &BootServices) -> FramebufferInfo {
     let mut interface: *mut c_void = ptr::null_mut();
     // SAFETY: Firmware supplies the boot-services table and the GOP GUID is
@@ -379,12 +764,27 @@ unsafe fn query_framebuffer(services: &BootServices) -> FramebufferInfo {
     // SAFETY: LocateProtocol returned a live GOP interface for this boot. Its
     // mode and mode-information pointers are valid until ExitBootServices.
     unsafe {
-        let gop = &*(interface as *const GraphicsOutput);
-        if gop.mode.is_null() {
+        let gop = interface as *mut GraphicsOutput;
+        if (*gop).mode.is_null() {
             serial_line!("loader: GOP mode pointer is null");
             return FramebufferInfo::NONE;
         }
-        let mode = &*gop.mode;
+        let previous = (*(*gop).mode).mode;
+        if let Some(preferred) = preferred_gop_mode(gop) {
+            let status = ((*gop).set_mode)(gop, preferred);
+            if status == SUCCESS {
+                serial_line!("loader: GOP mode {previous} -> {preferred} selected");
+            } else {
+                serial_line!(
+                    "loader: GOP SetMode({preferred}) failed status={status:#x}; keeping {previous}"
+                );
+            }
+        }
+        if (*gop).mode.is_null() {
+            serial_line!("loader: GOP mode pointer is null after SetMode");
+            return FramebufferInfo::NONE;
+        }
+        let mode = &*(*gop).mode;
         if mode.info.is_null()
             || mode.size_of_info < core::mem::size_of::<uefi::GraphicsOutputModeInformation>()
             || !(mode.info as usize)

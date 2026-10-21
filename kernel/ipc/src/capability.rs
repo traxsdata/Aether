@@ -266,6 +266,18 @@ impl CapTable {
         })
     }
 
+    /// Returns the number of granted capabilities.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.iter().filter(|slot| !slot.is_empty()).count()
+    }
+
+    /// Returns `true` when no capability has been granted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Returns `true` if at least one capability slot is free.
     ///
     /// Callers that must create an object before they can mint its capability
