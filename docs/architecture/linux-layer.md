@@ -257,8 +257,9 @@ exact AppImage digest, and the runtime version.
   embedded US keymap) installed at the host library's SONAME path in the Gate
   4 rootfs; it presents surfaces and receives input through the
   `/dev/aether-display` endpoint, and `make gate4-test` launches the windowed
-  `/usr/bin/gridcraft` from the signed AppImage. The completed windowed run
-  and its marker/screenshot evidence are still pending.
+  `/usr/bin/gridcraft` from the signed AppImage. The completed run at tested
+  commit `2b6ce00` (2026-10-21) recorded the present, input, save, portal,
+  revoke, and boot markers plus the QEMU screenshots.
 
-The compatibility database records GridCraft 0.8.0 as `unsupported` until these
-gates pass. A static test program is not an ArtCraft application.
+The compatibility database records GridCraft 0.8.0 as `limited` after the
+Gate 3 and Gate 4 runs. A static test program is not an ArtCraft application.

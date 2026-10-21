@@ -7,8 +7,8 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
-- Linux Gate 4 windowed-GridCraft slice (QEMU prototype scope; the completed
-  run is pending): `runtime/wayland/wayland_shim.c` builds as a drop-in
+- Linux Gate 4 windowed GridCraft is complete at QEMU prototype scope:
+  `runtime/wayland/wayland_shim.c` builds as a drop-in
   `libwayland-client.so.0` (plus a `libwayland-cursor.so.0` stub and an
   embedded US keymap) implementing the client ABI that winit/Smithay and Mesa's
   Vulkan Wayland WSI use, and `make gate4-runtime` installs it at the host
@@ -25,9 +25,21 @@ versioning scheme until the kernel ABI stabilises.
   and `AETHER_GATE4_REVOKE_OK` markers, captures a QEMU screenshot at
   `build/gate4/gridcraft.ppm` with a non-black pixel check, drives a pointer
   click plus the keys `4`, `2`, `ctrl-s` through the emulated PS/2 path, and
-  requires the post-exit revocation after the window close. This is not a
-  Wayland wire server, not a GUI compatibility claim, and the completed
-  windowed run with its marker/screenshot evidence is still pending.
+  requires the post-exit revocation after the window close. The completed run
+  at tested commit `2b6ce00` (2026-10-21, `qemu-q35-ovmf`) recorded
+  `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
+  `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
+  `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`,
+  `AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093
+  staging=sctmp+rename source=kernel`, the matching portal and revoke markers,
+  and `AETHER_BOOT_OK stage=kernel version=0.1.0`, with screenshots at
+  `build/gate4/gridcraft.ppm` and `build/gate4/gridcraft-after-input.ppm`.
+  Known prototype behavior: `ctrl-s` produces two staging/rename cycles because
+  press and release both translate, and input delivery is broadcast to matching
+  proxies/wrappers. This is not a Wayland wire server and not general Linux or
+  GUI compatibility; the GridCraft record remains `limited` because the Gate 2
+  production follow-up (ring-3 ABI/ELF/VMA, reproducible runtime pin, durable
+  AppImage install/overlay) is open.
 - Gate 4 kernel display slice: `/dev/aether-display` request/event records, a
   `WindowKind::Linux` compositor window with a kernel-owned presented surface,
   focus-scoped keyboard/pointer routing with window-relative coordinates, and

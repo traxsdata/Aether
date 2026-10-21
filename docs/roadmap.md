@@ -190,16 +190,43 @@ user space. It is not a VM. The target and security gates are in
   signed host-derived Gate 3 runtime rootfs. The imported AppImage tree is not
   yet merged into a per-application visible root, so this is a prototype run,
   not a production claim.
-- [ ] Gate 4 — windowed GridCraft: run `usr/bin/gridcraft` with Wayland,
-  software rendering, keyboard/pointer input, and workbook open/save through
-  the portal. The code slice is in the tree — the Wayland bridge, the kernel
-  display endpoint, the GUI portal contract, and the `make gate4-test` target
-  — but the gate completes only when that target passes with the full
-  kernel-owned marker set and the screenshot, which has not happened yet. At
-  the current head the guest reaches `AETHER_GATE4_DISPLAY_CREATE_OK`, receives
-  and acknowledges xdg-shell configure, and then parks without a
-  `AETHER_GATE4_PRESENT_OK`; host-only bridge tests do present real frames.
-  (EVIDENCE-PENDING: gate4-test marker transcript and tested commit hash)
+- [x] Gate 4 — windowed GridCraft (QEMU prototype scope): run
+  `usr/bin/gridcraft` with Wayland, software rendering, keyboard/pointer
+  input, and workbook open/save through the portal. `make gate4-test` passed
+  at tested code commit `2b6ce00` (this documentation change is a docs-only
+  descendant) against the pinned AppImage
+  `942096a29a534aa2503e9e7aa1816e952f7250e73d55f8f32afd077547617f77`
+  (19,024,376 bytes), with runtime profile `gate4-host-lavapipe` (Mesa
+  `lavapipe-26.0.8-1ubuntu0.3`, Wayland `1.24.0-2`) on `qemu-q35-ovmf` with
+  software VGA, no GPU, and no X11/D-Bus, on 2026-10-21. The kernel-owned
+  markers were:
+  `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
+  `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
+  `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`,
+  `AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093
+  staging=sctmp+rename source=kernel`,
+  `AETHER_GATE4_PORTAL_OK
+  path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_bytes=4089
+  source=kernel`,
+  `AETHER_GATE4_REVOKE_OK
+  path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_denials=1
+  write_denials=1 source=kernel`, and
+  `AETHER_BOOT_OK stage=kernel version=0.1.0`. The harness waited for
+  document-title readiness, clicked the window, sent `4`, `2`, and `ctrl-s`,
+  waited for the save, closed the window, and verified post-exit revocation.
+  QEMU screenshots: `build/gate4/gridcraft.ppm` (1280x800, 1,024,000
+  non-black pixels, sha256
+  `37547030161a3db4f0f0ffe9abb0e9afc54f5a8609958c5549467b6a962d782c`) and
+  `build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989 non-black
+  pixels, sha256
+  `dea314b57ab4d3a460afa243fffc173167103f071f971e9894826702fa7af55b`); the
+  post-input screenshot shows the real workbook with `GATE4-GUI.XLSX` in the
+  title. This proves that the unmodified GridCraft GUI starts through the
+  in-tree Wayland bridge, presents a real frame, receives keyboard and
+  pointer input, saves a workbook through the exact-file portal, and fails
+  closed after revocation. It does not prove production or general Linux
+  compatibility; the GridCraft record stays `limited` until the Gate 2
+  production follow-up is complete.
   - [x] Gate 4 portal slice (QEMU prototype scope): `make gate4-portal-test`
     seeds an exact-file read+write grant for
     `/run/aether/portal/dd8f879ba78d207c/gate4.xlsx`, launches a small static
@@ -257,9 +284,10 @@ user space. It is not a VM. The target and security gates are in
     toplevel configure, and frame callbacks — and maps presentation and input
     to fixed `PRESENT`/input records through `/dev/aether-display`. It is not
     a Wayland wire server; see
-    [the Wayland bridge](architecture/wayland-bridge.md). It is exercised end
-    to end only by the pending `make gate4-test` run.
-    (EVIDENCE-PENDING: end-to-end bridge exercise in the Gate 4 run)
+    [the Wayland bridge](architecture/wayland-bridge.md). The completed Gate 4
+    run exercises it end to end: the real GUI presents a frame, receives
+    input, and saves the workbook through the portal, with the kernel-owned
+    markers recorded above.
   - [x] Kernel display endpoint slice (QEMU prototype scope): `/dev/aether-display`
     with bounded `CREATE`/`PRESENT`/`DESTROY`, a Linux window in the ring-0
     compositor, focused-window input routing, and kernel-owned evidence
@@ -278,17 +306,28 @@ user space. It is not a VM. The target and security gates are in
     screenshot at `build/gate4/gridcraft.ppm` with a non-black pixel check,
     clicks the window, sends the keys `4`, `2`, `ctrl-s` through the emulated
     PS/2 path, closes the window, and requires the post-exit revocation. The
-    completed run has not happened yet; the transcript and screenshot are the
-    remaining evidence. (EVIDENCE-PENDING: marker transcript)
-    (EVIDENCE-PENDING: screenshot path and non-black pixel count)
+    completed run recorded `frames=1`, `checksum=0x7b2cafc5`, `keys=1`,
+    `pointer=24`, `focus=3`, a 4,093-byte save from a 4,089-byte portal read,
+    and one read and one write denial after revocation. Screenshot evidence is
+    `build/gate4/gridcraft.ppm` (1280x800, 1,024,000 non-black pixels) and
+    `build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989 non-black
+    pixels); the post-input image shows `GATE4-GUI.XLSX` in the title.
 - [x] Moved the GridCraft record from `unsupported` to `limited` after the
   Gate 3 run, with the exact digest, runtime profile, named tests, platform,
   and date.
 - [ ] Raise the GridCraft record above `limited` only after the relevant gate
   has a completed run, named tests, the exact AppImage digest, the runtime
-  version, and the platform/date. The GUI record upgrade is pending the
-  `make gate4-test` run. (EVIDENCE-PENDING: windowed-record digest, runtime
-  profile, named tests, platform, and test date)
+  version, and the platform/date. Gate 4 has now passed at QEMU prototype
+  scope with the windowed tests `linux.gridcraft.gui.present`,
+  `linux.gridcraft.gui.input`, `linux.gridcraft.portal.save`, and
+  `linux.gridcraft.portal.revoke`, the pinned AppImage digest above, runtime
+  profile `gate4-host-lavapipe`, platform `qemu-q35-ovmf`, and date
+  2026-10-21. The record nevertheless stays `limited` because the Gate 2
+  production follow-up is not complete: ABI/ELF/VMA work still runs in the
+  kernel, the runtime pin is host-derived, and AppImage installation/overlay
+  persistence are not durable. The [Linux compatibility
+  specification](specifications/linux-compatibility.md) forbids raising the
+  record until that follow-up closes.
 
 #### Import and runtime root
 
@@ -485,8 +524,9 @@ user space. It is not a VM. The target and security gates are in
   `wl_shm`, xdg-shell toplevel configure, and seat keyboard/pointer through
   the drop-in `libwayland-client.so.0` bridge (`runtime/wayland/wayland_shim.c`)
   over `/dev/aether-display`. Clipboard, a Wayland wire server, and output
-  globals beyond the bridge's fixed configuration remain unimplemented, and
-  the completed windowed run is pending.
+  globals beyond the bridge's fixed configuration remain unimplemented. The
+  completed Gate 4 run exercises the present, input, and portal paths end to
+  end; see the Gate 4 entry above.
 - [ ] Validate shared-memory buffers (size, stride, format, lifetime) before
   the compositor presents them; no framebuffer or DRM/PCI access from the
   app. Partial: the kernel display endpoint validates the guest range and
@@ -504,8 +544,8 @@ user space. It is not a VM. The target and security gates are in
 - [x] Software renderer bundled at QEMU prototype scope: the Gate 4 runtime
   rootfs packages Mesa lavapipe (Vulkan), its ICD, and LLVM, selected
   explicitly by the runtime profile; the Wayland WSI resolves through the
-  bridge to the display endpoint. Exercised only by the pending `make
-  gate4-test` run.
+  bridge to the display endpoint. Exercised by the completed `make gate4-test`
+  run recorded above.
 - [ ] Accelerated GPU service is a later optimization, not a dependency for the
   first GridCraft run.
 
@@ -572,9 +612,9 @@ smoke-tested.
 The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
 (QEMU scope), the **Gate 3 headless GridCraft run** (QEMU prototype scope), the
 **Gate 4 portal slice** (QEMU prototype scope), the **Gate 4 runtime rootfs
-packaging slice** (QEMU prototype scope), and the **Gate 4 Wayland-bridge and
-windowed-run slice** (QEMU prototype scope; the completed windowed run is
-pending). Boot markers cover signed
+packaging slice** (QEMU prototype scope), and the **Gate 4 windowed GridCraft
+run** (QEMU prototype scope, complete at tested commit `2b6ce00` on
+2026-10-21). Boot markers cover signed
 embedded-rootfs and loader-staged AppImage import, the pinned host-glibc runtime
 manifest, ring-3 `linuxd` launch approval and denial, demand paging,
 cross-process shared anonymous mappings, read-shared rootfs mappings,
@@ -607,15 +647,22 @@ immediately after validating the committed ZIP/XLSX bytes, and performs the
 post-exit revocation and fresh read/write/rename denials in the kernel. The
 Gate 4 windowed slice adds the Wayland bridge and the `make gate4-test`
 harness for the real `/usr/bin/gridcraft` GUI against the signed AppImage and
-the Mesa/lavapipe runtime rootfs. The completed windowed run — marker
-transcript, screenshot, and input trace — is still pending
-(EVIDENCE-PENDING: gate4-test marker transcript)
-(EVIDENCE-PENDING: screenshot path and non-black pixel count), and the
-compatibility record stays `limited` until that run.
+the Mesa/lavapipe runtime rootfs. The completed run recorded
+`AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
+`AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
+`AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`, a 4,093-byte save from a
+4,089-byte portal read (`AETHER_GATE4_SAVE_OK`), the matching
+`AETHER_GATE4_PORTAL_OK` and `AETHER_GATE4_REVOKE_OK` markers with one read
+and one write denial, and `AETHER_BOOT_OK stage=kernel version=0.1.0`. The
+screenshots are `build/gate4/gridcraft.ppm` (1280x800, 1,024,000 non-black
+pixels) and `build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989
+non-black pixels); the second shows `GATE4-GUI.XLSX` in the title. The
+compatibility record stays `limited` because the Gate 2 production follow-up
+is open, not because the windowed run is missing.
 
 Neither the Gate 2 prototype, the Gate 3 run, the Gate 4 portal slice, the
-Gate 4 runtime packaging slice, nor the Gate 4 windowed slice is a production
-compatibility claim. Linux syscall dispatch, ELF/library mapping, and VMA
+Gate 4 runtime packaging slice, nor the completed Gate 4 windowed run is a
+production compatibility claim. Linux syscall dispatch, ELF/library mapping, and VMA
 management remain in the kernel, so `linuxd` is a ring-3 launch-policy manager
 rather than the full ABI service described by the architecture. The imported
 AppImage tree is not yet merged into a per-application visible root, and the
@@ -629,10 +676,10 @@ uncompressed tree) because the bootstrap allocator never reclaims. Durable
 overlay storage on a persistent device, a user-installed AppImage picker,
 nested epoll, complete inotify/signal semantics, high-resolution timers,
 file-backed shared writeback, clipboard, interactive resize and window chrome,
-a desktop file chooser/D-Bus portal, and the completed windowed `make
-gate4-test` run remain open. These are tracked as the Gate 2 production
-follow-up and Gate 4 work; the bridge, the packaged runtime, and the portal do
-not make the GUI or arbitrary Linux applications compatible.
+and a desktop file chooser/D-Bus portal remain open. These are tracked as the
+Gate 2 production follow-up and Gate 4 work; the bridge, the packaged runtime,
+and the portal do not make the GUI or arbitrary Linux applications
+compatible.
 
 The remaining Phase 5/6 work is blocked on user-space process creation, a
 durable block store, network/audio services, the Wayland/software-renderer

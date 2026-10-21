@@ -31,13 +31,15 @@ grants, and the desktop is not a security authority.
 > acceleration, a general installer, Secure Boot, and an external security
 > review are not implemented. The Linux track imports the pinned GridCraft
 > AppImage and runs its headless `gridcraft-cli` at QEMU prototype scope
-> (Gate 3), and the Gate 4 windowed slice is in the tree: a drop-in
-> `libwayland-client.so.0` bridge over the `/dev/aether-display` endpoint,
-> Mesa lavapipe software Vulkan in the signed Gate 4 runtime rootfs, and a
-> `make gate4-test` windowed run with portal open/save. The completed windowed
-> run, its marker/screenshot evidence, and general application compatibility
-> are not demonstrated yet (EVIDENCE-PENDING: tested commit hash). Do not use
-> this tree for real data.
+> (Gate 3), and Gate 4 windowed GridCraft is complete at QEMU prototype scope:
+> a drop-in `libwayland-client.so.0` bridge over the `/dev/aether-display`
+> endpoint, Mesa lavapipe software Vulkan in the signed Gate 4 runtime rootfs,
+> and a passing `make gate4-test` windowed run with portal open/save at tested
+> commit `2b6ce00` (2026-10-21). The run recorded the kernel-owned present,
+> input, save, portal, revoke, and boot markers and QEMU screenshots; this is
+> still not general Linux application compatibility, and the GridCraft record
+> remains `limited` because the Gate 2 production follow-up is open. Do not
+> use this tree for real data.
 
 ## What works today
 
@@ -167,10 +169,15 @@ grants, and the desktop is not a security authority.
   library's SONAME path in the signed Gate 4 rootfs; it maps Wayland surfaces,
   xdg-shell configure, seat input, and frame callbacks onto the
   `/dev/aether-display` endpoint, beside Mesa lavapipe software Vulkan in the
-  same rootfs, and `make gate4-test` launches the windowed
-  `/usr/bin/gridcraft` from the AppImage with portal open/save
-  (EVIDENCE-PENDING: tested commit hash). The windowed run is pending, and
-  general Linux application compatibility is not implemented.
+  same rootfs. `make gate4-test` launches the windowed
+  `/usr/bin/gridcraft` from the AppImage with portal open/save and passed at
+  tested commit `2b6ce00` (2026-10-21), recording
+  `AETHER_GATE4_DISPLAY_CREATE_OK`, `AETHER_GATE4_PRESENT_OK`,
+  `AETHER_GATE4_INPUT_OK`, `AETHER_GATE4_SAVE_OK`,
+  `AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_REVOKE_OK`, and
+  `AETHER_BOOT_OK`. The GridCraft record remains `limited` because the Gate 2
+  production follow-up is open; general Linux application compatibility is
+  not implemented.
 - A compatibility database and classification harness (`aether-compat`) with
   verified/compatible/limited/unsupported records and named-test evidence.
 - A signed update manifest format (`aether-update`) with image digests,

@@ -1,7 +1,9 @@
 # PR #20 Gate 4 review — windowed GridCraft
 
-**Status:** in progress. This review records only evidence that has actually
-run. It is not a compatibility claim beyond the named tests.
+**Status:** Gate 4 met at QEMU prototype scope on 2026-10-21 at tested code
+commit `2b6ce00`; this documentation change is a docs-only descendant. This
+review records only evidence that has actually run. It is not a compatibility
+claim beyond the named tests.
 
 Related: [Linux compatibility](../specifications/linux-compatibility.md),
 [host-interface inventory](../specifications/linux-host-interface-inventory.md),
@@ -48,43 +50,72 @@ The full spreadsheet UI rendered at 1440×900 from `wl_shm` ARGB8888 buffers.
 This proves the client/protocol/renderer subset is viable; it does not prove
 Aether.
 
-## Current guest blocker (at the integration head)
+## Evidence
 
-The guest initializes the signed runtime rootfs, imports the pinned AppImage,
-opens `/dev/aether-display`, reaches `AETHER_GATE4_DISPLAY_CREATE_OK
-pid=7 size=1440x900`, and receives and acknowledges the xdg-shell configure.
-It then parks in the event loop without a `wl_surface.attach`/`commit` of a
-wgpu swapchain buffer, so no `AETHER_GATE4_PRESENT_OK` is emitted and the
-input/save/revoke markers never run. The host-only bridge, using the same
-client ABI, does present real 1440x900 ARGB frames and produces a real GUI
-screenshot. The remaining work is the guest event/presentation handoff:
-first-frame scheduling and Mesa WSI buffer-release/queue delivery over the
-kernel display endpoint. This is a presentation blocker, not a container,
-loader, portal, or rootfs failure.
+- [x] Exact commit tested: `2b6ce00` (`test(linux): synchronize the wait4
+      restart self-test`). The documentation commit that records this run is
+      a docs-only descendant.
+- [x] `make gate4-test` passed on `qemu-q35-ovmf` (software VGA, no GPU, no
+      X11/D-Bus), 2026-10-21, against the pinned GridCraft 0.8.0 AppImage
+      digest
+      `942096a29a534aa2503e9e7aa1816e952f7250e73d55f8f32afd077547617f77`
+      (19,024,376 bytes) and runtime profile `gate4-host-lavapipe` (Mesa
+      `lavapipe-26.0.8-1ubuntu0.3`, Wayland `1.24.0-2`).
+- [x] Marker transcript, captured from the run serial log:
 
-## Evidence to fill in
+```text
+AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900
+AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux
+AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3
+AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093 staging=sctmp+rename source=kernel
+AETHER_GATE4_PORTAL_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_bytes=4089 source=kernel
+AETHER_GATE4_REVOKE_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_denials=1 write_denials=1 source=kernel
+AETHER_BOOT_OK stage=kernel version=0.1.0
+```
 
-- [ ] Exact commit tested. (EVIDENCE-PENDING: tested commit hash)
-- [ ] `make gate4-test` pass/fail and marker transcript.
-      (EVIDENCE-PENDING: marker transcript)
-- [ ] `AETHER_GATE4_PRESENT_OK frames=... checksum=...`
-      (EVIDENCE-PENDING: present marker values)
-- [ ] QEMU screenshot path/dimensions/sha256 and non-black pixel count at
-      `build/gate4/gridcraft.ppm`
-      (EVIDENCE-PENDING: screenshot path, dimensions, and non-black pixel count)
-- [ ] `AETHER_GATE4_INPUT_OK keys=... pointer=... focus=...`
-      (EVIDENCE-PENDING: input marker values)
-- [ ] `AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_SAVE_OK`,
-      `AETHER_GATE4_REVOKE_OK`. (EVIDENCE-PENDING: portal/save/revoke marker values)
-- [ ] Compatibility database record after the run. (EVIDENCE-PENDING: windowed
-      record digest, runtime profile, named tests, platform, and test date)
-- [ ] `make ci` result and anything not run. (EVIDENCE-PENDING: ci result)
+- [x] Present marker: `AETHER_GATE4_PRESENT_OK frames=1
+      checksum=0x7b2cafc5 source=linux`.
+- [x] QEMU screenshots:
+      `build/gate4/gridcraft.ppm` — 1280x800, 1,024,000 non-black pixels,
+      sha256
+      `37547030161a3db4f0f0ffe9abb0e9afc54f5a8609958c5549467b6a962d782c`;
+      `build/gate4/gridcraft-after-input.ppm` — 1280x800, 1,023,989 non-black
+      pixels, sha256
+      `dea314b57ab4d3a460afa243fffc173167103f071f971e9894826702fa7af55b`.
+      The post-input screenshot shows the real workbook with `GATE4-GUI.XLSX`
+      in the title.
+- [x] `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`. The harness waited
+      for document-title readiness, clicked the window, and sent `4`, `2`,
+      `ctrl-s` through the emulated PS/2 path.
+- [x] Portal, save, and revoke markers recorded above. The kernel read 4,089
+      bytes through
+      `/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx`, committed a
+      4,093-byte workbook to `/home/gate4-gui.xlsx` with `.sctmp` staging plus
+      rename, and recorded one read denial and one write denial after
+      revocation. The harness closed the window and verified the post-exit
+      revocation.
+- [x] Boot also passes `AETHER_LINUX_RESTART_OK` after the fixture
+      synchronization fix at `2b6ce00`.
+- [x] Compatibility database record after the run: GridCraft remains
+      `limited`, now naming `linux.gridcraft.gui.present`,
+      `linux.gridcraft.gui.input`, `linux.gridcraft.portal.save`, and
+      `linux.gridcraft.portal.revoke` with platform `qemu-q35-ovmf` and date
+      `2026-10-21`. The classification stays `limited` because the Gate 2
+      production follow-up is open.
+- [ ] `make ci` result and anything not run: final CI awaits the orchestrator;
+      this change does not claim a CI pass. The Gate 4 command above is the
+      windowed evidence.
 
 ## Known limitations
 
 - Host-derived runtime pin; not reproducible across hosts.
 - Mesa/lavapipe and the Wayland bridge are bundled binary/runtime components;
   their licences and provenance need a release review.
+- Ctrl+S currently produces two staging/rename cycles because press and
+  release both translate; the first commit emits the SAVE marker. This is
+  accepted prototype behavior, not a claim of single-commit semantics.
+- Input delivery is broadcast to matching proxies/wrappers; it is not yet
+  per-surface delivery.
 - No D-Bus/XDG desktop portal chooser: the gate uses an exact-file grant path
   and kernel-side revocation. An interactive chooser is follow-up.
 - No persistent block device: the overlay and grants are RAM-backed across the
@@ -94,4 +125,5 @@ loader, portal, or rootfs failure.
   kernel (Gate 2 production follow-up).
 - The compositor adapter remains ring 0.
 - No general Linux application compatibility is claimed. The GridCraft record
-  must not be raised above what the named tests support.
+  must not be raised above what the named tests support, and it remains
+  `limited` until the Gate 2 production follow-up closes.

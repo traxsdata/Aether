@@ -68,16 +68,16 @@ ledger, not a security boundary.
 | Aether Other | native | verified | Sibling-root denial test passes. |
 | Aether Package Verifier | native | verified | Signature, digest, and publisher tests pass on host and in the boot self-test. |
 | Notepad (Win32) | none | unsupported | No Windows runtime exists; the package verifier rejects `runtime=windows`. |
-| GridCraft 0.8.0 (AppImage) | linux-runtime-glibc-2.43 | limited | The headless `gridcraft-cli` Gate 3 run passes on QEMU with a read-only root and private overlay, including formula evaluation and a CSV round trip. The Gate 4 windowed slice (Wayland bridge, display endpoint, `make gate4-test` harness, portal save) is in the tree; the windowed GUI record is still pending the completed run. See [Linux compatibility](linux-compatibility.md). |
+| GridCraft 0.8.0 (AppImage) | linux-runtime-glibc-2.43 | limited | The headless `gridcraft-cli` Gate 3 run and the windowed Gate 4 run (`linux.gridcraft.gui.present`, `linux.gridcraft.gui.input`, `linux.gridcraft.portal.save`, `linux.gridcraft.portal.revoke`) pass on QEMU with a read-only root, private overlay, and portal open/save. The classification stays `limited` because the Gate 2 production follow-up (ring-3 ABI/ELF/VMA, a reproducible runtime pin, and durable AppImage install/overlay) is open. See [Linux compatibility](linux-compatibility.md). |
 
-A prepared upgrade line raises the GridCraft record to `compatible` with
-QEMU-scope windowed evidence only after a completed `make gate4-test` run, at
-which point `tests/compatibility/database.txt`, not this table, is edited. The
-windowed record must name the exact AppImage digest, the Gate 4 runtime
-profile, the windowed named tests, the platform, and the test date
-(EVIDENCE-PENDING: windowed-record digest, runtime profile, named tests,
-platform, and test date). Until that run, the record above stays `limited` and
-no GUI claim is made.
+Gate 4 passed at QEMU prototype scope on 2026-10-21, and the windowed record
+now names the exact AppImage digest, the Gate 4 runtime profile, the windowed
+named tests, the platform, and the test date. The record nevertheless stays
+`limited` because the Gate 2 production follow-up is not complete: ABI/ELF/VMA
+work remains in the kernel, the runtime pin is host-derived, and AppImage
+installation/overlay persistence are not durable. A future upgrade above
+`limited` edits `tests/compatibility/database.txt`, not this table, and
+requires that follow-up.
 
 ## Test suite
 

@@ -1,8 +1,8 @@
 # ADR-017: Linux application and AppImage runtime
 
-- **Status:** Accepted; Gate 3 headless GridCraft CLI runs at QEMU prototype
-  scope; the Gate 4 windowed slice is implemented in the tree with its
-  completed run pending; the production runtime remains incomplete
+- **Status:** Accepted; Gate 3 headless GridCraft CLI and Gate 4 windowed
+  GridCraft run at QEMU prototype scope; the production runtime remains
+  incomplete
 - **Date:** 2026-10-20
 - **Supersedes:** none
 - **Related:** [Linux compatibility](../specifications/linux-compatibility.md),
@@ -78,9 +78,9 @@ its missing interfaces are Gate 2 work. Gate 3 now runs the pinned
 evaluation and a CSV round trip through the private overlay). The Gate 4
 windowed slice — the in-app Wayland client bridge, the kernel display
 endpoint, the GUI portal contract, and the `make gate4-test` harness — is
-implemented at QEMU prototype scope with the completed windowed run pending
-(see the Gate 4 status section below). The production runtime and a merged
-per-application AppImage root remain open.
+implemented and passed at QEMU prototype scope on 2026-10-21 at tested commit
+`2b6ce00` (see the Gate 4 status section below). The production runtime and a
+merged per-application AppImage root remain open.
 
 ## Gate 4 windowed prototype (status)
 
@@ -107,15 +107,15 @@ exists in the tree:
   click and the keys `4`, `2`, `ctrl-s`, requiring the kernel-owned present,
   input, save, and revoke markers plus a non-blank screenshot.
 
-The completed windowed run — marker transcript, screenshot, and the tested
-commit — has not happened yet
-(EVIDENCE-PENDING: tested commit hash and marker transcript). Until it does,
-GridCraft stays `limited`, this is not Wayland or GUI compatibility, and
-arbitrary Linux applications remain unsupported. The limits that follow the
-run are unchanged: clipboard, interactive resize and window chrome, a D-Bus
-desktop file chooser, high-resolution timers, file-backed shared writeback,
-durable overlay storage, a user-supplied AppImage picker, a reproducible
-cross-host runtime pin, nested epoll, and complete inotify/signal semantics.
+The completed windowed run recorded the kernel-owned present, input, save,
+portal, revoke, and boot markers, the QEMU screenshots, and the tested commit
+(see the [PR #20 Gate 4 review](../reviews/pr-20-gate4.md)). GridCraft stays
+`limited`, this is not Wayland or GUI compatibility, and arbitrary Linux
+applications remain unsupported. The limits that follow the run are unchanged:
+clipboard, interactive resize and window chrome, a D-Bus desktop file chooser,
+high-resolution timers, file-backed shared writeback, durable overlay storage,
+a user-supplied AppImage picker, a reproducible cross-host runtime pin, nested
+epoll, and complete inotify/signal semantics.
 
 ## Consequences
 
