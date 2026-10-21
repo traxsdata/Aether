@@ -2477,7 +2477,7 @@ pub fn linux_trace_error(number: u64, result: i64) {
 #[cfg(feature = "gate4-gui-test")]
 pub fn linux_trace_syscall(number: u64, a0: u64, a1: u64) {
     const TRACE_LIMIT: usize = 1024;
-    const QUIET: [u64; 6] = [9, 10, 11, 25, 26, 12];
+    const QUIET: [u64; 5] = [9, 11, 25, 26, 12];
     static TRACED: AtomicUsize = AtomicUsize::new(0);
     if QUIET.contains(&number) {
         return;
