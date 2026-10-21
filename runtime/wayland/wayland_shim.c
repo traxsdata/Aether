@@ -383,6 +383,8 @@ struct wl_display {
     struct wl_proxy *keyboard;
     struct wl_proxy *pointer;
     struct wl_proxy *output;
+    /* Pointer/keyboard enter is a transition, not a per-motion event. */
+    int focused;
 };
 
 enum proxy_kind { KIND_NONE, KIND_SURFACE, KIND_SHM_POOL, KIND_BUFFER, KIND_XDG,
@@ -1087,8 +1089,8 @@ static uint32_t bridge_evdev(uint32_t code) {
     }
 }
 
-static void aether_focus(struct wl_display *dpy, int entered,
-                         int32_t x, int32_t y) {
+static int aether_focus(struct wl_display *dpy, int entered,
+                        int32_t x, int32_t y) {
     static struct wl_array empty_keys = { 0, 0, NULL };
     uint32_t serial = ++dpy->serial;
     /* A surface only becomes a window once it has an xdg role. Focus has to
@@ -1097,12 +1099,14 @@ static void aether_focus(struct wl_display *dpy, int entered,
      * more than one proxy for the same surface (wrappers), so announce the
      * focus for every role-bearing proxy. */
     struct wl_proxy *p;
+    int focused = 0;
     for (p = dpy->proxies; p; p = p->next) {
         if (strcmp(iface_name(p), "wl_surface") != 0 || !p->state)
             continue;
         struct surface_state *ss = p->state;
         if (!ss->xdg)
             continue;
+        focused++;
         if (dpy->keyboard) {
             if (entered)
                 emit_input_n(dpy, dpy->keyboard, 1, 3, (uintptr_t)serial,
@@ -1119,6 +1123,7 @@ static void aether_focus(struct wl_display *dpy, int entered,
             emit_input_n(dpy, dpy->pointer, 5, 0); /* frame */
         }
     }
+    return focused;
 }
 
 static void aether_key(struct wl_display *dpy,
@@ -1180,8 +1185,12 @@ static int aether_read_events(struct wl_display *dpy) {
                 dpy->pending_configure = 1;
             break;
         case AETHER_EV_ENTER:
+            if (!dpy->focused && aether_focus(dpy, 1, ev.x, ev.y) > 0)
+                dpy->focused = 1;
+            break;
         case AETHER_EV_POINTER_MOTION:
-            aether_focus(dpy, 1, ev.x, ev.y);
+            if (!dpy->focused && aether_focus(dpy, 1, ev.x, ev.y) > 0)
+                dpy->focused = 1;
             if (dpy->pointer) {
                 emit_input_n(dpy, dpy->pointer, 2, 3, (uintptr_t)ev.serial,
                        (uintptr_t)bridge_fixed(ev.x),
@@ -1190,7 +1199,10 @@ static int aether_read_events(struct wl_display *dpy) {
             }
             break;
         case AETHER_EV_LEAVE:
-            aether_focus(dpy, 0, ev.x, ev.y);
+            if (dpy->focused) {
+                dpy->focused = 0;
+                (void)aether_focus(dpy, 0, ev.x, ev.y);
+            }
             break;
         case AETHER_EV_KEY:
             aether_key(dpy, &ev);

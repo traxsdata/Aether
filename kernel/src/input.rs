@@ -395,6 +395,13 @@ pub fn next_event() -> Option<KeyEvent> {
     unsafe { (*QUEUE.0.get()).pop() }
 }
 
+/// Returns `true` when pointer motion is waiting for the desktop service.
+pub fn pointer_pending() -> bool {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked while the queue state is sampled.
+    unsafe { !(*POINTER_EVENTS.0.get()).is_empty() }
+}
+
 /// Drains queued keys into the desktop service.
 pub fn poll() {
     for _ in 0..QUEUE_LEN {

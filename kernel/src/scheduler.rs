@@ -7356,14 +7356,23 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         tasks[current].state = TaskState::Ready;
     }
 
-    // Round-robin over ready tasks; use the idle task only when nothing else
-    // is runnable. This keeps the boot tests progressing.
+    // Round-robin over ready tasks, but let the idle task consume pending
+    // pointer input first. The idle task owns the desktop/compositor; without
+    // this preference a busy software-rendered Linux client can delay cursor
+    // updates for many ticks.
     let mut next = current;
-    for step in 1..=MAX_TASKS {
-        let index = (current + step) % MAX_TASKS;
-        if tasks[index].state == TaskState::Ready {
-            next = index;
-            break;
+    if current != 0
+        && crate::input::pointer_pending()
+        && matches!(tasks[0].state, TaskState::Ready | TaskState::Running)
+    {
+        next = 0;
+    } else {
+        for step in 1..=MAX_TASKS {
+            let index = (current + step) % MAX_TASKS;
+            if tasks[index].state == TaskState::Ready {
+                next = index;
+                break;
+            }
         }
     }
     if next == current && tasks[current].state != TaskState::Ready {
