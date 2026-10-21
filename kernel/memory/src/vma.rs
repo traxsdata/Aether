@@ -218,7 +218,7 @@ impl VmaTable {
             .find(|entry| entry.is_none())
             .ok_or(VmaError::OutOfSpace)?;
         *slot = Some(Vma { start, end, prot });
-        self.sort();
+        self.compact();
         Ok(())
     }
 
@@ -337,8 +337,37 @@ impl VmaTable {
                 *slot = Some(fragment);
             }
         }
-        self.sort();
+        self.compact();
         Ok(())
+    }
+
+    /// Sorts the table and coalesces adjacent areas with equal protections.
+    ///
+    /// Linux merges neighbouring VMAs, and clients such as the LLVM JIT make
+    /// many small mappings and protection changes. Without the merge the
+    /// fixed table fills with fragments and later `mmap`/`mprotect` calls fail
+    /// with `ENOMEM` even though the address space is free.
+    fn compact(&mut self) {
+        self.sort();
+        let mut write = 0usize;
+        for read in 0..MAX_VMAS {
+            let Some(current) = self.entries[read] else {
+                continue;
+            };
+            if write > 0
+                && let Some(previous) = self.entries[write - 1].as_mut()
+                && previous.end == current.start
+                && previous.prot == current.prot
+            {
+                previous.end = current.end;
+                continue;
+            }
+            self.entries[write] = Some(current);
+            write += 1;
+        }
+        for entry in self.entries[write..].iter_mut() {
+            *entry = None;
+        }
     }
 
     fn sort(&mut self) {
@@ -359,9 +388,8 @@ fn validate_protection(prot: u32) -> Result<(), VmaError> {
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return Err(VmaError::InvalidProtection);
     }
-    if prot & (PROT_WRITE | PROT_EXEC) == (PROT_WRITE | PROT_EXEC) {
-        return Err(VmaError::InvalidProtection);
-    }
+    // Like Linux, allow writable+executable areas: the LLVM section allocator
+    // requests them directly when it does not use a two-step W^X mapping.
     Ok(())
 }
 
