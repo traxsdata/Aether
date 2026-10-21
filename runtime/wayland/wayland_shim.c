@@ -542,16 +542,6 @@ static void queue_event_raw(struct wl_event_queue *q, struct wl_proxy *target,
     signal_fd(target->display);
 }
 
-static void queue_event_all(struct wl_display *dpy, struct wl_proxy *target,
-                            uint32_t opcode, const union wl_argument *args,
-                            int nargs) {
-    struct wl_event_queue *q;
-    if (!dpy || !target)
-        return;
-    for (q = &dpy->default_queue; q; q = q->next)
-        queue_event_raw(q, target, opcode, args, nargs);
-}
-
 /* Build an event from nargs already-encoded argument words. */
 static void emit_n(struct wl_proxy *target, uint32_t opcode, int nargs, ...) {
     union wl_argument args[MAX_ARGS];
@@ -823,18 +813,18 @@ static void send_xdg_configure(struct wl_proxy *xdg) {
         args[0].i = xdg->display->aether ? xdg->display->width : FAKE_WIDTH;
         args[1].i = xdg->display->aether ? xdg->display->height : FAKE_HEIGHT;
         args[2].a = &empty_states;
-        queue_event_all(xdg->display, xs->toplevel, 0, args, 3);
+        queue_event_raw(xs->toplevel->queue, xs->toplevel, 0, args, 3);
     }
     union wl_argument args[MAX_ARGS];
     memset(args, 0, sizeof(args));
     args[0].u = serial;
-    queue_event_all(xdg->display, xdg, 0, args, 1);
+    queue_event_raw(xdg->queue, xdg, 0, args, 1);
     if (xdg->display->main_surface && xdg->display->output) {
         union wl_argument surface_args[MAX_ARGS];
         memset(surface_args, 0, sizeof(surface_args));
         surface_args[0].o = xdg->display->output;
-        queue_event_all(xdg->display, xdg->display->main_surface, 0,
-                        surface_args, 1);
+        queue_event_raw(xdg->display->main_surface->queue,
+                        xdg->display->main_surface, 0, surface_args, 1);
     }
 }
 
@@ -996,6 +986,10 @@ static int aether_read_events(struct wl_display *dpy) {
             return 0;
         if ((size_t)n != sizeof(ev))
             continue;
+        /* Translating an event queues Wayland events for the application, so
+         * it serializes against marshaling threads under the display lock.
+         * The read itself stays outside the lock: it may block on the fd. */
+        pthread_mutex_lock(&dpy->lock);
         switch (ev.kind) {
         case AETHER_EV_CONFIGURE:
             dpy->width = (int)ev.x;
@@ -1044,6 +1038,7 @@ static int aether_read_events(struct wl_display *dpy) {
         default:
             break;
         }
+        pthread_mutex_unlock(&dpy->lock);
     }
 }
 
@@ -1234,7 +1229,9 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
                 struct buffer_state *bs = ss->pending_buffer->state;
                 if (proxy != dpy->cursor_surface)
                     present_buffer(dpy, bs);
-                queue_event_all(dpy, ss->pending_buffer, 0, NULL, 0);
+                /* release belongs to the buffer's own queue */
+                queue_event_raw(ss->pending_buffer->queue, ss->pending_buffer,
+                                0, NULL, 0);
                 ss->pending_buffer = NULL;
             } else {
                 struct wl_proxy *xdg = ss->xdg ? ss->xdg : dpy->xdg;
@@ -1248,7 +1245,8 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
                 union wl_argument args[MAX_ARGS];
                 memset(args, 0, sizeof(args));
                 args[0].u = (uint32_t)now_ms();
-                queue_event_all(dpy, ss->frame_callback, 0, args, 1);
+                queue_event_raw(ss->frame_callback->queue, ss->frame_callback,
+                                0, args, 1);
                 ss->frame_callback = NULL;
             }
         }
@@ -1371,16 +1369,20 @@ static struct wl_proxy *marshal_request(struct wl_proxy *proxy,
                  proxy->version, is_ctor ? " constructor" : "",
                  proxy->is_wrapper ? " wrapper" : "");
 
+    /* Snap off the constructor, then run the fake compositor under the
+     * display lock: handle_request mutates per-proxy state and queues the
+     * response events, so it must not interleave with the dispatch or read
+     * paths, which mutate the same queues under this lock. */
     pthread_mutex_lock(&dpy->lock);
     if (is_ctor) {
         created = proxy_new(dpy, iface, version, queue);
+        if (!created) {
+            pthread_mutex_unlock(&dpy->lock);
+            return NULL;
+        }
     }
-    pthread_mutex_unlock(&dpy->lock);
-
-    if (is_ctor && !created)
-        return NULL;
-
     handle_request(proxy, opcode, iface, version, args, created);
+    pthread_mutex_unlock(&dpy->lock);
 
     if (is_ctor)
         return created;
@@ -1907,18 +1909,16 @@ EXPORT int wl_display_dispatch_queue_pending(struct wl_display *dpy,
         shim_log("HOST_SHIM_DQP_ENTER queue=%p pending=%d\n", (void *)q,
                  queue_has_events(q));
     for (;;) {
-        struct wl_event_queue *queues[2] = { q, &dpy->default_queue };
         int did = 0;
-        for (int i = 0; i < 2; i++) {
-            while (queue_has_events(queues[i])) {
-                int r = dispatch_one(queues[i]);
-                if (r < 0)
-                    return -1;
-                if (r == 0)
-                    break;
-                dispatched++;
-                did = 1;
-            }
+        /* Pending dispatch is queue-scoped: drain this queue and no other. */
+        while (queue_has_events(q)) {
+            int r = dispatch_one(q);
+            if (r < 0)
+                return -1;
+            if (r == 0)
+                break;
+            dispatched++;
+            did = 1;
         }
         if (!did)
             break;
@@ -1961,11 +1961,6 @@ EXPORT int wl_display_dispatch_queue(struct wl_display *dpy,
             if (r != 0)
                 return 0;
         }
-        if (queue_has_events(&dpy->default_queue)) {
-            int r = dispatch_one(&dpy->default_queue);
-            if (r != 0)
-                return 0;
-        }
         if (dpy->error)
             return -1;
         if (wait_readable(dpy, -1) < 0)
@@ -2002,11 +1997,6 @@ EXPORT int wl_display_dispatch_queue_timeout(struct wl_display *dpy,
             if (r != 0)
                 return 0;
         }
-        if (queue_has_events(&dpy->default_queue)) {
-            int r = dispatch_one(&dpy->default_queue);
-            if (r != 0)
-                return 0;
-        }
         if (dpy->error)
             return -1;
         int r = wait_readable(dpy, timeout_ms);
@@ -2040,7 +2030,7 @@ EXPORT int wl_display_prepare_read_queue(struct wl_display *dpy,
     if (getenv("G4_SHIM_TRACE"))
         shim_log("HOST_SHIM_PREPARE queue=%p pending=%d\n",
                  (void *)q, queue_has_events(q));
-    if (queue_has_events(q) || queue_has_events(&dpy->default_queue)) {
+    if (queue_has_events(q)) {
         errno = EAGAIN;
         return -1;
     }
