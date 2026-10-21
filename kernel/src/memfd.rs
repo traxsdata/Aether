@@ -182,22 +182,34 @@ pub fn ftruncate(index: usize, length: usize) -> Result<(), i64> {
         let mut installed = 0usize;
         let result = crate::memory::with_frame_allocator(|allocator| {
             for page in old_pages..needed {
-                let Some(frame) = allocator.allocate() else {
-                    return Err(ENOMEM);
-                };
-                // SAFETY: The frame was just allocated, is identity-mapped,
-                // and is not reachable from any address space yet.
-                unsafe {
-                    core::ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE as usize)
-                };
                 let offset = (page as u64) * PAGE_SIZE;
-                if shared::register_memfd(frame, domain, (key, offset)).is_err() {
-                    let _ = allocator.deallocate(frame);
-                    return Err(ENOMEM);
-                }
+                // A previous mmap of the tail may already have installed a
+                // page-cache frame for this offset. Reuse it so writes through
+                // the descriptor and reads through the mapping stay coherent.
+                let frame = if let Some(existing) = shared::find_file(key, offset) {
+                    existing
+                } else {
+                    let Some(frame) = allocator.allocate() else {
+                        return Err(ENOMEM);
+                    };
+                    // SAFETY: The frame was just allocated, is identity-mapped,
+                    // and is not reachable from any address space yet.
+                    unsafe {
+                        core::ptr::write_bytes(
+                            frame.start_address() as *mut u8,
+                            0,
+                            PAGE_SIZE as usize,
+                        )
+                    };
+                    if shared::register_memfd(frame, domain, (key, offset)).is_err() {
+                        let _ = allocator.deallocate(frame);
+                        return Err(ENOMEM);
+                    }
+                    installed += 1;
+                    frame
+                };
                 object.pages[page] = Some(frame);
                 object.pages_len = page + 1;
-                installed += 1;
             }
             Ok(())
         });
