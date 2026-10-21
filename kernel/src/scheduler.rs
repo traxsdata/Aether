@@ -2325,6 +2325,11 @@ pub fn linux_futex_wait(
         .unwrap_or(0);
     #[cfg(feature = "gate4-gui-test")]
     trace_block("futex");
+    // A successful FUTEX_WAIT returns zero when a waker releases the task. The
+    // syscall entry leaves the number in RAX, so set the result before
+    // blocking; the timeout path overwrites it with ETIMEDOUT.
+    // SAFETY: `frame` is the live Linux syscall frame on this task's stack.
+    unsafe { (*frame).rax = 0 };
     tasks[current].state = TaskState::Blocked;
     yield_current(frame)
 }
