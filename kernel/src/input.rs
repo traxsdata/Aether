@@ -236,11 +236,12 @@ fn probe_mouse_inner() -> bool {
     let Some(mut config) = read_data(false) else {
         return false;
     };
-    // Preserve firmware's translation mode. Keep the keyboard clock disabled
-    // during the mouse exchange so a keystroke cannot be mistaken for an ACK.
+    // Preserve firmware's translation mode, enable both interrupt lines, and
+    // leave both device clocks enabled. Firmware may hand over with a clock
+    // disabled, which silently produces ACKs during probing but no IRQ12
+    // traffic on some hypervisors.
     config |= 0x03;
-    config |= 0x10;
-    config &= !0x20;
+    config &= !0x30;
     if !controller_command(0x60) || !controller_data(config) {
         return false;
     }
@@ -251,10 +252,29 @@ fn probe_mouse_inner() -> bool {
     if !mouse_command(0xf6) {
         return false; // set defaults
     }
+    // Defaults are not enough on every virtual PS/2 controller: set a known
+    // sample rate and resolution before enabling reporting.
+    if !mouse_command_with_argument(0xf3, 100) {
+        return false; // set sample rate
+    }
+    if !mouse_command_with_argument(0xe8, 0x03) {
+        return false; // set resolution to 8 counts/mm
+    }
     if !mouse_command(0xf4) {
         return false; // enable data reporting
     }
     true
+}
+
+/// Sends a two-byte mouse command and waits for the device ACK.
+fn mouse_command_with_argument(command: u8, argument: u8) -> bool {
+    if !mouse_command(command) {
+        return false;
+    }
+    if !controller_command(0xd4) || !controller_data(argument) {
+        return false;
+    }
+    matches!(read_data(true), Some(0xfa))
 }
 
 /// Initializes the input queues and PS/2 mouse.

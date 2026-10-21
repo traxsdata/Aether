@@ -681,12 +681,71 @@ fn check_map_status(status: Status, size: usize) -> Result<(), LoadError> {
     }
 }
 
+/// Highest mode width the kernel back buffer is sized for.
+const MAX_GOP_WIDTH: u32 = 1920;
+/// Highest mode height the kernel back buffer is sized for.
+const MAX_GOP_HEIGHT: u32 = 1200;
+/// Bound on firmware mode enumeration.
+const MAX_GOP_MODES: u32 = 64;
+
+/// Picks the largest supported 4:3-or-wider mode within the back-buffer bounds.
+///
+/// Firmware often leaves the console at 1024x768 even when the adapter offers
+/// larger modes. Select a better mode explicitly; returning `None` keeps the
+/// current mode when firmware has nothing suitable.
+///
+/// # Safety
+///
+/// `gop` must be the live Graphics Output Protocol interface.
+unsafe fn preferred_gop_mode(gop: *mut GraphicsOutput) -> Option<u32> {
+    // SAFETY: The caller guarantees a live interface.
+    let current = unsafe { (*(*gop).mode).mode };
+    // SAFETY: Same invariant.
+    let max_mode = unsafe { (*(*gop).mode).max_mode }.min(MAX_GOP_MODES);
+    let mut best = None;
+    let mut best_area = 0u64;
+    for index in 0..max_mode {
+        let mut size = 0usize;
+        let mut info_pointer: *mut uefi::GraphicsOutputModeInformation = ptr::null_mut();
+        // SAFETY: GOP QueryMode fills the caller buffer information for a
+        // bounded mode index.
+        let status = unsafe { ((*gop).query_mode)(gop, index, &mut size, &mut info_pointer) };
+        if status != SUCCESS
+            || info_pointer.is_null()
+            || size < core::mem::size_of::<uefi::GraphicsOutputModeInformation>()
+        {
+            continue;
+        }
+        // SAFETY: QueryMode returned a valid descriptor of at least the
+        // expected size.
+        let info = unsafe { &*info_pointer };
+        if info.version != 0 || !matches!(info.pixel_format, 0 | 1) {
+            continue;
+        }
+        let width = info.horizontal_resolution;
+        let height = info.vertical_resolution;
+        if width < 1024
+            || height < 768
+            || width > MAX_GOP_WIDTH
+            || height > MAX_GOP_HEIGHT
+            || u64::from(width) * 3 < u64::from(height) * 4
+        {
+            continue;
+        }
+        let area = u64::from(width) * u64::from(height);
+        if area > best_area {
+            best_area = area;
+            best = Some(index);
+        }
+    }
+    best.filter(|mode| *mode != current)
+}
+
 /// Queries the firmware's linear framebuffer.
 ///
 /// Returns [`FramebufferInfo::NONE`] when GOP is absent or only supports
-/// blitting. The loader does not change the mode: the kernel accepts whatever
-/// mode the firmware selected, which keeps the boot path robust on real
-/// hardware and on QEMU.
+/// blitting. The loader requests the largest adapter mode within the kernel
+/// back-buffer bounds, then validates the firmware's reported aperture.
 unsafe fn query_framebuffer(services: &BootServices) -> FramebufferInfo {
     let mut interface: *mut c_void = ptr::null_mut();
     // SAFETY: Firmware supplies the boot-services table and the GOP GUID is
@@ -705,12 +764,27 @@ unsafe fn query_framebuffer(services: &BootServices) -> FramebufferInfo {
     // SAFETY: LocateProtocol returned a live GOP interface for this boot. Its
     // mode and mode-information pointers are valid until ExitBootServices.
     unsafe {
-        let gop = &*(interface as *const GraphicsOutput);
-        if gop.mode.is_null() {
+        let gop = interface as *mut GraphicsOutput;
+        if (*gop).mode.is_null() {
             serial_line!("loader: GOP mode pointer is null");
             return FramebufferInfo::NONE;
         }
-        let mode = &*gop.mode;
+        let previous = (*(*gop).mode).mode;
+        if let Some(preferred) = preferred_gop_mode(gop) {
+            let status = ((*gop).set_mode)(gop, preferred);
+            if status == SUCCESS {
+                serial_line!("loader: GOP mode {previous} -> {preferred} selected");
+            } else {
+                serial_line!(
+                    "loader: GOP SetMode({preferred}) failed status={status:#x}; keeping {previous}"
+                );
+            }
+        }
+        if (*gop).mode.is_null() {
+            serial_line!("loader: GOP mode pointer is null after SetMode");
+            return FramebufferInfo::NONE;
+        }
+        let mode = &*(*gop).mode;
         if mode.info.is_null()
             || mode.size_of_info < core::mem::size_of::<uefi::GraphicsOutputModeInformation>()
             || !(mode.info as usize)

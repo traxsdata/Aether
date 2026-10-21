@@ -193,13 +193,22 @@ pub struct GraphicsOutputMode {
     pub frame_buffer_size: usize,
 }
 
+/// `EFI_GRAPHICS_OUTPUT_PROTOCOL.QueryMode`.
+pub type GraphicsOutputQueryMode = unsafe extern "efiapi" fn(
+    *mut GraphicsOutput,
+    u32,
+    *mut usize,
+    *mut *mut GraphicsOutputModeInformation,
+) -> Status;
+
+/// `EFI_GRAPHICS_OUTPUT_PROTOCOL.SetMode`.
+pub type GraphicsOutputSetMode = unsafe extern "efiapi" fn(*mut GraphicsOutput, u32) -> Status;
+
 /// `EFI_GRAPHICS_OUTPUT_PROTOCOL`.
-///
-/// Only the mode field is consumed; query/set/blt are kept in their ABI slots.
 #[repr(C)]
 pub struct GraphicsOutput {
-    pub query_mode: usize,
-    pub set_mode: usize,
+    pub query_mode: GraphicsOutputQueryMode,
+    pub set_mode: GraphicsOutputSetMode,
     pub blt: usize,
     pub mode: *mut GraphicsOutputMode,
 }

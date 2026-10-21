@@ -76,6 +76,13 @@ The generated `.vmx` sets these values, limits the advertised display to
 1920×1200 for the buffered path, disables the enhanced/USB pointer, and captures
 COM1 in `build/aether-vmware-serial.log`.
 
+Do not enable the VMware absolute pointing device or a USB mouse. Aether drives
+the legacy PS/2 auxiliary port (IRQ12); the loader also initializes the mouse
+sample rate and resolution. With an enabled `vmmouse` or USB pointer, Workstation
+can present a device the prototype does not drive, so the cursor appears stuck.
+Keep `vmmouse.present = "FALSE"`, `mouse.vusb.enable = "FALSE"`, and
+`usb.present = "FALSE"`.
+
 ## Framebuffer behaviour
 
 VMware's virtual SVGA adapter reports a GOP mode through UEFI. The kernel
@@ -86,8 +93,11 @@ The layout adapts to
 800×600, 1024×768, 1280×800, 1440×900, and 1920×1080; the work area is derived
 from the visible framebuffer rather than a hard-coded QEMU resolution.
 
-The loader reads the actual GOP stride (including padding) from the standard
-36-byte mode-information structure and rejects short descriptors/apertures.
+The loader asks GOP for the largest 4:3-or-wider mode within its 1920×1200
+back-buffer bound, then reads the actual stride (including padding) from the
+standard 36-byte mode-information structure and rejects short
+descriptors/apertures. Firmware that leaves the console at 1024×768 is upgraded
+when its mode table offers something larger.
 Boot ABI 3 follows UEFI: `0 = RGBX`, `1 = BGRX`. The graphics service converts
 its `0x00RRGGBB` colors for the reported format; it does not assume that all
 firmware is BGRX. Host tests exercise both formats and padded scan lines; the
