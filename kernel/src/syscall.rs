@@ -342,7 +342,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         63 => linux_uname(pml4, first),
         102 | 104 | 107 | 108 => 1000,
         158 => linux_arch_prctl(pml4, first, second),
-        202 => return linux_futex(frame, pml4, first, second, third),
+        202 => return linux_futex(frame, pml4),
         218 => 0,
         273 => linux_set_robust_list(pml4, first, second),
         274 => linux_get_robust_list(pml4, first, second, third),
@@ -358,13 +358,9 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     if scheduler::linux_is_appimage_task() && matches!(number, 283 | 286 | 287 | 319) {
         // The Gate 4 trace records the descriptor calls of the GUI so a
         // missing or failing call is visible instead of looking like an
-        // application hang.
-        serial_line!(
-            "linux: fdcall nr={} fd={} result={}",
-            number,
-            first,
-            result
-        );
+        // application hang. The line count is bounded because the emulated
+        // serial port is slow.
+        scheduler::linux_trace_fdcall(number, first, result);
     }
     // SAFETY: The assembly stub passes a live frame on this task's kernel
     // stack and keeps it valid until iretq.
@@ -2104,72 +2100,161 @@ fn linux_rseq(pml4: PhysFrame, address: u64, length: u64, flags: u64, signature:
     0
 }
 
-fn linux_futex(
-    frame: *mut InterruptFrame,
-    pml4: PhysFrame,
-    address: u64,
-    operation: u64,
-    value: u64,
-) -> *mut InterruptFrame {
-    match operation & 0x7f {
-        0 => {
-            if !address.is_multiple_of(4) || !linux_user_range_valid(pml4, address, 4, true) {
-                // SAFETY: The frame is live on the current kernel stack.
-                unsafe { (*frame).rax = LINUX_EFAULT as u64 };
-                return frame;
+fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFrame {
+    let uaddr = unsafe { (*frame).rdi };
+    let operation = unsafe { (*frame).rsi };
+    let value = unsafe { (*frame).rdx } as u32;
+    // `arg4` doubles as the relative timeout for WAIT and as the wake count of
+    // `UADDR2` for WAKE_OP / requeue (Linux documents this aliasing).
+    let arg4 = unsafe { (*frame).r10 };
+    let uaddr2 = unsafe { (*frame).r8 };
+    let arg5 = unsafe { (*frame).r9 } as u32;
+    // FUTEX_PRIVATE_FLAG (0x80) and FUTEX_CLOCK_REALTIME (0x100) are flags;
+    // the command is the low byte. Shared futexes behave like private ones in
+    // this single-CPU model: all waiters share one table keyed by address.
+    let command = operation & 0x7f;
+    let realtime = operation & 0x100 != 0;
+    match command {
+        0 | 9 => {
+            // FUTEX_WAIT / FUTEX_WAIT_BITSET. Linux rejects a mismatched word
+            // with EAGAIN; bitsets are ignored because every wake here wakes
+            // any waiter of the address.
+            if !address_valid(pml4, uaddr) {
+                return linux_result(frame, LINUX_EFAULT);
             }
             // SAFETY: The four-byte user word was validated above.
-            let observed = unsafe { core::ptr::read(address as *const u32) } as u64;
-            if observed != value {
-                unsafe { (*frame).rax = LINUX_EAGAIN as u64 };
-                return frame;
+            let observed = unsafe { core::ptr::read(uaddr as *const u32) } as u64;
+            if observed != u64::from(value) {
+                return linux_result(frame, LINUX_EAGAIN);
             }
-            let timeout_pointer = unsafe { (*frame).r10 };
-            let timeout_ticks = if timeout_pointer == 0 {
-                None
-            } else {
-                if !linux_user_range_valid(pml4, timeout_pointer, 16, false) {
-                    unsafe { (*frame).rax = LINUX_EFAULT as u64 };
-                    return frame;
-                }
-                // SAFETY: The complete timespec was validated as readable.
-                let raw = unsafe { core::slice::from_raw_parts(timeout_pointer as *const u8, 16) };
-                let seconds = i64::from_ne_bytes(raw[..8].try_into().unwrap_or([0; 8]));
-                let nanoseconds = i64::from_ne_bytes(raw[8..].try_into().unwrap_or([0; 8]));
-                if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
-                    unsafe { (*frame).rax = LINUX_EINVAL as u64 };
-                    return frame;
-                }
-                let Some(ticks) = (seconds as u64)
-                    .checked_mul(100)
-                    .and_then(|whole| whole.checked_add((nanoseconds as u64).div_ceil(10_000_000)))
-                else {
-                    unsafe { (*frame).rax = LINUX_EINVAL as u64 };
-                    return frame;
+            let mut relative = None;
+            if arg4 != 0 {
+                let Some((seconds, nanoseconds)) = read_timespec(pml4, arg4) else {
+                    return linux_result(frame, LINUX_EINVAL);
                 };
-                if ticks == 0 {
-                    unsafe { (*frame).rax = (-110i64) as u64 };
-                    return frame;
+                // CLOCK_REALTIME is served by the same single monotonic clock,
+                // a bounded simplification documented for this prototype.
+                let _ = realtime;
+                let Some(ticks) = timespec_ticks(seconds, nanoseconds) else {
+                    return linux_result(frame, LINUX_EINVAL);
+                };
+                if command == 9 {
+                    // WAIT_BITSET takes an absolute monotonic deadline; the
+                    // shared futex bookkeeping stores a remaining duration.
+                    if scheduler::ticks() >= ticks {
+                        return linux_result(frame, LINUX_ETIMEDOUT);
+                    }
+                    relative = Some(ticks - scheduler::ticks());
+                } else if ticks == 0 {
+                    // Linux reports ETIMEDOUT immediately for a relative
+                    // zero-length wait.
+                    return linux_result(frame, LINUX_ETIMEDOUT);
+                } else {
+                    relative = Some(ticks);
                 }
-                if scheduler::ticks().checked_add(ticks).is_none() {
-                    unsafe { (*frame).rax = LINUX_EINVAL as u64 };
-                    return frame;
-                }
-                Some(ticks)
             };
-            scheduler::linux_futex_wait(frame, address, timeout_ticks)
+            scheduler::futex_trace(command, uaddr, value, arg4, 0, 1);
+            scheduler::linux_futex_wait(frame, uaddr, relative)
         }
-        1 => {
-            let woken = scheduler::linux_futex_wake(address, value);
-            unsafe { (*frame).rax = woken as u64 };
-            frame
+        1 | 10 => {
+            // FUTEX_WAKE / FUTEX_WAKE_BITSET.
+            if !address_valid(pml4, uaddr) {
+                return linux_result(frame, LINUX_EFAULT);
+            }
+            let woken = scheduler::linux_futex_wake(uaddr, u64::from(value));
+            if woken == 0 {
+                scheduler::futex_trace(command, uaddr, value, arg4, 0, -2);
+            } else {
+                scheduler::futex_trace(command, uaddr, value, arg4, 0, woken);
+            }
+            linux_result(frame, woken)
+        }
+        4 => {
+            // FUTEX_CMP_REQUEUE: wake `value` waiters at `uaddr`, then move up
+            // to `arg4` further waiters to `uaddr2` when `*uaddr == arg5`.
+            if !address_valid(pml4, uaddr) || !address_valid(pml4, uaddr2) {
+                return linux_result(frame, LINUX_EFAULT);
+            }
+            // SAFETY: The four-byte user word was validated above.
+            let observed = unsafe { core::ptr::read(uaddr as *const u32) } as u64;
+            if observed != u64::from(arg5) {
+                return linux_result(frame, LINUX_EAGAIN);
+            }
+            let result = scheduler::linux_futex_requeue(uaddr, uaddr2, u64::from(value), arg4);
+            scheduler::futex_trace(command, uaddr, value, arg4, uaddr2, result);
+            linux_result(frame, result)
+        }
+        5 => {
+            // FUTEX_WAKE_OP: conditionally wake `value` waiters at `uaddr` and
+            // `arg4` waiters at `uaddr2`, per the packed algorithm in `arg5`.
+            // `arg5` encodes command|compare|operand|comparand exactly as the
+            // Linux `FUTEX_OP` macro does: 3-bit command, 4-bit comparison,
+            // 12-bit operand, 12-bit comparand.
+            if !address_valid(pml4, uaddr) || !address_valid(pml4, uaddr2) {
+                return linux_result(frame, LINUX_EFAULT);
+            }
+            // SAFETY: The four-byte user word was validated above.
+            let old = unsafe { core::ptr::read(uaddr2 as *const u32) };
+            let command = (arg5 >> 28) & 0xf;
+            let compare = (arg5 >> 24) & 0xf;
+            let operand = (arg5 >> 12) & 0xfff;
+            let comparand = arg5 & 0xfff;
+            let new_word = match command {
+                0 => operand,                             // FUTEX_OP_SET
+                1 => old.wrapping_add(operand),           // FUTEX_OP_ADD
+                2 => old | operand,                       // FUTEX_OP_OR
+                3 => !old & operand,                      // FUTEX_OP_ANDN
+                4 => old ^ operand,                       // FUTEX_OP_XOR
+                _ => {
+                    scheduler::futex_trace(command, uaddr, value, arg4, uaddr2, -22);
+                    return linux_result(frame, LINUX_ENOSYS);
+                }
+            };
+            let matched = match compare {
+                0 => old == comparand, // FUTEX_OP_CMP_EQ
+                1 => old != comparand, // FUTEX_OP_CMP_NE
+                2 => old < comparand,  // FUTEX_OP_CMP_LT
+                3 => old <= comparand, // FUTEX_OP_CMP_LE
+                4 => old > comparand,  // FUTEX_OP_CMP_GT
+                5 => old >= comparand, // FUTEX_OP_CMP_GE
+                _ => false,
+            };
+            let store_ok = if new_word != old {
+                write_user_u32(pml4, uaddr2, new_word).is_some()
+            } else {
+                true
+            };
+            if !store_ok {
+                return linux_result(frame, LINUX_EFAULT);
+            }
+            let first_woken = if matched {
+                scheduler::linux_futex_wake(uaddr, u64::from(value))
+            } else {
+                0
+            };
+            let second_woken = if matched {
+                scheduler::linux_futex_wake(uaddr2, u64::from(arg4))
+            } else {
+                0
+            };
+            scheduler::futex_trace(command, uaddr, value, arg4, uaddr2, first_woken + second_woken);
+            linux_result(frame, first_woken + second_woken)
         }
         _ => {
-            unsafe { (*frame).rax = LINUX_ENOSYS as u64 };
-            frame
+            // PI operations (6/7/11/12) and all others stay unsupported; the
+            // bounded trace shows whether a real thread ever needs them.
+            scheduler::futex_trace(command, uaddr, value, arg4, uaddr2, -38);
+            linux_result(frame, LINUX_ENOSYS)
         }
     }
 }
+
+/// Validates a four-byte futex word as writable user memory.
+fn address_valid(pml4: PhysFrame, address: u64) -> bool {
+    address.is_multiple_of(4) && linux_user_range_valid(pml4, address, 4, true)
+}
+
+const LINUX_ETIMEDOUT: i64 = -110;
 
 fn write_user_u32(pml4: PhysFrame, pointer: u64, value: u32) -> Option<()> {
     write_user_bytes(pml4, pointer, &value.to_le_bytes())

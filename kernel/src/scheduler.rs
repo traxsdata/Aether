@@ -2330,6 +2330,69 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
     woken as i64
 }
 
+/// Implements the wake-then-requeue half of `FUTEX_CMP_REQUEUE`.
+///
+/// Up to `wake` waiters on `address` become ready; every further waiter on the
+/// same address (up to `requeue` more) keeps blocking but switches its futex
+/// word to `target`, so a later `FUTEX_WAKE(target)` reaches it. This mirrors
+/// the POSIX condition-variable hand-off glibc performs on broadcast.
+pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -> i64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let mut woken = 0u64;
+    let mut moved = 0u64;
+    for task in tasks.iter_mut() {
+        if woken >= wake && moved >= requeue {
+            break;
+        }
+        if task.state != TaskState::Blocked || task.futex_address != address {
+            continue;
+        }
+        if woken < wake {
+            task.state = TaskState::Ready;
+            task.futex_address = 0;
+            task.futex_deadline = 0;
+            woken += 1;
+        } else {
+            task.futex_address = target;
+            task.futex_deadline = 0;
+            moved += 1;
+        }
+    }
+    (woken + moved) as i64
+}
+
+/// Bounded Gate 4 diagnostic: one line per distinct futex command and result.
+///
+/// The GUI application exercises futex intensively, so the trace aggregates
+/// repeats instead of printing a line per call. Each (command, result) pair
+/// logs once with its total worry count; the table is fixed size so the trace
+/// stays bounded no matter how busy the render loop becomes.
+#[cfg(feature = "gate4-gui-test")]
+pub fn futex_trace(command: u64, address: u64, value: u32, arg4: u64, target: u64, result: i64) {
+    // Bounded pairs: every supported command plus one overflow slot.
+    const PAIRS: usize = 16;
+    // SAFETY: Single CPU; the trace is called with interrupts masked.
+    static mut PAIRS: [u64; PAIRS] = [0; PAIRS];
+    let pairs = unsafe { &mut *core::ptr::addr_of_mut!(PAIRS) };
+    let slot = command as usize % PAIRS;
+    pairs[slot] = pairs[slot].wrapping_add(1);
+    // The first sighting of a command and every 4096-th repeat produce one
+    // line, which keeps even a pathological caller to a handful of lines per
+    // boot.
+    if pairs[slot] == 1 || pairs[slot] % 4096 == 0 {
+        serial_line!(
+            "linux: futex cmd={} addr={:#x} val={} arg4={:#x} target={:#x} result={} seen={}",
+            command,
+            address,
+            value,
+            arg4,
+            target,
+            result,
+            pairs[slot]
+        );
+    }
+}
+
 /// Parks the current task and rewinds the saved user context to the
 /// `syscall` instruction. When the task is woken, the syscall is re-executed
 /// and the handler resumes with its stored absolute deadline. This is the
@@ -2350,19 +2413,20 @@ pub fn linux_set_last_syscall(number: u64) {
     }
     let task = &mut tasks[current];
     task.last_syscall = number;
-    if task.tgid != APPIMAGE_TASK {
+}
+
+/// Traces one descriptor call of the Gate 4 GUI application.
+///
+/// The trace is bounded: the emulated serial port cannot carry an unbounded
+/// number of lines, and the application may repeat a call in a loop.
+#[cfg(feature = "gate4-gui-test")]
+pub fn linux_trace_fdcall(number: u64, fd: u64, result: i64) {
+    const TRACE_LIMIT: usize = 32;
+    static TRACED: AtomicUsize = AtomicUsize::new(0);
+    if TRACED.fetch_add(1, Ordering::Relaxed) >= TRACE_LIMIT {
         return;
     }
-    if task.traced_syscall == number {
-        return;
-    }
-    task.traced_syscall = number;
-    serial_line!(
-        "linux: syscall task={} tgid={} nr={}",
-        current,
-        task.tgid,
-        number
-    );
+    serial_line!("linux: fdcall nr={} fd={} result={}", number, fd, result);
 }
 
 /// Returns `true` when the current task belongs to the Gate 4 GUI program.
@@ -2380,9 +2444,16 @@ pub fn linux_is_appimage_task() -> bool {
 /// stuck in without flooding the serial log.
 #[cfg(feature = "gate4-gui-test")]
 fn trace_block(kind: &str) {
+    /// Upper bound on the number of trace lines, so the serial log stays
+    /// readable and the emulated serial port does not saturate.
+    const TRACE_LIMIT: usize = 32;
+    static TRACED: AtomicUsize = AtomicUsize::new(0);
     let tasks = unsafe { &*TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     if current >= tasks.len() || tasks[current].tgid != APPIMAGE_TASK {
+        return;
+    }
+    if TRACED.fetch_add(1, Ordering::Relaxed) >= TRACE_LIMIT {
         return;
     }
     let task = &tasks[current];
