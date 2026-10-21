@@ -695,6 +695,8 @@ static OVERLAYS: Global<[Option<LinuxOverlay>; OVERLAY_FILES]> =
 /// required 64-byte alignment headroom.
 #[repr(align(64))]
 #[derive(Clone, Copy)]
+// The bytes are only ever addressed through `fpu_save`/`fpu_restore`.
+#[allow(dead_code)]
 struct FpuState([u8; 1024]);
 const FPU_STATE_ZERO: FpuState = FpuState([0; 1024]);
 static FPU_STATES: Global<[FpuState; MAX_TASKS]> =
