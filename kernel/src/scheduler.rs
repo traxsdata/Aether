@@ -1555,6 +1555,10 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
         );
     }
     tasks[APPIMAGE_TASK] = app_task;
+    // The runtime and AppImage imports run with interrupts masked. Recover
+    // any PS/2 bytes the user generated during that window before the window
+    // starts accepting pointer input.
+    crate::input::rearm_mouse();
     serial_line!(
         "sched: linux appimage task ready pid={} pml4={:#018x} entry={:#018x} approved=linuxd dynamic={}",
         APPIMAGE_TASK,

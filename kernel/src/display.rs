@@ -152,6 +152,7 @@ struct DisplayState {
     keys_read: u32,
     pointer_read: u32,
     focus_read: u32,
+    button_logs: u32,
     injected: bool,
 }
 
@@ -183,6 +184,7 @@ impl DisplayState {
             keys_read: 0,
             pointer_read: 0,
             focus_read: 0,
+            button_logs: 0,
             injected: false,
         }
     }
@@ -200,7 +202,22 @@ impl DisplayState {
         self.serial = self.serial.wrapping_add(1);
         let mut event = event;
         event.serial = self.serial;
-        if self.len == QUEUE_LEN {
+        // Coalesce motion into the newest queued motion. A slow client under
+        // software rendering must not lose a button because a motion flood
+        // filled the bounded queue.
+        if event.kind == EVENT_POINTER_MOTION {
+            let mut offset = self.len;
+            while offset > 0 {
+                offset -= 1;
+                let index = (self.head + offset) % QUEUE_LEN;
+                if self.events[index].kind == EVENT_POINTER_MOTION {
+                    self.events[index] = event;
+                    scheduler::linux_wake_pollers();
+                    return;
+                }
+            }
+        }
+        if self.len == QUEUE_LEN && !self.drop_oldest_motion() {
             self.head = (self.head + 1) % QUEUE_LEN;
             self.len -= 1;
         }
@@ -208,6 +225,28 @@ impl DisplayState {
         self.events[index] = event;
         self.len += 1;
         scheduler::linux_wake_pollers();
+    }
+
+    /// Removes the oldest queued motion event, preserving buttons and keys.
+    fn drop_oldest_motion(&mut self) -> bool {
+        let mut offset = 0;
+        while offset < self.len {
+            let index = (self.head + offset) % QUEUE_LEN;
+            if self.events[index].kind == EVENT_POINTER_MOTION {
+                for shift in offset..self.len - 1 {
+                    let from = (self.head + shift + 1) % QUEUE_LEN;
+                    let to = (self.head + shift) % QUEUE_LEN;
+                    self.events[to] = self.events[from];
+                }
+                self.len -= 1;
+                if self.len == 0 {
+                    self.head = 0;
+                }
+                return true;
+            }
+            offset += 1;
+        }
+        false
     }
 
     fn dequeue(&mut self) -> Option<DisplayEvent> {
@@ -738,7 +777,10 @@ pub fn sync_input(
                 ..DisplayEvent::EMPTY
             });
             state.last_pointer = (relative_x, relative_y);
-            state.last_buttons = buttons;
+            // Leave the previous button state empty so a click that also
+            // focuses the window is delivered rather than swallowed by the
+            // focus transition.
+            state.last_buttons = 0;
         } else if !is_focused && state.focused {
             state.focused = false;
             state.enqueue(DisplayEvent {
@@ -773,6 +815,16 @@ pub fn sync_input(
         if changed & 0x7 != 0 {
             for bit in 0..3 {
                 if changed & (1 << bit) != 0 {
+                    if state.button_logs < 12 {
+                        state.button_logs += 1;
+                        serial_line!(
+                            "display: pointer button code={} state={} x={} y={}",
+                            bit,
+                            buttons & (1 << bit) != 0,
+                            relative_x,
+                            relative_y
+                        );
+                    }
                     state.enqueue(DisplayEvent {
                         kind: EVENT_POINTER_BUTTON,
                         code: bit + 1,

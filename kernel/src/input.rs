@@ -249,12 +249,18 @@ fn probe_mouse_inner() -> bool {
         return false;
     }
 
+    configure_mouse_reporting()
+}
+
+/// Programs a known mouse reporting mode.
+///
+/// Defaults are not enough on every virtual PS/2 controller: set the highest
+/// standard sample rate and 8 counts/mm before enabling reporting.
+fn configure_mouse_reporting() -> bool {
     if !mouse_command(0xf6) {
         return false; // set defaults
     }
-    // Defaults are not enough on every virtual PS/2 controller: set a known
-    // sample rate and resolution before enabling reporting.
-    if !mouse_command_with_argument(0xf3, 100) {
+    if !mouse_command_with_argument(0xf3, 200) {
         return false; // set sample rate
     }
     if !mouse_command_with_argument(0xe8, 0x03) {
@@ -264,6 +270,27 @@ fn probe_mouse_inner() -> bool {
         return false; // enable data reporting
     }
     true
+}
+
+/// Recovers the mouse after a long interrupt-disabled boot phase.
+///
+/// Kernel imports can run for seconds with interrupts masked. A user moving
+/// the mouse during that window overruns the controller's one-byte output
+/// register and desynchronizes the packet decoder. Discard stale bytes, reset
+/// the decoder, and re-send the reporting configuration before the Linux
+/// window starts accepting input.
+pub fn rearm_mouse() {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked and this is the only writer.
+    unsafe {
+        if !(*MOUSE.0.get()).available {
+            return;
+        }
+        flush_output();
+        (*MOUSE.0.get()).decoder.reset();
+    }
+    let ok = configure_mouse_reporting();
+    serial_line!("input: ps2 mouse rearmed={}", ok);
 }
 
 /// Sends a two-byte mouse command and waits for the device ACK.
