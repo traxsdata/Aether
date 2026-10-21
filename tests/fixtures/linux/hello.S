@@ -2135,6 +2135,26 @@ after_thread:
     syscall
 
     /* ---- SA_RESTART wait4 vs EINTR ---- */
+    /* The handshake between the parent and the child runs through a shared
+     * page. The child may only signal after the parent has named it there,
+     * so the signal cannot be delivered before the parent blocks in wait4.
+     * The parent still retries the attempt when the signal arrives early:
+     * the wait then returns the child instead of EINTR, which the attempt
+     * detects and starts over. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx                /* PROT_READ|PROT_WRITE */
+    mov $0x21, %r10             /* MAP_SHARED|MAP_ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_restart
+    mov %rax, 0x508(%r12)       /* the shared handshake page */
+    movq $0, 0(%rax)
+    movq $0, 8(%rax)
+
     lea restart_handler(%rip), %rax
     mov %rax, 0xa0(%r12)
     movq $0x14000000, 0xa8(%r12) /* SA_RESTORER|SA_RESTART */
@@ -2158,6 +2178,8 @@ after_thread:
     js fail_restart
     jz restart_child
     mov %rax, %r14
+    mov 0x508(%r12), %r13       /* the shared handshake page */
+    movq %r14, 0(%r13)          /* release the child */
     mov %r14, %rdi
     mov %rsp, %rsi
     xor %rdx, %rdx
@@ -2182,6 +2204,12 @@ after_thread:
     syscall
     test %rax, %rax
     jne fail_restart
+    movl $0, 0x504(%r12)        /* the attempt counter */
+
+restart_eintr_attempt:
+    movl $0, 0x500(%r12)        /* exactly one delivery per attempt */
+    mov 0x508(%r12), %r13       /* the shared handshake page */
+    movq $0, 0(%r13)            /* no child is released yet */
     sub $16, %rsp
     mov $57, %rax
     syscall
@@ -2189,15 +2217,31 @@ after_thread:
     js fail_restart
     jz interrupt_child
     mov %rax, %r14
+    movq %r14, 0(%r13)          /* release the child */
+    mov %r14, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    mov $61, %rax               /* blocking wait4 without SA_RESTART */
+    syscall
+    cmp $-4, %rax
+    je restart_eintr_interrupted
+    /* The signal was delivered before the parent blocked, so the wait
+     * returned the child instead of EINTR. Reap the child and try again. */
     mov %r14, %rdi
     mov %rsp, %rsi
     xor %rdx, %rdx
     xor %r10, %r10
     mov $61, %rax
     syscall
-    cmp $-4, %rax
-    jne fail_restart
-    cmpl $2, 0x500(%r12)
+    add $16, %rsp
+    incl 0x504(%r12)
+    cmpl $8, 0x504(%r12)
+    jle restart_eintr_attempt
+    jmp fail_restart
+
+restart_eintr_interrupted:
+    cmpl $1, 0x500(%r12)        /* the handler ran exactly once */
     jne fail_restart
     mov %r14, %rdi              /* reap the child after EINTR */
     mov %rsp, %rsi
@@ -2216,16 +2260,30 @@ after_thread:
     mov $restart_message_len, %rdx
     syscall
 
+    /* Release the handshake page so the shared-VMA quota test below still
+     * observes the full per-domain allowance. */
+    mov 0x508(%r12), %rdi
+    mov $4096, %rsi
+    mov $11, %rax
+    syscall
+
     jmp after_signals
 
 restart_child:
+    mov $39, %rax               /* getpid: the child's own identity */
+    syscall
+    mov %rax, %r15
+    mov 0x508(%r12), %r13       /* the shared handshake page */
+restart_child_wait:
+    cmpq %r15, 0(%r13)          /* has the parent released this child? */
+    je restart_child_go
+    mov $24, %rax               /* sched_yield */
+    syscall
+    jmp restart_child_wait
+restart_child_go:
     mov $110, %rax              /* getppid */
     syscall
     mov %rax, %r13
-    mov $2000000, %ecx
-14:
-    dec %ecx
-    jne 14b
     mov %r13, %rdi
     mov $10, %rsi
     mov $62, %rax
@@ -2240,6 +2298,17 @@ restart_child:
     jmp 15b
 
 interrupt_child:
+    mov $39, %rax               /* getpid: the child's own identity */
+    syscall
+    mov %rax, %r15
+    mov 0x508(%r12), %r13       /* the shared handshake page */
+interrupt_child_wait:
+    cmpq %r15, 0(%r13)          /* has the parent released this child? */
+    je interrupt_child_go
+    mov $24, %rax               /* sched_yield */
+    syscall
+    jmp interrupt_child_wait
+interrupt_child_go:
     mov $110, %rax
     syscall
     mov %rax, %r13
@@ -3431,7 +3500,14 @@ g2_shared_vma_loop:
     mov $9, %rax
     xor %rdi, %rdi
     mov $4096, %rsi
-    mov $3, %rdx
+    /* Alternate the protection so adjacent entries stay distinct: the VMA
+     * table coalesces neighbours with equal protections, and this test
+     * exercises the per-entry shared quota rather than the table's capacity. */
+    mov $1, %edx
+    test $1, %r13
+    jz g2_shared_vma_prot_ready
+    mov $3, %edx
+g2_shared_vma_prot_ready:
     mov $0x21, %r10             /* MAP_SHARED|MAP_ANONYMOUS */
     mov $-1, %r8
     xor %r9, %r9
@@ -3475,7 +3551,13 @@ g2_vma_loop:
     mov $9, %rax
     xor %rdi, %rdi
     mov $4096, %rsi
-    mov $3, %rdx
+    /* Keep the entries distinct for the same reason as the shared quota
+     * above: equal-protection neighbours coalesce into one VMA. */
+    mov $1, %edx
+    test $1, %r13
+    jz g2_vma_prot_ready
+    mov $3, %edx
+g2_vma_prot_ready:
     mov $0x22, %r10
     mov $-1, %r8
     xor %r9, %r9
