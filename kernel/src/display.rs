@@ -453,19 +453,22 @@ fn present(
     format: u32,
     buffer: u64,
 ) -> i64 {
-    let (expected_width, expected_height, expected_format) = match with_state(|state| {
+    let (expected_width, expected_height) = match with_state(|state| {
         if !state.open {
             return Err(EBADF);
         }
         if state.window.is_none() {
             return Err(EINVAL);
         }
-        Ok((state.width, state.height, state.format))
+        Ok((state.width, state.height))
     }) {
         Ok(value) => value,
         Err(error) => return error,
     };
-    if width != expected_width || height != expected_height || format != expected_format {
+    // CREATE declares the compositor-side format, but a client may attach
+    // either ARGB8888 (1, blended) or XRGB8888 (0, opaque) buffers. Both are
+    // accepted; the presented record's format selects the paint path.
+    if width != expected_width || height != expected_height || format > 1 {
         return EINVAL;
     }
     let Some(pixel_bytes) = width.checked_mul(4) else {
@@ -505,6 +508,7 @@ fn present(
             checksum = checksum.wrapping_mul(0x0100_0193);
         }
         state.presented = true;
+        state.format = format;
         state.frames = state.frames.saturating_add(1);
         if !state.present_marker {
             state.present_marker = true;

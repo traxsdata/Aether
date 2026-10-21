@@ -355,6 +355,11 @@ struct wl_proxy {
 struct wl_display {
     struct wl_proxy proxy; /* must be first: clients cast display to proxy */
     int fd;
+    int wake_fd;
+    pthread_t pump;
+    int pump_started;
+    volatile int shutdown;
+    pthread_mutex_t read_lock;
     uint32_t serial;
     uint32_t next_id;
     int error;
@@ -416,6 +421,7 @@ static uint32_t g_last_format;
 static wl_log_func_t g_log_handler;
 
 static void signal_fd(struct wl_display *dpy);
+static int aether_read_events(struct wl_display *dpy);
 
 static void stack_handler(int sig, siginfo_t *si, void *uc) {
     void *bt[64];
@@ -475,8 +481,11 @@ static void shim_log(const char *fmt, ...) {
 static void signal_fd(struct wl_display *dpy) {
     uint64_t one = 1;
     ssize_t r;
+    int fd = (dpy->wake_fd >= 0) ? dpy->wake_fd : dpy->fd;
+    if (fd < 0)
+        return;
     do {
-        r = write(dpy->fd, &one, sizeof(one));
+        r = write(fd, &one, sizeof(one));
     } while (r < 0 && errno == EINTR);
     (void)r; /* EAGAIN only means the counter is already readable */
 }
@@ -484,8 +493,11 @@ static void signal_fd(struct wl_display *dpy) {
 static void drain_fd(struct wl_display *dpy) {
     uint64_t value;
     ssize_t r;
+    int fd = (dpy->wake_fd >= 0) ? dpy->wake_fd : dpy->fd;
+    if (fd < 0)
+        return;
     do {
-        r = read(dpy->fd, &value, sizeof(value));
+        r = read(fd, &value, sizeof(value));
     } while (r < 0 && errno == EINTR);
 }
 
@@ -970,8 +982,14 @@ static void aether_key(struct wl_display *dpy,
 }
 
 static int aether_read_events(struct wl_display *dpy) {
+    int result = 0;
     if (!dpy || !dpy->aether)
         return 0;
+    /* The display fd has one consumer at a time.  In Aether mode a pump thread
+     * and the client may both notice readability, so serialize the actual
+     * reads; whichever wins translates the event and queues the Wayland
+     * record for the shared display state. */
+    pthread_mutex_lock(&dpy->read_lock);
     for (;;) {
         struct aether_display_event ev;
         ssize_t n = read(dpy->fd, &ev, sizeof(ev));
@@ -979,11 +997,12 @@ static int aether_read_events(struct wl_display *dpy) {
             if (errno == EINTR)
                 continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK)
-                return 0;
-            return -1;
+                break;
+            result = -1;
+            break;
         }
         if (n == 0)
-            return 0;
+            break;
         if ((size_t)n != sizeof(ev))
             continue;
         /* Translating an event queues Wayland events for the application, so
@@ -1040,6 +1059,30 @@ static int aether_read_events(struct wl_display *dpy) {
         }
         pthread_mutex_unlock(&dpy->lock);
     }
+    pthread_mutex_unlock(&dpy->read_lock);
+    return result;
+}
+
+/* Aether mode: the kernel endpoint is the only real event source.  Poll it and
+ * translate records as they arrive, then signal the local wake eventfd so a
+ * client blocked in poll(wl_display_get_fd()) runs its dispatch loop.  The pump
+ * deliberately does not poll the wake fd, so it can never consume a wake that
+ * another thread queued for the client. */
+static void *aether_pump_thread(void *arg) {
+    struct wl_display *dpy = arg;
+    while (!dpy->shutdown) {
+        struct pollfd pfd = { .fd = dpy->fd, .events = POLLIN };
+        int r = poll(&pfd, 1, 50);
+        if (r < 0 && errno != EINTR)
+            break;
+        if (dpy->shutdown)
+            break;
+        if (r > 0 && (pfd.revents & (POLLIN | POLLERR | POLLHUP))) {
+            aether_read_events(dpy);
+            signal_fd(dpy);
+        }
+    }
+    return NULL;
 }
 
 static void xdg_state_free(struct wl_proxy *p) {
@@ -1720,9 +1763,11 @@ static struct wl_display *display_alloc(int fd) {
     if (!dpy)
         return NULL;
     dpy->fd = fd;
+    dpy->wake_fd = -1;
     dpy->serial = 1;
     dpy->next_id = 2; /* id 1 is reserved for wl_display, as in libwayland */
     pthread_mutex_init(&dpy->lock, NULL);
+    pthread_mutex_init(&dpy->read_lock, NULL);
     dpy->proxy.display = dpy;
     dpy->proxy.interface = &wl_display_interface;
     dpy->proxy.id = 1;
@@ -1749,8 +1794,16 @@ EXPORT struct wl_display *wl_display_connect(const char *name) {
     dpy->aether = aether;
     dpy->width = 1440;
     dpy->height = 900;
-    if (aether)
+    if (aether) {
+        dpy->wake_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        if (dpy->wake_fd < 0 && getenv("G4_SHIM_TRACE"))
+            shim_log("AETHER_BRIDGE_WAKE_FD_FAILED errno=%d\n", errno);
         aether_create(dpy);
+        if (pthread_create(&dpy->pump, NULL, aether_pump_thread, dpy) == 0)
+            dpy->pump_started = 1;
+        else if (getenv("G4_SHIM_TRACE"))
+            shim_log("AETHER_BRIDGE_PUMP_FAILED errno=%d\n", errno);
+    }
     if (getenv("G4_SHIM_CRASH")) {
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
@@ -1780,6 +1833,12 @@ EXPORT void wl_display_disconnect(struct wl_display *dpy) {
     struct wl_event_queue *q, *qn;
     if (!dpy)
         return;
+    dpy->shutdown = 1;
+    signal_fd(dpy);
+    if (dpy->pump_started) {
+        pthread_join(dpy->pump, NULL);
+        dpy->pump_started = 0;
+    }
     aether_destroy(dpy);
     shim_log("HOST_SHIM_SUMMARY frames=%llu bytes=%llu checksum=0x%016llx "
              "size=%dx%d stride=%d format=%u\n",
@@ -1806,14 +1865,24 @@ EXPORT void wl_display_disconnect(struct wl_display *dpy) {
         free(q);
         q = qn;
     }
+    if (dpy->wake_fd >= 0)
+        close(dpy->wake_fd);
     if (dpy->fd >= 0)
         close(dpy->fd);
+    pthread_mutex_destroy(&dpy->read_lock);
     pthread_mutex_destroy(&dpy->lock);
     free(dpy);
 }
 
 EXPORT int wl_display_get_fd(struct wl_display *dpy) {
-    return dpy ? dpy->fd : -1;
+    if (!dpy)
+        return -1;
+    /* In Aether mode the kernel endpoint is consumed by the pump thread, so
+     * poll readiness is reported on the local wake eventfd instead. */
+    int fd = dpy->wake_fd >= 0 ? dpy->wake_fd : dpy->fd;
+    if (getenv("G4_SHIM_TRACE"))
+        shim_log("HOST_SHIM_GETFD fd=%d\n", fd);
+    return fd;
 }
 
 EXPORT int wl_display_flush(struct wl_display *dpy) {
@@ -1935,6 +2004,27 @@ EXPORT int wl_display_dispatch_pending(struct wl_display *dpy) {
 }
 
 static int wait_readable(struct wl_display *dpy, int timeout_ms) {
+    if (dpy->aether && dpy->wake_fd >= 0) {
+        struct pollfd pfds[2] = {
+            { .fd = dpy->wake_fd, .events = POLLIN },
+            { .fd = dpy->fd, .events = POLLIN },
+        };
+        int r;
+        do {
+            r = poll(pfds, 2, timeout_ms);
+        } while (r < 0 && errno == EINTR);
+        if (r <= 0)
+            return r;
+        if (pfds[1].revents & (POLLIN | POLLERR | POLLHUP)) {
+            if (aether_read_events(dpy) < 0)
+                return -1;
+        }
+        /* Return on a local wake even when the pump consumed the kernel
+         * record: queued Wayland events still need dispatching. */
+        if (pfds[0].revents & (POLLIN | POLLERR | POLLHUP))
+            drain_fd(dpy);
+        return 1;
+    }
     struct pollfd pfd = { .fd = dpy->fd, .events = POLLIN };
     int r;
     do {
@@ -2052,33 +2142,36 @@ EXPORT int wl_display_read_events(struct wl_display *dpy) {
         return -1;
     if (getenv("G4_SHIM_TRACE"))
         shim_log("HOST_SHIM_READ\n");
-    if (dpy->aether)
-        return aether_read_events(dpy) < 0 ? -1 : 0;
+    if (dpy->aether) {
+        int result = aether_read_events(dpy);
+        drain_fd(dpy);
+        return result < 0 ? -1 : 0;
+    }
     drain_fd(dpy);
     return 0;
 }
 
 EXPORT int wl_display_roundtrip_queue(struct wl_display *dpy,
                                       struct wl_event_queue *q) {
-    (void)q;
-    if (!dpy)
+    if (!dpy || !q)
         return -1;
-    if (dpy->aether && aether_read_events(dpy) < 0)
-        return -1;
+    if (dpy->aether) {
+        if (aether_read_events(dpy) < 0)
+            return -1;
+        drain_fd(dpy);
+    }
     /* Requests are answered synchronously, so every response caused by the
-     * caller's earlier requests is already queued.  A roundtrip drains all
-     * queues: the Rust backend keeps one queue for every proxy, and libwayland
-     * itself also queues callbacks on the display's default queue. */
+     * caller's earlier requests is already queued on the caller's queue.  A
+     * roundtrip must not drain other threads' queues: their listeners may
+     * require state (including thread-local dispatch state) that only the
+     * owning thread has set up. */
     for (;;) {
         int did = 0;
-        struct wl_event_queue *it;
-        for (it = &dpy->default_queue; it; it = it->next) {
-            while (queue_has_events(it)) {
-                int r = dispatch_one(it);
-                if (r <= 0)
-                    break;
-                did = 1;
-            }
+        while (queue_has_events(q)) {
+            int r = dispatch_one(q);
+            if (r <= 0)
+                break;
+            did = 1;
         }
         if (!did)
             break;

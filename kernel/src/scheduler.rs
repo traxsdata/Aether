@@ -2298,6 +2298,19 @@ fn wake_waiting_parent(child: usize) {
     }
 }
 
+/// Records the main thread's `clear_child_tid` pointer and returns its TID.
+///
+/// glibc calls `set_tid_address` to initialise the TCB `tid` field for the
+/// initial thread.  Returning `ENOSYS` leaves that field zero, which makes
+/// glibc's rwlock recursion checks treat a zero-initialised lock as if the
+/// caller already owned it (`EDEADLK`).
+pub fn linux_set_tid_address(pointer: u64) -> i64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    tasks[current].clear_child_tid = pointer;
+    current as i64
+}
+
 /// Blocks the current Linux task on a futex word.
 pub fn linux_futex_wait(
     frame: *mut InterruptFrame,
@@ -3025,7 +3038,12 @@ fn deliver_signal_to(index: usize, frame: *mut InterruptFrame) -> bool {
         {
             let top = base.saturating_add(size) & !15;
             if top > base && top <= USER_LIMIT {
+                // SysV enters the handler as if by `call`: the restorer word
+                // at [rsp] is the return address, so rsp must be 8 mod 16.
                 let candidate = (top - frame_size) & !15;
+                let Some(candidate) = candidate.checked_sub(8) else {
+                    return false;
+                };
                 if candidate >= base && paging::user_range_valid(pml4, candidate, frame_size, true)
                 {
                     frame_pointer = candidate;
@@ -3035,6 +3053,9 @@ fn deliver_signal_to(index: usize, frame: *mut InterruptFrame) -> bool {
         }
         if !used_altstack {
             let Some(candidate) = saved.rsp.checked_sub(frame_size).map(|value| value & !15) else {
+                return false;
+            };
+            let Some(candidate) = candidate.checked_sub(8) else {
                 return false;
             };
             if candidate < USER_BASE || !paging::user_range_valid(pml4, candidate, frame_size, true)
@@ -5404,6 +5425,17 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
 
 pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
     let pipe = linux_pipe_end(fd);
+    let eventfd = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+        task.linux_fds
+            .get(fd as usize)
+            .and_then(Option::as_ref)
+            .and_then(|file| match file.source {
+                LinuxFileSource::EventFd { index } => Some(index),
+                _ => None,
+            })
+    };
     let result = {
         let tasks = unsafe { &mut *TASKS.0.get() };
         let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
@@ -5518,6 +5550,13 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
         }
     }
     if result.is_ok() && pipe.is_some() {
+        refresh_epoll_edges(fd);
+    }
+    // A successful eventfd write makes the descriptor readable. Poll and
+    // epoll waiters must observe that transition; they re-evaluate readiness
+    // and park again, so a spurious wake is harmless.
+    if result.is_ok() && eventfd.is_some() {
+        linux_wake_pollers();
         refresh_epoll_edges(fd);
     }
     result
@@ -6924,8 +6963,13 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
     }
 
     if linux {
-        let signum = if vector == 14 { 7 } else { 11 };
-        let code = if vector == 14 { 1 } else { 0x80 };
+        // #PF and #GP are SIGSEGV; only #AC (alignment check) is SIGBUS.
+        let signum = if vector == 17 { 7 } else { 11 };
+        let code = if vector == 14 || vector == 17 {
+            1
+        } else {
+            0x80
+        };
         let fault_address = if vector == 14 { address } else { 0 };
         if linux_deliver_fault(frame, signum, code, fault_address) {
             let tasks = unsafe { &mut *TASKS.0.get() };

@@ -339,11 +339,11 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         12 => scheduler::linux_brk(first) as i64,
         131 => linux_sigaltstack(pml4, first, second),
         186 => scheduler::current_task() as i64,
+        218 => scheduler::linux_set_tid_address(first),
         63 => linux_uname(pml4, first),
         102 | 104 | 107 | 108 => 1000,
         158 => linux_arch_prctl(pml4, first, second),
         202 => return linux_futex(frame, pml4),
-        218 => 0,
         273 => linux_set_robust_list(pml4, first, second),
         274 => linux_get_robust_list(pml4, first, second, third),
         334 => linux_rseq(pml4, first, second, third, unsafe { (*frame).r10 }),
@@ -694,26 +694,15 @@ fn linux_mmap(
                 )
             })
         } else {
-            let Some((key, file_length)) = file_identity else {
+            let Some((key, _file_length)) = file_identity else {
                 let _ = scheduler::linux_vma_remove(start, length);
                 return LINUX_EINVAL;
             };
-            // A memfd mapping may not extend past the object's current size.
-            // Accessing a sparse tail would otherwise expose zero pages that
-            // are not backed by the object.
-            if crate::memfd::is_key(key) {
-                // A small memfd (SCTK creates a 2-byte pool) occupies one
-                // whole page. Linux permits a page-aligned mapping of that
-                // page; only reject ranges beyond the rounded object size.
-                let rounded = file_length
-                    .checked_add(aether_memory::PAGE_SIZE - 1)
-                    .map(|value| value & !(aether_memory::PAGE_SIZE - 1))
-                    .unwrap_or(file_length);
-                if offset.checked_add(length).is_none_or(|end| end > rounded) {
-                    let _ = scheduler::linux_vma_remove(start, length);
-                    return LINUX_EINVAL;
-                }
-            }
+            // Linux permits a shared mapping to extend past the current
+            // object size; pages beyond EOF are zero-filled on access (or
+            // fault with SIGBUS on a real kernel).  Mesa/lavapipe maps a
+            // 64 MiB memfd at a non-zero offset and grows/uses it afterwards,
+            // so rejecting the tail here fails device creation.
             crate::memory::with_frame_allocator(|allocator| {
                 map_shared_file_pages(
                     allocator, pml4, start, length, page_flags, fd, offset, key, domain,

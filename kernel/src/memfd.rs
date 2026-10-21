@@ -77,12 +77,6 @@ pub const fn file_key(index: usize) -> u64 {
     MEMFD_KEY_TAG | index as u64
 }
 
-/// Returns `true` when a page-cache key names a memfd object.
-#[must_use]
-pub const fn is_key(key: u64) -> bool {
-    key & !0xffff == MEMFD_KEY_TAG
-}
-
 /// Allocates a new empty object and returns its index.
 pub fn create() -> Result<usize, i64> {
     let _guard = InterruptGuard::enter();

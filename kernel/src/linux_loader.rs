@@ -337,6 +337,7 @@ fn build_stack(
         (3u64, main.program_header_address(main_bias)), // AT_PHDR
         (4, main.program_header_size() as u64),         // AT_PHENT
         (5, main.program_header_count() as u64),        // AT_PHNUM
+        (6, PAGE_SIZE),                                 // AT_PAGESZ
         (7, interp_bias),                               // AT_BASE
         (8, 0),                                         // AT_FLAGS
         (9, main_bias + main.entry()),                  // AT_ENTRY
