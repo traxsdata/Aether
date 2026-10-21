@@ -7133,9 +7133,46 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
     schedule_next(current)
 }
 
-/// Selects the save format for the per-task vector state.
+/// Selects the save format for the per-task vector state and seeds every slot
+/// with the architectural default.
+///
+/// A zeroed FXSAVE/XSAVE area is not a valid processor state: it sets MXCSR to
+/// zero, which unmasks every SIMD floating-point exception, and clears the x87
+/// control word. Restoring that into a task makes ordinary SSE arithmetic raise
+/// `#XM` (vector 19). Capture a real default state with `fninit`, a masked
+/// MXCSR, and `xsave64`/`fxsave64` instead.
 pub fn init_fpu(xsave: bool) {
     FPU_XSAVE.store(xsave, Ordering::Relaxed);
+    // SAFETY: Boot is single-threaded, interrupts are disabled, and no task
+    // has executed vector code yet. The static areas are 64-byte aligned and
+    // large enough for both save formats.
+    unsafe {
+        asm!("fninit", options(nostack, preserves_flags));
+        let mxcsr: u32 = 0x1f80;
+        asm!(
+            "ldmxcsr [{mxcsr}]",
+            mxcsr = in(reg) &mxcsr,
+            options(nostack, preserves_flags, readonly)
+        );
+        for task in 0..MAX_TASKS {
+            let ptr = FPU_STATES.0.get().cast::<FpuState>().add(task).cast::<u8>();
+            if xsave {
+                asm!(
+                    "xsave64 [{ptr}]",
+                    ptr = in(reg) ptr,
+                    in("eax") 0b111u32,
+                    in("edx") 0u32,
+                    options(nostack, preserves_flags)
+                );
+            } else {
+                asm!(
+                    "fxsave64 [{ptr}]",
+                    ptr = in(reg) ptr,
+                    options(nostack, preserves_flags)
+                );
+            }
+        }
+    }
 }
 
 /// Saves the live vector registers into a task's state area.
