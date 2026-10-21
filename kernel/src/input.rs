@@ -63,14 +63,17 @@ impl MouseState {
         let Some(packet) = self.decoder.push(byte) else {
             return false;
         };
+        // PS/2 counts are small at the supported 8 counts/mm resolution and
+        // 200 Hz rate; apply a fixed gain so normal pointer travel is usable.
+        const MOUSE_GAIN: i32 = 2;
         self.x = self
             .x
-            .saturating_add(i32::from(packet.dx))
+            .saturating_add(i32::from(packet.dx).saturating_mul(MOUSE_GAIN))
             .clamp(0, self.width - 1);
         // PS/2 reports positive Y upward; screen coordinates grow downward.
         self.y = self
             .y
-            .saturating_sub(i32::from(packet.dy))
+            .saturating_sub(i32::from(packet.dy).saturating_mul(MOUSE_GAIN))
             .clamp(0, self.height - 1);
         self.buttons = packet.buttons;
         self.packets = self.packets.saturating_add(1);
@@ -402,6 +405,13 @@ pub fn pointer_pending() -> bool {
     unsafe { !(*POINTER_EVENTS.0.get()).is_empty() }
 }
 
+/// Returns `true` when a key is waiting for the desktop/shell service.
+pub fn key_pending() -> bool {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked while the queue state is sampled.
+    unsafe { !(*QUEUE.0.get()).is_empty() }
+}
+
 /// Drains queued keys into the desktop service.
 pub fn poll() {
     for _ in 0..QUEUE_LEN {
@@ -539,7 +549,7 @@ fn mouse_decoder_self_test() -> bool {
     for byte in [0x00, 0x08, 12, 2] {
         mouse.push(byte);
     }
-    if (mouse.x, mouse.y) != (start.0 + 12, start.1 - 2) {
+    if (mouse.x, mouse.y) != (start.0 + 24, start.1 - 4) {
         return false;
     }
 

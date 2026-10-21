@@ -7356,20 +7356,18 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         tasks[current].state = TaskState::Ready;
     }
 
-    // Round-robin over ready tasks, but let the idle task consume pending
-    // pointer input first. The idle task owns the desktop/compositor; without
-    // this preference a busy software-rendered Linux client can delay cursor
-    // updates for many ticks.
+    // Prefer the idle task only when there is input for the desktop/shell to
+    // consume. Otherwise skip it so a software-rendered client gets the whole
+    // CPU instead of sharing round-robin slices with an idle painter.
+    let input_pending = crate::input::pointer_pending() || crate::input::key_pending();
+    let idle_ready = matches!(tasks[0].state, TaskState::Ready | TaskState::Running);
     let mut next = current;
-    if current != 0
-        && crate::input::pointer_pending()
-        && matches!(tasks[0].state, TaskState::Ready | TaskState::Running)
-    {
+    if current != 0 && input_pending && idle_ready {
         next = 0;
     } else {
         for step in 1..=MAX_TASKS {
             let index = (current + step) % MAX_TASKS;
-            if tasks[index].state == TaskState::Ready {
+            if index != 0 && tasks[index].state == TaskState::Ready {
                 next = index;
                 break;
             }

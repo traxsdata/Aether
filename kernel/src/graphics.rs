@@ -97,14 +97,17 @@ pub enum GraphicsError {
 }
 
 impl Framebuffer {
+    #[inline]
     fn unpack(&self, rgb: u32) -> u32 {
         self.format.decode_rgb(rgb).unwrap_or(0)
     }
 
+    #[inline]
     fn pack(&self, rgb: u32) -> u32 {
         self.format.encode_rgb(rgb).unwrap_or(0)
     }
 
+    #[inline]
     fn visible(&self, x: i32, y: i32) -> bool {
         x >= 0
             && y >= 0
@@ -161,6 +164,7 @@ impl Framebuffer {
         }
     }
 
+    #[inline]
     fn pixel(&mut self, x: i32, y: i32, rgb: u32) {
         if !self.visible(x, y) {
             return;
@@ -179,6 +183,7 @@ impl Framebuffer {
         }
     }
 
+    #[inline]
     fn pixel_blend(&mut self, x: i32, y: i32, rgb: u32, alpha: u8) {
         if !self.visible(x, y) || alpha == 0 {
             return;
@@ -897,6 +902,32 @@ pub fn blit_surface_scaled(
         return;
     }
     let _ = with_framebuffer(|fb| {
+        // The common case is an unscaled surface. Avoid two integer divisions
+        // per pixel and walk contiguous source rows instead.
+        if width as u32 == source_width && height as u32 == source_height {
+            let stride = source_width as usize;
+            for row in 0..height as usize {
+                let start = row * stride;
+                for (column, pixel) in source[start..start + stride].iter().enumerate() {
+                    let pixel = *pixel;
+                    let rgb = pixel & 0x00ff_ffff;
+                    if format == 1 {
+                        let alpha = ((pixel >> 24) & 0xff) as u8;
+                        if alpha == 0 {
+                            continue;
+                        }
+                        if alpha < 255 {
+                            fb.pixel_blend(x + column as i32, y + row as i32, rgb, alpha);
+                        } else {
+                            fb.pixel(x + column as i32, y + row as i32, rgb);
+                        }
+                    } else {
+                        fb.pixel(x + column as i32, y + row as i32, rgb);
+                    }
+                }
+            }
+            return;
+        }
         for row in 0..height {
             let source_y = (row as u32 * source_height / height as u32) as usize;
             for column in 0..width {
@@ -981,13 +1012,13 @@ pub fn present_region(x: i32, y: i32, width: i32, height: i32) {
         let Some(rect) = draw.clipped(x, y, width, height) else {
             return;
         };
+        // Copy each damaged row as one block. A pixel-at-a-time volatile loop
+        // is the dominant cost when the software-rendered Linux surface
+        // repaints, especially on emulated/virtual framebuffers.
         for row in rect.y as usize..(rect.y + rect.height) as usize {
-            for column in rect.x as usize..(rect.x + rect.width) as usize {
-                let value = source.add(row * draw.stride as usize + column).read();
-                target
-                    .add(row * front.stride as usize + column)
-                    .write_volatile(value);
-            }
+            let source_row = source.add(row * draw.stride as usize + rect.x as usize);
+            let target_row = target.add(row * front.stride as usize + rect.x as usize);
+            core::ptr::copy_nonoverlapping(source_row, target_row, rect.width as usize);
         }
     }
 }
