@@ -332,6 +332,7 @@ gate4-test: gate4-runtime
 		STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) \
 		IMAGE_SIZE=128M image
 	AETHER_GATE4_TIMEOUT=600 AETHER_GATE4_SCREENSHOT=$(abspath $(BUILD))/gate4/gridcraft.ppm \
+		AETHER_GATE4_POST_INPUT_SCREENSHOT=$(abspath $(BUILD))/gate4/gridcraft-after-input.ppm \
 		AETHER_GATE4_CLICK=1 AETHER_GATE4_KEYS='4,2,ctrl-s' \
 		$(PYTHON) tools/gate4_smoke.py
 
