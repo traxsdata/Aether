@@ -35,7 +35,7 @@ grants, and the desktop is not a security authority.
 > a drop-in `libwayland-client.so.0` bridge over the `/dev/aether-display`
 > endpoint, Mesa lavapipe software Vulkan in the signed Gate 4 runtime rootfs,
 > and a passing `make gate4-test` windowed run with portal open/save at tested
-> commit `2b6ce00` (2026-10-21). The run recorded the kernel-owned present,
+> commit `716dcb4` (2026-10-21). The run recorded the kernel-owned present,
 > input, save, portal, revoke, and boot markers and QEMU screenshots; this is
 > still not general Linux application compatibility, and the GridCraft record
 > remains `limited` because the Gate 2 production follow-up is open. Do not
@@ -171,7 +171,7 @@ grants, and the desktop is not a security authority.
   `/dev/aether-display` endpoint, beside Mesa lavapipe software Vulkan in the
   same rootfs. `make gate4-test` launches the windowed
   `/usr/bin/gridcraft` from the AppImage with portal open/save and passed at
-  tested commit `2b6ce00` (2026-10-21), recording
+  tested commit `716dcb4` (2026-10-21), recording
   `AETHER_GATE4_DISPLAY_CREATE_OK`, `AETHER_GATE4_PRESENT_OK`,
   `AETHER_GATE4_INPUT_OK`, `AETHER_GATE4_SAVE_OK`,
   `AETHER_GATE4_PORTAL_OK`, `AETHER_GATE4_REVOKE_OK`, and

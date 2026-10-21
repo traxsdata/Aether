@@ -193,7 +193,7 @@ user space. It is not a VM. The target and security gates are in
 - [x] Gate 4 — windowed GridCraft (QEMU prototype scope): run
   `usr/bin/gridcraft` with Wayland, software rendering, keyboard/pointer
   input, and workbook open/save through the portal. `make gate4-test` passed
-  at tested code commit `2b6ce00` (this documentation change is a docs-only
+  at tested code commit `716dcb4` (this documentation change is a docs-only
   descendant) against the pinned AppImage
   `942096a29a534aa2503e9e7aa1816e952f7250e73d55f8f32afd077547617f77`
   (19,024,376 bytes), with runtime profile `gate4-host-lavapipe` (Mesa
@@ -613,7 +613,7 @@ The Linux track has completed the Gate 1 inventory, the **Gate 2 prototype**
 (QEMU scope), the **Gate 3 headless GridCraft run** (QEMU prototype scope), the
 **Gate 4 portal slice** (QEMU prototype scope), the **Gate 4 runtime rootfs
 packaging slice** (QEMU prototype scope), and the **Gate 4 windowed GridCraft
-run** (QEMU prototype scope, complete at tested commit `2b6ce00` on
+run** (QEMU prototype scope, complete at tested commit `716dcb4` on
 2026-10-21). Boot markers cover signed
 embedded-rootfs and loader-staged AppImage import, the pinned host-glibc runtime
 manifest, ring-3 `linuxd` launch approval and denial, demand paging,
@@ -626,7 +626,7 @@ static/dynamic exec, the `PT_INTERP` loader, and the real GridCraft CLI CSV
 round trip. The Gate 4 runtime slice adds a loader-staged `BootInfo` v5 rootfs
 with Mesa lavapipe, LLVM, Wayland client libraries, `libxkbcommon`, and a
 kernel-verified 40-file manifest. `make gate3-test` passes with the pinned
-19 MiB AppImage. `make gate4-test` passed at tested code commit `2b6ce00`, and
+19 MiB AppImage. `make gate4-test` passed at tested code commit `716dcb4`, and
 `make ci` (lint, unit/tooling tests, QEMU boot, ISO/desktop/Files,
 fault/rollback/negative paths, release checks, and the runtime-packaging tests)
 passed at the same commit when the shared host's VNC `:9` collision was

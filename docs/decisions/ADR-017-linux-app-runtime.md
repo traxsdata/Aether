@@ -79,7 +79,7 @@ evaluation and a CSV round trip through the private overlay). The Gate 4
 windowed slice — the in-app Wayland client bridge, the kernel display
 endpoint, the GUI portal contract, and the `make gate4-test` harness — is
 implemented and passed at QEMU prototype scope on 2026-10-21 at tested commit
-`2b6ce00` (see the Gate 4 status section below). The production runtime and a
+`716dcb4` (see the Gate 4 status section below). The production runtime and a
 merged per-application AppImage root remain open.
 
 ## Gate 4 windowed prototype (status)

@@ -26,7 +26,7 @@ versioning scheme until the kernel ABI stabilises.
   `build/gate4/gridcraft.ppm` with a non-black pixel check, drives a pointer
   click plus the keys `4`, `2`, `ctrl-s` through the emulated PS/2 path, and
   requires the post-exit revocation after the window close. The completed run
-  at tested commit `2b6ce00` (2026-10-21, `qemu-q35-ovmf`) recorded
+  at tested commit `716dcb4` (2026-10-21, `qemu-q35-ovmf`) recorded
   `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
   `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
   `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`,

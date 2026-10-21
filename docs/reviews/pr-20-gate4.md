@@ -1,7 +1,7 @@
 # PR #20 Gate 4 review — windowed GridCraft
 
 **Status:** Gate 4 met at QEMU prototype scope on 2026-10-21 at tested code
-commit `2b6ce00`; this documentation change is a docs-only descendant. This
+commit `716dcb4`; this documentation change is a docs-only descendant. This
 review records only evidence that has actually run. It is not a compatibility
 claim beyond the named tests.
 
@@ -52,7 +52,7 @@ Aether.
 
 ## Evidence
 
-- [x] Exact commit tested: `2b6ce00` (`test(linux): synchronize the wait4
+- [x] Exact commit tested: `716dcb4` (`test(linux): synchronize the wait4
       restart self-test`). The documentation commit that records this run is
       a docs-only descendant.
 - [x] `make gate4-test` passed on `qemu-q35-ovmf` (software VGA, no GPU, no
@@ -95,14 +95,14 @@ AETHER_BOOT_OK stage=kernel version=0.1.0
       revocation. The harness closed the window and verified the post-exit
       revocation.
 - [x] Boot also passes `AETHER_LINUX_RESTART_OK` after the fixture
-      synchronization fix at `2b6ce00`.
+      synchronization fix at `716dcb4`.
 - [x] Compatibility database record after the run: GridCraft remains
       `limited`, now naming `linux.gridcraft.gui.present`,
       `linux.gridcraft.gui.input`, `linux.gridcraft.portal.save`, and
       `linux.gridcraft.portal.revoke` with platform `qemu-q35-ovmf` and date
       `2026-10-21`. The classification stays `limited` because the Gate 2
       production follow-up is open.
-- [x] `make ci` passed at `2b6ce00` when run with the host's VNC `:9` collision
+- [x] `make ci` passed at `716dcb4` when run with the host's VNC `:9` collision
       isolated (`bwrap --unshare-net env AETHER_ISO_TIMEOUT=300 make ci`). The
       plain command in the shared host environment aborted at the boot step
       because a pre-existing QEMU process owned `127.0.0.1:5909` (VNC display

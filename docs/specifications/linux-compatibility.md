@@ -356,7 +356,7 @@ its window in the Aether compositor, accept keyboard and pointer input, and
 open/save a workbook through the portal.
 
 **Status: met at QEMU prototype scope** on 2026-10-21 at tested code commit
-`2b6ce00` (this documentation change is a docs-only descendant), on
+`716dcb4` (this documentation change is a docs-only descendant), on
 `qemu-q35-ovmf` with software VGA, no GPU, and no X11/D-Bus.
 `make gate4-portal-test` builds a signed AppImage fixture, seeds an exact-file
 read+write grant for the demo root, and runs the fixture as a Linux task.
@@ -535,7 +535,7 @@ present; the kernel only emits `INPUT_OK` after the guest has read key, pointer,
 and focus records.
 
 **Completed windowed run:** the `make gate4-test` run on 2026-10-21 at tested
-code commit `2b6ce00` recorded the marker transcript, screenshot evidence, and
+code commit `716dcb4` recorded the marker transcript, screenshot evidence, and
 tested platform in the [Gate 4 status](#gate-4--windowed-gridcraft) above. The
 bridge, keymap delivery, frame-callback timing, Mesa/lavapipe content, and the
 workbook open/save portal path are exercised by that run. The endpoint remains

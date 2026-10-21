@@ -258,7 +258,7 @@ exact AppImage digest, and the runtime version.
   4 rootfs; it presents surfaces and receives input through the
   `/dev/aether-display` endpoint, and `make gate4-test` launches the windowed
   `/usr/bin/gridcraft` from the signed AppImage. The completed run at tested
-  commit `2b6ce00` (2026-10-21) recorded the present, input, save, portal,
+  commit `716dcb4` (2026-10-21) recorded the present, input, save, portal,
   revoke, and boot markers plus the QEMU screenshots.
 
 The compatibility database records GridCraft 0.8.0 as `limited` after the
