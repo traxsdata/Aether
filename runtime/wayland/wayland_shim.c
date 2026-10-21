@@ -575,6 +575,25 @@ static void emit_n(struct wl_proxy *target, uint32_t opcode, int nargs, ...) {
     queue_event_raw(target->queue, target, opcode, args, n);
 }
 
+/* Broadcasts an event to every queue of a display.
+ *
+ * A buffer release has to reach the queue the buffer's owner actually
+ * dispatches. The Vulkan Wayland WSI owns the swapchain buffers but runs on
+ * the client's display connection, and it dispatches a queue that the shim
+ * cannot associate with the buffer proxy. The release listener is
+ * idempotent, so broadcasting the release is safe: a second delivery only
+ * clears the same busy flag again.
+ */
+static void queue_event_broadcast(struct wl_display *dpy,
+                                  struct wl_proxy *target, uint32_t opcode,
+                                  const union wl_argument *args, int nargs) {
+    struct wl_event_queue *q;
+    if (!dpy || !target)
+        return;
+    for (q = &dpy->default_queue; q; q = q->next)
+        queue_event_raw(q, target, opcode, args, nargs);
+}
+
 static struct wl_event *queue_pop(struct wl_event_queue *q) {
     struct wl_event *ev = q->head;
     if (!ev)
@@ -825,18 +844,25 @@ static void send_xdg_configure(struct wl_proxy *xdg) {
         args[0].i = xdg->display->aether ? xdg->display->width : FAKE_WIDTH;
         args[1].i = xdg->display->aether ? xdg->display->height : FAKE_HEIGHT;
         args[2].a = &empty_states;
-        queue_event_raw(xs->toplevel->queue, xs->toplevel, 0, args, 3);
+        /* The configure is broadcast to the display's queues. A client that
+         * keeps one queue per proxy only dispatches the queue of the proxy
+         * that carries the event, and it may only start dispatching that
+         * queue once the window is registered. A single delivery can
+         * therefore be missed and a client that waits for the configure
+         * would never draw. The configure is idempotent and the client
+         * acknowledges every copy it receives. */
+        queue_event_broadcast(xdg->display, xs->toplevel, 0, args, 3);
     }
     union wl_argument args[MAX_ARGS];
     memset(args, 0, sizeof(args));
     args[0].u = serial;
-    queue_event_raw(xdg->queue, xdg, 0, args, 1);
+    queue_event_broadcast(xdg->display, xdg, 0, args, 1);
     if (xdg->display->main_surface && xdg->display->output) {
         union wl_argument surface_args[MAX_ARGS];
         memset(surface_args, 0, sizeof(surface_args));
         surface_args[0].o = xdg->display->output;
-        queue_event_raw(xdg->display->main_surface->queue,
-                        xdg->display->main_surface, 0, surface_args, 1);
+        queue_event_broadcast(xdg->display, xdg->display->main_surface, 0,
+                              surface_args, 1);
     }
 }
 
@@ -1272,9 +1298,10 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
                 struct buffer_state *bs = ss->pending_buffer->state;
                 if (proxy != dpy->cursor_surface)
                     present_buffer(dpy, bs);
-                /* release belongs to the buffer's own queue */
-                queue_event_raw(ss->pending_buffer->queue, ss->pending_buffer,
-                                0, NULL, 0);
+                /* The release must reach the queue the buffer owner
+                 * dispatches, which is not necessarily the buffer's own
+                 * queue. Broadcasting keeps the swapchain image free. */
+                queue_event_broadcast(dpy, ss->pending_buffer, 0, NULL, 0);
                 ss->pending_buffer = NULL;
             } else {
                 struct wl_proxy *xdg = ss->xdg ? ss->xdg : dpy->xdg;
@@ -1288,8 +1315,7 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
                 union wl_argument args[MAX_ARGS];
                 memset(args, 0, sizeof(args));
                 args[0].u = (uint32_t)now_ms();
-                queue_event_raw(ss->frame_callback->queue, ss->frame_callback,
-                                0, args, 1);
+                queue_event_broadcast(dpy, ss->frame_callback, 0, args, 1);
                 ss->frame_callback = NULL;
             }
         }
@@ -1979,15 +2005,23 @@ EXPORT int wl_display_dispatch_queue_pending(struct wl_display *dpy,
                  queue_has_events(q));
     for (;;) {
         int did = 0;
-        /* Pending dispatch is queue-scoped: drain this queue and no other. */
-        while (queue_has_events(q)) {
-            int r = dispatch_one(q);
-            if (r < 0)
-                return -1;
-            if (r == 0)
-                break;
-            dispatched++;
-            did = 1;
+        /* Pending dispatch is queue-scoped: drain this queue and no other.
+         * The display's own default queue is drained as well: it carries the
+         * events of the objects that the client left on the default queue,
+         * such as the buffer release of a swapchain image the Vulkan WSI
+         * owns. Leaving it undrained keeps those images busy forever and
+         * stalls the next acquire. */
+        struct wl_event_queue *queues[2] = { q, &dpy->default_queue };
+        for (int i = 0; i < 2; i++) {
+            while (queue_has_events(queues[i])) {
+                int r = dispatch_one(queues[i]);
+                if (r < 0)
+                    return -1;
+                if (r == 0)
+                    break;
+                dispatched++;
+                did = 1;
+            }
         }
         if (!did)
             break;
@@ -2087,6 +2121,15 @@ EXPORT int wl_display_dispatch_queue_timeout(struct wl_display *dpy,
             if (r != 0)
                 return 0;
         }
+        /* The display's own default queue carries the events of the objects
+         * the client left there, such as the release of a swapchain image
+         * that the Vulkan WSI owns. Draining it here keeps those images
+         * free; leaving it undrained stalls the next acquire. */
+        if (queue_has_events(&dpy->default_queue)) {
+            int r = dispatch_one(&dpy->default_queue);
+            if (r != 0)
+                return 0;
+        }
         if (dpy->error)
             return -1;
         int r = wait_readable(dpy, timeout_ms);
@@ -2120,7 +2163,7 @@ EXPORT int wl_display_prepare_read_queue(struct wl_display *dpy,
     if (getenv("G4_SHIM_TRACE"))
         shim_log("HOST_SHIM_PREPARE queue=%p pending=%d\n",
                  (void *)q, queue_has_events(q));
-    if (queue_has_events(q)) {
+    if (queue_has_events(q) || queue_has_events(&dpy->default_queue)) {
         errno = EAGAIN;
         return -1;
     }
