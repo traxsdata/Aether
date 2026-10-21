@@ -49,9 +49,9 @@ threads, Wayland/X11, Vulkan, D-Bus, and file dialogs.
 | Runtime ELF | static-pie AppImage launcher |
 | Payload linkage | dynamic: `ld-linux-x86-64.so.2`, `libc.so.6` (up to GLIBC_2.35), `libm.so.6`, `libgcc_s.so.1` |
 | GUI stack | `winit` 0.30 (Wayland/X11), `wgpu`/Vulkan, D-Bus, XDG desktop portal, `arboard` clipboard |
-| Test date | 2026-10-20 |
-| Runtime profile | `gate3-host-glibc`, glibc 2.43, host-derived pin |
-| Classification | `limited` (headless `gridcraft-cli` only; GUI not run) |
+| Test date | 2026-10-21 for Gate 4; 2026-10-20 for Gate 3 |
+| Runtime profile | Gate 3: `gate3-host-glibc`, glibc 2.43; Gate 4: `gate4-host-lavapipe`, Mesa `lavapipe-26.0.8-1ubuntu0.3` and Wayland `1.24.0-2`; both host-derived pins |
+| Classification | `limited` (headless and windowed GridCraft pass at QEMU prototype scope; general Linux compatibility is not claimed) |
 
 `make appimage-test` exercises the container parser against a synthetic image.
 `appimage-inspect` reports the fields above from a real AppImage without
@@ -279,8 +279,9 @@ native syscall surface is allowlisted and excludes files, portal access,
 endpoint creation, and window requests. Linux syscall dispatch, ELF mapping,
 and library loading remain kernel-side; the syscall-remoting ABI is
 unimplemented and is not claimed. The overlay maps
-`/tmp`, `/settings`, and `/logs`, enforces a 1 KiB per-application quota and
-512-byte per-file limit, survives task exit within a boot, and supports erasure
+`/tmp`, `/settings`, and `/logs`, enforces a 16-entry overlay with a 4 KiB
+per-file limit and an 8 KiB per-application quota, survives task exit within a
+boot, and supports erasure
 (`AETHER_LINUX_OVERLAY_PERSIST_OK`, `AETHER_LINUX_OVERLAY_ERASE_OK`). It is
 RAM-backed and does not survive power loss. A static freestanding Linux ELF runs at CPL3,
 exercises anonymous and

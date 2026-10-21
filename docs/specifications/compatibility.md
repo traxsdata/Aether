@@ -68,11 +68,13 @@ ledger, not a security boundary.
 | Aether Other | native | verified | Sibling-root denial test passes. |
 | Aether Package Verifier | native | verified | Signature, digest, and publisher tests pass on host and in the boot self-test. |
 | Notepad (Win32) | none | unsupported | No Windows runtime exists; the package verifier rejects `runtime=windows`. |
-| GridCraft 0.8.0 (AppImage) | linux-runtime-glibc-2.43 | limited | The headless `gridcraft-cli` Gate 3 run and the windowed Gate 4 run (`linux.gridcraft.gui.present`, `linux.gridcraft.gui.input`, `linux.gridcraft.portal.save`, `linux.gridcraft.portal.revoke`) pass on QEMU with a read-only root, private overlay, and portal open/save. The classification stays `limited` because the Gate 2 production follow-up (ring-3 ABI/ELF/VMA, a reproducible runtime pin, and durable AppImage install/overlay) is open. See [Linux compatibility](linux-compatibility.md). |
+| GridCraft 0.8.0 (AppImage) | linux-runtime-gate4-host-lavapipe | limited | The headless `gridcraft-cli` Gate 3 run and the windowed Gate 4 run (`linux.gridcraft.gui.present`, `linux.gridcraft.gui.input`, `linux.gridcraft.portal.save`, `linux.gridcraft.portal.revoke`) pass on QEMU with a read-only root, private overlay, and portal open/save. The classification stays `limited` because the Gate 2 production follow-up (ring-3 ABI/ELF/VMA, a reproducible runtime pin, and durable AppImage install/overlay) is open. See [Linux compatibility](linux-compatibility.md). |
+| Aether Linux Runtime (pinned host glibc) | linux-rootfs-pinned | limited | Gate 3 host-derived glibc/loader pin; the separate Gate 4 profile adds Mesa/Wayland. |
 
 Gate 4 passed at QEMU prototype scope on 2026-10-21, and the windowed record
-now names the exact AppImage digest, the Gate 4 runtime profile, the windowed
-named tests, the platform, and the test date. The record nevertheless stays
+names the exact AppImage digest, the `gate4-host-lavapipe` runtime profile, the
+windowed named tests, the platform, and the test date. The same record retains
+the Gate 3 headless tests, which ran under `gate3-host-glibc`. The record nevertheless stays
 `limited` because the Gate 2 production follow-up is not complete: ABI/ELF/VMA
 work remains in the kernel, the runtime pin is host-derived, and AppImage
 installation/overlay persistence are not durable. A future upgrade above
@@ -104,6 +106,8 @@ make test         # boot self-test for verification and rejection paths
 ## Limits
 
 - The database is not served over the network; it ships with the source tree.
-- No Windows application has been executed; the only non-native record is
-  explicitly `unsupported`.
+- No Windows application has been executed; the Windows record is
+  `unsupported`. The Linux records are `limited`: GridCraft has named Gate 3
+  and Gate 4 tests, and the pinned host-glibc runtime record covers packaging
+  and import only.
 - Accessibility and usability are not yet part of the classification.

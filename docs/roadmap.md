@@ -124,6 +124,7 @@ what is missing.
 - [x] Initial compatibility test suite and database with named-test evidence
   ([compatibility](specifications/compatibility.md)).
 - [x] Developer documentation for packaging, updates, hardware, and recovery.
+- [x] Interactive permission consent and grant revocation UI.
 
 ### Windows compatibility
 
@@ -193,8 +194,8 @@ user space. It is not a VM. The target and security gates are in
 - [x] Gate 4 — windowed GridCraft (QEMU prototype scope): run
   `usr/bin/gridcraft` with Wayland, software rendering, keyboard/pointer
   input, and workbook open/save through the portal. `make gate4-test` passed
-  at tested code commit `716dcb4` (this documentation change is a docs-only
-  descendant) against the pinned AppImage
+  at tested code commit `716dcb4` and was revalidated at `ba6544c` (a
+  docs-only descendant) against the pinned AppImage
   `942096a29a534aa2503e9e7aa1816e952f7250e73d55f8f32afd077547617f77`
   (19,024,376 bytes), with runtime profile `gate4-host-lavapipe` (Mesa
   `lavapipe-26.0.8-1ubuntu0.3`, Wayland `1.24.0-2`) on `qemu-q35-ovmf` with
@@ -202,7 +203,7 @@ user space. It is not a VM. The target and security gates are in
   markers were:
   `AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900`,
   `AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux`,
-  `AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3`,
+  `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`,
   `AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093
   staging=sctmp+rename source=kernel`,
   `AETHER_GATE4_PORTAL_OK
@@ -256,8 +257,10 @@ user space. It is not a VM. The target and security gates are in
     read, temp open, and rename, and emits `AETHER_GATE4_REVOKE_OK` only after
     all three deny. The windowed GridCraft target consumes this feature with
     the same namespace path as argv. The contract was green at the portal-only
-    commit; the integrated rerun at `7ba2e51` hit `AETHER_LINUX_RESTART_FAIL`, so
-    it is not claimed green here.
+    commit. An intermediate integrated rerun at `7ba2e51` hit
+    `AETHER_LINUX_RESTART_FAIL`; the final revalidation at `716dcb4` passed
+    `AETHER_LINUX_RESTART_OK` and the full Gate 4 marker set, so the earlier
+    failure is historical.
   - [x] Gate 4 runtime rootfs packaging (QEMU prototype scope): `make
     gate4-runtime` assembles and signs a host-derived rootfs with glibc,
     libwayland-client/cursor, libxkbcommon, the Vulkan loader, Mesa lavapipe,
@@ -307,7 +310,7 @@ user space. It is not a VM. The target and security gates are in
     clicks the window, sends the keys `4`, `2`, `ctrl-s` through the emulated
     PS/2 path, closes the window, and requires the post-exit revocation. The
     completed run recorded `frames=1`, `checksum=0x7b2cafc5`, `keys=1`,
-    `pointer=23`, `focus=3`, a 4,093-byte save from a 4,089-byte portal read,
+    `pointer=24`, `focus=3`, a 4,093-byte save from a 4,089-byte portal read,
     and one read and one write denial after revocation. Screenshot evidence is
     `build/gate4/gridcraft.ppm` (1280x800, 1,024,000 non-black pixels) and
     `build/gate4/gridcraft-after-input.ppm` (1280x800, 1,023,989 non-black

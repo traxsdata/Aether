@@ -1,7 +1,7 @@
 # PR #20 Gate 4 review — windowed GridCraft
 
 **Status:** Gate 4 met at QEMU prototype scope on 2026-10-21 at tested code
-commit `716dcb4`; this documentation change is a docs-only descendant. This
+commit `716dcb4`, revalidated at `ba6544c` (a docs-only descendant). This
 review records only evidence that has actually run. It is not a compatibility
 claim beyond the named tests.
 
@@ -52,9 +52,10 @@ Aether.
 
 ## Evidence
 
-- [x] Exact commit tested: `716dcb4` (`test(linux): synchronize the wait4
-      restart self-test`). The documentation commit that records this run is
-      a docs-only descendant.
+- [x] Exact commits tested: `716dcb4` (`test(linux): synchronize the wait4
+      restart self-test`) and its docs-only descendant `ba6544c`. The
+      revalidation at `ba6544c` reproduced the marker set and screenshot
+      hashes below.
 - [x] `make gate4-test` passed on `qemu-q35-ovmf` (software VGA, no GPU, no
       X11/D-Bus), 2026-10-21, against the pinned GridCraft 0.8.0 AppImage
       digest
@@ -66,7 +67,7 @@ Aether.
 ```text
 AETHER_GATE4_DISPLAY_CREATE_OK pid=7 size=1440x900
 AETHER_GATE4_PRESENT_OK frames=1 checksum=0x7b2cafc5 source=linux
-AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3
+AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3
 AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4093 staging=sctmp+rename source=kernel
 AETHER_GATE4_PORTAL_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_bytes=4089 source=kernel
 AETHER_GATE4_REVOKE_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_denials=1 write_denials=1 source=kernel
@@ -75,6 +76,10 @@ AETHER_BOOT_OK stage=kernel version=0.1.0
 
 - [x] Present marker: `AETHER_GATE4_PRESENT_OK frames=1
       checksum=0x7b2cafc5 source=linux`.
+- [x] This transcript is from the `ba6544c` revalidation. The original run at
+      `716dcb4` recorded identical presentation, save, portal, and revoke
+      values, with `AETHER_GATE4_INPUT_OK ... pointer=23`; the pointer count
+      depends on the click sequence and is not part of the gate.
 - [x] QEMU screenshots:
       `build/gate4/gridcraft.ppm` — 1280x800, 1,024,000 non-black pixels,
       sha256
@@ -84,7 +89,7 @@ AETHER_BOOT_OK stage=kernel version=0.1.0
       `6d877f91ebe36e30b6bdf7ec4e00215fcce002fbe9530ec44223ffd9e162cba8`.
       The post-input screenshot shows the real workbook with `GATE4-GUI.XLSX`
       in the title.
-- [x] `AETHER_GATE4_INPUT_OK keys=1 pointer=23 focus=3`. The harness waited
+- [x] `AETHER_GATE4_INPUT_OK keys=1 pointer=24 focus=3`. The harness waited
       for document-title readiness, clicked the window, and sent `4`, `2`,
       `ctrl-s` through the emulated PS/2 path.
 - [x] Portal, save, and revoke markers recorded above. The kernel read 4,089
@@ -102,17 +107,18 @@ AETHER_BOOT_OK stage=kernel version=0.1.0
       `linux.gridcraft.portal.revoke` with platform `qemu-q35-ovmf` and date
       `2026-10-21`. The classification stays `limited` because the Gate 2
       production follow-up is open.
-- [x] `make ci` passed at `716dcb4` when run with the host's VNC `:9` collision
-      isolated (`bwrap --unshare-net env AETHER_ISO_TIMEOUT=300 make ci`). The
-      plain command in the shared host environment aborted at the boot step
-      because a pre-existing QEMU process owned `127.0.0.1:5909` (VNC display
-      `:9`); that is an environment conflict, not a code failure. In the
-      isolated run, lint, docs-check, license-check, unittest (326 host tests
-      plus 8 Python tests), compat, AppImage, SquashFS, update, boot, ISO/desktop
-      on VGA and VMware SVGA, VMware VMX generation, shell, fault, rollback,
-      negative, and release-tamper steps all passed. `make gate4-test` was run
-      separately and passed with the marker transcript above. `make docs-check`
-      and `make license-check` also pass directly.
+- [x] `make ci` passed on the tested code at `716dcb4` from a docs-only
+      descendant worktree when run with the host's VNC `:9` collision isolated
+      (`bwrap --unshare-net env AETHER_ISO_TIMEOUT=300 make ci`). The plain
+      command in the shared host environment aborted at the boot step because a
+      pre-existing QEMU process owned `127.0.0.1:5909` (VNC display `:9`); that
+      is an environment conflict, not a code failure. In the isolated run,
+      lint, docs-check, license-check, unittest (326 host tests plus 8 Python
+      tests), compat, AppImage, SquashFS, update, boot, ISO/desktop on VGA and
+      VMware SVGA, VMware VMX generation, shell, fault, rollback, negative, and
+      release-tamper steps all passed. `make gate4-test` was run separately and
+      passed with the marker transcript above; the `ba6544c` revalidation also
+      passed. `make docs-check` and `make license-check` also pass directly.
 
 ## Known limitations
 

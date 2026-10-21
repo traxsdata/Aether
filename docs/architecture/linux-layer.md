@@ -190,8 +190,8 @@ exact AppImage digest, and the runtime version.
   released when the last reference goes away, and VMA charges disappear with
   the task's address space, including fault and exit paths.
   The root is imported read-only. `/tmp`, `/settings`, and `/logs` map to a
-  per-application overlay store with a 1 KiB quota per application and a
-  512-byte per-file limit. The store is shared by processes of the same
+  per-application overlay store with a 16-entry limit, a 4 KiB per-file limit,
+  and an 8 KiB per-application quota. The store is shared by processes of the same
   application, survives task exit within a boot, and is erased through
   `linux-erase <app>`; the boot test checks persistence and erasure. It is a
   RAM-backed store: it does not survive a power cycle because no persistent
