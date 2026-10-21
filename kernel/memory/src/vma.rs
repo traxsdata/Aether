@@ -13,7 +13,7 @@
 use crate::{PAGE_SIZE, align_up};
 
 /// Maximum number of tracked areas.
-pub const MAX_VMAS: usize = 32;
+pub const MAX_VMAS: usize = 512;
 /// Fragment scratch capacity for split operations.
 const MAX_FRAGMENTS: usize = MAX_VMAS * 2 + 1;
 

@@ -470,6 +470,10 @@ pub fn commit_temp(root: &str, from: &str, to: &str) -> Result<(PortalGrant, usi
     }
     slot.key = None;
     slot.len = 0;
+    #[cfg(feature = "gate4-gui-test")]
+    if grant.path() == crate::fs::GATE4_GUI_WORKBOOK {
+        crate::display::request_close();
+    }
     Ok((grant, length))
 }
 

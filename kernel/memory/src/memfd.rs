@@ -6,12 +6,12 @@
 //! boundary and the tests.
 
 /// Maximum number of live memfd objects (also the per-task descriptor limit).
-pub const MAX_MEMFDS: usize = 4;
+pub const MAX_MEMFDS: usize = 32;
 /// Maximum bytes in one memfd object (16 MiB).
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum pages in one memfd object.
 pub const MAX_PAGES: usize = MAX_BYTES / super::PAGE_SIZE as usize;
-/// Global page budget for every live memfd object (64 MiB).
+/// Global page budget for every live memfd object (512 MiB).
 pub const MAX_TOTAL_PAGES: usize = MAX_MEMFDS * MAX_PAGES;
 
 /// Returns the page count needed for `length`, or `None` when over the cap.
@@ -48,8 +48,8 @@ mod tests {
     }
 
     #[test]
-    fn total_budget_covers_four_maximum_objects() {
+    fn total_budget_covers_all_maximum_objects() {
         assert_eq!(MAX_TOTAL_PAGES, MAX_MEMFDS * MAX_PAGES);
-        assert!(MAX_TOTAL_PAGES * super::super::PAGE_SIZE as usize <= 64 * 1024 * 1024);
+        assert!(MAX_TOTAL_PAGES * super::super::PAGE_SIZE as usize <= 512 * 1024 * 1024);
     }
 }

@@ -42,12 +42,12 @@ pub const APPIMAGE_TASK: usize = LINUX_DYN_TASK + 1;
 /// Task index of the ring-3 `linuxd` launch-policy service.
 pub const LINUXD_TASK: usize = APPIMAGE_TASK + 1;
 
-const MAX_TASKS: usize = WORKER_COUNT + 12;
+const MAX_TASKS: usize = WORKER_COUNT + 96;
 
 /// Maximum number of `MAP_SHARED` VMA entries per Linux application domain.
-const MAX_DOMAIN_SHARED_VMAS: usize = 16;
+const MAX_DOMAIN_SHARED_VMAS: usize = 64;
 const STACK_SIZE: usize = 16 * 1024;
-const KERNEL_STACK_SIZE: usize = 32 * 1024;
+const KERNEL_STACK_SIZE: usize = 256 * 1024;
 const ROUNDS: usize = 4;
 const MAGIC_PREFIX: u64 = 0xa5a5_0000_0000_0000;
 
@@ -144,11 +144,11 @@ const PORTAL_PATH_BYTES: usize = aether_fs::MAX_PATH;
 const PIPE_BYTES: usize = 512;
 /// Global pipe slots. Forked processes share the same slot, so a write on one
 /// side is visible to the other.
-const MAX_PIPES: usize = 4;
-const MAX_EVENTFDS: usize = 2;
-const MAX_EPOLLS: usize = 1;
+const MAX_PIPES: usize = 16;
+const MAX_EVENTFDS: usize = 16;
+const MAX_EPOLLS: usize = 8;
 const MAX_EPOLL_WATCH: usize = 8;
-const MAX_TIMERFDS: usize = 2;
+const MAX_TIMERFDS: usize = 8;
 const POLL_IN: i16 = 1;
 const POLL_OUT: i16 = 4;
 const POLL_ERR: i16 = 8;
@@ -1300,6 +1300,15 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             "LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64",
             "HOME=/tmp",
             "TMPDIR=/tmp",
+            "XDG_RUNTIME_DIR=/run/user/1000",
+            "WAYLAND_SOCKET=3",
+            "WGPU_BACKEND=vulkan",
+            "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json",
+            "GRIDCRAFT_NO_PREFS=1",
+            "G4_SHIM_TRACE=1",
+            "LANG=C.UTF-8",
+            "LC_ALL=C.UTF-8",
+            "TZ=UTC",
             crate::fs::GATE4_GUI_ENVIRONMENT,
         ];
         #[cfg(all(not(feature = "gate4-portal-test"), not(feature = "gate4-gui-test")))]
@@ -1359,6 +1368,18 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     app_task.tgid = APPIMAGE_TASK;
     app_task.pgid = APPIMAGE_TASK;
     app_task.sid = APPIMAGE_TASK;
+    #[cfg(feature = "gate4-gui-test")]
+    {
+        // wayland-client's connect_to_env() consumes a supplied fd before the
+        // bridge is loaded. A read-only /dev/null at fd 3 satisfies the
+        // fcntl/UnixStream checks; the bridge ignores the fd and opens the
+        // real /dev/aether-display endpoint itself.
+        app_task.linux_fds[3] = Some(LinuxFile {
+            source: LinuxFileSource::Pseudo(PseudoFile::DevNull),
+            offset: 0,
+            writable: false,
+        });
+    }
     // Narrow display grant tied to the verified GridCraft identity. The guest
     // cannot choose this: `app_identity` comes from the signed import record.
     app_task.display =

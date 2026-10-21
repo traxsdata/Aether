@@ -27,7 +27,7 @@ use core::cell::UnsafeCell;
 /// Maximum path bytes the Linux root accepts.
 pub const MAX_PATH: usize = 256;
 /// Maximum open files per Linux task.
-pub const MAX_FDS: usize = 8;
+pub const MAX_FDS: usize = 256;
 
 const ROOTFS: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS"));
 const ROOTFS_RECORD: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS_RECORD"));

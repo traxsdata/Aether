@@ -600,11 +600,11 @@ fn ensure_user_table(
 ///
 /// The window is reserved address space, not pre-mapped memory. `mmap` and
 /// `brk` allocate frames on demand; `munmap` returns them to the allocator.
-pub const LINUX_ARENA_BASE: u64 = USER_BASE + 16 * 1024 * 1024;
+pub const LINUX_ARENA_BASE: u64 = USER_BASE + 256 * 1024 * 1024;
 /// Number of pages in the Linux arena (32 MiB).
-pub const LINUX_ARENA_PAGES: u64 = 8192;
+pub const LINUX_ARENA_PAGES: u64 = 262_144;
 /// Pages reserved for the Linux `brk` heap at the start of the arena (1 MiB).
-pub const LINUX_HEAP_PAGES: u64 = 256;
+pub const LINUX_HEAP_PAGES: u64 = 4096;
 /// First address available to Linux `mmap` after the heap window.
 pub const LINUX_MMAP_BASE: u64 = LINUX_ARENA_BASE + LINUX_HEAP_PAGES * PAGE_SIZE;
 

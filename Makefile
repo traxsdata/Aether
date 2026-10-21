@@ -66,6 +66,9 @@ GATE4_BRIDGE_BUILD := $(BUILD)/gate4-bridge
 # AppImage's CLI through the Gate 4 rootfs and verifies its version.
 GATE4_APP_PROGRAM ?= /usr/bin/gridcraft-cli
 GATE4_APP_ARGS ?= --version
+# Real windowed GUI: the app opens the portal-granted workbook as argv.
+GATE4_GUI_PROGRAM ?= /usr/bin/gridcraft
+GATE4_GUI_ARGS ?= $(GATE4_GUI_NAMESPACE)
 IMAGE_SIZE ?= 64M
 IMAGE := $(BUILD)/aether.img
 
@@ -83,7 +86,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -96,9 +99,11 @@ user:
 	cp target/$(KERNEL_TARGET)/release/aether-init $(USER_ELF)
 	cp target/$(KERNEL_TARGET)/release/aether-linuxd $(LINUXD_ELF)
 
+FIXTURE_GATE4_GUI := $(if $(findstring gate4-gui-test,$(KERNEL_FEATURES)),--defsym AETHER_GATE4_GUI=1)
+
 linux-fixture:
 	@mkdir -p $(BUILD)
-	$(AS) --64 tests/fixtures/linux/hello.S -o $(BUILD)/linux-hello.o
+	$(AS) --64 $(FIXTURE_GATE4_GUI) tests/fixtures/linux/hello.S -o $(BUILD)/linux-hello.o
 	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
 		$(BUILD)/linux-hello.o -o $(LINUX_ELF)
 	$(AS) --64 tests/fixtures/linux/dynamic.S -o $(BUILD)/linux-dynamic.o
@@ -310,6 +315,25 @@ gate4-runtime-test: gate4-runtime-image
 		AETHER_EXPECT_BOOT_FAILURE=1 \
 		AETHER_EXPECT_FAILURE_TEXT='AETHER_LOADER_FAILED error=staged boot file' \
 		AETHER_MEMORY=3G AETHER_BOOT_TIMEOUT=240 $(PYTHON) tools/test-boot.py
+
+# Gate 4 windowed GridCraft: stage the signed GUI AppImage, the Mesa/lavapipe
+# runtime rootfs (with the Wayland bridge), and the GUI portal workbook. The
+# harness takes a screenshot and drives real PS/2 input; the kernel emits the
+# present/input/save/revoke markers.
+gate4-test: gate4-runtime
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		KERNEL_FEATURES="gate4-runtime gate4-gui-test" \
+		LINUX_RUNTIME_PIN=$(GATE4_RUNTIME_PIN) \
+		STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_ROOTFS) \
+		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+		LINUX_APPIMAGE_PROGRAM=$(GATE4_GUI_PROGRAM) \
+		LINUX_APPIMAGE_ARGS='$(GATE4_GUI_ARGS)' \
+		STAGED_APPIMAGE=$(GATECRAFT_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) \
+		IMAGE_SIZE=128M image
+	AETHER_GATE4_TIMEOUT=600 AETHER_GATE4_SCREENSHOT=$(abspath $(BUILD))/gate4/gridcraft.ppm \
+		AETHER_GATE4_CLICK=1 AETHER_GATE4_KEYS='4,2,ctrl-s' \
+		$(PYTHON) tools/gate4_smoke.py
 
 # Gate 4 GUI portal slice: run a static XLSX read/stage/commit fixture against
 # the real workbook grant. This exercises the GUI feature without the Wayland

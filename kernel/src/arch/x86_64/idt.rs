@@ -8,6 +8,7 @@
 //! a user fault terminates only the faulting task.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::serial_line;
 
@@ -540,22 +541,28 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
         );
     }
 
-    serial_line!(
-        "KERNEL EXCEPTION: {} ({}) error={:#x} rip={:#018x} cs={:#x} rflags={:#018x} cr2={:#018x}",
-        exception_name(saved_vector),
-        saved_vector,
-        saved_error,
-        saved_rip,
-        saved_cs,
-        saved_rflags,
-        cr2
-    );
+    static DEMAND_LOGS: AtomicUsize = AtomicUsize::new(0);
+    let user_demand = is_user && saved_vector == 14;
+    if !user_demand {
+        serial_line!(
+            "KERNEL EXCEPTION: {} ({}) error={:#x} rip={:#018x} cs={:#x} rflags={:#018x} cr2={:#018x}",
+            exception_name(saved_vector),
+            saved_vector,
+            saved_error,
+            saved_rip,
+            saved_cs,
+            saved_rflags,
+            cr2
+        );
+    }
 
     if is_user {
         if saved_vector == 14
             && crate::scheduler::resolve_linux_demand_fault(frame, cr2, saved_error)
         {
-            serial_line!("user: demand page mapped address={:#018x}", cr2);
+            if DEMAND_LOGS.fetch_add(1, Ordering::Relaxed) < 32 {
+                serial_line!("user: demand page mapped address={:#018x}", cr2);
+            }
             return frame;
         }
         serial_line!(

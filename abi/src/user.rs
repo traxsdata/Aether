@@ -21,7 +21,7 @@ pub const SYSCALL_VECTOR: u8 = 0x80;
 pub const USER_BASE: u64 = 0x0000_0200_0000_0000;
 
 /// Size of the user address window (128 MiB).
-pub const USER_WINDOW_BYTES: u64 = 128 * 1024 * 1024;
+pub const USER_WINDOW_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Highest address a user pointer may name.
 pub const USER_LIMIT: u64 = USER_BASE + USER_WINDOW_BYTES;
@@ -30,7 +30,7 @@ pub const USER_LIMIT: u64 = USER_BASE + USER_WINDOW_BYTES;
 pub const USER_STACK_TOP: u64 = USER_BASE + 64 * 1024 * 1024;
 
 /// Number of stack pages mapped for a user task.
-pub const USER_STACK_PAGES: u64 = 16;
+pub const USER_STACK_PAGES: u64 = 1024;
 
 /// Maximum bytes copied by one syscall.
 pub const MAX_SYSCALL_IO: usize = 4096;

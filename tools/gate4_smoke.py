@@ -38,6 +38,8 @@ KEYS = [key for key in os.environ.get("AETHER_GATE4_KEYS", "").split(",") if key
 WAIT_SAVE = os.environ.get("AETHER_GATE4_WAIT_SAVE", "1") != "0"
 
 REQUIRED = ["AETHER_GATE4_PRESENT_OK"]
+if CLICK or KEYS:
+    REQUIRED.append("AETHER_GATE4_INPUT_OK")
 if WAIT_SAVE:
     REQUIRED += ["AETHER_GATE4_SAVE_OK", "AETHER_GATE4_REVOKE_OK"]
 FAILURES = ("AETHER_BOOT_FAILED", "AETHER_KERNEL_PANIC", "AETHER_LOADER_FAILED")
@@ -98,7 +100,7 @@ def main() -> int:
         "qemu-system-x86_64",
         "-machine", "q35,accel=tcg",
         "-cpu", "max",
-        "-m", "2048M",
+        "-m", "8G",
         "-display", "none",
         "-device", "VGA",
         "-no-reboot",
@@ -113,7 +115,7 @@ def main() -> int:
         ]
     else:
         command += ["-bios", str(code)]
-    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     qmp_socket = None
     qmp_file = None
     try:
@@ -161,25 +163,45 @@ def main() -> int:
             print(f"PASS: screenshot {width}x{height} nonblack={nonblack} path={SCREENSHOT}")
 
         if CLICK:
-            x, y = (int(value) for value in CLICK.split(",", 1))
-            move_pointer(qmp_file, x, y)
+            # The PS/2 driver starts the pointer at the screen centre. Move up
+            # and left in bounded relative packets, then click twice: the first
+            # click focuses the Linux window, the second selects a cell.
+            for _ in range(10):
+                send_hmp(qmp_file, "mouse_move -30 30")
+                time.sleep(0.02)
+            send_hmp(qmp_file, "mouse_button 1")
+            send_hmp(qmp_file, "mouse_button 0")
+            time.sleep(0.05)
             send_hmp(qmp_file, "mouse_button 1")
             send_hmp(qmp_file, "mouse_button 0")
         for key in KEYS:
             send_hmp(qmp_file, f"sendkey {key} 20")
-            time.sleep(0.05)
+            time.sleep(0.08)
 
         if WAIT_SAVE:
-            deadline = time.monotonic() + 60
+            # Save first; the app stays open until the harness closes it. The
+            # revoke marker is emitted on the post-exit path.
+            deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
                 text = serial.read_text(errors="replace")
-                if "AETHER_GATE4_SAVE_OK" in text and "AETHER_GATE4_REVOKE_OK" in text:
+                if "AETHER_GATE4_SAVE_OK" in text:
+                    break
+                time.sleep(0.25)
+            else:
+                print(text)
+                print("FAIL: save marker did not appear", file=sys.stderr)
+                return 1
+            send_hmp(qmp_file, "sendkey alt-f4 20")
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                text = serial.read_text(errors="replace")
+                if "AETHER_GATE4_REVOKE_OK" in text:
                     print("PASS: Gate 4 save and revocation markers present")
                     break
                 time.sleep(0.25)
             else:
                 print(text)
-                print("FAIL: save/revocation markers did not appear", file=sys.stderr)
+                print("FAIL: revoke marker did not appear", file=sys.stderr)
                 return 1
 
         print(text)
@@ -223,17 +245,6 @@ def send_hmp(qmp_file, command: str):
         raise RuntimeError(f"monitor command {command!r}: {reply}")
 
 
-def move_pointer(qmp_file, x: int, y: int):
-    # The Aether PS/2 driver accumulates relative packets. A bounded sequence
-    # of relative moves reaches the requested absolute position without
-    # assuming a fixed host pointer state.
-    for _ in range(80):
-        send_hmp(qmp_file, "mouse_move 20 12")
-        time.sleep(0.01)
-        x -= 20
-        y -= 12
-        if x <= 0 and y <= 0:
-            break
 
 
 if __name__ == "__main__":

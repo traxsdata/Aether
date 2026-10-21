@@ -352,6 +352,22 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         60 | 231 => return scheduler::linux_exit(first),
         _ => LINUX_ENOSYS,
     };
+    #[cfg(feature = "gate4-gui-test")]
+    if (result == LINUX_EINVAL || result == LINUX_ENOMEM)
+        && matches!(number, 1 | 3 | 9 | 77 | 257 | 319 | 12)
+    {
+        serial_line!(
+            "linux: err={} nr={} a={:#x} b={:#x} c={:#x} d={:#x} e={:#x} f={:#x}",
+            result,
+            number,
+            first,
+            second,
+            third,
+            unsafe { (*frame).r10 },
+            unsafe { (*frame).r8 },
+            unsafe { (*frame).r9 }
+        );
+    }
     // SAFETY: The assembly stub passes a live frame on this task's kernel
     // stack and keeps it valid until iretq.
     unsafe { (*frame).rax = result as u64 };
@@ -691,13 +707,21 @@ fn linux_mmap(
             // A memfd mapping may not extend past the object's current size.
             // Accessing a sparse tail would otherwise expose zero pages that
             // are not backed by the object.
-            if crate::memfd::is_key(key)
-                && offset
+            if crate::memfd::is_key(key) {
+                // A small memfd (SCTK creates a 2-byte pool) occupies one
+                // whole page. Linux permits a page-aligned mapping of that
+                // page; only reject ranges beyond the rounded object size.
+                let rounded = file_length
+                    .checked_add(aether_memory::PAGE_SIZE as u64 - 1)
+                    .map(|value| value & !(aether_memory::PAGE_SIZE as u64 - 1))
+                    .unwrap_or(file_length);
+                if offset
                     .checked_add(length)
-                    .is_none_or(|end| end > file_length)
-            {
-                let _ = scheduler::linux_vma_remove(start, length);
-                return LINUX_EINVAL;
+                    .is_none_or(|end| end > rounded)
+                {
+                    let _ = scheduler::linux_vma_remove(start, length);
+                    return LINUX_EINVAL;
+                }
             }
             crate::memory::with_frame_allocator(|allocator| {
                 map_shared_file_pages(

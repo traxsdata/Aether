@@ -22,7 +22,12 @@ use core::ptr;
 /// Load bias for the main position-independent image.
 pub const MAIN_BASE: u64 = USER_BASE + 80 * 1024 * 1024;
 /// Load bias for the interpreter.
-pub const INTERP_BASE: u64 = USER_BASE + 96 * 1024 * 1024;
+///
+/// The GridCraft GUI's main image is ~34 MiB. It starts at `MAIN_BASE`
+/// (80 MiB), so a 96 MiB interpreter base would overlap it and corrupt the
+/// interpreter's GOT. Keep the interpreter above the largest accepted main
+/// image; the 128 MiB user window still leaves room for the stack.
+pub const INTERP_BASE: u64 = USER_BASE + 120 * 1024 * 1024;
 
 /// A loaded Linux process image.
 #[derive(Clone, Copy, Debug)]

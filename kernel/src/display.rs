@@ -62,6 +62,7 @@ const EVENT_POINTER_BUTTON: u32 = 4;
 const EVENT_POINTER_AXIS: u32 = 5;
 const EVENT_ENTER: u32 = 6;
 const EVENT_LEAVE: u32 = 7;
+const EVENT_CLOSE: u32 = 8;
 const EVENT_FRAME: u32 = 9;
 
 const EACCES: i64 = -13;
@@ -355,8 +356,15 @@ pub fn write_request(pml4: aether_memory::frame::PhysFrame, data: &[u8]) -> i64 
         }
         _ => return EINVAL,
     };
+    if result != 0 {
+        serial_line!(
+            "AETHER_GATE4_DISPLAY_WRITE_FAIL kind={} code={}",
+            kind,
+            result
+        );
+    }
     if result == 0 {
-        REQUEST_SIZE as i64
+        (REQUEST_SIZE + length) as i64
     } else {
         result
     }
@@ -531,6 +539,21 @@ fn present(
         desktop::mark_live_dirty();
     }
     result
+}
+
+/// Asks the bridge to close the toplevel after a completed save.
+///
+/// This is used by the Gate 4 GUI test path once the portal commit has landed;
+/// it is not an application-controlled close.
+pub fn request_close() {
+    with_state(|state| {
+        if state.open && state.window.is_some() {
+            state.enqueue(DisplayEvent {
+                kind: EVENT_CLOSE,
+                ..DisplayEvent::EMPTY
+            });
+        }
+    });
 }
 
 /// Drains one or more events into a validated guest buffer.

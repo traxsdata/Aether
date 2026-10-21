@@ -3356,8 +3356,11 @@ g2_block_joined:
 
     /* Display endpoint test runs before the VMA table is deliberately
      * exhausted by the quota test below. */
+.ifndef AETHER_GATE4_GUI
     call display_test
+.endif
 
+.ifndef AETHER_GATE4_GUI
     /* Quotas: overlay bytes, descriptor count, then VMA count. */
     sub $1024, %rsp
     mov $257, %rax
@@ -3485,6 +3488,8 @@ g2_vma_done:
     mov $g2_quota_message_len, %rdx
     syscall
     add $1024, %rsp
+    jmp g2_extras_done
+.endif
     jmp g2_extras_done
 
 g2_block_child:

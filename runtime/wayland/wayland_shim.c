@@ -364,6 +364,7 @@ struct wl_display {
     struct wl_event_queue *queues;
     struct wl_proxy *proxies;
     int aether;
+    int pending_configure;
     int width;
     int height;
     struct wl_proxy *main_surface;
@@ -372,6 +373,7 @@ struct wl_display {
     struct wl_proxy *toplevel;
     struct wl_proxy *keyboard;
     struct wl_proxy *pointer;
+    struct wl_proxy *output;
 };
 
 enum proxy_kind { KIND_NONE, KIND_SURFACE, KIND_SHM_POOL, KIND_BUFFER, KIND_XDG,
@@ -639,24 +641,19 @@ static void invoke_event(struct wl_proxy *p, uint32_t opcode,
 static int aether_write_request(struct wl_display *dpy,
                                   struct aether_display_request *req,
                                   const void *payload, size_t length) {
-    if (!dpy || !dpy->aether || dpy->fd < 0)
+    if (!dpy || !dpy->aether || dpy->fd < 0 || length > 64)
         return -1;
+    uint8_t buffer[sizeof(*req) + 64];
     req->magic = AETHER_DISPLAY_MAGIC;
     req->version = AETHER_DISPLAY_VERSION;
     req->length = (uint32_t)length;
-    struct iovec iov[2];
-    iov[0].iov_base = req;
-    iov[0].iov_len = sizeof(*req);
-    iov[1].iov_base = (void *)payload;
-    iov[1].iov_len = length;
+    memcpy(buffer, req, sizeof(*req));
+    if (length && payload)
+        memcpy(buffer + sizeof(*req), payload, length);
     size_t total = sizeof(*req) + length;
     size_t done = 0;
     while (done < total) {
-        int index = done < sizeof(*req) ? 0 : 1;
-        size_t offset = done < sizeof(*req) ? done : done - sizeof(*req);
-        ssize_t n = write(dpy->fd,
-                          (const uint8_t *)iov[index].iov_base + offset,
-                          iov[index].iov_len - offset);
+        ssize_t n = write(dpy->fd, buffer + done, total - done);
         if (n < 0) {
             if (errno == EINTR)
                 continue;
@@ -670,6 +667,7 @@ static int aether_write_request(struct wl_display *dpy,
 }
 
 static void aether_create(struct wl_display *dpy) {
+    shim_log("AETHER_BRIDGE_CREATE_BEGIN fd=%d aether=%d\n", dpy->fd, dpy->aether);
     struct aether_display_request req;
     memset(&req, 0, sizeof(req));
     req.kind = AETHER_REQ_CREATE;
@@ -677,7 +675,8 @@ static void aether_create(struct wl_display *dpy) {
     req.height = (uint32_t)dpy->height;
     req.format = 1; /* ARGB8888 */
     const char *title = "GridCraft";
-    aether_write_request(dpy, &req, title, strlen(title));
+    int rc = aether_write_request(dpy, &req, title, strlen(title));
+    shim_log("AETHER_BRIDGE_CREATE_RC rc=%d errno=%d\n", rc, errno);
     if (getenv("G4_SHIM_TRACE")) shim_log("AETHER_BRIDGE_CREATE size=%dx%d\n", dpy->width, dpy->height);
 }
 
@@ -813,6 +812,8 @@ static void present_buffer(struct wl_display *dpy,
 /* ------------------------------------------------------------------ */
 
 static void send_xdg_configure(struct wl_proxy *xdg) {
+    shim_log("AETHER_BRIDGE_CONFIGURE xdg=%p toplevel=%p\n", (void *)xdg,
+             xdg && xdg->state ? (void *)((struct xdg_state *)xdg->state)->toplevel : NULL);
     static struct wl_array empty_states = { 0, 0, NULL };
     struct xdg_state *xs = xdg ? xdg->state : NULL;
     if (!xs)
@@ -826,12 +827,19 @@ static void send_xdg_configure(struct wl_proxy *xdg) {
         args[0].i = xdg->display->aether ? xdg->display->width : FAKE_WIDTH;
         args[1].i = xdg->display->aether ? xdg->display->height : FAKE_HEIGHT;
         args[2].a = &empty_states;
-        queue_event_raw(xs->toplevel->queue, xs->toplevel, 0, args, 3);
+        queue_event_all(xdg->display, xs->toplevel, 0, args, 3);
     }
     union wl_argument args[MAX_ARGS];
     memset(args, 0, sizeof(args));
     args[0].u = serial;
-    queue_event_raw(xdg->queue, xdg, 0, args, 1);
+    queue_event_all(xdg->display, xdg, 0, args, 1);
+    if (xdg->display->main_surface && xdg->display->output) {
+        union wl_argument surface_args[MAX_ARGS];
+        memset(surface_args, 0, sizeof(surface_args));
+        surface_args[0].o = xdg->display->output;
+        queue_event_all(xdg->display, xdg->display->main_surface, 0,
+                        surface_args, 1);
+    }
 }
 
 static void send_keyboard(struct wl_proxy *kb) {
@@ -998,6 +1006,8 @@ static int aether_read_events(struct wl_display *dpy) {
             dpy->height = (int)ev.y;
             if (dpy->xdg)
                 send_xdg_configure(dpy->xdg);
+            else
+                dpy->pending_configure = 1;
             break;
         case AETHER_EV_ENTER:
         case AETHER_EV_POINTER_MOTION:
@@ -1138,6 +1148,8 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
             return;
         }
         if (strcmp(name, "xdg_wm_base") == 0 && opcode == 2) {
+            shim_log("AETHER_BRIDGE_GET_XDG surface=%p new=%u\n", args[1].o,
+                     created ? created->id : 0);
             struct xdg_state *xs = calloc(1, sizeof(*xs));
             if (xs) {
                 xs->surface = args[1].o;
@@ -1150,10 +1162,16 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
             return;
         }
         if (strcmp(name, "xdg_surface") == 0 && opcode == 1) { /* get_toplevel */
+            shim_log("AETHER_BRIDGE_GET_TOPLEVEL xdg=%u new=%u\n", proxy->id,
+                     created ? created->id : 0);
             struct xdg_state *xs = proxy->state;
             if (xs)
                 xs->toplevel = created;
             dpy->toplevel = created;
+            if (dpy->xdg && dpy->pending_configure) {
+                dpy->pending_configure = 0;
+                send_xdg_configure(dpy->xdg);
+            }
             created->state = NULL;
             created->interface = created->interface; /* keep Rust table */
             return;
@@ -1196,8 +1214,10 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
             send_shm_formats(created);
         else if (strcmp(iname, "wl_seat") == 0)
             send_seat(created);
-        else if (strcmp(iname, "wl_output") == 0)
+        else if (strcmp(iname, "wl_output") == 0) {
+            dpy->output = created;
             send_output(created);
+        }
         return;
     }
     if (strcmp(name, "wl_surface") == 0) {
@@ -1223,10 +1243,13 @@ static void handle_request(struct wl_proxy *proxy, uint32_t opcode,
                     present_buffer(dpy, bs);
                 queue_event_all(dpy, ss->pending_buffer, 0, NULL, 0);
                 ss->pending_buffer = NULL;
-            } else if (ss->xdg) {
-                struct xdg_state *xs = ss->xdg->state;
-                if (xs && xs->toplevel && !xs->configured)
-                    send_xdg_configure(ss->xdg);
+            } else {
+                struct wl_proxy *xdg = ss->xdg ? ss->xdg : dpy->xdg;
+                if (xdg) {
+                    struct xdg_state *xs = xdg->state;
+                    if (xs && xs->toplevel && !xs->configured)
+                        send_xdg_configure(xdg);
+                }
             }
             if (ss->frame_callback) {
                 union wl_argument args[MAX_ARGS];
@@ -2056,6 +2079,8 @@ EXPORT int wl_display_roundtrip_queue(struct wl_display *dpy,
                                       struct wl_event_queue *q) {
     (void)q;
     if (!dpy)
+        return -1;
+    if (dpy->aether && aether_read_events(dpy) < 0)
         return -1;
     /* Requests are answered synchronously, so every response caused by the
      * caller's earlier requests is already queued.  A roundtrip drains all
