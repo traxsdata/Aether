@@ -4,7 +4,13 @@
 use core::fmt::{self, Write};
 
 const COM1: u16 = 0x3f8;
-const MAX_SPIN: u32 = 100_000;
+/// Spin budget for one console byte.
+///
+/// The console must not drop output while the guest is busy: a dropped byte
+/// can hide a kernel marker. The budget is large enough to outlast a burst
+/// of guest output and small enough that a machine without a working UART
+/// still makes progress.
+const MAX_SPIN: u32 = 20_000_000;
 
 #[inline]
 unsafe fn outb(port: u16, value: u8) {

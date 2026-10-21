@@ -1430,6 +1430,9 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             "WGPU_BACKEND=vulkan",
             "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json",
             "GRIDCRAFT_NO_PREFS=1",
+            // The bridge trace is a Gate 4 diagnostic only: it shows the
+            // Wayland requests the unmodified application makes.
+            "G4_SHIM_TRACE=1",
             "LANG=C.UTF-8",
             "LC_ALL=C.UTF-8",
             "TZ=UTC",
