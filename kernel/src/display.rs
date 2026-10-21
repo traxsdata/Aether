@@ -143,6 +143,8 @@ struct DisplayState {
     serial: u32,
     frames: u32,
     presented: bool,
+    /// The current surface has no translucent pixels.
+    opaque: bool,
     create_marker: bool,
     present_marker: bool,
     input_marker: bool,
@@ -175,6 +177,7 @@ impl DisplayState {
             serial: 0,
             frames: 0,
             presented: false,
+            opaque: false,
             create_marker: false,
             present_marker: false,
             input_marker: false,
@@ -303,6 +306,23 @@ pub fn open() -> Result<(), i64> {
     })
 }
 
+/// Emits compositor and presentation counters at the end of a Gate 4 run.
+#[cfg(feature = "gate4-gui-test")]
+fn log_perf() {
+    let (scene, cursor, last, max, fast, slow) = desktop::paint_stats();
+    let frames = read_state(|state| state.frames);
+    serial_line!(
+        "AETHER_GATE4_PERF frames={} scene_paints={} cursor_paints={} last_paint_ms={} max_paint_ms={} fast_paints={} slow_paints={}",
+        frames,
+        scene,
+        cursor,
+        last * 10,
+        max * 10,
+        fast,
+        slow
+    );
+}
+
 /// Closes the endpoint and retires its window and surface.
 pub fn close() {
     let window = with_state(|state| {
@@ -319,8 +339,19 @@ pub fn close() {
         window
     });
     if let Some(id) = window {
+        #[cfg(feature = "gate4-gui-test")]
+        log_perf();
         desktop::close_linux_window(id);
     }
+}
+
+/// Returns true when the presented surface fully covers its content rectangle.
+///
+/// The compositor uses this to skip the wallpaper restore and background fill
+/// that an opaque guest surface immediately overwrites.
+#[must_use]
+pub fn surface_opaque() -> bool {
+    read_state(|state| state.open && state.presented && state.opaque)
 }
 
 /// Returns the current window title, or an empty string.
@@ -470,7 +501,9 @@ fn set_title(title: &[u8]) -> i64 {
         state.title_len = title.len().min(MAX_TITLE);
         state.title[..state.title_len].copy_from_slice(&title[..state.title_len]);
         0
-    })
+    });
+    crate::desktop::mark_linux_frame_dirty();
+    0
 }
 
 fn destroy() {
@@ -480,6 +513,8 @@ fn destroy() {
         window
     });
     if let Some(id) = window {
+        #[cfg(feature = "gate4-gui-test")]
+        log_perf();
         desktop::close_linux_window(id);
     }
 }
@@ -519,40 +554,86 @@ fn present(
     let Some(total) = stride.checked_mul(height) else {
         return EINVAL;
     };
-    if total as usize > MAX_SURFACE_BYTES
-        || !paging::user_range_valid(pml4, buffer, u64::from(total), false)
-    {
+    if total as usize > MAX_SURFACE_BYTES {
         return EFAULT;
     }
+    // `read_user_bytes_checked` validates every page as it copies, so a
+    // separate whole-range pre-walk would only double the page-table work.
     let row_bytes = pixel_bytes as usize;
     let stride_bytes = stride as usize;
-    let mut checksum = 0x811c_9dc5u32;
-    let result = with_state(|state| {
-        for row in 0..height as usize {
-            let source = buffer + (row * stride_bytes) as u64;
-            let start = row * width as usize;
-            let destination = &mut state.pixels[start..start + width as usize];
-            // SAFETY: The destination is a kernel-owned slice and the source
-            // range was validated as readable user memory. The syscall path is
-            // non-preemptible, so the mapping cannot change underneath us.
-            let destination_bytes = unsafe {
-                core::slice::from_raw_parts_mut(destination.as_mut_ptr() as *mut u8, row_bytes)
+    with_state(|state| {
+        // The bridge usually presents a tightly packed surface. Copy the whole
+        // validated range in one pass instead of re-walking the page table for
+        // every scan line.
+        if stride_bytes == row_bytes {
+            let pixels = &mut state.pixels[..width as usize * height as usize];
+            // SAFETY: `pixels` is a kernel-owned u32 slice; viewing it as bytes
+            // is valid for the exact `row_bytes * height` length. The user
+            // range was validated above and the syscall path is non-preemptible.
+            let destination = unsafe {
+                core::slice::from_raw_parts_mut(
+                    pixels.as_mut_ptr() as *mut u8,
+                    row_bytes * height as usize,
+                )
             };
-            if !paging::read_user_bytes(pml4, source, destination_bytes) {
-                return EFAULT;
+            // Copy in bounded chunks and service the PS/2 controller between
+            // them. The syscall gate masks interrupts, and the controller's
+            // single-byte output register would silently drop keystrokes
+            // arriving during a multi-megabyte surface copy.
+            const COPY_CHUNK: usize = 64 * 1024;
+            let mut offset = 0;
+            while offset < destination.len() {
+                let end = (offset + COPY_CHUNK).min(destination.len());
+                if !paging::read_user_bytes_checked(
+                    pml4,
+                    buffer + offset as u64,
+                    &mut destination[offset..end],
+                ) {
+                    return EFAULT;
+                }
+                crate::input::service_controller();
+                offset = end;
             }
-        }
-        for pixel in &state.pixels[..width as usize * height as usize] {
-            checksum ^= *pixel;
-            checksum = checksum.wrapping_mul(0x0100_0193);
+        } else {
+            for row in 0..height as usize {
+                let source = buffer + (row * stride_bytes) as u64;
+                let start = row * width as usize;
+                let destination = &mut state.pixels[start..start + width as usize];
+                // SAFETY: The destination is a kernel-owned slice and the
+                // source range was validated as readable user memory. The
+                // syscall path is non-preemptible, so it cannot change.
+                let destination_bytes = unsafe {
+                    core::slice::from_raw_parts_mut(destination.as_mut_ptr() as *mut u8, row_bytes)
+                };
+                if !paging::read_user_bytes_checked(pml4, source, destination_bytes) {
+                    return EFAULT;
+                }
+            }
         }
         state.presented = true;
         state.format = format;
+        state.opaque = format == 0
+            || state.pixels[..width as usize * height as usize]
+                .iter()
+                .all(|pixel| (pixel >> 24) & 0xff == 0xff);
         state.frames = state.frames.saturating_add(1);
-        // A newly presented frame is damage for the Linux window: the
-        // compositor must sample the fresh pixels on its next idle pass.
-        crate::desktop::mark_live_dirty();
+        // A newly presented frame is damage for the Linux window only. Clock
+        // and diagnostics damage must not force a Linux re-blit.
+        crate::desktop::mark_linux_dirty();
         if !state.present_marker {
+            // The checksum is boot evidence for the first frame. Hashing all
+            // 1.3M pixels on every later present was pure per-frame overhead.
+            let mut checksum = 0x811c_9dc5u32;
+            for (index, pixel) in state.pixels[..width as usize * height as usize]
+                .iter()
+                .enumerate()
+            {
+                if index & 0xffff == 0 {
+                    crate::input::service_controller();
+                }
+                checksum ^= *pixel;
+                checksum = checksum.wrapping_mul(0x0100_0193);
+            }
             state.present_marker = true;
             serial_line!(
                 "AETHER_GATE4_PRESENT_OK frames={} checksum={:#010x} source=linux",
@@ -583,11 +664,7 @@ fn present(
             crate::input::inject_mouse_packet([0x08, 6, 4]);
         }
         0
-    });
-    if result == 0 {
-        desktop::mark_live_dirty();
-    }
-    result
+    })
 }
 
 /// Asks the bridge to close the toplevel after a completed save.

@@ -10,6 +10,28 @@ use crate::serial_line;
 use aether_abi::{FramebufferInfo, PixelFormat};
 use core::cell::UnsafeCell;
 
+/// Exact truncating division by 255 for the 16-bit products used by the
+/// eight-bit alpha blend.
+///
+/// The naive form costs three integer divisions per blended pixel; window
+/// shadows alone blend millions of pixels per repaint. `n + 1 + (n >> 8)` is
+/// exact for every `n` up to `255 * 255`.
+#[inline]
+const fn div255(value: u32) -> u32 {
+    let value = value + 1;
+    (value + (value >> 8)) >> 8
+}
+
+/// Blends `0x00RRGGBB` over `existing` with eight-bit alpha.
+#[inline]
+fn blend_rgb(existing: u32, rgb: u32, alpha: u32) -> u32 {
+    let inverse = 255 - alpha;
+    let channel = |shift: u32| -> u32 {
+        div255(((existing >> shift) & 0xff) * inverse + ((rgb >> shift) & 0xff) * alpha)
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
 struct Global<T>(UnsafeCell<T>);
 
 // SAFETY: The framebuffer is only accessed from the single CPU. The idle task
@@ -201,16 +223,67 @@ impl Framebuffer {
             } else {
                 self.unpack(pointer.read())
             };
-            let alpha = u32::from(alpha);
-            let inverse = 255 - alpha;
-            let channel = |shift: u32| -> u32 {
-                (((existing >> shift) & 0xff) * inverse + ((rgb >> shift) & 0xff) * alpha) / 255
-            };
-            let blended = (channel(16) << 16) | (channel(8) << 8) | channel(0);
+            let blended = blend_rgb(existing, rgb, u32::from(alpha));
             if self.volatile {
                 pointer.write_volatile(self.pack(blended));
             } else {
                 pointer.write(self.pack(blended));
+            }
+        }
+    }
+
+    /// Copies one already-clipped destination row of a guest surface.
+    ///
+    /// Opaque rows are written as packed words without a per-pixel visibility
+    /// or blend check. Translucent rows fall back to per-pixel blending so the
+    /// window backdrop still shows through. `rect` and `row_span` have already
+    /// bounded the destination to the current clip, damage region, and rounded
+    /// window silhouette.
+    fn blit_row(&mut self, x: i32, y: i32, source: &[u32], format: u32) {
+        // The Linux content path holds interrupts while it copies a surface.
+        // Read the PS/2 controller periodically so keystrokes are not lost.
+        // Host render tests reuse this module without the kernel input service.
+        #[cfg(target_os = "none")]
+        if y & 31 == 0 {
+            crate::input::service_controller();
+        }
+        let opaque = format == 0
+            || source
+                .iter()
+                .all(|pixel| ((pixel >> 24) & 0xff) as u8 == 255);
+        if !opaque || source.is_empty() {
+            if !opaque {
+                for (column, pixel) in source.iter().enumerate() {
+                    let pixel = *pixel;
+                    let alpha = ((pixel >> 24) & 0xff) as u8;
+                    if alpha != 0 {
+                        self.pixel_blend(x + column as i32, y, pixel & 0x00ff_ffff, alpha);
+                    }
+                }
+            }
+            return;
+        }
+        let offset = y as usize * self.stride as usize + x as usize;
+        // SAFETY: The caller clipped the row to this framebuffer's validated
+        // bounds. Source and destination are distinct kernel-owned buffers.
+        unsafe {
+            let pointer = (self.base as *mut u32).add(offset);
+            if self.volatile {
+                for (column, pixel) in source.iter().enumerate() {
+                    pointer
+                        .add(column)
+                        .write_volatile(self.pack(pixel & 0x00ff_ffff));
+                }
+            } else if self.format == PixelFormat::BlueGreenRedReserved {
+                // The common GOP layout needs no channel permutation; only the
+                // reserved X byte is cleared.
+                for (column, pixel) in source.iter().enumerate() {
+                    pointer.add(column).write(pixel & 0x00ff_ffff);
+                }
+            } else {
+                for (column, pixel) in source.iter().enumerate() {
+                    pointer.add(column).write(self.pack(pixel & 0x00ff_ffff));
+                }
             }
         }
     }
@@ -268,9 +341,13 @@ impl Framebuffer {
                     } else {
                         pointer.read()
                     };
+                    // Channel permutation commutes with alpha blending, so the
+                    // packed native word can be blended directly.
                     let channel = |shift: u32| {
-                        (((existing >> shift) & 0xff) * inverse + ((rgb >> shift) & 0xff) * alpha)
-                            / 255
+                        div255(
+                            ((existing >> shift) & 0xff) * inverse
+                                + ((rgb >> shift) & 0xff) * alpha,
+                        )
                     };
                     let value = (channel(16) << 16) | (channel(8) << 8) | channel(0);
                     if self.volatile {
@@ -902,36 +979,33 @@ pub fn blit_surface_scaled(
         return;
     }
     let _ = with_framebuffer(|fb| {
+        // Clip once instead of asking every source pixel to reject itself.
+        // Without this, an unrelated menu-bar or clock repaint still walks the
+        // full Linux surface and takes the interrupt guard for nothing.
+        let Some(rect) = fb.clipped(x, y, width, height) else {
+            return;
+        };
         // The common case is an unscaled surface. Avoid two integer divisions
         // per pixel and walk contiguous source rows instead.
         if width as u32 == source_width && height as u32 == source_height {
             let stride = source_width as usize;
-            for row in 0..height as usize {
-                let start = row * stride;
-                for (column, pixel) in source[start..start + stride].iter().enumerate() {
-                    let pixel = *pixel;
-                    let rgb = pixel & 0x00ff_ffff;
-                    if format == 1 {
-                        let alpha = ((pixel >> 24) & 0xff) as u8;
-                        if alpha == 0 {
-                            continue;
-                        }
-                        if alpha < 255 {
-                            fb.pixel_blend(x + column as i32, y + row as i32, rgb, alpha);
-                        } else {
-                            fb.pixel(x + column as i32, y + row as i32, rgb);
-                        }
-                    } else {
-                        fb.pixel(x + column as i32, y + row as i32, rgb);
-                    }
+            for row in rect.y..rect.y + rect.height {
+                let (left, span) = fb.row_span(rect, row);
+                if span == 0 {
+                    continue;
                 }
+                let start = (row - y) as usize * stride + (left - x) as usize;
+                fb.blit_row(left, row, &source[start..start + span as usize], format);
             }
             return;
         }
-        for row in 0..height {
-            let source_y = (row as u32 * source_height / height as u32) as usize;
-            for column in 0..width {
-                let source_x = (column as u32 * source_width / width as u32) as usize;
+        // Scaled presentation is uncommon (the window is clamped or resized),
+        // but clip the loop and keep the source mapping proportional.
+        for row in rect.y..rect.y + rect.height {
+            let source_y = ((row - y) as u32 * source_height / height as u32) as usize;
+            let (left, span) = fb.row_span(rect, row);
+            for column in left..left + span {
+                let source_x = ((column - x) as u32 * source_width / width as u32) as usize;
                 let pixel = source[source_y * source_width as usize + source_x];
                 let rgb = pixel & 0x00ff_ffff;
                 if format == 1 {
@@ -940,12 +1014,12 @@ pub fn blit_surface_scaled(
                         continue;
                     }
                     if alpha < 255 {
-                        fb.pixel_blend(x + column, y + row, rgb, alpha);
+                        fb.pixel_blend(column, row, rgb, alpha);
                     } else {
-                        fb.pixel(x + column, y + row, rgb);
+                        fb.pixel(column, row, rgb);
                     }
                 } else {
-                    fb.pixel(x + column, y + row, rgb);
+                    fb.pixel(column, row, rgb);
                 }
             }
         }

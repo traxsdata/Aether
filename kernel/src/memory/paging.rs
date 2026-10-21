@@ -794,6 +794,50 @@ pub fn write_user_bytes(pml4: PhysFrame, address: u64, bytes: &[u8]) -> bool {
     true
 }
 
+/// Copies a user byte range into a kernel buffer while validating each page in
+/// the same pass.
+///
+/// This is the bulk form for large, already-bounded transfers such as a
+/// presented surface. Unlike [`read_user_bytes`], it does not pre-walk the
+/// whole range and then walk it again to copy. A failure may have copied a
+/// prefix into `bytes`; callers must discard the buffer on `false`.
+#[must_use]
+pub fn read_user_bytes_checked(pml4: PhysFrame, address: u64, bytes: &mut [u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let Some(end) = address.checked_add(bytes.len() as u64) else {
+        return false;
+    };
+    if address < USER_BASE || end > USER_LIMIT {
+        return false;
+    }
+    let mut copied = 0usize;
+    while copied < bytes.len() {
+        let virtual_address = address + copied as u64;
+        let Some(entry) = user_leaf_entry(pml4, virtual_address) else {
+            return false;
+        };
+        if !entry.is_present() || !entry.flags().contains(PageFlags::USER) {
+            return false;
+        }
+        let page_offset = (virtual_address & (PAGE_SIZE - 1)) as usize;
+        let length = (PAGE_SIZE as usize - page_offset).min(bytes.len() - copied);
+        let physical = entry.address() + page_offset as u64;
+        // SAFETY: The leaf entry was checked present and user-readable above,
+        // and the kernel identity map covers allocated physical frames.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                physical as *const u8,
+                bytes[copied..copied + length].as_mut_ptr(),
+                length,
+            );
+        }
+        copied += length;
+    }
+    true
+}
+
 /// Copies a short user byte range into a kernel buffer without changing CR3.
 /// The range must be present and readable in the supplied address space.
 pub fn read_user_bytes(pml4: PhysFrame, address: u64, bytes: &mut [u8]) -> bool {

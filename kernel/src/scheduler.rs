@@ -1456,9 +1456,11 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             "WGPU_BACKEND=vulkan",
             "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json",
             "GRIDCRAFT_NO_PREFS=1",
-            // The bridge trace is a Gate 4 diagnostic only: it shows the
-            // Wayland requests the unmodified application makes.
-            "G4_SHIM_TRACE=1",
+            // Per-request bridge tracing is deliberately off. It writes one
+            // serial line per Wayland request/emit/dispatch, and the emulated
+            // UART on the single guest CPU makes that dominate interaction.
+            // Use a dedicated diagnostic build when the request stream is the
+            // subject of the test.
             // Lavapipe runs one rasterizer thread; the prototype schedules a
             // single CPU, and the extra worker adds contention without gain.
             "LP_NUM_THREADS=1",
@@ -7356,13 +7358,16 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         tasks[current].state = TaskState::Ready;
     }
 
-    // Prefer the idle task only when there is input for the desktop/shell to
-    // consume. Otherwise skip it so a software-rendered client gets the whole
-    // CPU instead of sharing round-robin slices with an idle painter.
+    // Prefer the idle task when input is waiting or a presented frame has not
+    // been composited yet. Otherwise skip it so a software-rendered client
+    // gets the whole CPU instead of sharing round-robin slices with an idle
+    // painter. Without the frame check, a guest that renders or polls without
+    // blocking can starve presentation and make input feel laggy.
     let input_pending = crate::input::pointer_pending() || crate::input::key_pending();
+    let frame_pending = crate::desktop::frame_pending();
     let idle_ready = matches!(tasks[0].state, TaskState::Ready | TaskState::Running);
     let mut next = current;
-    if current != 0 && input_pending && idle_ready {
+    if current != 0 && (input_pending || frame_pending) && idle_ready {
         next = 0;
     } else {
         for step in 1..=MAX_TASKS {

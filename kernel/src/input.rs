@@ -391,6 +391,25 @@ pub fn on_mouse_irq() {
     on_irq();
 }
 
+/// Drains the PS/2 output register while interrupts are masked.
+///
+/// Surface copies and the compositor hold interrupts off for millions of
+/// pixel operations. The controller has a one-byte output register, so a key
+/// or mouse packet arriving in that window is otherwise lost. Long loops call
+/// this between chunks to keep input loss bounded.
+pub fn service_controller() {
+    for _ in 0..QUEUE_LEN {
+        // SAFETY: Fixed ports, accessed with interrupts already masked by the
+        // caller (or from interrupt context).
+        let status = unsafe { inb(PS2_STATUS) };
+        if status & 1 == 0 {
+            return;
+        }
+        // SAFETY: A byte is available according to the status just read.
+        route_byte(status, unsafe { inb(PS2_DATA) });
+    }
+}
+
 /// Drains the next key event.
 pub fn next_event() -> Option<KeyEvent> {
     let _guard = InterruptGuard::enter();

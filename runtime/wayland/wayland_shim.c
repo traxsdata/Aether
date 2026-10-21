@@ -763,9 +763,10 @@ static void aether_title(struct wl_display *dpy, const char *title) {
     if (length > 64)
         length = 64;
     aether_write_request(dpy, &req, title, length);
-    if (getenv("G4_SHIM_TRACE"))
-        shim_log("AETHER_BRIDGE_TITLE title=%.*s\n", (int)length,
-                 title ? title : "");
+    /* Title changes are rare and the harness uses them as readiness
+     * evidence, so keep this line independent of verbose request tracing. */
+    shim_log("AETHER_BRIDGE_TITLE title=%.*s\n", (int)length,
+             title ? title : "");
 }
 
 static void aether_destroy(struct wl_display *dpy) {
@@ -809,8 +810,12 @@ static void present_buffer(struct wl_display *dpy,
         g_last_h = h;
         g_last_stride = stride;
         g_last_format = buf->format;
-        if (getenv("G4_SHIM_TRACE")) shim_log("AETHER_BRIDGE_PRESENT frames=%llu size=%dx%d stride=%d format=%u\n",
-                 (unsigned long long)g_frames, w, h, stride, buf->format);
+        /* One line per frame is cheap evidence, but a burst of interaction
+         * frames should not serialise the UART. Log the startup frames used by
+         * the harness, then a sparse heartbeat. */
+        if (g_frames <= 8 || g_frames % 60 == 0)
+            shim_log("AETHER_BRIDGE_PRESENT frames=%llu size=%dx%d stride=%d format=%u\n",
+                     (unsigned long long)g_frames, w, h, stride, buf->format);
         return;
     }
 
