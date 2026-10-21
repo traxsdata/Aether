@@ -547,16 +547,19 @@ struct Task {
     futex_address: u64,
     futex_deadline: u64,
     clear_child_tid: u64,
-    linux_fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
+    /// Descriptors of the owning process. The threads of one process share
+    /// the table, so the view names the thread group id.
+    linux_fds: FdSlots,
     /// Per-application overlay store selected by the runtime manager.
     overlay_app: u8,
     inotify_wait_pointer: u64,
     inotify_wait_length: usize,
-    // Descriptor-local allocation map; counters live in EVENTFD_COUNTERS and
-    // are addressed by (tgid, slot), so cloned threads share them.
-    linux_eventfds: [Option<()>; MAX_EVENTFDS],
-    linux_epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
-    linux_timerfds: [Option<LinuxTimerFd>; MAX_TIMERFDS],
+    // Descriptor-local allocation map. The slots live in the per-process
+    // table so that cloned threads share them; the event counters live in
+    // EVENTFD_COUNTERS and are addressed by (tgid, slot).
+    linux_eventfds: EventfdSlots,
+    linux_epolls: EpollSlots,
+    linux_timerfds: TimerfdSlots,
     wait_kind: LinuxWaitKind,
     /// Most recent Linux system call number; used by the Gate 4 block trace.
     #[allow(dead_code)]
@@ -592,6 +595,17 @@ struct Task {
 }
 
 impl Task {
+    /// Points the descriptor views at the process that owns this task.
+    ///
+    /// The threads of one process share a descriptor table, so the views name
+    /// the thread group id rather than the task index.
+    fn bind_file_state(&mut self, tgid: usize) {
+        self.linux_fds = FdSlots(tgid);
+        self.linux_eventfds = EventfdSlots(tgid);
+        self.linux_epolls = EpollSlots(tgid);
+        self.linux_timerfds = TimerfdSlots(tgid);
+    }
+
     const fn new() -> Self {
         Self {
             state: TaskState::Empty,
@@ -619,13 +633,13 @@ impl Task {
             futex_address: 0,
             futex_deadline: 0,
             clear_child_tid: 0,
-            linux_fds: [None; crate::linux::MAX_FDS],
+            linux_fds: FdSlots(0),
             overlay_app: 0,
             inotify_wait_pointer: 0,
             inotify_wait_length: 0,
-            linux_eventfds: [None; MAX_EVENTFDS],
-            linux_epolls: [None; MAX_EPOLLS],
-            linux_timerfds: [None; MAX_TIMERFDS],
+            linux_eventfds: EventfdSlots(0),
+            linux_epolls: EpollSlots(0),
+            linux_timerfds: TimerfdSlots(0),
             wait_kind: LinuxWaitKind::None,
             last_syscall: u64::MAX,
             traced_syscall: u64::MAX,
@@ -681,6 +695,83 @@ static PIPES: Global<[Option<LinuxPipe>; MAX_PIPES]> = Global(UnsafeCell::new([N
 /// One inotify instance per process id (tgid). Threads share it; fork copies it.
 static INOTIFY: Global<[Option<LinuxInotify>; MAX_TASKS]> =
     Global(UnsafeCell::new([None; MAX_TASKS]));
+
+/// Descriptor state of one Linux process.
+///
+/// The threads of a process share one descriptor table, exactly like Linux
+/// `CLONE_FILES`. The state is addressed by the thread group id, so a
+/// descriptor created by one thread is immediately visible to the other
+/// threads of the same process. `fork` copies the table into the child's own
+/// slot; `clone` keeps the parent's slot.
+struct LinuxFileState {
+    fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
+    eventfds: [Option<()>; MAX_EVENTFDS],
+    epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
+    timerfds: [Option<LinuxTimerFd>; MAX_TIMERFDS],
+}
+
+impl LinuxFileState {
+    const fn new() -> Self {
+        Self {
+            fds: [None; crate::linux::MAX_FDS],
+            eventfds: [None; MAX_EVENTFDS],
+            epolls: [None; MAX_EPOLLS],
+            timerfds: [None; MAX_TIMERFDS],
+        }
+    }
+}
+
+static FILE_STATE: Global<[LinuxFileState; MAX_TASKS]> =
+    Global(UnsafeCell::new([const { LinuxFileState::new() }; MAX_TASKS]));
+
+/// Declares a view of one shared descriptor slot table.
+///
+/// The view keeps the existing `task.linux_fds[..]` call syntax while the
+/// storage lives in the per-process table, so every descriptor access resolves
+/// to the owning process.
+macro_rules! process_slot_view {
+    ($name:ident, $field:ident, $type:ty) => {
+        /// A view of one process's shared descriptor slot table.
+        #[derive(Clone, Copy)]
+        struct $name(usize);
+
+        impl core::ops::Deref for $name {
+            type Target = [$type];
+
+            fn deref(&self) -> &Self::Target {
+                // SAFETY: The table is static and the kernel is single-CPU;
+                // see the module documentation on the serialization model.
+                unsafe { &(*FILE_STATE.0.get())[self.0].$field }
+            }
+        }
+
+        impl core::ops::DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                // SAFETY: as above.
+                unsafe { &mut (*FILE_STATE.0.get())[self.0].$field }
+            }
+        }
+    };
+}
+
+process_slot_view!(FdSlots, fds, Option<LinuxFile>);
+process_slot_view!(EventfdSlots, eventfds, Option<()>);
+process_slot_view!(EpollSlots, epolls, Option<LinuxEpoll>);
+process_slot_view!(TimerfdSlots, timerfds, Option<LinuxTimerFd>);
+
+/// Clears the descriptor table of one process.
+///
+/// The table belongs to the whole thread group, so this runs only when the
+/// last thread of a process is gone.
+fn clear_file_state(tgid: usize) {
+    if tgid >= MAX_TASKS {
+        return;
+    }
+    // SAFETY: Single-CPU exit path with interrupts masked.
+    let state = unsafe { &mut *FILE_STATE.0.get() };
+    state[tgid] = LinuxFileState::new();
+}
+
 #[repr(align(16))]
 struct WorkerStacks([[u8; STACK_SIZE]; WORKER_COUNT]);
 
@@ -1094,6 +1185,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     user.kernel_stack_top = user_kernel_top;
     user.root = crate::fs::DEMO_ROOT;
     user.tgid = USER_TASK;
+    user.bind_file_state(USER_TASK);
     tasks[USER_TASK] = user;
     crate::apps::started(USER_TASK);
 
@@ -1130,6 +1222,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     linuxd_task.kernel_stack_top = linuxd_kernel_top;
     linuxd_task.root = crate::fs::DEMO_ROOT;
     linuxd_task.tgid = LINUXD_TASK;
+    linuxd_task.bind_file_state(LINUXD_TASK);
     tasks[LINUXD_TASK] = linuxd_task;
     serial_line!(
         "sched: linuxd service ready pid={} pml4={:#018x} entry={:#018x} cpl=3",
@@ -1160,6 +1253,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     linux.root = crate::fs::DEMO_ROOT;
     linux.brk = paging::LINUX_ARENA_BASE;
     linux.tgid = LINUX_TASK;
+    linux.bind_file_state(LINUX_TASK);
     linux.pgid = LINUX_TASK;
     linux.sid = LINUX_TASK;
     // Kernel-owned boot fixture grant. This is the only static Linux task, and
@@ -1201,6 +1295,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     dynamic_task.root = crate::fs::DEMO_ROOT;
     dynamic_task.brk = paging::LINUX_ARENA_BASE;
     dynamic_task.tgid = LINUX_DYN_TASK;
+    dynamic_task.bind_file_state(LINUX_DYN_TASK);
     dynamic_task.pgid = LINUX_DYN_TASK;
     dynamic_task.sid = LINUX_DYN_TASK;
     let dynamic_interpreter =
@@ -1394,6 +1489,7 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     app_task.brk = paging::LINUX_ARENA_BASE;
     app_task.overlay_app = crate::linuxd::APP_OVERLAY_ID;
     app_task.tgid = APPIMAGE_TASK;
+    app_task.bind_file_state(APPIMAGE_TASK);
     app_task.pgid = APPIMAGE_TASK;
     app_task.sid = APPIMAGE_TASK;
     #[cfg(feature = "gate4-gui-test")]
@@ -1868,11 +1964,7 @@ pub fn linux_clone(
         parent_brk,
         parent_fs_base,
         parent_tgid,
-        parent_fds,
         parent_overlay_app,
-        parent_eventfds,
-        parent_epolls,
-        parent_timerfds,
         parent_handles,
     ) = {
         let parent = &tasks[current];
@@ -1886,11 +1978,7 @@ pub fn linux_clone(
             parent.brk,
             parent.fs_base,
             parent.tgid,
-            parent.linux_fds,
             parent.overlay_app,
-            parent.linux_eventfds,
-            parent.linux_epolls,
-            parent.linux_timerfds,
             parent.handles,
         )
     };
@@ -1920,7 +2008,6 @@ pub fn linux_clone(
     } else {
         parent_fs_base
     };
-    thread.tgid = parent_tgid;
     thread.pgid = tasks[current].pgid;
     thread.sid = tasks[current].sid;
     thread.futex_address = 0;
@@ -1933,12 +2020,11 @@ pub fn linux_clone(
     thread.robust_list_len = 0;
     thread.rseq = 0;
     thread.rseq_len = 0;
-    thread.linux_fds = parent_fds;
-    retain_memfd_fds(&thread.linux_fds);
+    // A thread shares the descriptor table of its process, exactly like Linux
+    // `CLONE_FILES`, so the views keep naming the parent's thread group.
+    thread.tgid = parent_tgid;
+    thread.bind_file_state(parent_tgid);
     thread.overlay_app = parent_overlay_app;
-    thread.linux_eventfds = parent_eventfds;
-    thread.linux_epolls = parent_epolls;
-    thread.linux_timerfds = parent_timerfds;
     thread.handles = parent_handles;
 
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
@@ -1998,12 +2084,8 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         shared_vmas,
         brk,
         fs_base,
-        fds,
         overlay_app,
-        eventfds,
         parent_tgid,
-        epolls,
-        timerfds,
         sigactions,
         sigblocked,
         sigaltstack,
@@ -2017,12 +2099,8 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
             parent.shared_vmas,
             parent.brk,
             parent.fs_base,
-            parent.linux_fds,
             parent.overlay_app,
-            parent.linux_eventfds,
             parent.tgid,
-            parent.linux_epolls,
-            parent.linux_timerfds,
             parent.sigactions,
             parent.sigblocked,
             parent.sigaltstack,
@@ -2047,21 +2125,23 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.pgid = tasks[current].pgid;
     child.sid = tasks[current].sid;
     child.parent = current;
-    child.linux_fds = fds;
-    retain_memfd_fds(&child.linux_fds);
     child.overlay_app = overlay_app;
-    child.linux_eventfds = eventfds;
-    // fork gets a process-private snapshot; threads continue to address the
-    // parent's counters via their shared tgid.
+    // fork gets a process-private snapshot of the descriptor table; threads
+    // continue to address the parent's table via their shared tgid.
+    child.bind_file_state(slot);
     if parent_tgid < MAX_TASKS {
+        let state = unsafe { &mut *FILE_STATE.0.get() };
+        state[slot].fds = state[parent_tgid].fds;
+        state[slot].eventfds = state[parent_tgid].eventfds;
+        state[slot].epolls = state[parent_tgid].epolls;
+        state[slot].timerfds = state[parent_tgid].timerfds;
+        retain_memfd_fds(&state[slot].fds);
         let counters = unsafe { &mut *EVENTFD_COUNTERS.0.get() };
         counters[slot] = counters[parent_tgid];
         // Inotify is shared by threads but snapshotted by fork.
         let inotify = unsafe { &mut *INOTIFY.0.get() };
         inotify[slot] = inotify[parent_tgid];
     }
-    child.linux_epolls = epolls;
-    child.linux_timerfds = timerfds;
     child.sigactions = sigactions;
     child.sigblocked = sigblocked;
     child.sigaltstack = sigaltstack;
@@ -3130,11 +3210,10 @@ fn terminate_thread_group(index: usize, signum: u64) {
         task.futex_address = 0;
         task.futex_deadline = 0;
         task.state = TaskState::Done;
-        release_linux_task_resources(task);
-        task.linux_fds = [None; crate::linux::MAX_FDS];
-        task.linux_eventfds = [None; MAX_EVENTFDS];
-        task.linux_epolls = [None; MAX_EPOLLS];
+        release_linux_task_resources(&task.linux_fds);
     }
+    // The whole process is gone, so its shared descriptor table goes with it.
+    clear_file_state(tgid);
     // Pipes are global slots shared by every descriptor; dropping the group's
     // descriptors can release slots and must wake blocked peers.
     linux_release_task_pipes();
@@ -5866,7 +5945,7 @@ fn linux_release_task_pipes() {
 /// Adds an object reference for every copied memfd descriptor.
 ///
 /// Used by `fork` and `clone` after copying the parent's descriptor table.
-fn retain_memfd_fds(fds: &[Option<LinuxFile>; crate::linux::MAX_FDS]) {
+fn retain_memfd_fds(fds: &[Option<LinuxFile>]) {
     for file in fds.iter().flatten() {
         if let LinuxFileSource::MemFd { index } = file.source {
             let _ = crate::memfd::retain(index);
@@ -5875,7 +5954,7 @@ fn retain_memfd_fds(fds: &[Option<LinuxFile>; crate::linux::MAX_FDS]) {
 }
 
 /// Drops every memfd object reference held by a retiring descriptor table.
-fn release_memfd_fds(fds: &[Option<LinuxFile>; crate::linux::MAX_FDS]) {
+fn release_memfd_fds(fds: &[Option<LinuxFile>]) {
     for file in fds.iter().flatten() {
         if let LinuxFileSource::MemFd { index } = file.source {
             let _ = crate::memfd::release(index);
@@ -5888,10 +5967,9 @@ fn release_memfd_fds(fds: &[Option<LinuxFile>; crate::linux::MAX_FDS]) {
 /// Called on exit, signal exit, and fault. It is idempotent: a stale memfd
 /// index is ignored and `display::close` returns immediately when the endpoint
 /// was never opened.
-fn release_linux_task_resources(task: &mut Task) {
-    release_memfd_fds(&task.linux_fds);
-    if task
-        .linux_fds
+fn release_linux_task_resources(fds: &[Option<LinuxFile>]) {
+    release_memfd_fds(fds);
+    if fds
         .iter()
         .flatten()
         .any(|file| matches!(file.source, LinuxFileSource::Display))
@@ -6592,11 +6670,8 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = ((status & 0xff) << 8) as i64;
-        release_linux_task_resources(&mut tasks[current]);
-        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
-        tasks[current].linux_epolls = [None; MAX_EPOLLS];
-        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
+        release_linux_task_resources(&tasks[current].linux_fds);
+        clear_file_state(tasks[current].tgid);
         serial_line!("linux: process exit pid={current} status={status}");
         linux_release_task_pipes();
         wake_waiting_parent(current);
@@ -6610,11 +6685,8 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].futex_address = 0;
         tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
-        release_linux_task_resources(&mut tasks[current]);
-        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
-        tasks[current].linux_epolls = [None; MAX_EPOLLS];
-        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
+        // A thread shares the descriptor table of its process, so the table
+        // and the descriptors in it stay open for the other threads.
         serial_line!("linux: thread exit tid={current} status={status}");
         linux_release_task_pipes();
         return schedule_next(current);
@@ -6637,11 +6709,8 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].futex_address = 0;
     tasks[current].futex_deadline = 0;
     tasks[current].state = TaskState::Done;
-    release_linux_task_resources(&mut tasks[current]);
-    tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-    tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
-    tasks[current].linux_epolls = [None; MAX_EPOLLS];
-    tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
+    release_linux_task_resources(&tasks[current].linux_fds);
+    clear_file_state(tgid);
     tasks[current].vmas.reset();
     tasks[current].anonymous_vmas.reset();
     let result = if status == 0 {
@@ -6754,11 +6823,8 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = 128 + vector as i64;
-        release_linux_task_resources(&mut tasks[current]);
-        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
-        tasks[current].linux_epolls = [None; MAX_EPOLLS];
-        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
+        release_linux_task_resources(&tasks[current].linux_fds);
+        clear_file_state(tasks[current].tgid);
         serial_line!("linux: process fault pid={current} vector={vector}");
         linux_release_task_pipes();
         wake_waiting_parent(current);
@@ -6771,11 +6837,8 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].state = TaskState::Faulted;
         tasks[current].saved_rsp = frame as u64;
-        release_linux_task_resources(&mut tasks[current]);
-        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
-        tasks[current].linux_epolls = [None; MAX_EPOLLS];
-        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
+        release_linux_task_resources(&tasks[current].linux_fds);
+        clear_file_state(tasks[current].tgid);
         serial_line!("linux: thread fault tid={current} vector={vector}");
         linux_release_task_pipes();
         return schedule_next(current);
@@ -6801,11 +6864,8 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
     // tasks and the kernel continue.
     let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
     if linux {
-        release_linux_task_resources(&mut tasks[current]);
-        tasks[current].linux_fds = [None; crate::linux::MAX_FDS];
-        tasks[current].linux_eventfds = [None; MAX_EVENTFDS];
-        tasks[current].linux_epolls = [None; MAX_EPOLLS];
-        tasks[current].linux_timerfds = [None; MAX_TIMERFDS];
+        release_linux_task_resources(&tasks[current].linux_fds);
+        clear_file_state(tasks[current].tgid);
         tasks[current].vmas.reset();
         tasks[current].anonymous_vmas.reset();
         if current == LINUX_DYN_TASK {
