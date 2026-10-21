@@ -684,19 +684,34 @@ pub fn protect_user_range_if_present(
     while address < start + length {
         let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
         let pml4e = unsafe { (*table_ptr(pml4)).entry(pml4_index) };
-        if !pml4e.is_present() || pml4e.is_huge() {
+        if !pml4e.is_present() {
+            // A demand-paged range may not have allocated its intermediate
+            // tables yet. That is not an error: the VMA already records the
+            // protection and the fault path installs the page later.
+            address += PAGE_SIZE;
+            continue;
+        }
+        if pml4e.is_huge() {
             return Err(PagingError::MissingKernelMapping);
         }
         let pdpt = PhysFrame::from_address(pml4e.address())
             .ok_or(PagingError::UnrepresentableAddress(pml4e.address()))?;
         let pdpte = unsafe { (*table_ptr(pdpt)).entry(pdpt_index) };
-        if !pdpte.is_present() || pdpte.is_huge() {
+        if !pdpte.is_present() {
+            address += PAGE_SIZE;
+            continue;
+        }
+        if pdpte.is_huge() {
             return Err(PagingError::UnexpectedUserHugePage);
         }
         let pd = PhysFrame::from_address(pdpte.address())
             .ok_or(PagingError::UnrepresentableAddress(pdpte.address()))?;
         let pde = unsafe { (*table_ptr(pd)).entry(pd_index) };
-        if !pde.is_present() || pde.is_huge() {
+        if !pde.is_present() {
+            address += PAGE_SIZE;
+            continue;
+        }
+        if pde.is_huge() {
             return Err(PagingError::UnexpectedUserHugePage);
         }
         let pt = PhysFrame::from_address(pde.address())
