@@ -228,7 +228,9 @@ user space. It is not a VM. The target and security gates are in
     After the app exits, the kernel revokes the grant itself, attempts a fresh
     read, temp open, and rename, and emits `AETHER_GATE4_REVOKE_OK` only after
     all three deny. The windowed GridCraft target consumes this feature with
-    the same namespace path as argv.
+    the same namespace path as argv. The contract was green at the portal-only
+    commit; the integrated rerun at `7ba2e51` hit `AETHER_LINUX_RESTART_FAIL`, so
+    it is not claimed green here.
   - [x] Gate 4 runtime rootfs packaging (QEMU prototype scope): `make
     gate4-runtime` assembles and signs a host-derived rootfs with glibc,
     libwayland-client/cursor, libxkbcommon, the Vulkan loader, Mesa lavapipe,
