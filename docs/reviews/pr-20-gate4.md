@@ -48,6 +48,20 @@ The full spreadsheet UI rendered at 1440×900 from `wl_shm` ARGB8888 buffers.
 This proves the client/protocol/renderer subset is viable; it does not prove
 Aether.
 
+## Current guest blocker (at the integration head)
+
+The guest initializes the signed runtime rootfs, imports the pinned AppImage,
+opens `/dev/aether-display`, reaches `AETHER_GATE4_DISPLAY_CREATE_OK
+pid=7 size=1440x900`, and receives and acknowledges the xdg-shell configure.
+It then parks in the event loop without a `wl_surface.attach`/`commit` of a
+wgpu swapchain buffer, so no `AETHER_GATE4_PRESENT_OK` is emitted and the
+input/save/revoke markers never run. The host-only bridge, using the same
+client ABI, does present real 1440x900 ARGB frames and produces a real GUI
+screenshot. The remaining work is the guest event/presentation handoff:
+first-frame scheduling and Mesa WSI buffer-release/queue delivery over the
+kernel display endpoint. This is a presentation blocker, not a container,
+loader, portal, or rootfs failure.
+
 ## Evidence to fill in
 
 - [ ] Exact commit tested. (EVIDENCE-PENDING: tested commit hash)

@@ -195,7 +195,10 @@ user space. It is not a VM. The target and security gates are in
   the portal. The code slice is in the tree — the Wayland bridge, the kernel
   display endpoint, the GUI portal contract, and the `make gate4-test` target
   — but the gate completes only when that target passes with the full
-  kernel-owned marker set and the screenshot, which has not happened yet.
+  kernel-owned marker set and the screenshot, which has not happened yet. At
+  the current head the guest reaches `AETHER_GATE4_DISPLAY_CREATE_OK`, receives
+  and acknowledges xdg-shell configure, and then parks without a
+  `AETHER_GATE4_PRESENT_OK`; host-only bridge tests do present real frames.
   (EVIDENCE-PENDING: gate4-test marker transcript and tested commit hash)
   - [x] Gate 4 portal slice (QEMU prototype scope): `make gate4-portal-test`
     seeds an exact-file read+write grant for
