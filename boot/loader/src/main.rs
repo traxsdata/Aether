@@ -137,6 +137,11 @@ impl fmt::Display for LoadError {
             Self::NoBootServices => write!(f, "firmware did not provide boot services"),
             Self::Image(error) => write!(f, "kernel image rejected: {error:?}"),
             Self::BootInfo(error) => write!(f, "boot information rejected: {error}"),
+            Self::Allocation { status } if *status == uefi::OUT_OF_RESOURCES => write!(
+                f,
+                "page allocation failed (status {status:#x}): firmware is out of memory; \
+                 this kernel image needs more RAM"
+            ),
             Self::Allocation { status } => write!(f, "page allocation failed (status {status:#x})"),
             Self::AddressMismatch { wanted, got } => {
                 write!(f, "loaded at {got:#x}, kernel requires {wanted:#x}")

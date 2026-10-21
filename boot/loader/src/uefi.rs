@@ -19,6 +19,7 @@ pub type Status = usize;
 pub const SUCCESS: Status = 0;
 /// The caller-provided buffer was too small.
 pub const BUFFER_TOO_SMALL: Status = 0x8000_0000_0000_0005;
+pub const OUT_OF_RESOURCES: Status = 0x8000_0000_0000_000e;
 
 /// Allocate at the address supplied in the final argument.
 pub const ALLOCATE_ADDRESS: u32 = 2;

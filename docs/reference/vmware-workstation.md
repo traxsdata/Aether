@@ -2,7 +2,15 @@
 
 Aether ships a UEFI El Torito ISO. The same image that `make iso-test` boots
 through OVMF can be attached to a VMware Workstation virtual machine; the ISO
-carries an 8 MiB FAT EFI system image containing `/EFI/BOOT/BOOTX64.EFI`.
+carries a FAT EFI system image containing `/EFI/BOOT/BOOTX64.EFI` (8 MiB for
+the standard fixture, 128 MiB for the GridCraft demo).
+
+The GridCraft demo ISO links a 1.5 GiB static import heap into the kernel, so
+the loader must allocate roughly 1.6 GiB for the kernel image before the OS
+starts. A 2048 MiB VM fails with `AETHER_LOADER_FAILED error=page allocation
+failed (status 0x800000000000000e)`; that is EFI out-of-resources, not an ISO
+or VMware defect. Give the demo VM at least 4096 MiB; the generated VMX uses
+8192 MiB. The standard fixture ISO remains usable with 2048 MiB.
 
 The kernel is embedded in the loader, so the ISO does not need a disk. Storage,
 networking, audio, USB HID, and GPU acceleration are not used by this prototype;
@@ -16,6 +24,9 @@ make iso
 make iso-test
 make vmware-vmx
 ```
+
+For the GridCraft demo, build `make iso-gridcraft` instead of `make iso`, then
+run `make vmware-vmx` to generate an 8 GiB VMX pointing at the newest ISO.
 
 `make iso` writes a timestamped image under `build/ISOs/`. `make vmware-vmx`
 writes `build/aether-vmware.vmx` with an absolute `cdrom-image` path to the
@@ -51,7 +62,7 @@ ISO again.
 |---|---|
 | Guest OS | Other 64-bit |
 | Firmware | UEFI, Secure Boot off |
-| Memory | 2048 MiB |
+| Memory | 8192 MiB for the GridCraft demo; 2048 MiB for the standard ISO |
 | CPUs | 2 (the kernel is currently single-core; extra CPUs are ignored) |
 | Disk | None; attach the ISO as a CD/DVD image |
 | CD/DVD | SATA or IDE, start connected |
