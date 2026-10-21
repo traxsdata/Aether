@@ -180,8 +180,10 @@ exact AppImage digest, and the runtime version.
   counters, nested epoll watches, recursive/move/delete inotify events,
   high-resolution timers, stopped/continued `wait4`, and signal stopping remain
   missing.
-- A fixed per-task VMA table tracks ranges and rejects writable+executable
-  mappings. Anonymous private pages are faulted in on demand with bounded
+- A fixed per-task VMA table tracks ranges and rejects overlaps and unknown
+  protection bits. Initial writable+executable mappings are allowed for JIT
+  code, but a protection change that adds write to an executable mapping is
+  rejected. Anonymous private pages are faulted in on demand with bounded
   allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.
   Shared mappings have per-domain quotas of 16 shared VMA entries and 256
   shared physical pages. Exceeding either returns `ENOMEM`; page charges are

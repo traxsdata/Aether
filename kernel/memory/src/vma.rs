@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Host-testable virtual-memory-area tracking for the Linux ABI.
 //!
-//! The table stores page-aligned ranges in a fixed-size bounded window. It is
-//! deliberately policy-free: the caller decides the base, limit, and
-//! protections. The table rejects overlapping ranges and writable+executable
-//! mappings so the kernel can enforce W^X before installing page permissions.
+//! The table stores page-aligned ranges in a fixed-size bounded window. The
+//! caller decides the base, limit, and protections. The table rejects
+//! overlapping ranges and unknown protection bits. Initial mappings may be
+//! writable+executable because the LLVM JIT used by lavapipe requests them
+//! directly, while [`VmaTable::protect`] rejects adding write to an executable
+//! mapping so a later protection change still enforces W^X.
 //!
 //! A fixed table keeps every operation bounded. Range insertion, removal, and
 //! protection may split an existing area; a failed split reports
@@ -65,7 +67,8 @@ pub enum VmaError {
     OutOfSpace,
     /// The requested range is not fully mapped.
     NotFound,
-    /// The protection set is unknown or combines write and execute.
+    /// The protection set is unknown, or a protection change combines write
+    /// and execute.
     InvalidProtection,
 }
 
@@ -172,7 +175,7 @@ impl VmaTable {
     /// Returns the chosen start address.
     pub fn insert(&mut self, length: u64, prot: u32) -> Result<u64, VmaError> {
         let length = checked_length(length)?;
-        validate_protection(prot)?;
+        validate_protection(prot, true)?;
         let mut candidate = self.base;
         for entry in self.entries.iter().flatten() {
             if entry.start >= candidate && entry.start - candidate >= length {
@@ -196,7 +199,7 @@ impl VmaTable {
     /// [`VmaError::OutOfSpace`] when the table is full.
     pub fn insert_at(&mut self, start: u64, length: u64, prot: u32) -> Result<(), VmaError> {
         let length = checked_length(length)?;
-        validate_protection(prot)?;
+        validate_protection(prot, true)?;
         if !start.is_multiple_of(PAGE_SIZE) || start < self.window_start {
             return Err(VmaError::InvalidRange);
         }
@@ -275,7 +278,7 @@ impl VmaTable {
     /// be mapped, and writable+executable is rejected.
     pub fn protect(&mut self, start: u64, length: u64, prot: u32) -> Result<(), VmaError> {
         let length = checked_length(length)?;
-        validate_protection(prot)?;
+        validate_protection(prot, false)?;
         if !start.is_multiple_of(PAGE_SIZE) {
             return Err(VmaError::InvalidRange);
         }
@@ -384,12 +387,17 @@ fn checked_length(length: u64) -> Result<u64, VmaError> {
     Ok(aligned)
 }
 
-fn validate_protection(prot: u32) -> Result<(), VmaError> {
+fn validate_protection(prot: u32, allow_write_exec: bool) -> Result<(), VmaError> {
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return Err(VmaError::InvalidProtection);
     }
-    // Like Linux, allow writable+executable areas: the LLVM section allocator
-    // requests them directly when it does not use a two-step W^X mapping.
+    // Like Linux, an initial mapping may be writable+executable: the LLVM
+    // section allocator requests it directly when it does not use a two-step
+    // W^X mapping. A protection change must not add write to an executable
+    // mapping, matching the kernel's stricter `mprotect` policy.
+    if !allow_write_exec && prot & (PROT_WRITE | PROT_EXEC) == PROT_WRITE | PROT_EXEC {
+        return Err(VmaError::InvalidProtection);
+    }
     Ok(())
 }
 
@@ -435,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_overlap_and_writable_exec() {
+    fn rejects_overlap_and_unknown_protection_but_allows_initial_wx() {
         let mut map = table();
         map.insert_at(BASE, PAGE_SIZE, PROT_READ | PROT_WRITE)
             .unwrap();
@@ -443,12 +451,18 @@ mod tests {
             map.insert_at(BASE, PAGE_SIZE, PROT_READ),
             Err(VmaError::Overlap)
         );
+        map.insert_at(BASE + PAGE_SIZE, PAGE_SIZE, PROT_WRITE | PROT_EXEC)
+            .unwrap();
         assert_eq!(
-            map.insert_at(BASE + PAGE_SIZE, PAGE_SIZE, PROT_WRITE | PROT_EXEC),
+            map.get(BASE + PAGE_SIZE).unwrap().prot,
+            PROT_WRITE | PROT_EXEC
+        );
+        assert_eq!(
+            map.insert_at(BASE + 2 * PAGE_SIZE, PAGE_SIZE, 8),
             Err(VmaError::InvalidProtection)
         );
         assert_eq!(
-            map.insert_at(BASE + PAGE_SIZE, PAGE_SIZE, 8),
+            map.protect(BASE + PAGE_SIZE, PAGE_SIZE, PROT_WRITE | PROT_EXEC),
             Err(VmaError::InvalidProtection)
         );
     }
