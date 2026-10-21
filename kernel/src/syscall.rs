@@ -638,7 +638,10 @@ fn linux_mmap(
     {
         return LINUX_EINVAL;
     }
-    if protections & !7 != 0 || protections & 6 == 6 {
+    // Linux permits writable and executable mappings. LLVM's section
+    // allocator asks for them directly on some paths, so rejecting the
+    // combination breaks lavapipe shader compilation.
+    if protections & !7 != 0 {
         return LINUX_EINVAL;
     }
     let mut file_identity = None;
@@ -1264,9 +1267,12 @@ fn linux_epoll_wait(
     max_events: u64,
     timeout: u64,
 ) -> *mut InterruptFrame {
-    if max_events == 0 || max_events > 16 {
+    if max_events == 0 {
         return linux_result(frame, LINUX_EINVAL);
     }
+    // Linux accepts any positive maxevents; the prototype keeps a fixed
+    // 16-event scratch buffer, so clamp instead of failing the whole call.
+    let max_events = max_events.min(16);
     let timeout = timeout as i64;
     let deadline = match scheduler::linux_take_restart(number) {
         Some(deadline) => deadline,
@@ -1414,7 +1420,7 @@ fn vma_errno(error: aether_memory::vma::VmaError) -> i64 {
 }
 
 fn linux_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags> {
-    if protections & !7 != 0 || protections & 6 == 6 {
+    if protections & !7 != 0 {
         return None;
     }
     let mut flags =
