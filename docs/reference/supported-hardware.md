@@ -52,7 +52,8 @@ Firmware paths can be overridden with `OVMF_CODE` and `OVMF_VARS`.
 - `CR0.WP` support (all x86-64 CPUs used for testing).
 - Legacy 8259 PIC and 8254 PIT (the test platform uses them directly).
 
-APIC, IOMMU, SMEP, SMAP, and AVX are not used or required.
+SMEP and SMAP are enabled when CPUID reports them, but are not required; the
+boot log prints which are on. APIC, IOMMU, and AVX are not used or required.
 
 ## Not supported
 

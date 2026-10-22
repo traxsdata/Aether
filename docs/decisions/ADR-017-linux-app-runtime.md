@@ -137,11 +137,13 @@ This is recorded as a deviation, not a change of decision. While it stands:
   memory-safety or logic bug in one is a kernel compromise, not a contained
   `linuxd` failure.
 - **Crash containment.** A fault in user mode retires only the faulting
-  domain. A fault the kernel takes while servicing a Linux syscall halts the
-  machine, because ring-0 exceptions have no recovery path. The layer avoids
-  such faults by validating every user pointer, page by page, before it uses
-  it, and by refusing guard pages. A missed check still stops the whole
-  system.
+  domain. The kernel touches user memory only through one copy routine:
+  every pointer is validated page by page first, and a page fault on user
+  memory inside the routine is recovered through an exception table and
+  returns `EFAULT`. With SMEP and SMAP on (when the CPU has them), any other
+  ring-0 access to user memory faults. Every other fault the kernel takes
+  while servicing a Linux syscall still halts the machine, so a kernel bug in
+  a handler stops the whole system.
 - **Controls that apply now.** The syscall entry masks IF, TF, DF, NT, AC, and
   IOPL and clears DF; NMI, #DF, and #MC run on a separate IST stack;
   `rt_sigreturn` keeps only the user-changeable flags and forces the user code

@@ -107,7 +107,8 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
   service-isolation boundary.
 - The Linux syscall layer executes in ring 0, contrary to ADR-017's
   user-space design. Every Linux syscall handler is part of the trusted
-  computing base, and a kernel fault while servicing one halts the machine.
+  computing base, and a kernel fault while servicing one halts the machine
+  (a user-memory fault inside the copy routine is the one recovered case).
   See the
   [ADR-017 deviation](../decisions/ADR-017-linux-app-runtime.md#current-deviation-linux-abi-in-ring-0).
 - The native application is the only ring-3 component; there is no dynamic
