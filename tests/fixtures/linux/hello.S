@@ -3518,6 +3518,25 @@ g2_block_joined:
     syscall
     cmp $-13, %rax
     jne g2_fail_policy
+    /* Netlink is not offered to any task: EAFNOSUPPORT. */
+    mov $41, %rax               /* socket */
+    mov $16, %rdi               /* AF_NETLINK */
+    mov $3, %rsi                /* SOCK_RAW */
+    xor %rdx, %rdx
+    syscall
+    cmp $-97, %rax
+    jne g2_fail_policy
+    /* A socket call on a non-socket descriptor is ENOTSOCK. */
+    mov $44, %rax               /* sendto */
+    mov $1, %rdi                /* stdout console */
+    lea g2_dev_dri(%rip), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    xor %r8, %r8
+    xor %r9, %r9
+    syscall
+    cmp $-88, %rax
+    jne g2_fail_policy
     mov $16, %rax               /* ioctl */
     xor %rdi, %rdi
     xor %rsi, %rsi

@@ -32,6 +32,7 @@ mod recovery;
 mod runtime;
 mod scheduler;
 mod shell;
+mod socket;
 mod supervisor;
 mod syscall;
 mod updates;
