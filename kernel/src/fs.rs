@@ -13,8 +13,8 @@
 
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::scheduler;
-use crate::syscall::{user_bytes, user_bytes_mut, user_str};
-use aether_abi::user::{FileRights, errno};
+use crate::syscall::{copy_from_user, copy_to_user, user_range_writable, user_str};
+use aether_abi::user::{FileRights, MAX_SYSCALL_IO, errno};
 use aether_fs::{Access, AetherFs, FsError, OpenId, RamDisk};
 use aether_ipc::{CapError, CapHandle, CapTable, ObjectId, ObjectType, Rights};
 use aether_memory::frame::PhysFrame;
@@ -328,6 +328,7 @@ fn grant_file_open(
 /// Opens a path for the calling process.
 pub fn sys_open(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) -> Option<i64> {
     let path = user_str(pml4, pointer, length)?;
+    let path = path.as_str();
     let access = access_from_rights(rights)?;
     let result = scheduler::with_current_caps(|root, caps| {
         let open = match with_fs(|filesystem| filesystem.open(root, path, access)) {
@@ -348,6 +349,7 @@ pub fn sys_open(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) -> Opti
 /// Opens a file outside the process root through a portal grant.
 pub fn sys_portal_open(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) -> Option<i64> {
     let path = user_str(pml4, pointer, length)?;
+    let path = path.as_str();
     let access = access_from_rights(rights)?;
     let result = scheduler::with_current_caps(|root, caps| {
         // The verified manifest decides whether the application may use the
@@ -379,6 +381,7 @@ pub fn sys_portal_open(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) 
 /// `portal_open` still checks that record.
 pub fn sys_portal_request(pml4: PhysFrame, pointer: u64, length: u64, rights: u64) -> Option<i64> {
     let path = user_str(pml4, pointer, length)?;
+    let path = path.as_str();
     if access_from_rights(rights).is_none() {
         return Some(errno::EINVAL);
     }
@@ -398,7 +401,11 @@ pub fn sys_portal_request(pml4: PhysFrame, pointer: u64, length: u64, rights: u6
 /// Reads from an open file.
 pub fn sys_read(pml4: PhysFrame, handle: u64, buffer: u64, length: u64) -> Option<i64> {
     let cap = decode_handle(handle)?;
-    let output = unsafe { user_bytes_mut(pml4, buffer, length)? };
+    if !user_range_writable(pml4, buffer, length) {
+        return None;
+    }
+    let mut storage = [0u8; MAX_SYSCALL_IO];
+    let output = &mut storage[..length as usize];
     let result = scheduler::with_current_caps(|_root, caps| {
         let object = match caps.file(cap, Rights::READ) {
             Ok(object) => object,
@@ -412,13 +419,32 @@ pub fn sys_read(pml4: PhysFrame, handle: u64, buffer: u64, length: u64) -> Optio
             .map(|length| length as i64)
             .map_err(map_error)
     });
-    Some(result.unwrap_or_else(|error| error))
+    copy_out_result(pml4, buffer, output, result)
+}
+
+/// Copies the first `count` bytes of a successful read to user memory.
+fn copy_out_result(
+    pml4: PhysFrame,
+    pointer: u64,
+    output: &[u8],
+    result: Result<i64, i64>,
+) -> Option<i64> {
+    match result {
+        Ok(count) => {
+            copy_to_user(pml4, pointer, output.get(..count as usize)?)?;
+            Some(count)
+        }
+        Err(error) => Some(error),
+    }
 }
 
 /// Writes to an open file.
 pub fn sys_write(pml4: PhysFrame, handle: u64, buffer: u64, length: u64) -> Option<i64> {
     let cap = decode_handle(handle)?;
-    let input = user_bytes(pml4, buffer, length, false)?;
+    let mut storage = [0u8; MAX_SYSCALL_IO];
+    let input = storage.get_mut(..length as usize)?;
+    copy_from_user(pml4, buffer, input)?;
+    let input = &*input;
     let result = scheduler::with_current_caps(|_root, caps| {
         let object = match caps.file(cap, Rights::WRITE) {
             Ok(object) => object,
@@ -503,25 +529,21 @@ pub fn sys_list(
     buffer: u64,
     length: u64,
 ) -> Option<i64> {
-    // Copy the path before creating the mutable output slice. A caller can
-    // pass overlapping path and output ranges; keeping both a borrowed user
-    // path and a mutable user slice would violate Rust's aliasing rules even
-    // though the kernel never dereferences them concurrently.
-    let mut path_buffer = [0u8; 256];
-    let path_bytes = {
-        let path = user_str(pml4, path_pointer, path_length)?;
-        let end = path.len();
-        path_buffer.get_mut(..end)?.copy_from_slice(path.as_bytes());
-        end
-    };
-    let path = core::str::from_utf8(&path_buffer[..path_bytes]).ok()?;
-    let output = unsafe { user_bytes_mut(pml4, buffer, length)? };
+    // The path and the output are both kernel copies, so overlapping user
+    // ranges cannot alias.
+    let path = user_str(pml4, path_pointer, path_length)?;
+    let path = path.as_str();
+    if !user_range_writable(pml4, buffer, length) {
+        return None;
+    }
+    let mut storage = [0u8; MAX_SYSCALL_IO];
+    let output = &mut storage[..length as usize];
     let result = scheduler::with_current_caps(|root, _caps| {
         with_fs(|filesystem| filesystem.list(root, path, output))
             .map(|length| length as i64)
             .map_err(map_error)
     });
-    Some(result.unwrap_or_else(|error| error))
+    copy_out_result(pml4, buffer, output, result)
 }
 
 /// Creates a directory for the kernel console (no user pointer involved).
@@ -709,6 +731,7 @@ pub fn copy_path(from: &str, to: &str) -> Result<(), FsError> {
 /// Returns a file's size.
 pub fn sys_stat(pml4: PhysFrame, path_pointer: u64, path_length: u64) -> Option<i64> {
     let path = user_str(pml4, path_pointer, path_length)?;
+    let path = path.as_str();
     let result = scheduler::with_current_caps(|root, _caps| {
         with_fs(|filesystem| filesystem.stat(root, path))
             .map(|length| length as i64)
