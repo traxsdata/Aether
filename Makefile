@@ -363,6 +363,8 @@ gate4-test: gate4-runtime
 # the real workbook grant. This exercises the GUI feature without the Wayland
 # display path. The windowed GridCraft target consumes the same feature and
 # passes GATE4_GUI_NAMESPACE as argv.
+# The fixture compiles its display and quota tests out of this build
+# (`.ifndef AETHER_GATE4_GUI`), so their markers are skipped.
 gate4-gui-portal-test:
 	$(MAKE) linux-fixture
 	sh tools/build-appimage-fixture.sh $(GATE4_GUI_APPIMAGE) $(GATE4_GUI_APPIMAGE_RECORD) \
@@ -372,7 +374,7 @@ gate4-gui-portal-test:
 		LINUX_APPIMAGE_ARGS='$(GATE4_GUI_NAMESPACE)' \
 		STAGED_APPIMAGE=$(GATE4_GUI_APPIMAGE) \
 		STAGED_APPIMAGE_RECORD=$(GATE4_GUI_APPIMAGE_RECORD) image
-	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK,AETHER_LINUX_QUOTA_OK,AETHER_GATE4_DISPLAY_CREATE_OK,AETHER_GATE4_PRESENT_OK,AETHER_GATE4_INPUT_OK,AETHER_GATE4_GUEST_DISPLAY_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GATE4_PORTAL_OK,AETHER_GATE4_SAVE_OK,AETHER_GATE4_REVOKE_OK \
 	AETHER_REQUIRE_TEXT='portal: seeded Gate 4 GUI workbook grant|id=5b428ae53860eb72|AETHER_GATE4_PORTAL_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_bytes=4089|AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4089 staging=sctmp+rename source=kernel|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_denials=1 write_denials=1' \
 	$(PYTHON) tools/test-boot.py

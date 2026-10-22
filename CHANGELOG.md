@@ -511,6 +511,33 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Fixed
 
+- `make gate4-gui-portal-test` passes again. It waited for the quota and
+  Gate 4 display markers, which the fixture compiles out of the GUI build
+  (`.ifndef AETHER_GATE4_GUI`), so it always timed out after its portal,
+  save, and revoke checks had passed. Those five markers are now skipped
+  for that target only.
+
+- The Gate 3 and Gate 4 runtime builds no longer need squashfs-tools 4.7:
+  they pin image timestamps with `-mkfs-time 0 -all-time 0` instead of
+  `-repro-time 0`, which 4.6 (Ubuntu 24.04) rejects as an invalid option.
+
+- A signal sent to a task blocked in `nanosleep`, `poll`, `epoll_wait`, or a
+  pipe wait could be lost as an `EINTR`: if the timer tick landed just as the
+  woken task resumed at its rewound `syscall`, the tick ran the handler first
+  and the restarted wait then slept to its deadline. The tick now leaves that
+  delivery to the re-executed syscall, as `kill` already did. The Linux
+  fixture's nanosleep EINTR check also retries (up to three times) when the
+  parent is preempted for longer than the child's 50 ms delay, which made
+  `AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_ret` an occasional TCG flake.
+- Dragging a window no longer leaves the windows it passed over without
+  their shadows. The drag fast path dropped the shadow and translucent body
+  of every window, not just the moving one, and nothing repainted the
+  uncovered ones afterwards; it now applies only to the dragged window, and
+  the end of a gesture damages that window so its own shadow returns at
+  once. `make iso-test` caught this as a damage/full-paint mismatch once its
+  pointer step was fixed: the test drove the cursor assuming one pixel per
+  PS/2 count, but the kernel applies a 2x gain, so it overshot back and
+  forth and never reached its target.
 - A fault on user memory during a syscall no longer halts the machine. The
   kernel reads and writes user memory only through one copy routine whose
   `rep movsb` is listed in a new `.ex_table`; a page fault there on a
