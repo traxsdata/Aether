@@ -144,7 +144,8 @@ or `Ctrl+N`:
 - `F5` or the `R` button refreshes the folder after a diagnostic shell change.
 - `F3` duplicates the selected file under a service-chosen `copyN` name, `F2`
   opens a bounded rename prompt, and `Delete` moves a file or empty folder to
-  `Trash`. Deleting inside Trash is the explicit permanent action.
+  `Trash`. Activating an item in Trash restores it to the location recorded by
+  the service; deleting inside Trash is the explicit permanent action.
 - Previews show at most 512 bytes, do not execute programs, sanitize unsupported
   glyphs/control bytes, and mark truncation. Errors are shown, not disguised as
   empty folders. Failed navigation preserves the previous valid view.

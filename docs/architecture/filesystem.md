@@ -91,9 +91,13 @@ subdirectories. The package identity owns the storage, and the Files adapter
 denies vault enumeration regardless of the path displayed by the UI.
 
 User-facing delete moves a file or empty directory into `/home/Trash` through a
-service rename. Deleting from Trash is the explicit permanent action. The
-current implementation does not yet record the original location or provide
-restoration; that metadata belongs with the durable storage provider.
+service rename. Before the move, the service records the Trash component and
+the original absolute path in a bounded `/system/trash/index` store. Activating
+an item in Trash restores it only to that recorded path and refuses to
+overwrite an existing item. Deleting from Trash is the explicit permanent
+action and removes the metadata. The index uses the same fail-closed parser as
+the portal store: malformed, duplicated, traversal-bearing, or oversized
+records are rejected instead of restoring an item to a guessed location.
 
 The host-tested `aether_services::ux` module owns the policy that is not yet in
 the syscall ABI: stable resource identities, ownership domains, the complete

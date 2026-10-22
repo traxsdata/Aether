@@ -58,6 +58,11 @@ pub trait BrowserSource {
     fn duplicate(&mut self, _path: &str) -> Result<(), BrowserError> {
         Err(BrowserError::Unavailable)
     }
+    /// Restores a Trash item to its recorded original location. The service
+    /// must validate the destination and refuse to overwrite an item.
+    fn restore(&mut self, _path: &str) -> Result<(), BrowserError> {
+        Err(BrowserError::Unavailable)
+    }
 }
 
 /// One validated directory entry.
@@ -354,6 +359,22 @@ impl Browser {
         }
         path[len..len + entry.len].copy_from_slice(&entry.name[..entry.len]);
         let path = core::str::from_utf8(&path[..len + entry.len]).unwrap_or("");
+        // Trash is a recovery surface, not a third filesystem view: activating
+        // an item restores it to the exact location recorded by the service.
+        if self.path() == "/home/Trash" {
+            match source.restore(path) {
+                Ok(()) => {
+                    self.refresh(source);
+                    self.last_click = None;
+                    return;
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    self.last_click = None;
+                    return;
+                }
+            }
+        }
         if entry.directory {
             self.navigate(path, source);
             return;
@@ -756,6 +777,39 @@ mod tests {
         source.fail = true;
         assert!(browser.delete_selected(&mut source));
         assert_eq!(browser.error(), Some(BrowserError::Access));
+    }
+
+    #[test]
+    fn trash_activation_restores_instead_of_previewing() {
+        struct TrashSource {
+            restored: bool,
+        }
+        impl BrowserSource for TrashSource {
+            fn list(&mut self, path: &str, out: &mut [u8]) -> Result<usize, BrowserError> {
+                let data: &[u8] = match path {
+                    "/home/Trash" if !self.restored => b"renamed.txt\tf\t5\n",
+                    "/home/Trash" => b"",
+                    _ => return Err(BrowserError::Unavailable),
+                };
+                out[..data.len()].copy_from_slice(data);
+                Ok(data.len())
+            }
+            fn read(&mut self, _path: &str, _out: &mut [u8]) -> Result<usize, BrowserError> {
+                Err(BrowserError::Unavailable)
+            }
+            fn restore(&mut self, path: &str) -> Result<(), BrowserError> {
+                assert_eq!(path, "/home/Trash/renamed.txt");
+                self.restored = true;
+                Ok(())
+            }
+        }
+        let mut source = TrashSource { restored: false };
+        let mut browser = Browser::new();
+        assert!(browser.navigate("/home/Trash", &mut source));
+        browser.key(Key::Enter, &mut source);
+        assert!(source.restored);
+        assert!(!browser.preview_open());
+        assert!(browser.entries().is_empty());
     }
 
     #[test]

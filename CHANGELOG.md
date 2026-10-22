@@ -20,6 +20,13 @@ versioning scheme until the kernel ABI stabilises.
   destroying them. The RAM filesystem grows to 64 inodes. Live kernel folder
   grants, Trash restoration metadata, and application-contributed collections
   remain future work; see `docs/specifications/ui-filesystem.md`.
+- Recoverable Trash restoration. The filesystem service records the Trash
+  component and original absolute path for every user-facing delete in a
+  bounded, fail-closed `/system/trash/index` store. Activating an item in Trash
+  restores it to that exact path and refuses to overwrite an existing file;
+  permanent deletion removes the metadata. The boot mutation test now proves
+  delete, Trash placement, and restoration (`AETHER_FILES_MUTATE_OK ...
+  restore=1`).
 - Craft app suite: `tools/test-craft-apps.py` downloads and verifies every
   published Craft AppImage, runs a headless smoke test, and runs the windowed
   Gate 4 path. All 13 headless runs pass; 9 present a window. The suite found

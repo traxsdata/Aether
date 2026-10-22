@@ -19,6 +19,7 @@ use aether_fs::{Access, AetherFs, FsError, OpenId, RamDisk};
 use aether_ipc::{CapError, CapHandle, CapTable, ObjectId, ObjectType, Rights};
 use aether_memory::frame::PhysFrame;
 use aether_services::runtime::RuntimeProfile;
+use aether_services::trash::{self, TrashError, TrashIndex};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -28,6 +29,12 @@ struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
 static FS: Global<AetherFs<RamDisk>> = Global(UnsafeCell::new(AetherFs::new(RamDisk::new())));
+
+/// Recoverable-deletion metadata. The index names the Trash component and the
+/// original absolute path; it is not a capability and never authorizes access.
+static TRASH_INDEX: Global<TrashIndex> = Global(UnsafeCell::new(TrashIndex::new()));
+const TRASH_STORE_PATH: &str = "/system/trash/index";
+const TRASH_STORE_BYTES: usize = 2048;
 
 static OPENS: AtomicUsize = AtomicUsize::new(0);
 static ESCAPE_DENIALS: AtomicUsize = AtomicUsize::new(0);
@@ -99,6 +106,7 @@ pub fn init() -> Result<(), FsError> {
         "system/images",
         "system/updates",
         "system/portal",
+        "system/trash",
         "home",
         "portal",
     ] {
@@ -149,6 +157,8 @@ pub fn init() -> Result<(), FsError> {
     #[cfg(feature = "gate4-gui-test")]
     filesystem.write_file("/", GATE4_GUI_WORKBOOK, GATE4_GUI_FIXTURE)?;
 
+    drop(_guard);
+    load_trash();
     Ok(())
 }
 
@@ -221,6 +231,49 @@ fn with_fs<R>(f: impl FnOnce(&mut AetherFs<RamDisk>) -> R) -> R {
     // filesystem is initialized during boot before any task can call in.
     let slot = unsafe { &mut *FS.0.get() };
     f(slot)
+}
+
+fn with_trash<R>(f: impl FnOnce(&mut TrashIndex) -> R) -> R {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the duration of the closure, and the
+    // index is only touched by the filesystem service.
+    let slot = unsafe { &mut *TRASH_INDEX.0.get() };
+    f(slot)
+}
+
+/// Loads the recoverable-deletion index from the filesystem service store.
+///
+/// A malformed store is discarded rather than used to restore an item to a
+/// guessed location. Deletion remains available; only restoration of older
+/// records is lost.
+fn load_trash() {
+    let mut stored = [0u8; TRASH_STORE_BYTES];
+    let mut parsed = TrashIndex::new();
+    let loaded = match read_path(TRASH_STORE_PATH, &mut stored) {
+        Ok(length) => match trash::parse(&stored[..length], &mut parsed) {
+            Ok(count) => count,
+            Err(_) => 0,
+        },
+        Err(_) => 0,
+    };
+    with_trash(|index| *index = parsed);
+    if loaded != 0 {
+        crate::serial_line!("fs: restored {} Trash record(s)", loaded);
+    }
+}
+
+/// Persists the Trash index. A failed write is reported on the console; the
+/// live table still names the safe original path for this boot.
+fn persist_trash() {
+    let mut encoded = [0u8; TRASH_STORE_BYTES];
+    let length = with_trash(|index| trash::encode(index, &mut encoded));
+    let Some(length) = length else {
+        crate::serial_line!("fs: failed to encode Trash index");
+        return;
+    };
+    if write_path(TRASH_STORE_PATH, &encoded[..length]).is_err() {
+        crate::serial_line!("fs: failed to write Trash index");
+    }
 }
 
 fn map_error(error: FsError) -> i64 {
@@ -666,6 +719,80 @@ fn trash_path<'a>(
     core::str::from_utf8(&out[..end]).ok()
 }
 
+/// Returns the top-level Trash component named by `path`.
+fn trash_component(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix(TRASH_ROOT)?.strip_prefix('/')?;
+    if rest.is_empty() || rest.contains('/') || rest == "." || rest == ".." {
+        return None;
+    }
+    Some(rest)
+}
+
+fn record_trash(name: &str, original: &str) -> Result<(), TrashError> {
+    with_trash(|index| index.record(name, original))?;
+    persist_trash();
+    Ok(())
+}
+
+fn unrecord_trash(name: &str) {
+    with_trash(|index| index.take(name));
+    persist_trash();
+}
+
+/// Restores a top-level Trash item to the exact location recorded at deletion.
+///
+/// Restoration revalidates ownership and refuses to overwrite an existing
+/// file. A missing or malformed record fails closed; the service never guesses
+/// a destination from the item's name.
+pub fn restore_trash_path(path: &str) -> Result<(), FsError> {
+    let name = trash_component(path).ok_or(FsError::Access)?;
+    let record = with_trash(|index| index.take(name)).ok_or(FsError::NotFound)?;
+    let original = record.original();
+    if path == original
+        || !original.starts_with("/home/")
+        || original.starts_with("/home/Trash/")
+        || original.contains("/../")
+    {
+        let _ = with_trash(|index| index.put(record));
+        persist_trash();
+        return Err(FsError::Access);
+    }
+    match with_fs(|filesystem| filesystem.rename("/", path, original)) {
+        Ok(()) => {
+            persist_trash();
+            Ok(())
+        }
+        Err(error) => {
+            // Keep the metadata so a user can retry after freeing the
+            // destination or reconnecting the provider.
+            let _ = with_trash(|index| index.put(record));
+            persist_trash();
+            Err(error)
+        }
+    }
+}
+
+/// Permanently removes a top-level Trash item and its restoration metadata.
+pub fn purge_trash_path(path: &str) -> Result<(), FsError> {
+    let name = trash_component(path).ok_or(FsError::Access)?;
+    let record = with_trash(|index| index.take(name));
+    match with_fs(|filesystem| filesystem.remove("/", path)) {
+        Ok(()) => {
+            if record.is_some() {
+                persist_trash();
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(record) = record {
+                let _ = with_trash(|index| index.put(record));
+                persist_trash();
+            }
+            Err(error)
+        }
+    }
+}
+
 impl aether_wm::browser::BrowserSource for BrowserFiles {
     fn list(
         &mut self,
@@ -699,8 +826,7 @@ impl aether_wm::browser::BrowserSource for BrowserFiles {
         // explicit permanent action, and application-private cleanup never
         // enters this path.
         if path == TRASH_ROOT || path.starts_with("/home/Trash/") {
-            let (root, relative) = browser_scope(path).map_err(browser_error)?;
-            return with_fs(|filesystem| filesystem.remove(root, relative)).map_err(browser_error);
+            return purge_trash_path(path).map_err(browser_error);
         }
         let name = path.rsplit('/').next().unwrap_or("");
         if name.is_empty() {
@@ -711,13 +837,29 @@ impl aether_wm::browser::BrowserSource for BrowserFiles {
             let Some(destination) = trash_path(name, attempt, &mut destination) else {
                 return Err(aether_wm::browser::BrowserError::InvalidData);
             };
+            let Some(trashed) = destination.rsplit('/').next() else {
+                return Err(aether_wm::browser::BrowserError::InvalidData);
+            };
+            if record_trash(trashed, path).is_err() {
+                return Err(aether_wm::browser::BrowserError::Unavailable);
+            }
             match with_fs(|filesystem| filesystem.rename("/", path, destination)) {
                 Ok(()) => return Ok(()),
-                Err(aether_fs::FsError::Exists) => continue,
-                Err(error) => return Err(browser_error(error)),
+                Err(aether_fs::FsError::Exists) => {
+                    unrecord_trash(trashed);
+                    continue;
+                }
+                Err(error) => {
+                    unrecord_trash(trashed);
+                    return Err(browser_error(error));
+                }
             }
         }
         Err(aether_wm::browser::BrowserError::Unavailable)
+    }
+
+    fn restore(&mut self, path: &str) -> Result<(), aether_wm::browser::BrowserError> {
+        restore_trash_path(path).map_err(browser_error)
     }
 
     fn rename(

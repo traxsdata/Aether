@@ -88,6 +88,10 @@ It is a planning model, not a delivery promise.
   revocation, search isolation, storage accounting, and uninstall preservation
   (`kernel/services/src/ux.rs`). Live kernel portal integration for folders is
   still pending.
+- [x] Recoverable Trash metadata: delete records the original absolute path,
+  and activation in Trash restores to that path without overwriting an
+  existing item. The bounded index rejects malformed or traversal-bearing
+  records. Durable storage remains pending.
 - [x] Cached wallpaper, damage-tracked scene rendering/presentation, cursor-only
   updates, elapsed-tick animation, and real-input ISO regression tests.
 - [x] File portal with per-process, per-file grant records; revocation blocks

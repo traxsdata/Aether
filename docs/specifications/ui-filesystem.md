@@ -28,7 +28,9 @@ be duplicated by the desktop:
 
 Tests cover selected-file and selected-folder scope, cross-application vault
 isolation, one-time versus persistent lifetime, revocation, search isolation,
-identity preservation, cleanup, uninstall preservation, and navigation order.
+identity preservation, cleanup, uninstall preservation, navigation order, and
+Trash metadata round-trip, traversal rejection, bounded capacity, and rollback
+when a move fails.
 
 ## Kernel and desktop integration
 
@@ -45,7 +47,10 @@ identity preservation, cleanup, uninstall preservation, and navigation order.
 - Files presents the same thirteen locations in the specification order.
   Application-private vaults remain denied by the service adapter.
 - Deleting from a user location moves the item into `Trash` instead of
-  destroying it. Deleting from `Trash` is the explicit permanent action.
+  destroying it. The service records the Trash component and the original
+  absolute path in a bounded `/system/trash/index` store. Activating an item in
+  Trash restores it only to that recorded location, refusing to overwrite an
+  existing file. Deleting from `Trash` is the explicit permanent action.
   Application-private cleanup is a separate service operation and does not use
   the user Trash.
 - The existing portal keeps exact-file grants, bounded staging files, and
@@ -62,7 +67,6 @@ than silently claimed:
   compositor; the current adapters still include trusted ring-0 code;
 - folder grants in the live kernel portal (the policy model supports them, but
   the syscall and on-disk grant record still carry exact files only);
-- restoring an item from Trash and showing its original location;
 - application-contributed Recent, Favorites, and collections;
 - Open With, Share, drag-and-drop capability transfer, and clipboard grants;
 - persistent preferences, full search indexing, version history, and durable
