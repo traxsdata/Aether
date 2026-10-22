@@ -544,9 +544,11 @@ struct Task {
     root: &'static str,
     caps: CapTable,
     handles: TaskHandles,
-    vmas: VmaTable,
-    anonymous_vmas: VmaTable,
-    shared_vmas: VmaTable,
+    /// Mapping tables of the owning process, shared by its threads like the
+    /// descriptor views below.
+    vmas: VmaSlots,
+    anonymous_vmas: AnonymousVmaSlots,
+    shared_vmas: SharedVmaSlots,
     brk: u64,
     fs_base: u64,
     tgid: usize,
@@ -616,6 +618,9 @@ impl Task {
         self.linux_eventfds = EventfdSlots(tgid);
         self.linux_epolls = EpollSlots(tgid);
         self.linux_timerfds = TimerfdSlots(tgid);
+        self.vmas = VmaSlots(tgid);
+        self.anonymous_vmas = AnonymousVmaSlots(tgid);
+        self.shared_vmas = SharedVmaSlots(tgid);
     }
 
     const fn new() -> Self {
@@ -634,9 +639,9 @@ impl Task {
                 ep_b_send: None,
                 ep_b_recv: None,
             },
-            vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
-            anonymous_vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
-            shared_vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
+            vmas: VmaSlots(0),
+            anonymous_vmas: AnonymousVmaSlots(0),
+            shared_vmas: SharedVmaSlots(0),
             brk: 0,
             fs_base: 0,
             tgid: 0,
@@ -795,6 +800,71 @@ process_slot_view!(FdSlots, fds, Option<LinuxFile>);
 process_slot_view!(EventfdSlots, eventfds, Option<()>);
 process_slot_view!(EpollSlots, epolls, Option<LinuxEpoll>);
 process_slot_view!(TimerfdSlots, timerfds, Option<LinuxTimerFd>);
+
+/// Mapping tables of one Linux process.
+///
+/// Every thread of a process shares one address space, so the tables live per
+/// thread group like the descriptor table: an `mmap` in one thread is one
+/// update, not a copy per sibling.
+struct LinuxAddressSpace {
+    /// Every tracked mapping, including the program images.
+    vmas: VmaTable,
+    /// Private anonymous mappings, which may be demand-paged.
+    anonymous: VmaTable,
+    /// `MAP_SHARED` mappings, charged to the domain's shared quota.
+    shared: VmaTable,
+}
+
+impl LinuxAddressSpace {
+    const fn new() -> Self {
+        Self {
+            vmas: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
+            anonymous: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
+            shared: VmaTable::with_window(USER_BASE, paging::LINUX_MMAP_BASE, USER_LIMIT),
+        }
+    }
+
+    fn clone_from_process(&mut self, other: &Self) {
+        self.vmas = other.vmas.clone();
+        self.anonymous = other.anonymous.clone();
+        self.shared = other.shared.clone();
+    }
+}
+
+static ADDRESS_SPACES: Global<[LinuxAddressSpace; MAX_TASKS]> = Global(UnsafeCell::new(
+    [const { LinuxAddressSpace::new() }; MAX_TASKS],
+));
+
+/// Declares a view of one process's mapping table, like
+/// [`process_slot_view`] does for descriptors.
+macro_rules! process_vma_view {
+    ($name:ident, $field:ident) => {
+        /// A view of one process's shared mapping table.
+        #[derive(Clone, Copy)]
+        struct $name(usize);
+
+        impl core::ops::Deref for $name {
+            type Target = VmaTable;
+
+            fn deref(&self) -> &Self::Target {
+                // SAFETY: The table is static and the kernel is single-CPU;
+                // see the module documentation on the serialization model.
+                unsafe { &(*ADDRESS_SPACES.0.get())[self.0].$field }
+            }
+        }
+
+        impl core::ops::DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                // SAFETY: as above.
+                unsafe { &mut (*ADDRESS_SPACES.0.get())[self.0].$field }
+            }
+        }
+    };
+}
+
+process_vma_view!(VmaSlots, vmas);
+process_vma_view!(AnonymousVmaSlots, anonymous);
+process_vma_view!(SharedVmaSlots, shared);
 
 /// Clears the descriptor table of one process.
 ///
@@ -2052,9 +2122,6 @@ pub fn linux_clone(
         parent_abi,
         parent_pml4,
         parent_root,
-        parent_vmas,
-        parent_anonymous_vmas,
-        parent_shared_vmas,
         parent_brk,
         parent_fs_base,
         parent_tgid,
@@ -2066,9 +2133,6 @@ pub fn linux_clone(
             parent.abi,
             parent.pml4,
             parent.root,
-            parent.vmas,
-            parent.anonymous_vmas,
-            parent.shared_vmas,
             parent.brk,
             parent.fs_base,
             parent.tgid,
@@ -2093,9 +2157,6 @@ pub fn linux_clone(
     thread.pml4 = parent_pml4;
     thread.kernel_stack_top = kernel_top;
     thread.root = parent_root;
-    thread.vmas = parent_vmas;
-    thread.anonymous_vmas = parent_anonymous_vmas;
-    thread.shared_vmas = parent_shared_vmas;
     thread.brk = parent_brk;
     thread.fs_base = if flags & CLONE_SETTLS != 0 {
         tls
@@ -2171,27 +2232,11 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     };
     let child_pml4 = child_pml4.map_err(|_| LINUX_ENOMEM)?;
 
-    let (
-        abi,
-        root,
-        vmas,
-        anonymous_vmas,
-        shared_vmas,
-        brk,
-        fs_base,
-        overlay_app,
-        parent_tgid,
-        sigactions,
-        sigblocked,
-        sigaltstack,
-    ) = {
+    let (abi, root, brk, fs_base, overlay_app, parent_tgid, sigactions, sigblocked, sigaltstack) = {
         let parent = &tasks[current];
         (
             parent.abi,
             parent.root,
-            parent.vmas,
-            parent.anonymous_vmas,
-            parent.shared_vmas,
             parent.brk,
             parent.fs_base,
             parent.overlay_app,
@@ -2211,9 +2256,6 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.pml4 = child_pml4.start_address();
     child.kernel_stack_top = kernel_top;
     child.root = root;
-    child.vmas = vmas;
-    child.anonymous_vmas = anonymous_vmas;
-    child.shared_vmas = shared_vmas;
     child.brk = brk;
     child.fs_base = fs_base;
     child.tgid = slot;
@@ -2232,6 +2274,16 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         state[slot].epolls = state[parent_tgid].epolls;
         state[slot].timerfds = state[parent_tgid].timerfds;
         retain_memfd_fds(&state[slot].fds);
+        // fork copies the parent's mappings into the child's own tables.
+        let spaces = unsafe { &mut *ADDRESS_SPACES.0.get() };
+        let (parent_space, child_space) = if parent_tgid < slot {
+            let (low, high) = spaces.split_at_mut(slot);
+            (&low[parent_tgid], &mut high[0])
+        } else {
+            let (low, high) = spaces.split_at_mut(parent_tgid);
+            (&high[0], &mut low[slot])
+        };
+        child_space.clone_from_process(parent_space);
         let counters = unsafe { &mut *EVENTFD_COUNTERS.0.get() };
         counters[slot] = counters[parent_tgid];
         // Inotify is shared by threads but snapshotted by fork.
@@ -6430,80 +6482,33 @@ pub fn linux_vma_insert(
     if shared && shared_vma_usage(task.overlay_app) >= MAX_DOMAIN_SHARED_VMAS {
         return Err(VmaError::OutOfSpace);
     }
-    let tgid = task.tgid;
-    let pml4 = task.pml4;
-    let mut current_vmas = task.vmas;
-    let mut current_anonymous = task.anonymous_vmas;
-    let mut current_shared = task.shared_vmas;
+    // The tables belong to the process, so this one update is visible to
+    // every thread. Each step either succeeds or leaves its table unchanged;
+    // a later failure undoes the earlier steps.
+    let mut vmas = task.vmas;
+    let mut anonymous_vmas = task.anonymous_vmas;
+    let mut shared_vmas = task.shared_vmas;
     let start = if hint != 0 && hint.is_multiple_of(PAGE_SIZE) {
-        match current_vmas.insert_at(hint, length, prot) {
+        match vmas.insert_at(hint, length, prot) {
             Ok(()) => hint,
-            Err(VmaError::Overlap) if !fixed && !no_replace => current_vmas.insert(length, prot)?,
+            Err(VmaError::Overlap) if !fixed && !no_replace => vmas.insert(length, prot)?,
             Err(error) => return Err(error),
         }
     } else if fixed {
         return Err(VmaError::InvalidRange);
     } else {
-        current_vmas.insert(length, prot)?
+        vmas.insert(length, prot)?
     };
-    if anonymous {
-        current_anonymous.insert_at(start, length, prot)?;
+    if anonymous && let Err(error) = anonymous_vmas.insert_at(start, length, prot) {
+        let _ = vmas.remove(start, length);
+        return Err(error);
     }
-    if shared {
-        current_shared.insert_at(start, length, prot)?;
-    }
-
-    // Validate all peers before changing any record, so a full or inconsistent
-    // table cannot leave partially inserted metadata in the address-space group.
-    for (index, peer) in tasks.iter().enumerate() {
-        if index == current
-            || peer.state == TaskState::Empty
-            || peer.state == TaskState::Done
-            || peer.abi != TaskAbi::Linux
-            || peer.tgid != tgid
-            || peer.pml4 != pml4
-        {
-            continue;
-        }
-        let mut vmas = peer.vmas;
-        let mut anonymous_vmas = peer.anonymous_vmas;
-        let mut shared_vmas = peer.shared_vmas;
-        vmas.insert_at(start, length, prot)?;
+    if shared && let Err(error) = shared_vmas.insert_at(start, length, prot) {
         if anonymous {
-            anonymous_vmas.insert_at(start, length, prot)?;
+            let _ = anonymous_vmas.remove(start, length);
         }
-        if shared {
-            shared_vmas.insert_at(start, length, prot)?;
-        }
-    }
-
-    let task = &mut tasks[current];
-    task.vmas = current_vmas;
-    task.anonymous_vmas = current_anonymous;
-    task.shared_vmas = current_shared;
-    for (index, peer) in tasks.iter_mut().enumerate() {
-        if index == current
-            || peer.state == TaskState::Empty
-            || peer.state == TaskState::Done
-            || peer.abi != TaskAbi::Linux
-            || peer.tgid != tgid
-            || peer.pml4 != pml4
-        {
-            continue;
-        }
-        peer.vmas
-            .insert_at(start, length, prot)
-            .expect("VMA preflight changed");
-        if anonymous {
-            peer.anonymous_vmas
-                .insert_at(start, length, prot)
-                .expect("VMA preflight changed");
-        }
-        if shared {
-            peer.shared_vmas
-                .insert_at(start, length, prot)
-                .expect("VMA preflight changed");
-        }
+        let _ = vmas.remove(start, length);
+        return Err(error);
     }
     Ok(start)
 }
@@ -6571,18 +6576,10 @@ pub fn linux_vma_remove(address: u64, length: u64) -> Result<bool, VmaError> {
     if tasks[current].abi != TaskAbi::Linux {
         return Err(VmaError::NotFound);
     }
-    let tgid = tasks[current].tgid;
-    let pml4 = tasks[current].pml4;
-    let removed = tasks[current].vmas.remove(address, length)?;
-    for (index, task) in tasks.iter_mut().enumerate().filter(|(_, task)| {
-        task.state != TaskState::Empty && task.tgid == tgid && task.pml4 == pml4
-    }) {
-        if index != current && task.vmas.covers(address, length) {
-            let _ = task.vmas.remove(address, length);
-        }
-        let _ = task.anonymous_vmas.remove(address, length);
-        let _ = task.shared_vmas.remove(address, length);
-    }
+    let task = &mut tasks[current];
+    let removed = task.vmas.remove(address, length)?;
+    let _ = task.anonymous_vmas.remove(address, length);
+    let _ = task.shared_vmas.remove(address, length);
     Ok(removed)
 }
 
@@ -6665,32 +6662,13 @@ pub fn linux_vma_protect(address: u64, length: u64, prot: u32) -> Result<(), Vma
     if tasks[current].abi != TaskAbi::Linux {
         return Err(VmaError::NotFound);
     }
-    let tgid = tasks[current].tgid;
-    let pml4 = tasks[current].pml4;
-    tasks[current].vmas.protect(address, length, prot)?;
-    for (index, task) in tasks.iter_mut().enumerate().filter(|(index, task)| {
-        *index != current
-            && task.state != TaskState::Empty
-            && task.state != TaskState::Done
-            && task.tgid == tgid
-            && task.pml4 == pml4
-    }) {
-        let _ = index;
-        if task.vmas.covers(address, length) {
-            let _ = task.vmas.protect(address, length, prot);
-        }
-        if task.anonymous_vmas.covers(address, length) {
-            let _ = task.anonymous_vmas.protect(address, length, prot);
-        }
-        if task.shared_vmas.covers(address, length) {
-            let _ = task.shared_vmas.protect(address, length, prot);
-        }
+    let task = &mut tasks[current];
+    task.vmas.protect(address, length, prot)?;
+    if task.anonymous_vmas.covers(address, length) {
+        let _ = task.anonymous_vmas.protect(address, length, prot);
     }
-    if tasks[current].anonymous_vmas.covers(address, length) {
-        let _ = tasks[current].anonymous_vmas.protect(address, length, prot);
-    }
-    if tasks[current].shared_vmas.covers(address, length) {
-        let _ = tasks[current].shared_vmas.protect(address, length, prot);
+    if task.shared_vmas.covers(address, length) {
+        let _ = task.shared_vmas.protect(address, length, prot);
     }
     Ok(())
 }
@@ -6996,16 +6974,29 @@ pub fn linux_fs_base() -> u64 {
     tasks[CURRENT.load(Ordering::Relaxed)].fs_base
 }
 
-/// Releases the Linux task's anonymous mappings and heap pages.
+/// Releases the Linux process's mappings and heap pages, then empties its
+/// mapping tables so the memory behind them is reclaimed with the process.
 fn release_linux_mappings(index: usize) {
-    let (pml4, vmas, brk) = {
+    let (pml4, mut vmas, mut anonymous_vmas, mut shared_vmas, brk) = {
         let tasks = unsafe { &*TASKS.0.get() };
         let task = &tasks[index];
-        (task.pml4, task.vmas, task.brk)
+        (
+            task.pml4,
+            task.vmas,
+            task.anonymous_vmas,
+            task.shared_vmas,
+            task.brk,
+        )
     };
-    let Some(pml4) = PhysFrame::from_address(pml4) else {
-        return;
-    };
+    if let Some(pml4) = PhysFrame::from_address(pml4) {
+        unmap_linux_process(pml4, &vmas, brk);
+    }
+    vmas.reset();
+    anonymous_vmas.reset();
+    shared_vmas.reset();
+}
+
+fn unmap_linux_process(pml4: PhysFrame, vmas: &VmaTable, brk: u64) {
     let _ = crate::memory::with_frame_allocator(|allocator| {
         for vma in vmas.iter() {
             let _ = paging::unmap_user_range(allocator, pml4, vma.start, vma.end - vma.start);

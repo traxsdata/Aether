@@ -459,6 +459,10 @@ gesture, and there is no GPU service.
 - [x] Reclaiming kernel heap: size-class slabs plus a coalescing free list
   (`aether_memory::heap`, host-tested), so SquashFS decompression scratch is
   reused instead of accumulating for the rest of the boot.
+- [x] Ordered per-process VMA tables shared by threads, with a `large-apps`
+  kernel feature that raises the per-table cap to 65,530 areas.
+- [ ] Heap-allocated task, kernel-stack, and descriptor tables so the
+  `large-apps` bounds can also raise task and descriptor limits.
 - [ ] On-demand AppImage import. Every imported file still stays resident in
   the fixed heap arena; large applications need a selective import of the
   files they open.
