@@ -118,6 +118,8 @@ pub struct RuntimeProfile {
 
 /// Imported user AppImage identity and entry program.
 pub struct ImportedApp {
+    /// Pack entry imported into this domain.
+    pub pack_index: usize,
     /// Signed application identity.
     pub id: String,
     /// Signed application version.
@@ -135,7 +137,148 @@ pub struct ImportedApp {
 }
 
 static RUNTIME: Global<Option<RuntimeProfile>> = Global(UnsafeCell::new(None));
-static APP: Global<Option<ImportedApp>> = Global(UnsafeCell::new(None));
+
+/// Maximum simultaneously imported Craft app domains.
+///
+/// The kernel heap is sized for two large AppImages plus the shared runtime
+/// rootfs. Additional apps wait in the launcher until a domain is released.
+pub const MAX_APPS: usize = 2;
+
+/// One signed entry in the boot-volume app pack.
+#[derive(Clone)]
+struct PackEntry {
+    name: String,
+    image_offset: usize,
+    image_length: usize,
+    record_offset: usize,
+    record_length: usize,
+}
+
+struct AppPack {
+    bytes: &'static [u8],
+    entries: Vec<PackEntry>,
+}
+
+static PACK: Global<Option<AppPack>> = Global(UnsafeCell::new(None));
+static APPS: Global<[Option<ImportedApp>; MAX_APPS]> =
+    Global(UnsafeCell::new([const { None }; MAX_APPS]));
+
+fn app(slot: usize) -> Option<&'static ImportedApp> {
+    if slot >= MAX_APPS {
+        return None;
+    }
+    // SAFETY: Domains are written only from the single CPU during import or
+    // teardown; readers run on the same CPU with interrupts masked.
+    unsafe { (*APPS.0.get()).get(slot)?.as_ref() }
+}
+
+/// Returns the first free app-domain slot.
+#[must_use]
+pub fn free_slot() -> Option<usize> {
+    // SAFETY: Domains are written on the single CPU; this reads a snapshot.
+    let apps = unsafe { &*APPS.0.get() };
+    (0..MAX_APPS).find(|slot| apps[*slot].is_none())
+}
+
+/// Returns the domain slot already running a pack entry.
+#[must_use]
+pub fn running_slot(pack_index: usize) -> Option<usize> {
+    // SAFETY: Domains are written on the single CPU; this reads a snapshot.
+    let apps = unsafe { &*APPS.0.get() };
+    apps.iter().enumerate().find_map(|(slot, app)| {
+        app.as_ref()
+            .filter(|app| app.pack_index == pack_index)
+            .map(|_| slot)
+    })
+}
+
+/// Releases one app domain after its task exits.
+pub fn release_app(slot: usize) {
+    if slot >= MAX_APPS {
+        return;
+    }
+    // SAFETY: Single-CPU teardown; no syscall can reference this slot after
+    // the last task using it has exited.
+    unsafe {
+        (*APPS.0.get())[slot] = None;
+    }
+}
+
+/// Returns a pack entry name for the desktop catalog.
+#[must_use]
+pub fn pack_entry_name(index: usize) -> Option<&'static str> {
+    // SAFETY: The pack is immutable after boot.
+    let pack = unsafe { (*PACK.0.get()).as_ref() }?;
+    Some(pack.entries.get(index)?.name.as_str())
+}
+
+/// Returns the number of entries in the boot app pack, or zero for the
+/// single-app layout.
+#[must_use]
+pub fn pack_len() -> usize {
+    // SAFETY: The pack is immutable after boot.
+    unsafe { (*PACK.0.get()).as_ref() }.map_or(0, |pack| pack.entries.len())
+}
+
+/// Parses `\linux\apps.index` when the loader staged a multi-app pack.
+fn parse_pack() -> Result<(), ()> {
+    // SAFETY: STAGED is written once during boot and immutable afterwards.
+    let Some(staged) = (unsafe { (*STAGED.0.get()).as_ref() }) else {
+        return Ok(());
+    };
+    if !staged.appimage.is_present() || !staged.record.is_present() {
+        return Ok(());
+    }
+    let image = staged_bytes(staged.appimage)?;
+    let index = staged_bytes(staged.record)?;
+    if !index.starts_with(b"AETHER_APPS 1\n") {
+        return Ok(());
+    }
+    let mut entries = Vec::new();
+    for line in index.split(|byte| *byte == b'\n').skip(1) {
+        if line.is_empty() {
+            continue;
+        }
+        let text = core::str::from_utf8(line).map_err(|_| ())?;
+        let mut fields = text.split(' ');
+        let name = fields.next().ok_or(())?;
+        let _id = fields.next().ok_or(())?;
+        let _version = fields.next().ok_or(())?;
+        let _sha = fields.next().ok_or(())?;
+        let image_offset: usize = fields.next().ok_or(())?.parse().map_err(|_| ())?;
+        let image_length: usize = fields.next().ok_or(())?.parse().map_err(|_| ())?;
+        let record_offset: usize = fields.next().ok_or(())?.parse().map_err(|_| ())?;
+        let record_length: usize = fields.next().ok_or(())?.parse().map_err(|_| ())?;
+        let image_end = image_offset.checked_add(image_length).ok_or(())?;
+        let record_end = record_offset.checked_add(record_length).ok_or(())?;
+        if fields.next().is_some() || image_end > image.len() || record_end > image.len() {
+            return Err(());
+        }
+        entries.push(PackEntry {
+            name: String::from(name),
+            image_offset,
+            image_length,
+            record_offset,
+            record_length,
+        });
+    }
+    if entries.is_empty() {
+        return Err(());
+    }
+    serial_line!(
+        "linux: app pack parsed entries={} bytes={}",
+        entries.len(),
+        image.len()
+    );
+    // SAFETY: Boot is single-threaded and this is the only write to PACK.
+    unsafe {
+        *PACK.0.get() = Some(AppPack {
+            bytes: image,
+            entries,
+        })
+    };
+    Ok(())
+}
 
 fn trust() -> Option<TrustStore<'static>> {
     let mut key = [0u8; 32];
@@ -158,6 +301,7 @@ fn trust() -> Option<TrustStore<'static>> {
 ///
 /// Returns `(files, bytes)` on success. Diagnostics are printed by the caller.
 pub fn init() -> Result<(usize, usize), ()> {
+    parse_pack()?;
     let trust = trust().ok_or(())?;
     let (rootfs, record) = runtime_rootfs().ok_or_else(|| {
         serial_line!("linux: runtime rootfs is missing");
@@ -342,22 +486,22 @@ pub fn runtime_profile() -> Option<&'static RuntimeProfile> {
 /// only a physical extent; the record and image digest are checked before the
 /// container parser or SquashFS importer sees either one. A missing or
 /// tampered artifact fails closed before any parsing or launch.
-pub fn import_appimage() -> Result<(), ()> {
-    // SAFETY: STAGED is written once during boot and immutable afterwards.
-    let Some(staged) = (unsafe { (*STAGED.0.get()).as_ref() }) else {
-        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=missing");
-        return Err(());
-    };
-    if !staged.appimage.is_present() || !staged.record.is_present() {
-        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=missing");
+/// Verifies and imports one app from the boot pack (or the single-app layout)
+/// into the given domain slot.
+///
+/// The signature and digest are always checked before the container or
+/// SquashFS parser sees the bytes. `index` is a boot-pack entry; the single-app
+/// layout accepts only index zero.
+pub fn import_app(slot: usize, index: usize) -> Result<(), ()> {
+    if slot >= MAX_APPS {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=slot");
         return Err(());
     }
-    let appimage = staged_bytes(staged.appimage).map_err(|()| {
-        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=bounds");
-    })?;
-    let record_bytes = staged_bytes(staged.record).map_err(|()| {
-        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=record-bounds");
-    })?;
+    if app(slot).is_some() {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=busy");
+        return Err(());
+    }
+    let (appimage, record_bytes) = app_bytes(index)?;
     let trust = trust().ok_or_else(|| {
         serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=trust");
     })?;
@@ -366,7 +510,9 @@ pub fn import_appimage() -> Result<(), ()> {
         serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=verify");
     })?;
     serial_line!(
-        "AETHER_LINUX_APPIMAGE_STAGED_OK source=loader id={} version={} bytes={}",
+        "AETHER_LINUX_APPIMAGE_STAGED_OK source=loader slot={} index={} id={} version={} bytes={}",
+        slot,
+        index,
         record.id,
         record.version,
         appimage.len()
@@ -385,32 +531,51 @@ pub fn import_appimage() -> Result<(), ()> {
         serial_line!("linux: AppImage import failed: {error:?}");
     })?;
     serial_line!(
-        "linux: AppImage imported heap={} peak={}",
+        "linux: AppImage imported slot={} heap={} peak={}",
+        slot,
         crate::memory::heap_stats().used,
         crate::memory::heap_stats().peak
     );
-    let program_path = APPIMAGE_PROGRAM.trim_start_matches('/');
-    let mut program = None;
-    for entry in tree.entries {
-        if entry.path == program_path
-            && let aether_squashfs::TreeKind::File(data) = entry.kind
-        {
-            program = Some(data);
+    // The configured GUI binary wins. A different signed identity falls back
+    // to its own name, so the desktop can launch any Craft app.
+    let app_name = record.id.rsplit('.').next().unwrap_or("");
+    let derived = alloc::format!("/usr/bin/{app_name}");
+    let candidates = [APPIMAGE_PROGRAM, derived.as_str()];
+    let mut found = None;
+    for candidate in candidates {
+        let wanted = candidate.trim_start_matches('/');
+        if let Some(index) = tree.entries.iter().position(|entry| {
+            entry.path == wanted && matches!(&entry.kind, aether_squashfs::TreeKind::File(_))
+        }) {
+            found = Some((index, candidate));
             break;
         }
     }
-    let program = program.ok_or_else(|| {
+    let (entry_index, selected_path) = found.ok_or_else(|| {
         serial_line!("linux: AppImage lacks the selected program");
     })?;
+    let program = match tree
+        .entries
+        .into_iter()
+        .nth(entry_index)
+        .map(|entry| entry.kind)
+    {
+        Some(aether_squashfs::TreeKind::File(data)) => data,
+        _ => {
+            serial_line!("linux: AppImage program entry is not a regular file");
+            return Err(());
+        }
+    };
     let dynamic = aether_linux_elf::parse(&program)
         .map(|image| image.interpreter().is_some())
         .unwrap_or(false);
-    // SAFETY: Boot is single-threaded and this is the only write to APP.
+    // SAFETY: Single-CPU import; the slot was empty above.
     unsafe {
-        *APP.0.get() = Some(ImportedApp {
+        (*APPS.0.get())[slot] = Some(ImportedApp {
+            pack_index: index,
             id: String::from(record.id),
             version: String::from(record.version),
-            path: String::from(APPIMAGE_PROGRAM),
+            path: String::from(selected_path),
             program,
             dynamic,
             jit: record.jit,
@@ -418,6 +583,42 @@ pub fn import_appimage() -> Result<(), ()> {
         })
     };
     Ok(())
+}
+
+/// Returns the image and signed record bytes for one pack entry.
+fn app_bytes(index: usize) -> Result<(&'static [u8], &'static [u8]), ()> {
+    // SAFETY: The pack is immutable after boot.
+    if let Some(pack) = unsafe { (*PACK.0.get()).as_ref() } {
+        let entry = pack.entries.get(index).ok_or(())?;
+        let image = pack
+            .bytes
+            .get(entry.image_offset..entry.image_offset + entry.image_length)
+            .ok_or(())?;
+        let record = pack
+            .bytes
+            .get(entry.record_offset..entry.record_offset + entry.record_length)
+            .ok_or(())?;
+        return Ok((image, record));
+    }
+    if index != 0 {
+        return Err(());
+    }
+    // SAFETY: STAGED is written once during boot and immutable afterwards.
+    let Some(staged) = (unsafe { (*STAGED.0.get()).as_ref() }) else {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=missing");
+        return Err(());
+    };
+    if !staged.appimage.is_present() || !staged.record.is_present() {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=missing");
+        return Err(());
+    }
+    let image = staged_bytes(staged.appimage).map_err(|()| {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=bounds");
+    })?;
+    let record = staged_bytes(staged.record).map_err(|()| {
+        serial_line!("AETHER_LINUX_APPIMAGE_STAGE_FAILED reason=record-bounds");
+    })?;
+    Ok((image, record))
 }
 
 /// Borrows a loader-staged artifact as a byte slice.
@@ -437,35 +638,30 @@ fn staged_bytes(artifact: BootArtifact) -> Result<&'static [u8], ()> {
 
 /// Returns the imported AppImage identity, version, and launch path.
 #[must_use]
-pub fn app_identity() -> Option<(&'static str, &'static str, &'static str)> {
-    // SAFETY: APP is written once during boot and immutable afterwards.
-    let app = unsafe { (*APP.0.get()).as_ref() }?;
+pub fn app_identity(slot: usize) -> Option<(&'static str, &'static str, &'static str)> {
+    let app = app(slot)?;
     Some((app.id.as_str(), app.version.as_str(), app.path.as_str()))
 }
 
 /// Returns `true` if the imported AppImage's signed record declares
 /// `memory=jit`, which allows writable+executable mappings.
 #[must_use]
-pub fn app_jit() -> bool {
-    // SAFETY: APP is written once during boot and immutable afterwards.
-    unsafe { (*APP.0.get()).as_ref() }.is_some_and(|app| app.jit)
+pub fn app_jit(slot: usize) -> bool {
+    app(slot).is_some_and(|app| app.jit)
 }
 
 /// Returns `true` if the imported AppImage's signed record declares
 /// `network=client`. That makes the application eligible to ask for outbound
 /// connections; the user's consent is still required.
 #[must_use]
-pub fn app_network_client() -> bool {
-    // SAFETY: APP is written once during boot and immutable afterwards.
-    unsafe { (*APP.0.get()).as_ref() }.is_some_and(|app| app.network_client)
+pub fn app_network_client(slot: usize) -> bool {
+    app(slot).is_some_and(|app| app.network_client)
 }
 
 /// Returns the program bytes selected from the imported AppImage.
 #[must_use]
-pub fn app_program() -> Option<&'static [u8]> {
-    // SAFETY: APP is written once during boot and immutable afterwards.
-    let app = unsafe { (*APP.0.get()).as_ref() }?;
-    Some(app.program.as_slice())
+pub fn app_program(slot: usize) -> Option<&'static [u8]> {
+    Some(app(slot)?.program.as_slice())
 }
 
 /// Returns `true` when the imported program requests an interpreter.
@@ -474,9 +670,8 @@ pub fn app_program() -> Option<&'static [u8]> {
 /// files the static fixture writes, so the post-exit overlay self-test is only
 /// meaningful for the static fixture.
 #[must_use]
-pub fn app_is_dynamic() -> bool {
-    // SAFETY: APP is written once during boot and immutable afterwards.
-    unsafe { (*APP.0.get()).as_ref() }.is_some_and(|app| app.dynamic)
+pub fn app_is_dynamic(slot: usize) -> bool {
+    app(slot).is_some_and(|app| app.dynamic)
 }
 
 /// Returns the configured arguments for the imported program.
@@ -484,9 +679,14 @@ pub fn app_is_dynamic() -> bool {
 /// `None` means the compile-time list exceeds the loader's bounded argv array;
 /// the caller must reject the launch rather than silently truncate it.
 #[must_use]
-pub fn app_arguments() -> Option<([&'static str; MAX_APPIMAGE_ARGUMENTS], usize)> {
+pub fn app_arguments(slot: usize) -> Option<([&'static str; MAX_APPIMAGE_ARGUMENTS], usize)> {
     let mut arguments = [""; MAX_APPIMAGE_ARGUMENTS];
     let mut count = 0usize;
+    // The configured argument list is the GridCraft portal workbook. A
+    // different imported app must not receive that private namespace path.
+    if !app(slot).is_some_and(|app| app.id.ends_with(".gridcraft")) {
+        return Some((arguments, 0));
+    }
     for argument in APPIMAGE_ARGS.split('|').filter(|value| !value.is_empty()) {
         if count == MAX_APPIMAGE_ARGUMENTS {
             return None;

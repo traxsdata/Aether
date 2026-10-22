@@ -38,7 +38,7 @@ pub const MAX_MEMORY_REGIONS: usize = 256;
 /// x86-64 AppImages currently range from about 16 MiB to 119 MiB, while still
 /// keeping the loader's allocation and the kernel's slice construction finite;
 /// a larger file is rejected before it is read.
-pub const MAX_STAGED_APPIMAGE_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_STAGED_APPIMAGE_BYTES: u64 = 1536 * 1024 * 1024;
 
 /// Largest signed import record the loader will stage (64 KiB).
 ///

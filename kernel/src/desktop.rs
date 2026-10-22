@@ -68,6 +68,8 @@ struct DesktopState {
     network_generation: u64,
     /// Tick the current network consent prompt appeared, while one is up.
     network_prompt: Option<u64>,
+    /// Keyboard selection in the Applications launcher grid.
+    applications_selected: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -115,6 +117,7 @@ impl DesktopState {
             rename: RenameState::new(),
             network_generation: 0,
             network_prompt: None,
+            applications_selected: 0,
         }
     }
 }
@@ -200,6 +203,20 @@ pub fn mark_live_dirty() {
     // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
     unsafe {
         (*DESKTOP.0.get()).live_dirty = true;
+    }
+}
+
+fn applications_selected() -> usize {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized read of a plain counter.
+    unsafe { (*DESKTOP.0.get()).applications_selected }
+}
+
+fn set_applications_selected(value: usize) {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupt-serialized write of a plain counter.
+    unsafe {
+        (*DESKTOP.0.get()).applications_selected = value;
     }
 }
 
@@ -379,11 +396,17 @@ fn paint_frame(wm: &Wm, mut damage: Damage) {
     // content rectangle. Restoring the wallpaper underneath it first is wasted
     // bandwidth on every keystroke and hover frame.
     let opaque_content = !theme_changed
-        && wm
-            .window_id(WindowKind::Linux)
-            .and_then(|id| wm.window_frame(id))
-            .is_some_and(|frame| damage.rects() == [layout::content_rect(frame)])
-        && crate::display::surface_opaque();
+        && [WindowKind::Linux, WindowKind::Linux2]
+            .into_iter()
+            .filter_map(|kind| {
+                let slot = kind.linux_slot()?;
+                let frame = wm.window_frame(wm.window_id(kind)?)?;
+                (damage.rects() == [layout::content_rect(frame)]
+                    && crate::display::surface_opaque(slot))
+                .then_some(())
+            })
+            .next()
+            .is_some();
     // Without a cached wallpaper (first frame or direct mode) every region
     // restore fails alike, so the first rectangle decides.
     let restorable = opaque_content
@@ -516,17 +539,26 @@ pub fn tick() {
     for event in events.into_iter().flatten().chain(core::iter::once(mouse)) {
         route_pointer(&mut wm, &mut last_buttons, event, now);
     }
-    // Feed the Linux endpoint only while its window owns focus. Coordinates
-    // are translated to the window's client area here, not by the guest.
-    let linux = wm
+    // Feed the focused Linux endpoint. Coordinates are translated to the
+    // window's client area here, not by the guest.
+    let focused_slot = wm
         .focused_window()
-        .filter(|window| window.kind == WindowKind::Linux)
-        .map(|window| window.id);
-    let content = linux
-        .and_then(|id| wm.window_frame(id))
-        .map(layout::content_rect);
+        .and_then(|window| window.kind.linux_slot().map(|slot| (slot, window.id)));
     let cursor = wm.cursor();
-    crate::display::sync_input(linux, content, cursor.x, cursor.y, mouse.buttons);
+    for slot in 0..crate::linux::MAX_APPS {
+        let focused = focused_slot.filter(|(focused, _)| *focused == slot);
+        let content = focused
+            .and_then(|(_, id)| wm.window_frame(id))
+            .map(layout::content_rect);
+        crate::display::sync_input(
+            slot,
+            focused.map(|(_, id)| id),
+            content,
+            cursor.x,
+            cursor.y,
+            mouse.buttons,
+        );
+    }
 
     let second = now / 100;
     let clock_changed = second != last_second;
@@ -538,6 +570,7 @@ pub fn tick() {
         }
     }
     store(wm, now, second, last_buttons);
+    reconcile_linux_windows(&wm);
     let mut damage = painted.map_or(Damage::from_rect(wm.screen()), |before| {
         wm.damage_region_since(&before)
     });
@@ -558,17 +591,20 @@ pub fn tick() {
     {
         include(frame);
     }
-    if (linux_dirty || linux_frame_dirty)
-        && let Some(id) = wm.window_id(WindowKind::Linux)
-        && let Some(frame) = wm.window_frame(id)
-    {
-        // A pure surface present changes only the content rectangle. Keeping
-        // the damage inside it avoids repainting the title bar, body, and two
-        // shadow layers for every keystroke or hover frame.
-        if linux_frame_dirty {
-            include(frame);
-        } else {
-            include(layout::content_rect(frame));
+    if linux_dirty || linux_frame_dirty {
+        for kind in [WindowKind::Linux, WindowKind::Linux2] {
+            if let Some(id) = wm.window_id(kind)
+                && let Some(frame) = wm.window_frame(id)
+            {
+                // A pure surface present changes only the content rectangle.
+                // Keeping the damage inside it avoids repainting the title
+                // bar, body, and two shadow layers for every frame.
+                if linux_frame_dirty {
+                    include(frame);
+                } else {
+                    include(layout::content_rect(frame));
+                }
+            }
         }
     }
     if clock_dirty {
@@ -592,7 +628,12 @@ pub fn tick() {
     }
     if live_dirty {
         include(layout::menu_bar(wm.screen()));
-        for kind in [WindowKind::Security, WindowKind::Portal, WindowKind::Log] {
+        for kind in [
+            WindowKind::Security,
+            WindowKind::Portal,
+            WindowKind::Log,
+            WindowKind::Applications,
+        ] {
             if let Some(id) = wm.window_id(kind)
                 && let Some(frame) = wm.window_frame(id)
             {
@@ -634,6 +675,13 @@ fn route_pointer(wm: &mut Wm, last_buttons: &mut u8, mouse: input::MouseSnapshot
                 )
             });
             mark_files_dirty();
+        } else if let aether_wm::Hit::Window(id) = hit
+            && wm
+                .window(id)
+                .is_some_and(|window| window.kind == WindowKind::Applications)
+            && let Some(frame) = wm.window_frame(id)
+        {
+            applications_click(layout::content_rect(frame), point);
         } else if let aether_wm::Hit::Window(id) = hit
             && wm
                 .window(id)
@@ -687,15 +735,66 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
     };
     // While the Linux surface owns focus, keys go to its endpoint instead of
     // the native window manager. Overlays and menus keep native focus.
+    let global_shortcut =
+        matches!(key, Key::Function(3 | 4 | 10)) || (modifiers.command() && key == Key::Char(b'w'));
     let linux_focused = wm
         .focused_window()
-        .is_some_and(|window| window.kind == WindowKind::Linux)
+        .and_then(|window| window.kind.linux_slot())
+        .filter(|_| {
+            !global_shortcut
+                && !wm.overview_open()
+                && !wm.spotlight_open()
+                && wm.menu_state().is_none()
+        });
+    if let Some(slot) = linux_focused {
+        crate::display::key(slot, key, modifiers);
+        return;
+    }
+    let applications_focused = wm
+        .focused_window()
+        .is_some_and(|window| window.kind == WindowKind::Applications)
         && !wm.overview_open()
         && !wm.spotlight_open()
-        && wm.menu_state().is_none();
-    if linux_focused {
-        crate::display::key(key, modifiers);
-        return;
+        && wm.menu_state().is_none()
+        && !modifiers.command();
+    if applications_focused {
+        let count = crate::linux::pack_len();
+        if count > 0 {
+            let columns = wm
+                .focused_window()
+                .and_then(|window| wm.window_frame(window.id))
+                .map(|frame| app_grid(layout::content_rect(frame), count).columns)
+                .unwrap_or(4);
+            let mut selected = applications_selected().min(count - 1);
+            match key {
+                Key::Left => selected = selected.saturating_sub(1),
+                Key::Right if selected + 1 < count => selected += 1,
+                Key::Up => selected = selected.saturating_sub(columns),
+                Key::Down if selected + columns < count => selected += columns,
+                Key::Enter => {
+                    set_applications_selected(selected);
+                    launch_craft(selected);
+                    return;
+                }
+                Key::Escape => {
+                    if let Some(id) = wm.window_id(WindowKind::Applications) {
+                        wm.close_window(id);
+                        let now = scheduler::ticks();
+                        store(wm, now, now / 100, input::mouse().buttons);
+                    }
+                    return;
+                }
+                _ => return,
+            }
+            set_applications_selected(selected);
+            let now = scheduler::ticks();
+            store(wm, now, now / 100, input::mouse().buttons);
+            mark_live_dirty();
+            return;
+        }
+    }
+    if key == Key::Function(4) {
+        set_applications_selected(0);
     }
     let terminal_focused = wm
         .focused_window()
@@ -843,10 +942,18 @@ pub fn close_terminal() {
 /// The frame is sized so its client area matches the requested surface within
 /// the compositor's work area. The surface is scaled by the painter when the
 /// frame is clamped smaller. Returns `None` when no desktop exists.
-pub fn open_linux_window(width: u32, height: u32, title: &str) -> Option<u8> {
+fn linux_kind(slot: usize) -> WindowKind {
+    if slot == 0 {
+        WindowKind::Linux
+    } else {
+        WindowKind::Linux2
+    }
+}
+
+pub fn open_linux_window(slot: usize, width: u32, height: u32, title: &str) -> Option<u8> {
     let _ = title;
     let mut wm = current()?;
-    let id = wm.open(WindowKind::Linux)?;
+    let id = wm.open(linux_kind(slot))?;
     let area = layout::work_area(wm.screen());
     let frame_width =
         (i32::try_from(width).ok()?.saturating_add(2)).clamp(layout::MIN_WINDOW_WIDTH, area.width);
@@ -865,20 +972,33 @@ pub fn open_linux_window(width: u32, height: u32, title: &str) -> Option<u8> {
 }
 
 /// Retires the Linux window when the endpoint closes or the task exits.
-pub fn close_linux_window(id: u8) {
+pub fn close_linux_window(slot: usize, id: u8) {
     let Some(mut wm) = current() else {
         return;
     };
-    if wm
-        .window(id)
-        .is_none_or(|window| window.kind != WindowKind::Linux)
-    {
+    let kind = linux_kind(slot);
+    if wm.window(id).is_none_or(|window| window.kind != kind) {
         return;
     }
     wm.close_window(id);
     let now = scheduler::ticks();
     store(wm, now, now / 100, input::mouse().buttons);
     mark_linux_frame_dirty();
+}
+
+/// Tells an app to exit when its compositor window has been closed.
+///
+/// Closing a window is the user's request to quit that app, matching the dock
+/// taskbar model. The app gets one close event through the display endpoint;
+/// when its task exits the domain is released for a later launch.
+fn reconcile_linux_windows(wm: &Wm) {
+    for slot in 0..crate::linux::MAX_APPS {
+        if let Some(id) = crate::display::window_id(slot)
+            && wm.window(id).is_none()
+        {
+            crate::display::request_close(slot);
+        }
+    }
 }
 
 /// Restores the welcome window as the focused, frontmost window.
@@ -1324,7 +1444,10 @@ fn paint_window(
     };
     let radius = layout::WINDOW_RADIUS;
     let content = layout::content_rect(frame);
-    let linux_opaque = window.kind == WindowKind::Linux && crate::display::surface_opaque();
+    let linux_opaque = window
+        .kind
+        .linux_slot()
+        .is_some_and(crate::display::surface_opaque);
     // Every pixel of the content rectangle is painted opaquely below (a solid
     // fill or an opaque Linux surface), except in the bottom rows that the
     // rounded silhouette trims. Shadow and body blends under that core are
@@ -1451,8 +1574,8 @@ fn paint_window(
 
     let lights = layout::traffic_lights(frame);
     paint_traffic_lights(wm, &lights, focused, palette);
-    let title = if window.kind == WindowKind::Linux {
-        let requested = crate::display::title();
+    let title = if let Some(slot) = window.kind.linux_slot() {
+        let requested = crate::display::title(slot);
         if requested.is_empty() {
             window.kind.title()
         } else {
@@ -1546,8 +1669,168 @@ fn paint_content(
         WindowKind::Log => paint_log(wm, content, palette),
         WindowKind::Welcome => paint_welcome(wm, content, focused, palette),
         WindowKind::Terminal => crate::terminal::paint(content),
-        WindowKind::Linux => crate::display::paint_content(content),
+        WindowKind::Linux => crate::display::paint_content(0, content),
+        WindowKind::Linux2 => crate::display::paint_content(1, content),
+        WindowKind::Applications => paint_applications(wm, content, palette),
     }
+}
+
+struct AppGrid {
+    columns: usize,
+    cell_width: i32,
+    cell_height: i32,
+    tile: i32,
+}
+
+fn app_grid(content: Rect, count: usize) -> AppGrid {
+    let columns = if content.width >= 760 {
+        4
+    } else if content.width >= 520 {
+        3
+    } else {
+        2
+    }
+    .max(1);
+    let rows = count.div_ceil(columns).max(1) as i32;
+    let cell_width = (content.width - 40).max(1) / columns as i32;
+    let available_height = (content.height - 72).max(1);
+    let cell_height = (available_height / rows).clamp(92, 132);
+    let tile = (cell_width.min(cell_height) - 36).clamp(42, 84);
+    AppGrid {
+        columns,
+        cell_width,
+        cell_height,
+        tile,
+    }
+}
+
+fn application_rect(content: Rect, grid: &AppGrid, index: usize) -> Rect {
+    let column = index % grid.columns;
+    let row = index / grid.columns;
+    let cell_x = content.x + 20 + column as i32 * grid.cell_width;
+    let cell_y = content.y + 66 + row as i32 * grid.cell_height;
+    Rect::new(
+        cell_x + (grid.cell_width - grid.tile) / 2,
+        cell_y + 6,
+        grid.tile,
+        grid.tile,
+    )
+}
+
+fn applications_click(content: Rect, point: aether_wm::Point) {
+    let count = crate::linux::pack_len();
+    if count == 0 {
+        return;
+    }
+    let grid = app_grid(content, count);
+    for index in 0..count {
+        let tile = application_rect(content, &grid, index);
+        let target = Rect::new(tile.x - 8, tile.y - 4, tile.width + 16, tile.height + 30);
+        if target.contains(point) {
+            set_applications_selected(index);
+            launch_craft(index);
+            return;
+        }
+    }
+}
+
+fn launch_craft(index: usize) {
+    if let Some(slot) = crate::linux::running_slot(index) {
+        if let Some(mut wm) = current() {
+            let kind = linux_kind(slot);
+            if wm.window_id(kind).is_some() {
+                let _ = wm.open(kind);
+                let now = scheduler::ticks();
+                store(wm, now, now / 100, input::mouse().buttons);
+                mark_linux_frame_dirty();
+            } else {
+                serial_line!("desktop: craft app index={index} is still closing");
+            }
+        }
+        return;
+    }
+    match crate::linuxd::request_launch(index) {
+        Ok(slot) => serial_line!("desktop: craft launch requested index={index} slot={slot}"),
+        Err(error) => serial_line!("desktop: craft launch failed index={index} error={error:?}"),
+    }
+}
+
+fn paint_applications(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
+    graphics::fill_rect(
+        content.x,
+        content.y,
+        content.width,
+        content.height,
+        palette.window,
+    );
+    draw_text(
+        content.x + 22,
+        content.y + 18,
+        "APPLICATIONS",
+        palette.text,
+        2,
+    );
+    draw_text(
+        content.x + 22,
+        content.y + 40,
+        "Launch Craft apps from here. The dock keeps running apps one click away.",
+        palette.muted,
+        1,
+    );
+    let count = crate::linux::pack_len();
+    if count == 0 {
+        draw_text(
+            content.x + 22,
+            content.y + 82,
+            "This image has no multi-app pack.",
+            palette.faint,
+            1,
+        );
+        return;
+    }
+    let grid = app_grid(content, count);
+    let selected = applications_selected().min(count - 1);
+    let mut running = 0usize;
+    for index in 0..count {
+        let tile = application_rect(content, &grid, index);
+        icons::craft_tile(index, tile, palette);
+        if index == selected {
+            graphics::outline_round_rect(
+                tile.x - 4,
+                tile.y - 4,
+                tile.width + 8,
+                tile.height + 8,
+                tile.width / 4,
+                palette.accent,
+            );
+        }
+        if crate::linux::running_slot(index).is_some() {
+            running += 1;
+            graphics::fill_circle(tile.center().x, tile.bottom() + 7, 3, palette.accent);
+        }
+        let name = crate::linux::pack_entry_name(index).unwrap_or("?");
+        let cell_x = tile.center().x - grid.cell_width / 2;
+        draw_text_centered(
+            cell_x.max(content.x),
+            (cell_x + grid.cell_width).min(content.right()),
+            tile.bottom() + 12,
+            name,
+            palette.text,
+            1,
+        );
+    }
+    let footer = alloc::format!(
+        "{count} Craft apps · {running} running · {} app domains",
+        crate::linux::MAX_APPS
+    );
+    draw_text(
+        content.x + 22,
+        content.bottom() - 24,
+        &footer,
+        palette.faint,
+        1,
+    );
+    let _ = wm;
 }
 
 fn paint_files(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
@@ -3031,12 +3314,20 @@ fn paint_dock(wm: &Wm, palette: aether_wm::Palette, glass: GlassLevel) {
         match slot {
             DockSlot::App(kind) => {
                 icons::app_icon(*kind, rect, palette);
-                if wm.is_running(*kind) {
+                let craft_running = *kind == WindowKind::Applications
+                    && [WindowKind::Linux, WindowKind::Linux2]
+                        .into_iter()
+                        .any(|kind| wm.is_running(kind));
+                let craft_active = *kind == WindowKind::Applications
+                    && wm
+                        .focused_window()
+                        .is_some_and(|window| window.kind.linux_slot().is_some());
+                if wm.is_running(*kind) || craft_running {
                     graphics::fill_circle(
                         rect.center().x,
                         panel.bottom() - 5,
                         2,
-                        if wm.is_active(*kind) {
+                        if wm.is_active(*kind) || craft_active {
                             palette.accent
                         } else {
                             palette.muted

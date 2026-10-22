@@ -29,6 +29,12 @@ make vmware-vmx
 For the GridCraft demo, build `make iso-gridcraft` instead of `make iso`, then
 run `make vmware-vmx` to generate an 8 GiB VMX pointing at the newest ISO.
 
+To run the Craft suite, build `make iso-craft-apps`. The ISO packs every
+published Craft app; GridCraft starts automatically and the Applications tile
+in the dock (or F4) opens the in-desktop launcher. Arrow keys select an app and
+Enter launches it. Two app domains can be open at once, and the dock keeps the
+running indicator for the active windows.
+
 `make iso` writes a timestamped image under `build/ISOs/`. `make vmware-vmx`
 writes `build/aether-vmware.vmx` with an absolute `cdrom-image` path to the
 newest ISO. The VMX target does not rebuild it, so the image you just tested is

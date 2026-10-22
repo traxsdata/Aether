@@ -50,11 +50,15 @@ pub enum WindowKind {
     /// synthetic `/dev/aether-display` endpoint; the title is supplied by the
     /// display service rather than this fixed kind.
     Linux,
+    /// Second simultaneous Linux application surface.
+    Linux2,
+    /// In-desktop application launcher for the Craft suite.
+    Applications,
 }
 
 impl WindowKind {
     /// All application kinds in dock order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Files,
         Self::Terminal,
         Self::Security,
@@ -63,6 +67,7 @@ impl WindowKind {
         Self::Recovery,
         Self::Log,
         Self::Welcome,
+        Self::Applications,
     ];
 
     /// Window title.
@@ -78,6 +83,18 @@ impl WindowKind {
             Self::Welcome => "WELCOME",
             Self::Terminal => "TERMINAL",
             Self::Linux => "LINUX APP",
+            Self::Linux2 => "LINUX APP",
+            Self::Applications => "APPLICATIONS",
+        }
+    }
+
+    /// Returns the app-domain slot for a Linux surface window.
+    #[must_use]
+    pub const fn linux_slot(self) -> Option<usize> {
+        match self {
+            Self::Linux => Some(0),
+            Self::Linux2 => Some(1),
+            _ => None,
         }
     }
 
@@ -93,7 +110,9 @@ impl WindowKind {
             Self::Log => "Log",
             Self::Welcome => "Welcome",
             Self::Terminal => "Terminal",
-            Self::Linux => "Linux",
+            Self::Linux => "Craft",
+            Self::Linux2 => "Craft",
+            Self::Applications => "Applications",
         }
     }
 
@@ -110,6 +129,8 @@ impl WindowKind {
             Self::Welcome => "Desktop guide and keyboard shortcuts",
             Self::Terminal => "Shell and command-line programs as the signed-in user",
             Self::Linux => "Pixel surface presented by a Linux application",
+            Self::Linux2 => "Second Linux application surface",
+            Self::Applications => "Launch Craft apps and switch between running apps",
         }
     }
 }
@@ -2288,6 +2309,10 @@ impl Wm {
             }
             Key::Function(3) => {
                 self.toggle_overview();
+                outcome.changed = true;
+            }
+            Key::Function(4) => {
+                self.open(WindowKind::Applications);
                 outcome.changed = true;
             }
             Key::Function(10) => {

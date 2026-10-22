@@ -25,7 +25,7 @@ use aether_ipc::{CapHandle, CapTable, IpcError, ObjectId, ObjectType, ReceivedMe
 use core::cell::UnsafeCell;
 
 /// Overlay store slot owned by the imported AppImage domain.
-pub const APP_OVERLAY_ID: u8 = 1;
+pub const APP_OVERLAY_ID: u8 = 0;
 
 /// First capability granted to the service task.
 ///
@@ -51,10 +51,10 @@ const MAX_FIELD: usize = 63;
 enum Phase {
     /// Waiting for `linuxd` to reject the deliberately invalid request.
     WaitingDenial,
+    /// Approved and ready for the desktop to request another app.
+    Idle,
     /// Waiting for `linuxd` to approve the signed launch request.
     WaitingApproval,
-    /// The application task has been created and made runnable.
-    Launched,
     /// A protocol or policy failure. The boot fails closed.
     Failed,
 }
@@ -64,7 +64,7 @@ impl Phase {
         match self {
             Self::WaitingDenial => 0,
             Self::WaitingApproval => 1,
-            Self::Launched => 2,
+            Self::Idle => 2,
             Self::Failed => 3,
         }
     }
@@ -72,7 +72,7 @@ impl Phase {
     fn from_raw(value: u8) -> Self {
         match value {
             1 => Self::WaitingApproval,
-            2 => Self::Launched,
+            2 => Self::Idle,
             3 => Self::Failed,
             _ => Self::WaitingDenial,
         }
@@ -87,6 +87,10 @@ struct State {
     approval: Option<ObjectId>,
     request_send: Option<CapHandle>,
     approval_recv: Option<CapHandle>,
+    /// App-domain slot awaiting approval.
+    pending_slot: usize,
+    /// Absolute tick deadline for the current handshake phase.
+    deadline: u64,
 }
 
 impl State {
@@ -96,6 +100,8 @@ impl State {
         approval: None,
         request_send: None,
         approval_recv: None,
+        pending_slot: 0,
+        deadline: 0,
     };
 }
 
@@ -200,8 +206,8 @@ pub fn init(service_caps: &mut CapTable) -> Result<(), LinuxdError> {
         serial_line!("linuxd: no verified runtime profile");
         return Err(LinuxdError::NoRuntimeProfile);
     };
-    crate::linux::import_appimage().map_err(|_| LinuxdError::ImportFailed)?;
-    let Some((id, version, path)) = crate::linux::app_identity() else {
+    crate::linux::import_app(0, 0).map_err(|_| LinuxdError::ImportFailed)?;
+    let Some((id, version, path)) = crate::linux::app_identity(0) else {
         return Err(LinuxdError::ImportFailed);
     };
     if !aether_packaging::manifest::is_valid_identity(id)
@@ -259,6 +265,8 @@ pub fn init(service_caps: &mut CapTable) -> Result<(), LinuxdError> {
         approval: Some(approval),
         request_send: Some(request_send),
         approval_recv: Some(approval_recv),
+        pending_slot: 0,
+        deadline: crate::scheduler::ticks() + 1000,
     };
     drop(_guard);
 
@@ -292,8 +300,14 @@ pub fn service_tick() {
     // A missing or crashed approval path must fail the boot rather than leave
     // the application permanently pending. Ten seconds is well beyond the
     // first scheduler tick that lets the service run on the test platform.
-    if phase != Phase::Launched && crate::scheduler::ticks() > 1000 {
-        failed("linuxd approval timeout");
+    if matches!(phase, Phase::WaitingDenial | Phase::WaitingApproval) {
+        let deadline = {
+            let _guard = InterruptGuard::enter();
+            state().deadline
+        };
+        if crate::scheduler::ticks() > deadline {
+            failed("linuxd approval timeout");
+        }
     }
     match phase {
         Phase::WaitingDenial => match receive_approval() {
@@ -305,7 +319,7 @@ pub fn service_tick() {
                     failed("linuxd denial protocol");
                 }
                 serial_line!("AETHER_LINUXD_DENY_OK reason=launch-path");
-                let Some((id, version, path)) = crate::linux::app_identity() else {
+                let Some((id, version, path)) = crate::linux::app_identity(0) else {
                     failed("linuxd missing imported identity");
                 };
                 if send_request(STATUS_REQUIRED, id, version, path).is_err() {
@@ -313,6 +327,8 @@ pub fn service_tick() {
                 }
                 let _guard = InterruptGuard::enter();
                 state().phase = Phase::WaitingApproval;
+                state().pending_slot = 0;
+                state().deadline = crate::scheduler::ticks() + 1000;
             }
             Err(IpcError::Empty) => {}
             Err(_) => failed("linuxd denial receive"),
@@ -325,19 +341,57 @@ pub fn service_tick() {
                 {
                     failed("linuxd approval protocol");
                 }
-                if crate::scheduler::launch_appimage().is_err() {
+                let _guard = InterruptGuard::enter();
+                let slot = state().pending_slot;
+                drop(_guard);
+                if crate::scheduler::launch_appimage(slot).is_err() {
                     failed("linuxd approved launch could not start");
                 }
+                crate::scheduler::mark_linuxd_ready();
                 let _guard = InterruptGuard::enter();
-                state().phase = Phase::Launched;
+                state().phase = Phase::Idle;
+                drop(_guard);
                 serial_line!("AETHER_LINUXD_USER_OK ring3=ok ipc=ok launch=approved");
             }
             Err(IpcError::Empty) => {}
             Err(_) => failed("linuxd approval receive"),
         },
-        Phase::Launched => {}
+        Phase::Idle => {}
         Phase::Failed => failed("linuxd launch state"),
     }
+}
+
+/// Imports one pack entry and asks ring-3 `linuxd` to approve its launch.
+///
+/// The import is synchronous because it allocates the app tree and program
+/// bytes; the launch itself is completed by [`service_tick`] after the policy
+/// service replies. Returns the domain slot reserved for the app.
+pub fn request_launch(index: usize) -> Result<usize, LinuxdError> {
+    let slot = {
+        let _guard = InterruptGuard::enter();
+        if state().phase != Phase::Idle {
+            return Err(LinuxdError::Request);
+        }
+        crate::linux::free_slot().ok_or(LinuxdError::Request)?
+    };
+    crate::linux::import_app(slot, index).map_err(|_| LinuxdError::ImportFailed)?;
+    let Some((id, version, path)) = crate::linux::app_identity(slot) else {
+        crate::linux::release_app(slot);
+        return Err(LinuxdError::ImportFailed);
+    };
+    if id.len() > MAX_FIELD || version.len() > MAX_FIELD || path.len() > MAX_FIELD {
+        crate::linux::release_app(slot);
+        return Err(LinuxdError::Policy);
+    }
+    if let Err(error) = send_request(STATUS_REQUIRED, id, version, path) {
+        crate::linux::release_app(slot);
+        return Err(error);
+    }
+    let _guard = InterruptGuard::enter();
+    state().phase = Phase::WaitingApproval;
+    state().pending_slot = slot;
+    state().deadline = crate::scheduler::ticks() + 1000;
+    Ok(slot)
 }
 
 /// Returns `true` once the approved application task has been created.
@@ -345,7 +399,7 @@ pub fn service_tick() {
 pub fn launch_approved() -> bool {
     let _guard = InterruptGuard::enter();
     let state = state();
-    state.phase == Phase::Launched && state.request.is_some() && state.approval.is_some()
+    state.phase == Phase::Idle && state.request.is_some() && state.approval.is_some()
 }
 
 fn failed(reason: &str) -> ! {
@@ -387,7 +441,7 @@ pub fn post_app_exit() {
         // The static fixture writes three files to prove overlay persistence. A
         // real dynamically linked application is not required to write anything,
         // so its successful exit is checked by the scheduler result instead.
-        if crate::linux::app_is_dynamic() {
+        if crate::linux::app_is_dynamic(0) {
             serial_line!("AETHER_LINUX_OVERLAY_SKIP_OK reason=dynamic-app");
             return;
         }
@@ -398,7 +452,7 @@ pub fn post_app_exit() {
         }
         serial_line!(
             "AETHER_LINUX_OVERLAY_PERSIST_OK app={} entries={} bytes={}",
-            crate::linux::app_identity().map_or("unknown", |(id, _, _)| id),
+            crate::linux::app_identity(0).map_or("unknown", |(id, _, _)| id),
             entries,
             bytes
         );
@@ -415,7 +469,7 @@ pub fn post_app_exit() {
 /// Prints the runtime manager status for the shell and security view.
 pub fn print_status() {
     let profile = crate::linux::runtime_profile();
-    let app = crate::linux::app_identity();
+    let app = crate::linux::app_identity(0);
     let (entries, bytes) = crate::scheduler::linux_overlay_stats(APP_OVERLAY_ID);
     let _guard = InterruptGuard::enter();
     let phase = state().phase;

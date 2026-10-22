@@ -102,11 +102,21 @@ focus cycling, and settings.
 
 ## Dock
 
-A floating glass dock holds seven original application tiles and a Spaces tile.
-Icons magnify under the pointer, running applications get a status dot, and a
-tooltip appears above the emphasised tile. Clicking a running application
-focuses or restores it; clicking a closed application opens it. The magnification
-can be disabled in Settings.
+A floating glass dock holds eight original application tiles and a Spaces
+tile. Icons magnify under the pointer, running applications get a status dot,
+and a tooltip appears above the emphasised tile. Clicking a running application
+focuses or restores it; clicking a closed application opens it. The
+Applications tile opens the Craft launcher and carries a running indicator
+while any imported app domain is alive. The magnification can be disabled in
+Settings.
+
+## Applications
+
+`F4` or the Applications dock tile opens the Craft launcher. It lists every
+entry in the boot app pack, marks the running ones, and launches the selected
+app with `Enter`. Two imported app domains can run together, so a document app
+and an image, audio, or video app stay open at once. Closing an app releases
+its domain and frees the slot for the next launch.
 
 ## Spaces and the overview
 

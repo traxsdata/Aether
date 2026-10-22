@@ -29,6 +29,62 @@ pub fn aether_mark(center_x: i32, center_y: i32, radius: i32, color: u32) {
     graphics::fill_circle(center_x, center_y, (radius / 5).max(1), 0xfff3d6);
 }
 
+/// Draws one Craft app tile for the Applications launcher.
+///
+/// The palette is deliberately varied so the grid reads at a glance without
+/// shipping any upstream application artwork.
+pub fn craft_tile(index: usize, rect: aether_wm::Rect, _palette: Palette) {
+    const COLORS: [u32; 13] = [
+        0x2c7080, 0x8a4b3a, 0x6d3b6d, 0x3a5b8a, 0x2d7048, 0x806a2d, 0x46566d, 0x754049, 0x3d4775,
+        0x7a5b2b, 0x2d6d6d, 0x5b3f75, 0x4d6b2d,
+    ];
+    if rect.width < 18 || rect.height < 18 {
+        return;
+    }
+    let background = COLORS[index % COLORS.len()];
+    let radius = (rect.width / 5).max(6);
+    graphics::fill_round_rect(rect.x, rect.y, rect.width, rect.height, radius, background);
+    graphics::blend_round_rect(
+        rect.x + 1,
+        rect.y + 1,
+        rect.width - 2,
+        rect.height / 2,
+        radius.saturating_sub(1),
+        0xffffff,
+        26,
+    );
+    graphics::blend_rect(
+        rect.x + radius,
+        rect.y + 1,
+        rect.width - radius * 2,
+        1,
+        0xffffff,
+        85,
+    );
+    let name = crate::linux::pack_entry_name(index).unwrap_or("?");
+    let mut initials = [0u8; 2];
+    let mut count = 0usize;
+    for byte in name.bytes() {
+        if count == 0 && byte.is_ascii_alphabetic() {
+            initials[0] = byte.to_ascii_uppercase();
+            count = 1;
+        } else if count == 1 {
+            initials[1] = byte.to_ascii_uppercase();
+            break;
+        }
+    }
+    let text = core::str::from_utf8(&initials[..count.max(1)]).unwrap_or("?");
+    let scale = if rect.width >= 54 { 3 } else { 2 };
+    let width = graphics::text_width(text, scale);
+    graphics::draw_text(
+        rect.center().x - width / 2,
+        rect.center().y - 4 * scale,
+        text,
+        0xffffff,
+        scale,
+    );
+}
+
 /// Draws a small squared application tile with an original glyph.
 pub fn app_icon(kind: WindowKind, rect: aether_wm::Rect, palette: Palette) {
     if rect.width < 16 || rect.height < 16 {
@@ -47,6 +103,8 @@ pub fn app_icon(kind: WindowKind, rect: aether_wm::Rect, palette: Palette) {
             WindowKind::Log => (0x3d4775, 0xe2e6ff),
             WindowKind::Welcome => (0x7a5b2b, 0xfff0c9),
             WindowKind::Linux => (0x333d54, 0xdce7ff),
+            WindowKind::Linux2 => (0x2f4a63, 0xd8f2ff),
+            WindowKind::Applications => (0x5b3f75, 0xf3e2ff),
             WindowKind::Terminal => (0x22272e, 0x9df5b4),
         }
     };
@@ -123,7 +181,7 @@ fn draw_glyph(kind: WindowKind, rect: aether_wm::Rect, color: u32) {
             }
         }
         WindowKind::Welcome => aether_mark(cx, cy, size / 2, color),
-        WindowKind::Linux => {
+        WindowKind::Linux | WindowKind::Linux2 => {
             // A small framed surface: compositor window with presented pixels.
             graphics::outline_round_rect(
                 rect.x + size / 10,
@@ -135,6 +193,21 @@ fn draw_glyph(kind: WindowKind, rect: aether_wm::Rect, color: u32) {
             );
             graphics::fill_rect(rect.x + size / 4, rect.y + size / 2 - 1, size / 2, 2, color);
             graphics::fill_circle(rect.x + size / 2, rect.y + size / 2, size / 10, color);
+        }
+        WindowKind::Applications => {
+            // A 3x3 launch grid with one highlighted tile.
+            for row in 0..3 {
+                for column in 0..3 {
+                    let cell = size / 4;
+                    let x = rect.x + column * cell + cell / 4;
+                    let y = rect.y + row * cell + cell / 4;
+                    if row == 1 && column == 1 {
+                        graphics::fill_round_rect(x, y, cell / 2, cell / 2, 1, color);
+                    } else {
+                        graphics::outline_round_rect(x, y, cell / 2, cell / 2, 1, color);
+                    }
+                }
+            }
         }
         WindowKind::Terminal => {
             // A shell prompt: a chevron and a cursor bar.

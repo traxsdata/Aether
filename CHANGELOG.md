@@ -25,6 +25,16 @@ versioning scheme until the kernel ABI stabilises.
   or console input is pending, so a busy program cannot freeze the screen.
   `make terminal-test` drives the whole path over the serial console.
 
+- Multi-app Craft desktop. `make iso-craft-apps` verifies and signs all
+  thirteen pinned Craft AppImages, packs them into one signed boot-volume
+  pack, and builds a suite ISO. The kernel imports a selected app on demand
+  into one of two app domains, so GridCraft, PhotoCraft, and the other Craft
+  apps can stay open together. The desktop gains an Applications launcher
+  (dock tile or F4, arrow keys, Enter) and keeps a running indicator on the
+  dock. There is no boot-time picker; app selection is part of the desktop.
+  Closing a Craft window quits that app and releases its domain, so the dock
+  and Applications view stop reporting it as running.
+
 ### Security
 
 - Transparent pre-image retention for file replacement. `AetherFs` now keeps

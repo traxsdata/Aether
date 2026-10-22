@@ -75,6 +75,10 @@ CRAFT_TIMEOUT ?= 300
 CRAFT_GUI_TIMEOUT ?= 600
 CRAFT_OUT ?= $(BUILD)/craft-app
 CRAFT_GUI_SCREENSHOT ?= $(CRAFT_OUT)/gui.ppm
+# Full Craft app suite staged for the multi-app ISO.
+CRAFT_APPS_DIR ?= $(BUILD)/craft-apps
+CRAFT_APP_CACHE ?= /tmp/opencode/craft-apps
+CRAFT_ISO_IMAGE_SIZE ?= 1536M
 LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
 LINUX_DYN_PATH ?= /usr/bin/dynamic
 LINUX_RUNTIME_PREBUILT ?= 0
@@ -87,6 +91,9 @@ GATE4_RUNTIME_TAMPERED := $(BUILD)/gate4-runtime-tampered.sqfs
 GATE4_EXTRA_ROOT := $(BUILD)/gate4-runtime-extra
 GATE4_APPIMAGE_RECORD := $(BUILD)/gridcraft.import
 GATE4_BRIDGE_BUILD := $(BUILD)/gate4-bridge
+# The suite ISO carries its own signed app pack, so it can build the runtime
+# without signing the single GridCraft demo artifact.
+GATE4_RUNTIME_SKIP_APP ?= 0
 # The Gate 4 GUI launch is a later slice. This boot smoke test runs the real
 # AppImage's CLI through the Gate 4 rootfs and verifies its version.
 GATE4_APP_PROGRAM ?= /usr/bin/gridcraft-cli
@@ -111,7 +118,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft craft-apps-stage iso-craft-apps iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -138,6 +145,33 @@ iso-gridcraft: gate4-runtime
 		STAGED_APPIMAGE_RECORD=$(GATE4_APPIMAGE_RECORD) \
 		STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_ROOTFS) \
 		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+		sh tools/make-iso.sh
+
+# Verify, sign, and pack every pinned Craft AppImage under
+# build/craft-apps/. The download cache can be reused across runs.
+craft-apps-stage:
+	$(PYTHON) tools/stage-craft-apps.py \
+		--cache $(CRAFT_APP_CACHE) --out $(CRAFT_APPS_DIR)
+
+# Bootable Craft suite ISO. The kernel imports the selected app on demand from
+# the boot-volume pack; the desktop launches apps from Applications and keeps
+# two app domains alive at once.
+iso-craft-apps: craft-apps-stage
+	$(MAKE) gate4-runtime GATE4_RUNTIME_SKIP_APP=1
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		KERNEL_FEATURES="gate4-runtime gate4-gui-test" \
+		LINUX_RUNTIME_PIN=$(GATE4_RUNTIME_PIN) \
+		STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_ROOTFS) \
+		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+		LINUX_APPIMAGE_PROGRAM=$(GATE4_GUI_PROGRAM) \
+		LINUX_APPIMAGE_ARGS='$(GATE4_GUI_ARGS)' \
+		loader
+	AETHER_ISO_SKIP_IMAGE=1 \
+		EFI_IMAGE_SIZE=$(CRAFT_ISO_IMAGE_SIZE) \
+		ISO_PREFIX=aether-craft-apps \
+		STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_ROOTFS) \
+		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+		STAGED_CRAFT_APPS_DIR=$(CRAFT_APPS_DIR) \
 		sh tools/make-iso.sh
 
 user:
@@ -424,8 +458,10 @@ gate4-runtime: linux-fixture gate4-bridge
 		sh tools/build-gate4-runtime.sh $(GATE4_RUNTIME_ROOTFS) \
 		$(GATE4_RUNTIME_RECORD) $(GATE4_RUNTIME_PIN) \
 		$(GATE4_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED) $(GATE4_EXTRA_ROOT)
-	sh tools/build-gate3-appimage.sh $(GATECRAFT_APPIMAGE) \
-		$(GATE4_APPIMAGE_RECORD) $(LINUX_RUNTIME_SEED)
+	if [ "$(GATE4_RUNTIME_SKIP_APP)" = "0" ]; then \
+		sh tools/build-gate3-appimage.sh $(GATECRAFT_APPIMAGE) \
+			$(GATE4_APPIMAGE_RECORD) $(LINUX_RUNTIME_SEED); \
+	fi
 	$(PYTHON) tools/test-gate4-runtime.py \
 		--root $(BUILD)/gate4-runtime-root \
 		--manifest $(GATE4_RUNTIME_MANIFEST) \
