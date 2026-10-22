@@ -5,9 +5,9 @@ mod heap;
 pub mod paging;
 pub mod shared;
 
-pub use heap::used_bytes as heap_used_bytes;
+pub use heap::stats as heap_stats;
 
-/// Reserves the bootstrap heap from the frame allocator.
+/// Reserves the kernel heap arena from the frame allocator.
 ///
 /// Must run after the kernel has switched to its own page tables and released
 /// boot-services memory, so the arena comes from ordinary usable RAM rather

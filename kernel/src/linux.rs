@@ -187,8 +187,9 @@ pub fn init() -> Result<(usize, usize), ()> {
     // SAFETY: Boot is single-threaded and this is the only write to ROOT.
     unsafe { *ROOT.0.get() = Some(Root { files }) };
     serial_line!(
-        "linux: runtime rootfs imported files={count} bytes={bytes} heap={}",
-        crate::memory::heap_used_bytes()
+        "linux: runtime rootfs imported files={count} bytes={bytes} heap={} peak={}",
+        crate::memory::heap_stats().used,
+        crate::memory::heap_stats().peak
     );
     install_runtime_profile()?;
     Ok((count, bytes))
@@ -380,8 +381,9 @@ pub fn import_appimage() -> Result<(), ()> {
         serial_line!("linux: AppImage import failed: {error:?}");
     })?;
     serial_line!(
-        "linux: AppImage imported heap={}",
-        crate::memory::heap_used_bytes()
+        "linux: AppImage imported heap={} peak={}",
+        crate::memory::heap_stats().used,
+        crate::memory::heap_stats().peak
     );
     let program_path = APPIMAGE_PROGRAM.trim_start_matches('/');
     let mut program = None;

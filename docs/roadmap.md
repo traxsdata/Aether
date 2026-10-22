@@ -456,10 +456,12 @@ gesture, and there is no GPU service.
   read-only root. Today the selected program is read from the verified
   AppImage, while data and libraries are resolved from the runtime rootfs; the
   CLI gate does not need the GUI's data files.
-- [ ] Replace the 512 MiB fixed bootstrap heap. The allocation-only SquashFS
-  importer accumulates every AppImage file and decompression buffer, so the
-  real 19 MiB image forced a large static arena. A selective import of the
-  launch program, or a reclaiming scratch allocator, should remove it.
+- [x] Reclaiming kernel heap: size-class slabs plus a coalescing free list
+  (`aether_memory::heap`, host-tested), so SquashFS decompression scratch is
+  reused instead of accumulating for the rest of the boot.
+- [ ] On-demand AppImage import. Every imported file still stays resident in
+  the fixed heap arena; large applications need a selective import of the
+  files they open.
 - [ ] User-installed AppImage selection: no file picker, package channel, or
   writable install location exists yet; the AppImage is staged on the boot
   volume at build time.
