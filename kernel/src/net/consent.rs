@@ -33,6 +33,9 @@ struct State {
     pending: Option<([u8; MAX_ID], usize)>,
     /// Tick the pending request was raised.
     requested: u64,
+    /// Bumped whenever a request or an answer changes, so the desktop knows
+    /// when to repaint.
+    generation: u64,
 }
 
 struct Global<T>(UnsafeCell<T>);
@@ -44,6 +47,7 @@ static STATE: Global<State> = Global(UnsafeCell::new(State {
     decisions: Decisions::new(),
     pending: None,
     requested: 0,
+    generation: 0,
 }));
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
@@ -76,11 +80,19 @@ pub fn check(app: &str) -> Access {
                 id[..app.len()].copy_from_slice(app.as_bytes());
                 state.pending = Some((id, app.len()));
                 state.requested = crate::scheduler::ticks();
+                state.generation += 1;
                 serial_line!("net: consent requested app={app}");
             }
             Access::Pending
         }
     })
+}
+
+/// Whether the user has blocked `app`. Unlike [`check`], this never raises
+/// a request.
+#[must_use]
+pub fn blocked(app: &str) -> bool {
+    with(|state| state.decisions.get(app) == Some(Decision::Deny))
 }
 
 /// The application waiting for an answer, if any.
@@ -107,6 +119,7 @@ pub fn decide(app: &str, allow: bool) {
         {
             state.pending = None;
         }
+        state.generation += 1;
         state.decisions.set(app, decision).is_ok()
     });
     if !stored {
@@ -119,8 +132,17 @@ pub fn decide(app: &str, allow: bool) {
 
 /// Forgets the answer for `app`, so it is asked again on its next attempt.
 pub fn forget(app: &str) {
-    with(|state| state.decisions.forget(app));
+    with(|state| {
+        state.decisions.forget(app);
+        state.generation += 1;
+    });
     persist();
+}
+
+/// Changes whenever a request is raised or an answer changes.
+#[must_use]
+pub fn generation() -> u64 {
+    with(|state| state.generation)
 }
 
 /// Calls `visit` with each recorded `(app, allowed)` pair.

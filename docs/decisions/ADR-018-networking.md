@@ -1,7 +1,7 @@
 # ADR-018: Networking and the network permission
 
-- **Status:** Accepted; landing in stages (socket layer, then driver, stack,
-  and Internet sockets; the desktop consent prompt follows)
+- **Status:** Accepted; landing in stages (socket layer; driver, stack, and
+  Internet sockets; the desktop consent prompt)
 - **Date:** 2026-10-22
 - **Supersedes in part:** the "network denied" decision D-08 in the
   [host-interface inventory](../specifications/linux-host-interface-inventory.md#decisions)
@@ -35,7 +35,13 @@ configuration.
    portal grants, so they last until power-off). Until the user answers, a
    TCP connect waits and sends nothing: blocking calls park, non-blocking
    ones report `EINPROGRESS`. UDP sends fail with `EACCES` until allowed.
-   The serial console's `net allow|deny|forget <app>` changes an answer.
+
+   The request opens Security Center with an Allow / Deny prompt drawn by
+   the kernel desktop. Allow ignores clicks for the first 500 ms so a click
+   aimed at something else cannot answer it. Security Center's Network
+   Access list shows each answer with a button to block or allow the app
+   again; blocking also ends the app's open connections. The serial
+   console's `net allow|deny|forget <app>` does the same.
 
    An application without the field gets `EACCES` for every Internet socket,
    exactly as before. `bind`, `listen`, and `accept` on Internet sockets are

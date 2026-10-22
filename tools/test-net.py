@@ -47,6 +47,8 @@ def main() -> int:
         for model in MODELS:
             environment = dict(os.environ)
             environment["AETHER_NIC_MODEL"] = model
+            # The desktop must surface the request before the test answers it.
+            environment["AETHER_REQUIRE_TEXT"] = "desktop: network consent prompt shown"
             environment["AETHER_EXTRA_MARKERS"] = ",".join(
                 [
                     "AETHER_NET_LINK_OK",

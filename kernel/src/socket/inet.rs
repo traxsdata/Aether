@@ -20,8 +20,8 @@
 //! `ENETUNREACH`.
 
 use super::{
-    EACCES, EAFNOSUPPORT, EAGAIN, EALREADY, ECONNREFUSED, ECONNRESET, EDESTADDRREQ, EINPROGRESS,
-    EINVAL, EISCONN, EMSGSIZE, ENETUNREACH, ENOPROTOOPT, ENOTCONN, EOPNOTSUPP, EPIPE,
+    EACCES, EAFNOSUPPORT, EAGAIN, EALREADY, ECONNABORTED, ECONNREFUSED, ECONNRESET, EDESTADDRREQ,
+    EINPROGRESS, EINVAL, EISCONN, EMSGSIZE, ENETUNREACH, ENOPROTOOPT, ENOTCONN, EOPNOTSUPP, EPIPE,
     EPROTONOSUPPORT, ETIMEDOUT, MSG_PEEK, Outgoing, POLL_ERR, POLL_HUP, POLL_IN, POLL_OUT,
     POLL_RDHUP, Received, SO_ERROR, SOCK_DGRAM, SOCK_STREAM, SOL_SOCKET, SockAddr, get_int,
     put_int,
@@ -215,6 +215,11 @@ impl InetSocket {
                 }
             }
             Stage::Connected => {
+                // Blocking an app in Security Center ends its live
+                // connections, not only new ones.
+                if consent::blocked(app_id()) {
+                    return self.fail(ECONNABORTED);
+                }
                 if let Some(handle) = self.handle
                     && net::with(|net| net.tcp(handle).state()) == Some(tcp::State::Closed)
                     && net::with(|net| net.tcp(handle).recv_queue()) == Some(0)
