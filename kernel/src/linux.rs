@@ -130,6 +130,8 @@ pub struct ImportedApp {
     dynamic: bool,
     /// Whether the signed record declares `memory=jit`.
     jit: bool,
+    /// Whether the signed record declares `network=client`.
+    network_client: bool,
 }
 
 static RUNTIME: Global<Option<RuntimeProfile>> = Global(UnsafeCell::new(None));
@@ -412,6 +414,7 @@ pub fn import_appimage() -> Result<(), ()> {
             program,
             dynamic,
             jit: record.jit,
+            network_client: record.network_client,
         })
     };
     Ok(())
@@ -446,6 +449,15 @@ pub fn app_identity() -> Option<(&'static str, &'static str, &'static str)> {
 pub fn app_jit() -> bool {
     // SAFETY: APP is written once during boot and immutable afterwards.
     unsafe { (*APP.0.get()).as_ref() }.is_some_and(|app| app.jit)
+}
+
+/// Returns `true` if the imported AppImage's signed record declares
+/// `network=client`. That makes the application eligible to ask for outbound
+/// connections; the user's consent is still required.
+#[must_use]
+pub fn app_network_client() -> bool {
+    // SAFETY: APP is written once during boot and immutable afterwards.
+    unsafe { (*APP.0.get()).as_ref() }.is_some_and(|app| app.network_client)
 }
 
 /// Returns the program bytes selected from the imported AppImage.

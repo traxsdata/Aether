@@ -74,6 +74,9 @@ TIMEOUT = int(os.environ.get("AETHER_BOOT_TIMEOUT", "90"))
 # VNC display number for the headless q35 boot. Parallel worktrees can collide
 # on the default display, so callers may select another one explicitly.
 VNC_DISPLAY = os.environ.get("AETHER_VNC_DISPLAY", "9")
+# Optional NIC model (for example e1000 or e1000e) on a QEMU user-mode
+# network. Unset keeps the machine's default NIC.
+NIC_MODEL = os.environ.get("AETHER_NIC_MODEL", "")
 
 def qemu_command(code: Path, variables: Path | None) -> list[str]:
     command = [
@@ -96,6 +99,8 @@ def qemu_command(code: Path, variables: Path | None) -> list[str]:
         "-drive",
         f"file={IMAGE},format=raw,if=virtio",
     ]
+    if NIC_MODEL:
+        command += ["-nic", f"user,model={NIC_MODEL}"]
     if EXPECT_CRASH_SCREEN:
         command += ["-qmp", f"unix:{QMP},server=on,wait=off"]
     if variables is None:

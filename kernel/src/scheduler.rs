@@ -153,6 +153,11 @@ enum LinuxFileSource {
     },
     /// The task's one synthetic display endpoint.
     Display,
+    /// A slot in the global socket table (`crate::socket`). Descriptors that
+    /// share a slot share the socket, like one Linux open file description.
+    Socket {
+        index: usize,
+    },
     /// The serial console. Descriptors 0, 1 and 2 start here, and `dup2`
     /// can replace them like any other descriptor. Writes go to the serial
     /// port; reads report end-of-file because the console has no input.
@@ -311,6 +316,8 @@ enum PseudoFile {
     DevNull,
     DevZero,
     DevRandom,
+    /// `/etc/resolv.conf`, generated from the DHCP lease.
+    ResolvConf,
 }
 
 /// Pseudo-directory enumerated by `getdents64`.
@@ -626,6 +633,10 @@ struct Task {
     /// AppImage record that declares `memory=jit`; threads, `fork` and
     /// `execve` keep it, since they stay inside the same application.
     jit: bool,
+    /// Eligible to ask for outbound network connections. Set only from a
+    /// verified AppImage record that declares `network=client`; inherited
+    /// like `jit`. The user's consent is checked on every socket.
+    network_client: bool,
 }
 
 impl Task {
@@ -705,6 +716,7 @@ impl Task {
             reserved: false,
             display: false,
             jit: false,
+            network_client: false,
         }
     }
 }
@@ -1242,6 +1254,7 @@ pub fn run() -> ! {
         // input/desktop path before parking for the next interrupt.
         crate::input::poll();
         crate::desktop::tick();
+        crate::net::poll();
         timer::halt_until_interrupt();
     }
 }
@@ -1275,6 +1288,7 @@ fn console_loop() -> ! {
         crate::shell::poll();
         crate::input::poll();
         crate::desktop::tick();
+        crate::net::poll();
         timer::halt_until_interrupt();
     }
 }
@@ -1355,6 +1369,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     #[cfg(feature = "recovery-rollback-selftest")]
     crate::recovery::rollback_self_test().map_err(SchedulerError::Filesystem)?;
     crate::portal::init();
+    crate::net::consent::init();
     let revocation_checks = crate::portal::self_test().map_err(|_| SchedulerError::Portal)?;
     serial_line!("AETHER_REVOCATION_OK checks={revocation_checks}");
     crate::apps::init();
@@ -1714,6 +1729,7 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     app_task.display =
         crate::linux::app_identity().is_some_and(|(id, _, _)| id == "ai.storyteller.gridcraft");
     app_task.jit = crate::linux::app_jit();
+    app_task.network_client = crate::linux::app_network_client();
     if let Some((_, main_image, interpreter_image)) = dynamic {
         seed_linux_vmas(&mut app_task, &main_image, crate::linux_loader::MAIN_BASE);
         seed_linux_vmas(
@@ -2247,6 +2263,7 @@ pub fn linux_clone(
     thread.overlay_app = parent_overlay_app;
     thread.handles = parent_handles;
     thread.jit = tasks[current].jit;
+    thread.network_client = tasks[current].network_client;
 
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
     let frame_end = (kernel_top - 16) & !15;
@@ -2328,6 +2345,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.parent = current;
     child.overlay_app = overlay_app;
     child.jit = tasks[current].jit;
+    child.network_client = tasks[current].network_client;
     // fork gets a process-private snapshot of the descriptor table; threads
     // continue to address the parent's table via their shared tgid.
     child.bind_file_state(slot);
@@ -2337,7 +2355,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
         state[slot].eventfds = state[parent_tgid].eventfds.clone();
         state[slot].epolls = state[parent_tgid].epolls.clone();
         state[slot].timerfds = state[parent_tgid].timerfds.clone();
-        retain_memfd_fds(&state[slot].fds);
+        retain_shared_fds(&state[slot].fds);
         // fork copies the parent's mappings into the child's own tables.
         let spaces = unsafe { &mut *ADDRESS_SPACES.0.get() };
         let (parent_space, child_space) = if parent_tgid < slot {
@@ -2932,6 +2950,13 @@ pub fn linux_set_robust_list(head: u64, length: u64) -> i64 {
 /// Returns `true` if the current task may create writable+executable
 /// mappings (its signed AppImage record declares `memory=jit`).
 #[must_use]
+/// Returns `true` if the current Linux task belongs to an application whose
+/// signed record declares `network=client`. Consent is checked separately.
+pub fn linux_network_declared() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].network_client
+}
+
 pub fn linux_jit_allowed() -> bool {
     let tasks = unsafe { &*TASKS.0.get() };
     tasks[CURRENT.load(Ordering::Relaxed)].jit
@@ -3651,7 +3676,7 @@ fn terminate_thread_group(index: usize, signum: u64) {
         task.futex_address = 0;
         task.futex_deadline = 0;
         task.state = TaskState::Done;
-        release_linux_task_resources(&task.linux_fds);
+        release_linux_task_resources(&mut task.linux_fds);
     }
     // The whole process is gone, so its shared descriptor table goes with it.
     clear_file_state(tgid);
@@ -4366,6 +4391,7 @@ fn pseudo_file(path: &str) -> Option<PseudoFile> {
         "/dev/null" => Some(PseudoFile::DevNull),
         "/dev/zero" => Some(PseudoFile::DevZero),
         "/dev/random" | "/dev/urandom" => Some(PseudoFile::DevRandom),
+        "/etc/resolv.conf" => Some(PseudoFile::ResolvConf),
         _ => None,
     }
 }
@@ -4386,9 +4412,10 @@ fn pseudo_stat(kind: PseudoFile) -> (u64, u64, u32) {
         PseudoFile::ProcExe => (LINUX_ELF.len() as u64, 3, 0o100555),
         PseudoFile::DevNull | PseudoFile::DevZero => (0, 4, 0o020666),
         PseudoFile::DevRandom => (0, 5, 0o020666),
-        PseudoFile::ProcMaps | PseudoFile::ProcStatus | PseudoFile::SyscallAudit => {
-            (0, 6, 0o100444)
-        }
+        PseudoFile::ProcMaps
+        | PseudoFile::ProcStatus
+        | PseudoFile::SyscallAudit
+        | PseudoFile::ResolvConf => (0, 6, 0o100444),
     }
 }
 
@@ -4999,6 +5026,39 @@ pub fn linux_pipe() -> Result<(u64, u64), i64> {
     }
 }
 
+/// Installs a socket slot in the lowest free descriptor above stdio. The
+/// slot's existing reference becomes the descriptor's.
+pub fn linux_install_socket(index: usize) -> Result<u64, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
+        if slot.is_none() {
+            *slot = Some(LinuxFile {
+                source: LinuxFileSource::Socket { index },
+                offset: 0,
+                writable: true,
+            });
+            return Ok(descriptor as u64);
+        }
+    }
+    Err(LINUX_EMFILE)
+}
+
+/// Returns the socket slot behind `fd`: `EBADF` for a closed descriptor and
+/// `ENOTSOCK` for any other kind.
+pub fn linux_socket_index(fd: u64) -> Result<usize, i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    match task.linux_fds.get(fd as usize).and_then(Option::as_ref) {
+        Some(LinuxFile {
+            source: LinuxFileSource::Socket { index },
+            ..
+        }) => Ok(*index),
+        Some(_) => Err(crate::socket::ENOTSOCK),
+        None => Err(LINUX_EBADF),
+    }
+}
+
 /// Creates an eventfd with the given initial counter.
 pub fn linux_eventfd(initial: u64) -> Result<u64, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -5414,6 +5474,9 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
                 ready |= POLL_IN;
             }
         }
+        LinuxFileSource::Socket { index } => {
+            ready = crate::socket::poll(index, events);
+        }
         LinuxFileSource::EventFd { index } => {
             let counter = if task.tgid < MAX_TASKS {
                 unsafe { (*EVENTFD_COUNTERS.0.get())[task.tgid][index].unwrap_or(0) }
@@ -5556,6 +5619,14 @@ fn pseudo_read(
         PseudoFile::ProcExe => None,
         PseudoFile::ProcMaps => Some(proc_maps_text(vmas)),
         PseudoFile::ProcStatus => Some(proc_status_text(vmas, tgid, parent)),
+        PseudoFile::ResolvConf => {
+            let mut text = PseudoText {
+                buffer: [0; 4096],
+                length: 0,
+            };
+            text.length = crate::net::resolv_conf(&mut text.buffer);
+            Some(text)
+        }
         _ => None,
     };
     if let Some(text) = text.as_ref() {
@@ -5660,6 +5731,7 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
             // The syscall layer drains the endpoint before it borrows the task
             // table, because queueing a wakeup touches the scheduler too.
             LinuxFileSource::Display => Err(LINUX_EINVAL),
+            LinuxFileSource::Socket { index } => crate::socket::read(index, out),
             LinuxFileSource::Console => Ok(0),
             LinuxFileSource::Pipe {
                 index,
@@ -5851,6 +5923,7 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
                 Ok(count)
             }
             LinuxFileSource::Display => Err(LINUX_EINVAL),
+            LinuxFileSource::Socket { index } => crate::socket::write(index, data),
             LinuxFileSource::Console => {
                 crate::arch::x86_64::serial::write_bytes(data);
                 Ok(data.len())
@@ -6280,7 +6353,8 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. }
-        | LinuxFileSource::TimerFd { .. } => Err(LINUX_ESPIPE),
+        | LinuxFileSource::TimerFd { .. }
+        | LinuxFileSource::Socket { .. } => Err(LINUX_ESPIPE),
         LinuxFileSource::Pseudo(kind) => {
             let count = pseudo_read(kind, offset, out, &task.vmas, task.tgid, task.parent)?;
             Ok(count)
@@ -6369,8 +6443,8 @@ pub fn linux_close(fd: u64) -> i64 {
                     }
                 }
             }
-            Some(LinuxFileSource::MemFd { index }) => {
-                let _ = crate::memfd::release(index);
+            Some(source @ (LinuxFileSource::MemFd { .. } | LinuxFileSource::Socket { .. })) => {
+                release_shared_object(source);
             }
             Some(LinuxFileSource::Display) => crate::display::close(),
             _ => {}
@@ -6411,22 +6485,51 @@ fn linux_release_task_pipes() {
     linux_wake_pollers();
 }
 
-/// Adds an object reference for every copied memfd descriptor.
-///
-/// Used by `fork` and `clone` after copying the parent's descriptor table.
-fn retain_memfd_fds(fds: &[Option<LinuxFile>]) {
-    for file in fds.iter().flatten() {
-        if let LinuxFileSource::MemFd { index } = file.source {
+/// Adds a reference to a reference-counted object behind a descriptor
+/// (memfd or socket). Other kinds are not counted.
+fn retain_shared_object(source: LinuxFileSource) {
+    match source {
+        LinuxFileSource::MemFd { index } => {
             let _ = crate::memfd::retain(index);
         }
+        LinuxFileSource::Socket { index } => crate::socket::retain(index),
+        _ => {}
     }
 }
 
-/// Drops every memfd object reference held by a retiring descriptor table.
-fn release_memfd_fds(fds: &[Option<LinuxFile>]) {
-    for file in fds.iter().flatten() {
-        if let LinuxFileSource::MemFd { index } = file.source {
+/// Drops the reference [`retain_shared_object`] took.
+fn release_shared_object(source: LinuxFileSource) {
+    match source {
+        LinuxFileSource::MemFd { index } => {
             let _ = crate::memfd::release(index);
+        }
+        LinuxFileSource::Socket { index } => crate::socket::release(index),
+        _ => {}
+    }
+}
+
+/// Adds an object reference for every copied memfd or socket descriptor.
+///
+/// Used by `fork` after copying the parent's descriptor table.
+fn retain_shared_fds(fds: &[Option<LinuxFile>]) {
+    for file in fds.iter().flatten() {
+        retain_shared_object(file.source);
+    }
+}
+
+/// Drops every memfd and socket reference held by a retiring descriptor
+/// table and clears those descriptors, so a second call for another thread
+/// of the same process cannot release them twice.
+fn release_shared_fds(fds: &mut [Option<LinuxFile>]) {
+    for slot in fds.iter_mut() {
+        if let Some(file) = slot
+            && matches!(
+                file.source,
+                LinuxFileSource::MemFd { .. } | LinuxFileSource::Socket { .. }
+            )
+        {
+            release_shared_object(file.source);
+            *slot = None;
         }
     }
 }
@@ -6436,8 +6539,8 @@ fn release_memfd_fds(fds: &[Option<LinuxFile>]) {
 /// Called on exit, signal exit, and fault. It is idempotent: a stale memfd
 /// index is ignored and `display::close` returns immediately when the endpoint
 /// was never opened.
-fn release_linux_task_resources(fds: &[Option<LinuxFile>]) {
-    release_memfd_fds(fds);
+fn release_linux_task_resources(fds: &mut [Option<LinuxFile>]) {
+    release_shared_fds(fds);
     if fds
         .iter()
         .flatten()
@@ -6476,6 +6579,7 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. }
         | LinuxFileSource::TimerFd { .. } => 0,
+        LinuxFileSource::Socket { .. } => return LINUX_ESPIPE,
         LinuxFileSource::PseudoDir(_) => 0,
         LinuxFileSource::Pseudo(PseudoFile::ProcExe) => LINUX_ELF.len(),
         LinuxFileSource::Pseudo(_) => 0,
@@ -6811,6 +6915,7 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. }
         | LinuxFileSource::TimerFd { .. } => Ok((0, 0, 0o010600)),
+        LinuxFileSource::Socket { index } => Ok((0, crate::socket::inode(index), 0o140777)),
         LinuxFileSource::Inotify => Ok((0, 0, 0o010600)),
     }
 }
@@ -6825,9 +6930,7 @@ pub fn linux_dup(fd: u64) -> Result<u64, i64> {
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
         if slot.is_none() {
             *slot = Some(source);
-            if let LinuxFileSource::MemFd { index } = source.source {
-                let _ = crate::memfd::retain(index);
-            }
+            retain_shared_object(source.source);
             return Ok(descriptor as u64);
         }
     }
@@ -6851,14 +6954,11 @@ pub fn linux_dup2(old: u64, new: u64) -> Result<u64, i64> {
     let Some(slot) = task.linux_fds.get_mut(new as usize) else {
         return Err(LINUX_EBADF);
     };
-    if let Some(previous) = slot.as_ref()
-        && let LinuxFileSource::MemFd { index } = previous.source
-    {
-        let _ = crate::memfd::release(index);
-    }
-    *slot = Some(source);
-    if let LinuxFileSource::MemFd { index } = source.source {
-        let _ = crate::memfd::retain(index);
+    // Take the new reference first so `dup2` onto a descriptor that shares
+    // the same object cannot drop it to zero in between.
+    retain_shared_object(source.source);
+    if let Some(previous) = slot.replace(source) {
+        release_shared_object(previous.source);
     }
     Ok(new)
 }
@@ -6898,7 +6998,8 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
         | LinuxFileSource::Epoll { .. }
-        | LinuxFileSource::TimerFd { .. } => Ok(0),
+        | LinuxFileSource::TimerFd { .. }
+        | LinuxFileSource::Socket { .. } => Ok(0),
         LinuxFileSource::PseudoDir(_) => Ok(0),
         LinuxFileSource::Pseudo(PseudoFile::ProcExe) => Ok(LINUX_ELF.len() as u64),
         LinuxFileSource::Pseudo(_) => Ok(0),
@@ -7093,7 +7194,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].futex_deadline = 0;
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = ((status & 0xff) << 8) as i64;
-        release_linux_task_resources(&tasks[current].linux_fds);
+        release_linux_task_resources(&mut tasks[current].linux_fds);
         clear_file_state(tasks[current].tgid);
         serial_line!("linux: process exit pid={current} status={status}");
         linux_release_task_pipes();
@@ -7134,7 +7235,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     tasks[current].futex_address = 0;
     tasks[current].futex_deadline = 0;
     tasks[current].state = TaskState::Done;
-    release_linux_task_resources(&tasks[current].linux_fds);
+    release_linux_task_resources(&mut tasks[current].linux_fds);
     clear_file_state(tgid);
     tasks[current].vmas.reset();
     tasks[current].anonymous_vmas.reset();
@@ -7258,7 +7359,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].state = TaskState::Done;
         tasks[current].exit_status = 128 + vector as i64;
-        release_linux_task_resources(&tasks[current].linux_fds);
+        release_linux_task_resources(&mut tasks[current].linux_fds);
         clear_file_state(tasks[current].tgid);
         serial_line!("linux: process fault pid={current} vector={vector}");
         linux_release_task_pipes();
@@ -7319,7 +7420,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
     // tasks and the kernel continue.
     let _closed = crate::fs::close_task_files(&mut tasks[current].caps);
     if linux {
-        release_linux_task_resources(&tasks[current].linux_fds);
+        release_linux_task_resources(&mut tasks[current].linux_fds);
         clear_file_state(tasks[current].tgid);
         tasks[current].vmas.reset();
         tasks[current].anonymous_vmas.reset();
@@ -7612,6 +7713,9 @@ fn at_rewound_syscall(index: usize, frame: *mut InterruptFrame) -> bool {
 /// Called from the timer interrupt before returning to a task.
 pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     let now = TICKS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    // Run the network stack before any task state is borrowed; it may wake
+    // socket waiters.
+    crate::net::poll();
     // Advance the linuxd launch handshake before the interrupted task is
     // saved. The application task is only created once an approval message
     // has been received; no boot path creates it directly.

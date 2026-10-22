@@ -16,8 +16,9 @@ use crate::arch::x86_64::timer::{self, InterruptGuard};
 use crate::graphics;
 use crate::icons;
 use crate::input::{self, Key};
+use crate::net::consent;
 use crate::serial_line;
-use crate::{fs, packaging, portal, recovery, scheduler, supervisor, syscall};
+use crate::{fs, net, packaging, portal, recovery, scheduler, supervisor, syscall};
 use aether_packaging::manifest::Version;
 use aether_wm::browser::{Browser, BrowserLayout, LOCATIONS};
 use aether_wm::layout::{self, DOCK_SLOTS, DockSlot};
@@ -63,6 +64,10 @@ struct DesktopState {
     fast_paints: u64,
     slow_paints: u64,
     rename: RenameState,
+    /// Last network consent generation the desktop painted.
+    network_generation: u64,
+    /// Tick the current network consent prompt appeared, while one is up.
+    network_prompt: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +113,8 @@ impl DesktopState {
             fast_paints: 0,
             slow_paints: 0,
             rename: RenameState::new(),
+            network_generation: 0,
+            network_prompt: None,
         }
     }
 }
@@ -504,6 +511,7 @@ pub fn tick() {
     let now = scheduler::ticks();
     let elapsed = now.saturating_sub(last_ticks).min(u64::from(u16::MAX)) as u16;
     wm.tick(elapsed);
+    sync_network_prompt(&mut wm, now);
     let (events, mouse) = input::drain_mouse_events();
     for event in events.into_iter().flatten().chain(core::iter::once(mouse)) {
         route_pointer(&mut wm, &mut last_buttons, event, now);
@@ -610,6 +618,13 @@ fn route_pointer(wm: &mut Wm, last_buttons: &mut u8, mouse: input::MouseSnapshot
                 )
             });
             mark_files_dirty();
+        } else if let aether_wm::Hit::Window(id) = hit
+            && wm
+                .window(id)
+                .is_some_and(|window| window.kind == WindowKind::Security)
+            && let Some(frame) = wm.window_frame(id)
+        {
+            network_click(layout::content_rect(frame), point, now);
         } else if let aether_wm::Hit::Window(id) = hit
             && wm
                 .window(id)
@@ -1689,10 +1704,20 @@ fn paint_security(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
     let columns = 2usize;
     let gap = 8;
     let card_width = (content.width - 28 - gap) / columns as i32;
-    let top = banner.bottom() + 10;
-    let available = content.bottom() - 10 - top;
-    let rows = 3;
-    let card_height = ((available - gap * (rows - 1)) / rows).max(38);
+    let network = network_layout(content);
+    let top = network
+        .prompt
+        .map_or(banner.bottom(), |prompt| prompt.panel.bottom())
+        + 10;
+    let available = network.section.y - 12 - top;
+    // Show as many card rows as fit at a legible height; the network prompt
+    // takes priority over the counters on a small window.
+    let rows = ((available + gap) / (38 + gap)).clamp(0, 3);
+    let card_height = if rows == 0 {
+        0
+    } else {
+        (available - gap * (rows - 1)) / rows
+    };
     let mut cards: [(&str, [u8; 64]); 6] = [
         ("VERIFIED PACKAGE", [0; 64]),
         ("SERVICES", [0; 64]),
@@ -1750,7 +1775,7 @@ fn paint_security(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
         cards[4].1 = fixed_two("EXIT ", scheduler::user_exits(), " F ", faults);
     }
 
-    for (index, (label, value)) in cards.iter().enumerate() {
+    for (index, (label, value)) in cards.iter().enumerate().take(rows as usize * columns) {
         let column = index % columns;
         let row = index / columns;
         let x = content.x + 14 + column as i32 * (card_width + gap);
@@ -1773,6 +1798,355 @@ fn paint_security(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
             scale,
         );
     }
+    paint_network(&network, palette);
+}
+
+const NET_ROWS: usize = 3;
+const NET_ROW_HEIGHT: i32 = 22;
+const NET_PROMPT_HEIGHT: i32 = 78;
+const NET_BUTTON_WIDTH: i32 = 64;
+/// Allow ignores clicks for this long after the prompt appears (500 ms), so
+/// a click aimed at whatever was under the pointer cannot answer it.
+const NET_PROMPT_ARM_TICKS: u64 = 50;
+
+#[derive(Clone, Copy)]
+struct AppLabel {
+    id: [u8; aether_net::consent::MAX_ID],
+    len: usize,
+}
+
+impl AppLabel {
+    fn new(app: &str) -> Self {
+        let mut id = [0u8; aether_net::consent::MAX_ID];
+        let len = app.len().min(id.len());
+        id[..len].copy_from_slice(&app.as_bytes()[..len]);
+        Self { id, len }
+    }
+
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.id[..self.len]).unwrap_or("")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NetworkPrompt {
+    app: AppLabel,
+    panel: Rect,
+    allow: Rect,
+    deny: Rect,
+}
+
+#[derive(Clone, Copy)]
+struct NetworkRow {
+    app: AppLabel,
+    allowed: bool,
+    row: Rect,
+    button: Rect,
+}
+
+/// Security Center's network area: the pending first-use prompt under the
+/// banner and the per-app list at the bottom. The list has a fixed height so
+/// rows never move under the pointer when an answer is added.
+struct NetworkLayout {
+    prompt: Option<NetworkPrompt>,
+    section: Rect,
+    rows: [Option<NetworkRow>; NET_ROWS],
+    more: usize,
+}
+
+fn network_layout(content: Rect) -> NetworkLayout {
+    let mut pending = [0u8; aether_net::consent::MAX_ID];
+    let prompt = consent::pending(&mut pending).map(|len| {
+        let panel = Rect::new(
+            content.x + 14,
+            content.y + 56,
+            content.width - 28,
+            NET_PROMPT_HEIGHT,
+        );
+        let allow = Rect::new(
+            panel.x + 10,
+            panel.bottom() - PORTAL_BUTTON_HEIGHT - 8,
+            PORTAL_BUTTON_WIDTH,
+            PORTAL_BUTTON_HEIGHT,
+        );
+        let deny = Rect::new(
+            allow.right() + 8,
+            allow.y,
+            PORTAL_BUTTON_WIDTH,
+            PORTAL_BUTTON_HEIGHT,
+        );
+        NetworkPrompt {
+            app: AppLabel::new(core::str::from_utf8(&pending[..len]).unwrap_or("")),
+            panel,
+            allow,
+            deny,
+        }
+    });
+    let height = 18 + NET_ROWS as i32 * NET_ROW_HEIGHT + 12;
+    let section = Rect::new(
+        content.x + 14,
+        content.bottom() - 8 - height,
+        content.width - 28,
+        height,
+    );
+    let mut rows = [None; NET_ROWS];
+    let mut count = 0;
+    let mut more = 0;
+    consent::for_each(|app, allowed| {
+        if count == NET_ROWS {
+            more += 1;
+            return;
+        }
+        let y = section.y + 18 + count as i32 * NET_ROW_HEIGHT;
+        let row = Rect::new(section.x, y, section.width, NET_ROW_HEIGHT - 4);
+        let button = Rect::new(
+            row.right() - NET_BUTTON_WIDTH,
+            y,
+            NET_BUTTON_WIDTH,
+            row.height,
+        );
+        rows[count] = Some(NetworkRow {
+            app: AppLabel::new(app),
+            allowed,
+            row,
+            button,
+        });
+        count += 1;
+    });
+    NetworkLayout {
+        prompt,
+        section,
+        rows,
+        more,
+    }
+}
+
+/// Opens Security Center when an application first asks for the network,
+/// and repaints it whenever a request or an answer changes.
+fn sync_network_prompt(wm: &mut Wm, now: u64) {
+    let generation = consent::generation();
+    let pending = consent::pending(&mut [0u8; aether_net::consent::MAX_ID]).is_some();
+    let (seen, shown) = {
+        let _guard = InterruptGuard::enter();
+        // SAFETY: Interrupt-serialized read; IRQs never enter the desktop.
+        let state = unsafe { &*DESKTOP.0.get() };
+        (state.network_generation, state.network_prompt)
+    };
+    if generation == seen {
+        return;
+    }
+    let shown = match (pending, shown) {
+        (true, None) => {
+            let _ = wm.open(WindowKind::Security);
+            serial_line!("desktop: network consent prompt shown");
+            Some(now)
+        }
+        (true, Some(shown)) => Some(shown),
+        (false, _) => None,
+    };
+    {
+        let _guard = InterruptGuard::enter();
+        // SAFETY: Interrupt-serialized update; IRQs never enter the desktop.
+        unsafe {
+            (*DESKTOP.0.get()).network_generation = generation;
+            (*DESKTOP.0.get()).network_prompt = shown;
+        }
+    }
+    mark_live_dirty();
+}
+
+fn network_click(content: Rect, point: aether_wm::Point, now: u64) {
+    let network = network_layout(content);
+    if let Some(prompt) = network.prompt {
+        let app = prompt.app.as_str();
+        if prompt.deny.contains(point) {
+            consent::decide(app, false);
+            return;
+        }
+        if prompt.allow.contains(point) {
+            let shown = {
+                let _guard = InterruptGuard::enter();
+                // SAFETY: Interrupt-serialized read.
+                unsafe { (*DESKTOP.0.get()).network_prompt }
+            };
+            if shown.is_none_or(|shown| now.saturating_sub(shown) < NET_PROMPT_ARM_TICKS) {
+                serial_line!("desktop: network allow ignored; prompt just appeared");
+                return;
+            }
+            consent::decide(app, true);
+            return;
+        }
+    }
+    for row in network.rows.iter().flatten() {
+        if row.button.contains(point) {
+            consent::decide(row.app.as_str(), !row.allowed);
+            return;
+        }
+    }
+}
+
+fn paint_network(network: &NetworkLayout, palette: aether_wm::Palette) {
+    if let Some(prompt) = network.prompt {
+        let panel = prompt.panel;
+        graphics::fill_round_rect(panel.x, panel.y, panel.width, panel.height, 8, palette.card);
+        graphics::outline_round_rect(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            8,
+            palette.accent,
+        );
+        draw_text(
+            panel.x + 10,
+            panel.y + 8,
+            "NETWORK REQUEST",
+            palette.accent,
+            1,
+        );
+        draw_text_fit(
+            panel.x + 10,
+            panel.y + 21,
+            prompt.app.as_str(),
+            panel.width - 20,
+            palette.text,
+            1,
+        );
+        draw_text_fit(
+            panel.x + 10,
+            panel.y + 33,
+            "WANTS TO CONNECT TO THE INTERNET",
+            panel.width - 20,
+            palette.muted,
+            1,
+        );
+        let allow = prompt.allow;
+        graphics::fill_round_rect(
+            allow.x,
+            allow.y,
+            allow.width,
+            allow.height,
+            6,
+            palette.accent,
+        );
+        draw_text_centered(
+            allow.x,
+            allow.right(),
+            allow.y + 5,
+            "ALLOW",
+            palette.window,
+            1,
+        );
+        let deny = prompt.deny;
+        graphics::fill_round_rect(deny.x, deny.y, deny.width, deny.height, 6, palette.card);
+        graphics::outline_round_rect(deny.x, deny.y, deny.width, deny.height, 6, palette.warning);
+        draw_text_centered(deny.x, deny.right(), deny.y + 5, "DENY", palette.warning, 1);
+    }
+
+    let section = network.section;
+    graphics::fill_rect(section.x, section.y - 6, section.width, 1, palette.divider);
+    draw_text(section.x, section.y, "NETWORK ACCESS", palette.accent, 1);
+    let mut status = [0u8; 32];
+    let length = match net::with(|net| net.address()) {
+        None => copy_label(&mut status, "OFFLINE"),
+        Some(None) => copy_label(&mut status, "NO ADDRESS YET"),
+        Some(Some(address)) => {
+            let mut length = 0;
+            for (index, octet) in address.octets().iter().enumerate() {
+                if index > 0 {
+                    status[length] = b'.';
+                    length += 1;
+                }
+                length += format_u64(&mut status[length..], u64::from(*octet));
+            }
+            length
+        }
+    };
+    let status_width =
+        graphics::text_width(core::str::from_utf8(&status[..length]).unwrap_or(""), 1);
+    draw_text_bytes(
+        section.right() - status_width,
+        section.y,
+        &status[..length],
+        palette.muted,
+        1,
+    );
+    if network.rows[0].is_none() {
+        draw_text(
+            section.x + 2,
+            section.y + 22,
+            "NO APP HAS ASKED FOR THE NETWORK",
+            palette.faint,
+            1,
+        );
+    }
+    for row in network.rows.iter().flatten() {
+        let (state, color, action) = if row.allowed {
+            ("ALLOWED", palette.success, "BLOCK")
+        } else {
+            ("BLOCKED", palette.warning, "ALLOW")
+        };
+        let state_width = graphics::text_width(state, 1);
+        draw_text_fit(
+            row.row.x + 2,
+            row.row.y + 5,
+            row.app.as_str(),
+            row.button.x - row.row.x - state_width - 16,
+            palette.text,
+            1,
+        );
+        draw_text(
+            row.button.x - state_width - 8,
+            row.row.y + 5,
+            state,
+            color,
+            1,
+        );
+        let button = row.button;
+        graphics::fill_round_rect(
+            button.x,
+            button.y,
+            button.width,
+            button.height,
+            6,
+            palette.card,
+        );
+        graphics::outline_round_rect(
+            button.x,
+            button.y,
+            button.width,
+            button.height,
+            6,
+            palette.divider,
+        );
+        draw_text_centered(
+            button.x,
+            button.right(),
+            button.y + 5,
+            action,
+            palette.text,
+            1,
+        );
+    }
+    if network.more > 0 {
+        let mut text = [0u8; 40];
+        let mut length = copy_label(&mut text, "+");
+        length += format_u64(&mut text[length..], network.more as u64);
+        length += copy_label(&mut text[length..], " MORE (CONSOLE: NET)");
+        draw_text_bytes(
+            section.x + 2,
+            section.y + 18 + NET_ROWS as i32 * NET_ROW_HEIGHT,
+            &text[..length],
+            palette.faint,
+            1,
+        );
+    }
+}
+
+fn copy_label(out: &mut [u8], label: &str) -> usize {
+    let length = label.len().min(out.len());
+    out[..length].copy_from_slice(&label.as_bytes()[..length]);
+    length
 }
 
 const PORTAL_BUTTON_WIDTH: i32 = 84;
