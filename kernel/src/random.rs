@@ -61,14 +61,7 @@ fn detect_source() -> Source {
 }
 
 fn rdtsc() -> u64 {
-    let low: u32;
-    let high: u32;
-    // SAFETY: RDTSC is unprivileged, has no memory effects, and is available
-    // on every x86-64 processor.
-    unsafe {
-        asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
-    }
-    (u64::from(high) << 32) | u64::from(low)
+    crate::arch::x86_64::timer::tsc()
 }
 
 /// Draws one 64-bit hardware value, or `None` when the instruction keeps

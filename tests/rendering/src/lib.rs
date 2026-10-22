@@ -175,6 +175,61 @@ fn software_surface_regressions() {
             }
         }
 
+        // Span-based glyphs match drawing every lit cell as its own clipped
+        // rectangle, including under rounded, damage, and content clips.
+        let text = "Ag#9 Wm.";
+        type Bounds = Option<(i32, i32, i32, i32)>;
+        let cases: [(i32, i32, i32, Bounds, Bounds); 5] = [
+            (2, 3, 1, None, None),
+            (-3, -2, 2, None, None),
+            (1, 1, 3, Some((3, 2, 40, 30)), None),
+            (0, 4, 2, None, Some((4, 6, 21, 13))),
+            (5, 0, 3, Some((2, 1, 30, 40)), Some((9, 3, 50, 9))),
+        ];
+        for (x, y, scale, round, clip) in cases {
+            let apply = || {
+                graphics::fill_rect(0, 0, 64, 48, 0x102030);
+                graphics::set_damage(1, 1, 60, 45);
+                if let Some((cx, cy, cw, ch)) = round {
+                    graphics::set_round_clip(cx, cy, cw, ch, 9);
+                }
+                if let Some((cx, cy, cw, ch)) = clip {
+                    graphics::set_clip(cx, cy, cw, ch);
+                }
+            };
+            let reset = || {
+                graphics::clear_clip();
+                graphics::clear_round_clip();
+                graphics::clear_damage();
+                graphics::present();
+            };
+            apply();
+            graphics::draw_text(x, y, text, 0xf0e0d0, scale);
+            reset();
+            let spans = snapshot(&pixels);
+            apply();
+            let mut cursor = x;
+            for character in text.chars() {
+                let rows = graphics::glyph(character.to_ascii_uppercase());
+                for (row, bits) in rows.iter().enumerate() {
+                    for column in 0..5 {
+                        if bits & (1 << (4 - column)) != 0 {
+                            graphics::fill_rect(
+                                cursor + column * scale,
+                                y + row as i32 * scale,
+                                scale,
+                                scale,
+                                0xf0e0d0,
+                            );
+                        }
+                    }
+                }
+                cursor += 6 * scale;
+            }
+            reset();
+            assert_eq!(spans, snapshot(&pixels), "glyph case {x},{y} scale {scale}");
+        }
+
         let direct = surface(format, 1921, 1, 1928);
         graphics::fill_rect(0, 0, 1921, 1, 0xff0000);
         assert_eq!(direct[0], format.encode_rgb(0xff0000).unwrap());
