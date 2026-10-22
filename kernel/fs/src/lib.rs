@@ -19,7 +19,11 @@ pub const BLOCK_COUNT: usize = 256;
 /// Total device size in bytes.
 pub const DISK_BYTES: usize = BLOCK_SIZE * BLOCK_COUNT;
 /// Maximum inode number.
-pub const MAX_INODES: usize = 32;
+///
+/// The user workspace and per-application private categories need more than
+/// the original bring-up table of 32 entries, while still fitting in the
+/// reserved inode blocks before the first data block.
+pub const MAX_INODES: usize = 64;
 /// Blocks a file may occupy.
 pub const MAX_FILE_BLOCKS: usize = 8;
 /// Maximum file size.
@@ -36,11 +40,11 @@ pub const MAX_ENTRIES: usize = BLOCK_SIZE / ENTRY_BYTES;
 pub const MAX_OPEN: usize = 8;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"AFS1");
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const ROOT_INODE: u16 = 1;
 const INODE_TABLE_BLOCK: u16 = 1;
 const INODE_BYTES: usize = 32;
-const DATA_START_BLOCK: u16 = 3;
+const DATA_START_BLOCK: u16 = 5;
 const FREE_BITMAP_OFFSET: usize = 16;
 const MODE_FREE: u8 = 0;
 const MODE_FILE: u8 = 1;
@@ -248,7 +252,7 @@ impl Inode {
                 }
                 for (index, block) in self.blocks.iter().enumerate() {
                     if index < blocks {
-                        if *block == 0 || usize::from(*block) >= BLOCK_COUNT {
+                        if *block < DATA_START_BLOCK || usize::from(*block) >= BLOCK_COUNT {
                             return Err(FsError::Corrupt);
                         }
                     } else if *block != 0 {
@@ -265,7 +269,10 @@ impl Inode {
                 if self.size != 0 && self.blocks[0] == 0 {
                     return Err(FsError::Corrupt);
                 }
-                if self.blocks[0] != 0 && usize::from(self.blocks[0]) >= BLOCK_COUNT {
+                if self.blocks[0] != 0
+                    && (self.blocks[0] < DATA_START_BLOCK
+                        || usize::from(self.blocks[0]) >= BLOCK_COUNT)
+                {
                     return Err(FsError::Corrupt);
                 }
                 if self.blocks[1..].iter().any(|block| *block != 0) {
@@ -283,6 +290,10 @@ struct OpenSlot {
     alive: bool,
     generation: u32,
     inode: u16,
+    /// Inode content version observed when the handle was opened. A whole-file
+    /// replacement bumps it so a stale writable handle cannot overwrite the
+    /// replacement at an offset from the old contents.
+    inode_version: u32,
     access: Access,
     position: u16,
 }
@@ -292,8 +303,31 @@ impl OpenSlot {
         alive: false,
         generation: 0,
         inode: 0,
+        inode_version: 0,
         access: Access(0),
         position: 0,
+    };
+}
+
+/// One retained copy of a file's previous contents.
+///
+/// The block chain stays allocated after a replacement commits, so a normal
+/// overwrite no longer destroys the only copy. Only the immediately previous
+/// version is kept per inode; block pressure reclaims pre-images before a
+/// write fails. The table is in memory: the prototype volume is already
+/// volatile, and an on-disk version log is future persistent-storage work.
+#[derive(Clone, Copy)]
+struct PreImage {
+    blocks: [u16; MAX_FILE_BLOCKS],
+    size: u16,
+    valid: bool,
+}
+
+impl PreImage {
+    const EMPTY: Self = Self {
+        blocks: [0; MAX_FILE_BLOCKS],
+        size: 0,
+        valid: false,
     };
 }
 
@@ -326,6 +360,8 @@ pub struct AetherFs<D: BlockDevice> {
     device: D,
     open: [OpenSlot; MAX_OPEN],
     next_generation: u32,
+    inode_versions: [u32; MAX_INODES],
+    preimages: [PreImage; MAX_INODES],
 }
 
 impl<D: BlockDevice> AetherFs<D> {
@@ -336,6 +372,8 @@ impl<D: BlockDevice> AetherFs<D> {
             device,
             open: [OpenSlot::EMPTY; MAX_OPEN],
             next_generation: 1,
+            inode_versions: [0; MAX_INODES],
+            preimages: [PreImage::EMPTY; MAX_INODES],
         }
     }
 
@@ -349,6 +387,8 @@ impl<D: BlockDevice> AetherFs<D> {
     pub fn format(&mut self) -> Result<(), FsError> {
         self.open = [OpenSlot::EMPTY; MAX_OPEN];
         self.next_generation = 1;
+        self.inode_versions = [0; MAX_INODES];
+        self.preimages = [PreImage::EMPTY; MAX_INODES];
         let zero = [0u8; BLOCK_SIZE];
         for block in 0..BLOCK_COUNT {
             self.device.write_block(block as u16, &zero)?;
@@ -388,7 +428,7 @@ impl<D: BlockDevice> AetherFs<D> {
             return Err(FsError::Exists);
         }
         let inode_number = self.allocate_inode()?;
-        let block = self.allocate_block()?;
+        let block = self.allocate_block_reclaiming()?;
         if let Err(error) = self.write_inode(
             inode_number,
             Inode {
@@ -447,7 +487,12 @@ impl<D: BlockDevice> AetherFs<D> {
         if !inode.is_file() {
             return Err(FsError::IsDirectory);
         }
-        self.write_inode_blocks(inode_number, &mut inode, data)
+        self.write_inode_blocks(inode_number, &mut inode, data)?;
+        // A whole-file replacement invalidates writable handles opened against
+        // the previous contents. Their offsets no longer describe this file.
+        self.inode_versions[usize::from(inode_number)] =
+            self.inode_versions[usize::from(inode_number)].wrapping_add(1);
+        Ok(())
     }
 
     /// Reads a whole file below `scope`.
@@ -541,6 +586,7 @@ impl<D: BlockDevice> AetherFs<D> {
             alive: true,
             generation,
             inode: inode_number,
+            inode_version: self.inode_versions[usize::from(inode_number)],
             access,
             position: 0,
         };
@@ -574,6 +620,9 @@ impl<D: BlockDevice> AetherFs<D> {
     pub fn write(&mut self, id: OpenId, data: &[u8]) -> Result<usize, FsError> {
         let slot = *self.slot(id)?;
         if !slot.access.contains(Access::WRITE) {
+            return Err(FsError::Access);
+        }
+        if slot.inode_version != self.inode_versions[usize::from(slot.inode)] {
             return Err(FsError::Access);
         }
         let mut inode = self.read_inode(slot.inode)?;
@@ -625,6 +674,7 @@ impl<D: BlockDevice> AetherFs<D> {
         self.dir_remove(parent, name.as_bytes())?;
         let mut inode = self.read_inode(inode_number)?;
         self.free_inode_blocks(&mut inode)?;
+        self.drop_preimage(inode_number);
         self.free_inode(inode_number)
     }
 
@@ -637,6 +687,9 @@ impl<D: BlockDevice> AetherFs<D> {
         let source = resolve(scope, from)?;
         let destination = resolve(scope, to)?;
         if source.as_str() == destination.as_str() {
+            // Renaming a path to itself is a no-op only when the source
+            // actually exists; otherwise it must report NotFound.
+            self.lookup(&source)?;
             return Ok(());
         }
         let (source_parent_path, source_name) = source.parent_and_name()?;
@@ -656,7 +709,8 @@ impl<D: BlockDevice> AetherFs<D> {
             }
         }
         let destination_parent = self.lookup(&destination_parent_path)?;
-        if !self.read_inode(destination_parent)?.is_dir() {
+        let destination_before = self.read_inode(destination_parent)?;
+        if !destination_before.is_dir() {
             return Err(FsError::NotDirectory);
         }
         if self
@@ -673,8 +727,21 @@ impl<D: BlockDevice> AetherFs<D> {
         )?;
         if let Err(error) = self.dir_remove(source_parent, source_name.as_bytes()) {
             // Roll back the destination entry rather than leaving two names for
-            // one inode after a partial rename.
+            // one inode after a partial rename. If the destination directory
+            // had no block before this rename, release the block that dir_add
+            // allocated so a failed rollback does not leak it.
             let _ = self.dir_remove(destination_parent, destination_name.as_bytes());
+            if destination_before.blocks[0] == 0
+                && let Ok(destination_after) = self.read_inode(destination_parent)
+                && destination_after.blocks[0] != 0
+                && destination_after.size == 0
+            {
+                let block = destination_after.blocks[0];
+                let _ = self.free_block(block);
+                let mut cleared = destination_after;
+                cleared.blocks = [0; MAX_FILE_BLOCKS];
+                let _ = self.write_inode(destination_parent, cleared);
+            }
             return Err(error);
         }
         Ok(())
@@ -712,6 +779,7 @@ impl<D: BlockDevice> AetherFs<D> {
         self.dir_remove(parent, name.as_bytes())?;
         let mut inode = self.read_inode(inode_number)?;
         self.free_inode_blocks(&mut inode)?;
+        self.drop_preimage(inode_number);
         self.free_inode(inode_number)
     }
 
@@ -818,6 +886,9 @@ impl<D: BlockDevice> AetherFs<D> {
     fn allocate_inode(&mut self) -> Result<u16, FsError> {
         for index in 1..MAX_INODES as u16 {
             if self.read_inode(index)?.mode == MODE_FREE {
+                // A reused slot must never inherit a stale version whose
+                // blocks could be restored over a different file.
+                self.drop_preimage(index);
                 return Ok(index);
             }
         }
@@ -906,7 +977,7 @@ impl<D: BlockDevice> AetherFs<D> {
         let needed = data.len().div_ceil(BLOCK_SIZE);
         let mut new_blocks = [0u16; MAX_FILE_BLOCKS];
         for slot in new_blocks.iter_mut().take(needed) {
-            match self.allocate_block() {
+            match self.allocate_block_reclaiming() {
                 Ok(block) => *slot = block,
                 Err(error) => {
                     let _ = self.release_blocks(new_blocks);
@@ -935,10 +1006,107 @@ impl<D: BlockDevice> AetherFs<D> {
             let _ = self.release_blocks(new_blocks);
             return Err(error);
         }
-        // The inode now names only the new blocks. Releasing the old blocks
-        // after the commit means a failure here leaks space but cannot corrupt
-        // the file.
-        self.release_blocks(old_blocks)
+        // Keep the old chain as a pre-image instead of freeing it. The write
+        // is already committed, so the previous contents survive a permitted
+        // overwrite and can be restored. Replacing an older pre-image releases
+        // it; if that release fails, the space is leaked rather than the file
+        // corrupted.
+        if old_size != 0 {
+            let previous = PreImage {
+                blocks: old_blocks,
+                size: old_size,
+                valid: true,
+            };
+            let displaced =
+                core::mem::replace(&mut self.preimages[usize::from(inode_number)], previous);
+            if displaced.valid {
+                let _ = self.release_blocks(displaced.blocks);
+            }
+        } else {
+            let _ = self.release_blocks(old_blocks);
+        }
+        Ok(())
+    }
+
+    /// Allocates a data block, reclaiming a pre-image if the volume is full.
+    ///
+    /// Pre-images are recovery data, not live file data, so they yield before
+    /// a legitimate write or directory allocation fails. Reclamation is
+    /// best-effort: when no pre-image remains, allocation fails as before.
+    fn allocate_block_reclaiming(&mut self) -> Result<u16, FsError> {
+        loop {
+            match self.allocate_block() {
+                Ok(block) => return Ok(block),
+                Err(FsError::NoSpace) if self.reclaim_preimage() => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Releases one retained pre-image to make room. Returns `false` when no
+    /// pre-image remains.
+    fn reclaim_preimage(&mut self) -> bool {
+        for index in 1..MAX_INODES {
+            if self.preimages[index].valid {
+                let previous = core::mem::replace(&mut self.preimages[index], PreImage::EMPTY);
+                let _ = self.release_blocks(previous.blocks);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drops any pre-image owned by `inode_number` and releases its blocks.
+    fn drop_preimage(&mut self, inode_number: u16) {
+        let index = usize::from(inode_number);
+        if index >= MAX_INODES {
+            return;
+        }
+        let previous = core::mem::replace(&mut self.preimages[index], PreImage::EMPTY);
+        if previous.valid {
+            let _ = self.release_blocks(previous.blocks);
+        }
+    }
+
+    /// Returns whether a restorable previous version exists.
+    pub fn has_previous(&mut self, scope: &str, path: &str) -> Result<bool, FsError> {
+        let resolved = resolve(scope, path)?;
+        let inode_number = self.lookup(&resolved)?;
+        if self.read_inode(inode_number)?.is_dir() {
+            return Err(FsError::IsDirectory);
+        }
+        Ok(self.preimages[usize::from(inode_number)].valid)
+    }
+
+    /// Swaps a file with its retained pre-image and returns the restored
+    /// length.
+    ///
+    /// Restoring keeps the replaced contents as the new pre-image, so a second
+    /// call undoes the restore. Every open handle is invalidated because its
+    /// offsets described the other content version.
+    pub fn restore_previous(&mut self, scope: &str, path: &str) -> Result<usize, FsError> {
+        let resolved = resolve(scope, path)?;
+        let inode_number = self.lookup(&resolved)?;
+        let mut inode = self.read_inode(inode_number)?;
+        if inode.is_dir() {
+            return Err(FsError::IsDirectory);
+        }
+        let index = usize::from(inode_number);
+        if !self.preimages[index].valid {
+            return Err(FsError::NotFound);
+        }
+        let previous = self.preimages[index];
+        let current = PreImage {
+            blocks: inode.blocks,
+            size: inode.size,
+            valid: true,
+        };
+        inode.blocks = previous.blocks;
+        inode.size = previous.size;
+        self.write_inode(inode_number, inode)?;
+        self.preimages[index] = current;
+        self.inode_versions[index] = self.inode_versions[index].wrapping_add(1);
+        Ok(usize::from(inode.size))
     }
 
     fn release_blocks(&mut self, blocks: [u16; MAX_FILE_BLOCKS]) -> Result<(), FsError> {
@@ -962,7 +1130,7 @@ impl<D: BlockDevice> AetherFs<D> {
     }
 
     fn dir_entries(&mut self, inode: Inode) -> Result<[Option<DirEntry>; MAX_ENTRIES], FsError> {
-        let mut entries = [None; MAX_ENTRIES];
+        let mut entries: [Option<DirEntry>; MAX_ENTRIES] = [None; MAX_ENTRIES];
         if !inode.is_dir() {
             return Err(FsError::NotDirectory);
         }
@@ -982,12 +1150,51 @@ impl<D: BlockDevice> AetherFs<D> {
                 name.copy_from_slice(&data[start..start + MAX_NAME]);
                 let name_len = name.iter().position(|byte| *byte == 0).unwrap_or(MAX_NAME);
                 let inode_number = u16::from_le_bytes([data[start + 16], data[start + 17]]);
+                let kind = data[start + 18];
+                let stored_name = &name[..name_len];
+                // Directory entries are untrusted on-disk bytes. Empty,
+                // control-bearing, slash-bearing, traversal, or non-UTF-8
+                // names would break the `name<TAB>kind<TAB>size` listing
+                // protocol and could forge a path. A zero/out-of-range inode
+                // would name metadata that does not exist.
+                if name_len == 0
+                    || stored_name.iter().any(|byte| byte.is_ascii_control())
+                    || stored_name.contains(&b'/')
+                    || stored_name == b"."
+                    || stored_name == b".."
+                    || core::str::from_utf8(stored_name).is_err()
+                    || inode_number == 0
+                    || usize::from(inode_number) >= MAX_INODES
+                    || !matches!(kind, 1 | 2)
+                {
+                    return Err(FsError::Corrupt);
+                }
+                // The entry kind and the referenced inode must agree. A free
+                // inode or a kind mismatch would let a file operation treat a
+                // directory as a file (or the reverse) and free the wrong
+                // blocks.
+                let referenced = self.read_inode(inode_number)?;
+                if (kind == 2) != referenced.is_dir() {
+                    return Err(FsError::Corrupt);
+                }
                 *entry = Some(DirEntry {
                     name,
                     name_len: name_len as u8,
                     inode: inode_number,
-                    is_dir: data[start + 18] == 2,
+                    is_dir: kind == 2,
                 });
+            }
+            for index in 1..count {
+                let Some(current) = entries[index] else {
+                    continue;
+                };
+                if entries[..index].iter().flatten().any(|existing| {
+                    existing.name_len == current.name_len
+                        && existing.name[..usize::from(existing.name_len)]
+                            == current.name[..usize::from(current.name_len)]
+                }) {
+                    return Err(FsError::Corrupt);
+                }
             }
         }
         Ok(entries)
@@ -1021,7 +1228,7 @@ impl<D: BlockDevice> AetherFs<D> {
             return Err(FsError::NoSpace);
         }
         let block = if inode.blocks[0] == 0 {
-            let block = self.allocate_block()?;
+            let block = self.allocate_block_reclaiming()?;
             inode.blocks[0] = block;
             block
         } else {
@@ -1122,6 +1329,13 @@ impl FixedPath {
 
     fn push(&mut self, component: &str) -> Result<(), FsError> {
         if component.len() > MAX_NAME {
+            return Err(FsError::NameTooLong);
+        }
+        // A directory entry is a fixed-width byte field. Embedded NULs would
+        // truncate the displayed name, and tabs/newlines would inject extra
+        // records into the service listing protocol. Reject control bytes at
+        // the API boundary instead of trusting every caller to sanitize them.
+        if component.is_empty() || component.bytes().any(|byte| byte.is_ascii_control()) {
             return Err(FsError::NameTooLong);
         }
         let needed = self.len + component.len() + usize::from(self.len != 0);
