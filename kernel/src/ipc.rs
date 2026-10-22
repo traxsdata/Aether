@@ -13,7 +13,7 @@ pub const MAX_ENDPOINTS: usize = 8;
 
 struct Slot {
     alive: bool,
-    generation: u16,
+    generation: u32,
     owner: u16,
     endpoint: Endpoint,
 }
@@ -100,7 +100,7 @@ pub fn destroy(id: ObjectId, owner: u16) -> Result<(), IpcError> {
 /// rule: a closed endpoint never leaves a usable alias behind in that table.
 pub fn close(caps: &mut CapTable, endpoint_cap: CapHandle, task: u16) -> Result<(), IpcError> {
     let (id, _) = caps.endpoint(endpoint_cap, Rights::empty())?;
-    caps.revoke_object(id);
+    caps.revoke_object(id, aether_ipc::ObjectType::Endpoint);
     let owned = {
         let _guard = InterruptGuard::enter();
         let index = usize::from(id.index);
@@ -128,7 +128,7 @@ pub fn close_task_endpoints(caps: &mut CapTable, task: u16) -> (usize, usize) {
     let mut destroyed = 0usize;
     for handle in handles.iter().take(count) {
         if let Ok((id, _)) = caps.endpoint(*handle, Rights::empty()) {
-            revoked += caps.revoke_object(id);
+            revoked += caps.revoke_object(id, aether_ipc::ObjectType::Endpoint);
             if destroy(id, task).is_ok() {
                 destroyed += 1;
             }

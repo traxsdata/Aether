@@ -320,7 +320,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         291 => scheduler::linux_epoll_create().map_or_else(|error| error, |fd| fd as i64),
         293 => linux_pipe2(pml4, first, second),
         267 => linux_readlink(pml4, second, third, unsafe { (*frame).r10 }, first),
-        302 => linux_prlimit(pml4, first, second, unsafe { (*frame).r10 }),
+        302 => linux_prlimit(pml4, first, second, third, unsafe { (*frame).r10 }),
         294 => scheduler::linux_inotify_init(first).map_or_else(|error| error, |fd| fd as i64),
         254 => {
             let Some(path) = user_cstr(pml4, second, 256) else {
@@ -360,7 +360,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         273 => linux_set_robust_list(pml4, first, second),
         274 => linux_get_robust_list(pml4, first, second, third),
         334 => linux_rseq(pml4, first, second, third, unsafe { (*frame).r10 }),
-        228 => linux_clock_gettime(pml4, second),
+        228 => linux_clock_gettime(pml4, first, second),
         318 => linux_getrandom(pml4, first, second),
         257 => linux_openat(pml4, first, second, third),
         319 => scheduler::linux_memfd_create().map_or_else(|error| error, |fd| fd as i64),
@@ -1192,12 +1192,36 @@ fn linux_fstat(pml4: PhysFrame, fd: u64, stat_pointer: u64) -> i64 {
     write_stat(pml4, stat_pointer, size, inode, mode)
 }
 
+/// `dirfd` value that means "relative to the current directory".
+const LINUX_AT_FDCWD: u64 = -100i64 as u64;
+
+/// Rejects a relative path that names a directory descriptor.
+///
+/// Path lookup only resolves absolute paths and paths relative to the
+/// current directory. A relative path under another `dirfd` would otherwise
+/// be looked up from the wrong directory and report a different file, so it
+/// fails: `EBADF` for a closed descriptor, as Linux does, else `ENOENT`, as
+/// `openat` reports for relative paths.
+fn unsupported_dirfd(directory: u64, path: &str) -> Option<i64> {
+    if path.starts_with('/') || directory == LINUX_AT_FDCWD {
+        return None;
+    }
+    Some(if scheduler::linux_stat_fd(directory).is_err() {
+        LINUX_EBADF
+    } else {
+        LINUX_ENOENT
+    })
+}
+
 fn linux_newfstatat(pml4: PhysFrame, directory: u64, path_pointer: u64, stat_pointer: u64) -> i64 {
     let Some(path) = user_cstr(pml4, path_pointer, 256) else {
         return LINUX_EFAULT;
     };
     if path.is_empty() {
         return linux_fstat(pml4, directory, stat_pointer);
+    }
+    if let Some(error) = unsupported_dirfd(directory, path) {
+        return error;
     }
     linux_stat(pml4, path_pointer, stat_pointer)
 }
@@ -1237,6 +1261,9 @@ fn linux_statx(
         if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
             use_fd = true;
         }
+    }
+    if !use_fd && let Some(error) = unsupported_dirfd(directory, path) {
+        return error;
     }
     let (size, inode, mode, uid, gid) = if use_fd {
         let Ok((size, inode, mode)) = scheduler::linux_stat_fd(directory) else {
@@ -1455,13 +1482,52 @@ fn linux_sched_getaffinity(pml4: PhysFrame, _pid: u64, length: u64, pointer: u64
     write_user_bytes(pml4, pointer, &1u64.to_le_bytes()).map_or(LINUX_EFAULT, |()| 8)
 }
 
-fn linux_prlimit(pml4: PhysFrame, _resource: u64, _new_limit: u64, old_limit: u64) -> i64 {
+/// Fixed `(soft, hard)` limit reported for a Linux `RLIMIT_*` resource.
+///
+/// Limits are not configurable. Descriptors are bounded by the per-process
+/// table and the stack keeps its historical 8 MiB report; every other
+/// resource is bounded by kernel pools rather than an rlimit, so it reports
+/// `RLIM_INFINITY`.
+fn linux_rlimit(resource: u64) -> Option<u64> {
+    const RLIMIT_STACK: u64 = 3;
+    const RLIMIT_NOFILE: u64 = 7;
+    const RLIM_NLIMITS: u64 = 16;
+    match resource {
+        RLIMIT_STACK => Some(8 * 1024 * 1024),
+        RLIMIT_NOFILE => Some(crate::linux::MAX_FDS as u64),
+        resource if resource < RLIM_NLIMITS => Some(u64::MAX),
+        _ => None,
+    }
+}
+
+fn linux_prlimit(pml4: PhysFrame, pid: u64, resource: u64, new_limit: u64, old_limit: u64) -> i64 {
+    if pid != 0 && pid != scheduler::linux_getpid() as u64 {
+        return LINUX_ESRCH;
+    }
+    let Some(limit) = linux_rlimit(resource) else {
+        return LINUX_EINVAL;
+    };
+    if new_limit != 0 {
+        // Limits are fixed, so only a request that keeps them succeeds. A
+        // different value is refused instead of being reported as applied.
+        let Some(raw) = user_bytes(pml4, new_limit, 16, false) else {
+            return LINUX_EFAULT;
+        };
+        let soft = u64::from_ne_bytes(raw[..8].try_into().unwrap_or([0; 8]));
+        let hard = u64::from_ne_bytes(raw[8..].try_into().unwrap_or([0; 8]));
+        if soft > hard {
+            return LINUX_EINVAL;
+        }
+        if soft != limit || hard != limit {
+            return LINUX_EPERM;
+        }
+    }
     if old_limit == 0 {
         return 0;
     }
     let mut limits = [0u8; 16];
-    limits[..8].copy_from_slice(&(8 * 1024 * 1024u64).to_le_bytes());
-    limits[8..].copy_from_slice(&(8 * 1024 * 1024u64).to_le_bytes());
+    limits[..8].copy_from_slice(&limit.to_le_bytes());
+    limits[8..].copy_from_slice(&limit.to_le_bytes());
     write_user_bytes(pml4, old_limit, &limits).map_or(LINUX_EFAULT, |()| 0)
 }
 
@@ -2370,9 +2436,37 @@ fn write_user_u32(pml4: PhysFrame, pointer: u64, value: u32) -> Option<()> {
     write_user_bytes(pml4, pointer, &value.to_le_bytes())
 }
 
-fn linux_clock_gettime(pml4: PhysFrame, pointer: u64) -> i64 {
+fn linux_clock_gettime(pml4: PhysFrame, clock: u64, pointer: u64) -> i64 {
+    // CLOCK_REALTIME is the CMOS RTC reading at boot plus uptime. The
+    // monotonic clocks and BOOTTIME are the uptime. The CPU-time clocks are
+    // approximated by the uptime, since per-task CPU time is not accounted.
+    // Any other clock id is refused.
+    const CLOCK_REALTIME: u64 = 0;
+    const CLOCK_MONOTONIC: u64 = 1;
+    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
+    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
+    const CLOCK_MONOTONIC_RAW: u64 = 4;
+    const CLOCK_REALTIME_COARSE: u64 = 5;
+    const CLOCK_MONOTONIC_COARSE: u64 = 6;
+    const CLOCK_BOOTTIME: u64 = 7;
     let ticks = scheduler::ticks();
-    let seconds = (ticks / 100) as i64;
+    let uptime = ticks / 100;
+    let base = match clock {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
+            let Some(epoch) = crate::arch::x86_64::rtc::boot_epoch(uptime) else {
+                return LINUX_EINVAL;
+            };
+            epoch
+        }
+        CLOCK_MONOTONIC
+        | CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_MONOTONIC_RAW
+        | CLOCK_MONOTONIC_COARSE
+        | CLOCK_BOOTTIME => 0,
+        _ => return LINUX_EINVAL,
+    };
+    let seconds = base.saturating_add(uptime) as i64;
     let nanos = ((ticks % 100) * 10_000_000) as i64;
     let mut buffer = [0u8; 16];
     buffer[..8].copy_from_slice(&seconds.to_le_bytes());

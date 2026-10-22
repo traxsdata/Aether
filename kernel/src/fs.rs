@@ -271,11 +271,12 @@ fn profile_for_root(root: &str) -> Option<RuntimeProfile<'static>> {
 ///
 /// The desktop grant authorizes one file; the packaged application's declared
 /// permissions decide whether it may use the portal contract at all. A task
-/// with no registered profile (for example the kernel console) has no profile
-/// gate.
+/// with no registered profile has declared no portal permission, so it is
+/// denied: the gate fails closed.
 pub(crate) fn portal_permission(root: &str, rights: u64) -> Result<(), i64> {
     let Some(profile) = profile_for_root(root) else {
-        return Ok(());
+        ACCESS_DENIALS.fetch_add(1, Ordering::Release);
+        return Err(errno::EACCES);
     };
     // Every requested right needs its own declaration. A combined READ|WRITE
     // request must not pass on PORTAL_WRITE alone, or an application that

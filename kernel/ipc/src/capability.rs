@@ -15,8 +15,10 @@ pub const MAX_CAPS: usize = 16;
 pub struct ObjectId {
     /// Object slot.
     pub index: u16,
-    /// Object generation, to reject references to recycled slots.
-    pub generation: u16,
+    /// Object generation, to reject references to recycled slots. It is 32
+    /// bits wide so a long-running system cannot wrap it back onto a live
+    /// object.
+    pub generation: u32,
 }
 
 /// A handle to a capability table slot.
@@ -119,7 +121,7 @@ struct Capability {
     kind: ObjectType,
     rights: Rights,
     object_index: u16,
-    object_generation: u16,
+    object_generation: u32,
     slot_generation: u16,
 }
 
@@ -134,6 +136,24 @@ impl Capability {
 
     const fn is_empty(self) -> bool {
         matches!(self.kind, ObjectType::Empty)
+    }
+
+    /// Returns `true` if the slot can hold a new capability.
+    ///
+    /// Handle generations are 16 bits because they are part of the user ABI
+    /// encoding. A slot that has issued [`u16::MAX`] is retired instead of
+    /// wrapping, so a stale handle can never name a later capability.
+    const fn is_free(self) -> bool {
+        self.is_empty() && self.slot_generation < u16::MAX
+    }
+
+    /// Returns the empty slot that replaces this one, with the generation
+    /// advanced (saturating, see [`Capability::is_free`]).
+    const fn cleared(self) -> Self {
+        Self {
+            slot_generation: self.slot_generation.saturating_add(1),
+            ..Self::EMPTY
+        }
     }
 }
 
@@ -191,9 +211,9 @@ impl CapTable {
         let index = self
             .slots
             .iter()
-            .position(|slot| slot.is_empty())
+            .position(|slot| slot.is_free())
             .ok_or(CapError::TableFull)?;
-        let next_generation = self.slots[index].slot_generation.wrapping_add(1).max(1);
+        let next_generation = self.slots[index].slot_generation + 1;
         self.slots[index] = Capability {
             kind,
             rights,
@@ -287,7 +307,7 @@ impl CapTable {
     pub const fn has_free_slot(&self) -> bool {
         let mut index = 0usize;
         while index < MAX_CAPS {
-            if self.slots[index].is_empty() {
+            if self.slots[index].is_free() {
                 return true;
             }
             index += 1;
@@ -339,26 +359,28 @@ impl CapTable {
         (out, count)
     }
 
-    /// Revokes every capability that names `object`.
+    /// Revokes every capability of type `kind` that names `object`.
+    ///
+    /// Object ids are only unique within one object type, so the type is part
+    /// of the match: closing an endpoint never revokes a file capability that
+    /// happens to share its index and generation.
     ///
     /// This is the object-lifetime primitive: destroying or revoking an
     /// object must invalidate every handle in this table, including handles
     /// installed by capability transfer. Each affected slot advances its
     /// generation, so a held [`CapHandle`] cannot name a later capability that
     /// reuses the slot. Returns the number of revoked handles.
-    pub fn revoke_object(&mut self, object: ObjectId) -> usize {
+    pub fn revoke_object(&mut self, object: ObjectId, kind: ObjectType) -> usize {
         let mut revoked = 0usize;
         let mut index = 0usize;
         while index < MAX_CAPS {
             let slot = &mut self.slots[index];
             if !slot.is_empty()
+                && slot.kind == kind
                 && slot.object_index == object.index
                 && slot.object_generation == object.generation
             {
-                *slot = Capability {
-                    slot_generation: slot.slot_generation.wrapping_add(1).max(1),
-                    ..Capability::EMPTY
-                };
+                *slot = slot.cleared();
                 revoked += 1;
             }
             index += 1;
@@ -403,10 +425,7 @@ impl CapTable {
         if slot.is_empty() || slot.slot_generation != handle.generation {
             return Err(CapError::InvalidHandle);
         }
-        *slot = Capability {
-            slot_generation: slot.slot_generation.wrapping_add(1).max(1),
-            ..Capability::EMPTY
-        };
+        *slot = slot.cleared();
         Ok(())
     }
 
@@ -436,9 +455,9 @@ impl CapTable {
         let index = self
             .slots
             .iter()
-            .position(|slot| slot.is_empty())
+            .position(|slot| slot.is_free())
             .ok_or(CapError::TableFull)?;
-        let next_generation = self.slots[index].slot_generation.wrapping_add(1).max(1);
+        let next_generation = self.slots[index].slot_generation + 1;
         self.slots[index] = Capability {
             kind: cap.kind,
             rights: cap.rights,
@@ -465,7 +484,7 @@ pub struct TransferCap {
     kind: ObjectType,
     rights: Rights,
     object_index: u16,
-    object_generation: u16,
+    object_generation: u32,
 }
 
 #[cfg(test)]
@@ -637,19 +656,19 @@ mod tests {
             .grant(target, ObjectType::Endpoint, Rights::SEND)
             .expect("slot");
         let second = table
-            .grant(target, ObjectType::File, Rights::READ)
+            .grant(target, ObjectType::Endpoint, Rights::RECEIVE)
             .expect("slot");
         let unrelated = table
             .grant(object(8), ObjectType::Endpoint, Rights::SEND)
             .expect("slot");
 
-        assert_eq!(table.revoke_object(target), 2);
+        assert_eq!(table.revoke_object(target, ObjectType::Endpoint), 2);
         assert_eq!(
             table.check(first, Rights::SEND),
             Err(CapError::InvalidHandle)
         );
         assert_eq!(
-            table.file(second, Rights::READ),
+            table.check(second, Rights::RECEIVE),
             Err(CapError::InvalidHandle)
         );
         assert_eq!(
@@ -670,11 +689,79 @@ mod tests {
             Err(CapError::InvalidHandle)
         );
         assert_eq!(
-            table.file(second, Rights::READ),
+            table.check(second, Rights::RECEIVE),
             Err(CapError::InvalidHandle)
         );
-        assert_eq!(table.revoke_object(target), 1);
-        assert_eq!(table.revoke_object(target), 0);
+        assert_eq!(table.revoke_object(target, ObjectType::Endpoint), 1);
+        assert_eq!(table.revoke_object(target, ObjectType::Endpoint), 0);
+    }
+
+    #[test]
+    fn revoking_an_object_leaves_other_types_with_the_same_id() {
+        let mut table = CapTable::new();
+        let target = object(3);
+        let endpoint = table
+            .grant(target, ObjectType::Endpoint, Rights::SEND)
+            .expect("slot");
+        let file = table
+            .grant(target, ObjectType::File, Rights::READ)
+            .expect("slot");
+
+        assert_eq!(table.revoke_object(target, ObjectType::Endpoint), 1);
+        assert_eq!(
+            table.check(endpoint, Rights::SEND),
+            Err(CapError::InvalidHandle)
+        );
+        assert_eq!(table.file(file, Rights::READ), Ok(target));
+        assert_eq!(table.revoke_object(target, ObjectType::File), 1);
+        assert_eq!(table.file(file, Rights::READ), Err(CapError::InvalidHandle));
+    }
+
+    #[test]
+    fn a_slot_is_retired_instead_of_wrapping_its_generation() {
+        let mut table = CapTable::new();
+        let mut last = table
+            .grant(object(0), ObjectType::File, Rights::READ)
+            .expect("slot");
+        assert_eq!(last.index, 0);
+        // Cycle slot 0 until it has issued every generation. Slot 0 is always
+        // chosen first while it is free.
+        while last.generation < u16::MAX {
+            table.remove(last).expect("remove");
+            last = table
+                .grant(object(0), ObjectType::File, Rights::READ)
+                .expect("slot");
+            assert_eq!(last.index, 0);
+        }
+        table.remove(last).expect("remove");
+
+        // The next grant must skip the exhausted slot rather than reissue
+        // generation 1 for it.
+        let next = table
+            .grant(object(1), ObjectType::File, Rights::READ)
+            .expect("slot");
+        assert_ne!(next.index, 0);
+        let stale = CapHandle {
+            index: 0,
+            generation: 1,
+        };
+        assert_eq!(
+            table.file(stale, Rights::READ),
+            Err(CapError::InvalidHandle)
+        );
+
+        // Once every other slot is in use the table reports full instead of
+        // reusing the retired slot.
+        while table.has_free_slot() {
+            table
+                .grant(object(2), ObjectType::File, Rights::READ)
+                .expect("slot");
+        }
+        assert_eq!(table.len(), MAX_CAPS - 1);
+        assert_eq!(
+            table.grant(object(2), ObjectType::File, Rights::READ),
+            Err(CapError::TableFull)
+        );
     }
 
     #[test]

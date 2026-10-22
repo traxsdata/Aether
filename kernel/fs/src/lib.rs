@@ -281,7 +281,7 @@ impl Inode {
 #[derive(Clone, Copy)]
 struct OpenSlot {
     alive: bool,
-    generation: u16,
+    generation: u32,
     inode: u16,
     access: Access,
     position: u16,
@@ -303,8 +303,9 @@ impl OpenSlot {
 pub struct OpenId {
     /// Slot index.
     pub index: u8,
-    /// Slot generation.
-    pub generation: u16,
+    /// Slot generation. It is 32 bits wide so it cannot wrap back onto a
+    /// live open in practice.
+    pub generation: u32,
 }
 
 /// Result of a directory listing entry.
@@ -324,7 +325,7 @@ pub struct DirEntry {
 pub struct AetherFs<D: BlockDevice> {
     device: D,
     open: [OpenSlot; MAX_OPEN],
-    next_generation: u16,
+    next_generation: u32,
 }
 
 impl<D: BlockDevice> AetherFs<D> {

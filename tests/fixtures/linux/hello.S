@@ -1102,6 +1102,24 @@ after_thread:
     movl $0, (%r12)
     movl $0, 8(%r12)
 
+    /* --- clock ids: REALTIME is a wall-clock date (after 2020-01-01), and
+     * an unknown clock id is rejected instead of returning uptime. */
+    mov $228, %rax              /* clock_gettime(CLOCK_REALTIME) */
+    xor %rdi, %rdi
+    lea 0(%rsp), %rsi
+    syscall
+    test %rax, %rax
+    jne fail_clock
+    mov $1577836800, %rax
+    cmp %rax, 0(%rsp)
+    jl fail_clock
+    mov $228, %rax              /* clock_gettime(99) */
+    mov $99, %rdi
+    lea 0(%rsp), %rsi
+    syscall
+    cmp $-22, %rax
+    jne fail_clock
+
     /* --- nanosleep: a 60 ms relative sleep advances the monotonic clock. */
     mov $228, %rax              /* clock_gettime(CLOCK_MONOTONIC) */
     mov $1, %rdi
@@ -4136,6 +4154,10 @@ fail_sleep:
     lea sleep_failure(%rip), %rsi
     mov $sleep_failure_len, %rdx
     jmp report_failure
+fail_clock:
+    lea clock_failure(%rip), %rsi
+    mov $clock_failure_len, %rdx
+    jmp report_failure
 fail_sleep_rel:
     lea sleep_rel_failure(%rip), %rsi
     mov $sleep_rel_failure_len, %rdx
@@ -4581,6 +4603,9 @@ nanosleep_message:
 sleep_failure:
     .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=setup\n"
     .set sleep_failure_len, . - sleep_failure
+clock_failure:
+    .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=clock\n"
+    .set clock_failure_len, . - clock_failure
 sleep_rel_failure:
     .ascii "AETHER_LINUX_NANOSLEEP_FAIL stage=relative\n"
     .set sleep_rel_failure_len, . - sleep_rel_failure
