@@ -25,6 +25,8 @@ use aether_memory::frame::{FrameAllocator, PhysFrame};
 use aether_memory::vma::{VmaError, VmaTable};
 use aether_services::ServiceError;
 use aether_services::runtime::RuntimeError;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::ptr;
@@ -43,9 +45,13 @@ pub const APPIMAGE_TASK: usize = LINUX_DYN_TASK + 1;
 /// Task index of the ring-3 `linuxd` launch-policy service.
 pub const LINUXD_TASK: usize = APPIMAGE_TASK + 1;
 
-#[cfg(feature = "gate4-gui-test")]
+// Linux-sized bounds for large applications such as Firefox: a browser runs
+// several processes with dozens of threads each.
+#[cfg(feature = "large-apps")]
+const MAX_TASKS: usize = WORKER_COUNT + 512;
+#[cfg(all(feature = "gate4-gui-test", not(feature = "large-apps")))]
 const MAX_TASKS: usize = WORKER_COUNT + 96;
-#[cfg(not(feature = "gate4-gui-test"))]
+#[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
 const MAX_TASKS: usize = WORKER_COUNT + 12;
 
 /// Maximum number of `MAP_SHARED` VMA entries per Linux application domain.
@@ -54,9 +60,9 @@ const MAX_DOMAIN_SHARED_VMAS: usize = 64;
 #[cfg(not(feature = "gate4-gui-test"))]
 const MAX_DOMAIN_SHARED_VMAS: usize = 16;
 const STACK_SIZE: usize = 16 * 1024;
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(any(feature = "gate4-gui-test", feature = "large-apps"))]
 const KERNEL_STACK_SIZE: usize = 256 * 1024;
-#[cfg(not(feature = "gate4-gui-test"))]
+#[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const ROUNDS: usize = 4;
 const MAGIC_PREFIX: u64 = 0xa5a5_0000_0000_0000;
@@ -158,22 +164,34 @@ const PORTAL_PATH_BYTES: usize = aether_fs::MAX_PATH;
 const PIPE_BYTES: usize = 512;
 /// Global pipe slots. Forked processes share the same slot, so a write on one
 /// side is visible to the other.
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(feature = "large-apps")]
+const MAX_PIPES: usize = 128;
+#[cfg(all(feature = "gate4-gui-test", not(feature = "large-apps")))]
 const MAX_PIPES: usize = 16;
-#[cfg(not(feature = "gate4-gui-test"))]
+#[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
 const MAX_PIPES: usize = 4;
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(feature = "large-apps")]
+const MAX_EVENTFDS: usize = 64;
+#[cfg(all(feature = "gate4-gui-test", not(feature = "large-apps")))]
 const MAX_EVENTFDS: usize = 16;
-#[cfg(not(feature = "gate4-gui-test"))]
+#[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
 const MAX_EVENTFDS: usize = 2;
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(feature = "large-apps")]
+const MAX_EPOLLS: usize = 16;
+#[cfg(all(feature = "gate4-gui-test", not(feature = "large-apps")))]
 const MAX_EPOLLS: usize = 8;
-#[cfg(not(feature = "gate4-gui-test"))]
+#[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
 const MAX_EPOLLS: usize = 1;
+// Firefox's IPC I/O thread watches one descriptor per child channel.
+#[cfg(feature = "large-apps")]
+const MAX_EPOLL_WATCH: usize = 64;
+#[cfg(not(feature = "large-apps"))]
 const MAX_EPOLL_WATCH: usize = 8;
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(feature = "large-apps")]
+const MAX_TIMERFDS: usize = 32;
+#[cfg(all(feature = "gate4-gui-test", not(feature = "large-apps")))]
 const MAX_TIMERFDS: usize = 8;
-#[cfg(not(feature = "gate4-gui-test"))]
+#[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
 const MAX_TIMERFDS: usize = 2;
 const POLL_IN: i16 = 1;
 const POLL_OUT: i16 = 4;
@@ -614,6 +632,7 @@ impl Task {
     /// The threads of one process share a descriptor table, so the views name
     /// the thread group id rather than the task index.
     fn bind_file_state(&mut self, tgid: usize) {
+        ensure_file_state(tgid);
         self.linux_fds = FdSlots(tgid);
         self.linux_eventfds = EventfdSlots(tgid);
         self.linux_epolls = EpollSlots(tgid);
@@ -736,34 +755,46 @@ static INOTIFY: Global<[Option<LinuxInotify>; MAX_TASKS]> =
 /// threads of the same process. `fork` copies the table into the child's own
 /// slot; `clone` keeps the parent's slot.
 struct LinuxFileState {
-    fds: [Option<LinuxFile>; crate::linux::MAX_FDS],
-    eventfds: [Option<()>; MAX_EVENTFDS],
-    epolls: [Option<LinuxEpoll>; MAX_EPOLLS],
-    timerfds: [Option<LinuxTimerFd>; MAX_TIMERFDS],
+    // The tables are heap-allocated when a process slot is bound and freed
+    // when the process is gone, so large descriptor limits cost memory only
+    // for live processes and do not grow the kernel image.
+    fds: Vec<Option<LinuxFile>>,
+    eventfds: Vec<Option<()>>,
+    epolls: Vec<Option<LinuxEpoll>>,
+    timerfds: Vec<Option<LinuxTimerFd>>,
 }
 
 impl LinuxFileState {
-    const fn new() -> Self {
+    const fn empty() -> Self {
+        Self {
+            fds: Vec::new(),
+            eventfds: Vec::new(),
+            epolls: Vec::new(),
+            timerfds: Vec::new(),
+        }
+    }
+
+    fn new() -> Self {
         const CONSOLE: Option<LinuxFile> = Some(LinuxFile {
             source: LinuxFileSource::Console,
             offset: 0,
             writable: true,
         });
-        let mut fds = [None; crate::linux::MAX_FDS];
+        let mut fds = vec![None; crate::linux::MAX_FDS];
         fds[0] = CONSOLE;
         fds[1] = CONSOLE;
         fds[2] = CONSOLE;
         Self {
             fds,
-            eventfds: [None; MAX_EVENTFDS],
-            epolls: [None; MAX_EPOLLS],
-            timerfds: [None; MAX_TIMERFDS],
+            eventfds: vec![None; MAX_EVENTFDS],
+            epolls: vec![None; MAX_EPOLLS],
+            timerfds: vec![None; MAX_TIMERFDS],
         }
     }
 }
 
 static FILE_STATE: Global<[LinuxFileState; MAX_TASKS]> = Global(UnsafeCell::new(
-    [const { LinuxFileState::new() }; MAX_TASKS],
+    [const { LinuxFileState::empty() }; MAX_TASKS],
 ));
 
 /// Declares a view of one shared descriptor slot table.
@@ -866,6 +897,17 @@ process_vma_view!(VmaSlots, vmas);
 process_vma_view!(AnonymousVmaSlots, anonymous);
 process_vma_view!(SharedVmaSlots, shared);
 
+/// Allocates the standard descriptor table for a process slot that has none.
+fn ensure_file_state(tgid: usize) {
+    // SAFETY: Single-CPU scheduler state; callers run with interrupts masked.
+    let state = unsafe { &mut *FILE_STATE.0.get() };
+    if let Some(slot) = state.get_mut(tgid)
+        && slot.fds.is_empty()
+    {
+        *slot = LinuxFileState::new();
+    }
+}
+
 /// Clears the descriptor table of one process.
 ///
 /// The table belongs to the whole thread group, so this runs only when the
@@ -876,21 +918,21 @@ fn clear_file_state(tgid: usize) {
     }
     // SAFETY: Single-CPU exit path with interrupts masked.
     let state = unsafe { &mut *FILE_STATE.0.get() };
-    state[tgid] = LinuxFileState::new();
+    state[tgid] = LinuxFileState::empty();
 }
 
 #[repr(align(16))]
 struct WorkerStacks([[u8; STACK_SIZE]; WORKER_COUNT]);
 
-#[repr(align(16))]
-struct KernelStacks([[u8; KERNEL_STACK_SIZE]; MAX_TASKS]);
-
 static STACKS: Global<WorkerStacks> = Global(UnsafeCell::new(WorkerStacks(
     [[0; STACK_SIZE]; WORKER_COUNT],
 )));
-static KERNEL_STACKS: Global<KernelStacks> = Global(UnsafeCell::new(KernelStacks(
-    [[0; KERNEL_STACK_SIZE]; MAX_TASKS],
-)));
+/// Physical base of each task slot's kernel stack, or zero before first use.
+///
+/// Stacks come from the frame allocator the first time a slot runs a task and
+/// stay with the slot for reuse, so the kernel image does not reserve
+/// `MAX_TASKS` stacks in `.bss` up front.
+static KERNEL_STACKS: Global<[u64; MAX_TASKS]> = Global(UnsafeCell::new([0; MAX_TASKS]));
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static DONE: AtomicUsize = AtomicUsize::new(0);
@@ -1238,7 +1280,6 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     let kernel_pml4 = paging::current_pml4().ok_or(SchedulerError::MissingKernelPml4)?;
     let tasks = unsafe { &mut *TASKS.0.get() };
     let stacks = unsafe { &mut *STACKS.0.get() };
-    let kernel_stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
 
     // Task 0 is the idle task: it is the boot context and keeps the kernel
     // address space. Its kernel stack is the stack used during boot.
@@ -1246,7 +1287,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     idle.state = TaskState::Running;
     idle.kind = TaskKind::Idle;
     idle.pml4 = kernel_pml4.start_address();
-    idle.kernel_stack_top = stack_top(&kernel_stacks.0[0]);
+    idle.kernel_stack_top = kernel_stack_top(allocator, 0)?;
     tasks[0] = idle;
 
     for (index, stack) in stacks.0.iter_mut().enumerate() {
@@ -1264,7 +1305,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         task.kind = TaskKind::Worker;
         task.saved_rsp = saved_rsp;
         task.pml4 = pml4.start_address();
-        task.kernel_stack_top = stack_top(&kernel_stacks.0[task_id]);
+        task.kernel_stack_top = kernel_stack_top(allocator, task_id)?;
         tasks[task_id] = task;
         serial_line!(
             "sched: task {task_id} ready pml4={:#018x} private={:#018x}",
@@ -1324,7 +1365,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // is copied supervisor-only; only USER_BASE..USER_LIMIT is user-accessible.
     let image = elf::parse(USER_ELF).map_err(SchedulerError::UserImage)?;
     let user_pml4 = paging::create_user_address_space(allocator, &image, USER_ELF)?;
-    let user_kernel_top = stack_top(&kernel_stacks.0[USER_TASK]);
+    let user_kernel_top = kernel_stack_top(allocator, USER_TASK)?;
     let user_saved_rsp =
         prepare_user_stack(user_kernel_top, image.entry(), (USER_STACK_TOP - 16) & !0xf);
 
@@ -1359,7 +1400,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // approval endpoint. It cannot create endpoints or open files.
     let linuxd_image = elf::parse(LINUXD_ELF).map_err(SchedulerError::UserImage)?;
     let linuxd_pml4 = paging::create_user_address_space(allocator, &linuxd_image, LINUXD_ELF)?;
-    let linuxd_kernel_top = stack_top(&kernel_stacks.0[LINUXD_TASK]);
+    let linuxd_kernel_top = kernel_stack_top(allocator, LINUXD_TASK)?;
     let linuxd_saved_rsp = prepare_user_stack(
         linuxd_kernel_top,
         linuxd_image.entry(),
@@ -1387,7 +1428,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     // syscall entry, not yet an application domain with its own root.
     let linux_image = elf::parse(LINUX_ELF).map_err(|_| SchedulerError::LinuxImage)?;
     let linux_pml4 = paging::create_user_address_space(allocator, &linux_image, LINUX_ELF)?;
-    let linux_kernel_top = stack_top(&kernel_stacks.0[LINUX_TASK]);
+    let linux_kernel_top = kernel_stack_top(allocator, LINUX_TASK)?;
     let linux_saved_rsp = prepare_user_stack(
         linux_kernel_top,
         linux_image.entry(),
@@ -1433,7 +1474,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         &["LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/lib64"],
     )
     .map_err(|_| SchedulerError::LinuxImage)?;
-    let dynamic_kernel_top = stack_top(&kernel_stacks.0[LINUX_DYN_TASK]);
+    let dynamic_kernel_top = kernel_stack_top(allocator, LINUX_DYN_TASK)?;
     let dynamic_saved_rsp =
         prepare_user_stack(dynamic_kernel_top, dynamic.entry, dynamic.stack_pointer);
     let mut dynamic_task = Task::new();
@@ -1633,9 +1674,11 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
         (pml4, static_image.entry(), (USER_STACK_TOP - 16) & !0xf)
     };
 
-    // SAFETY: The kernel stack array is static and this task slot was reserved
-    // for the imported payload; no other task owns its stack.
-    let kernel_top = stack_top(&unsafe { &*KERNEL_STACKS.0.get() }.0[APPIMAGE_TASK]);
+    // This task slot was reserved for the imported payload; no other task owns
+    // its stack.
+    let kernel_top =
+        crate::memory::with_frame_allocator(|allocator| kernel_stack_top(allocator, APPIMAGE_TASK))
+            .ok_or(SchedulerError::OutOfMemory)??;
     let saved_rsp = prepare_user_stack(kernel_top, entry, stack_pointer);
     let mut app_task = Task::new();
     app_task.state = TaskState::Ready;
@@ -1730,8 +1773,28 @@ fn seed_linux_vmas(task: &mut Task, image: &aether_linux_elf::Image<'_>, bias: u
     }
 }
 
-fn stack_top(stack: &[u8; KERNEL_STACK_SIZE]) -> u64 {
-    stack.as_ptr() as u64 + KERNEL_STACK_SIZE as u64
+/// Returns the top of `slot`'s kernel stack, allocating it on first use.
+fn kernel_stack_top(
+    allocator: &mut FrameAllocator<'_>,
+    slot: usize,
+) -> Result<u64, SchedulerError> {
+    // SAFETY: Single-CPU scheduler state; callers run with interrupts masked.
+    let stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
+    let base = stacks.get_mut(slot).ok_or(SchedulerError::OutOfMemory)?;
+    if *base == 0 {
+        let frames = allocator
+            .allocate_contiguous((KERNEL_STACK_SIZE as u64) / PAGE_SIZE)
+            .ok_or(SchedulerError::OutOfMemory)?;
+        *base = frames.start_address();
+    }
+    Ok(*base + KERNEL_STACK_SIZE as u64)
+}
+
+/// [`kernel_stack_top`] for a Linux `clone`/`fork`, as a Linux error.
+fn slot_kernel_stack_top(slot: usize) -> Result<u64, i64> {
+    crate::memory::with_frame_allocator(|allocator| kernel_stack_top(allocator, slot).ok())
+        .flatten()
+        .ok_or(LINUX_ENOMEM)
 }
 
 /// Builds an interrupt-return frame so IRETQ enters `entry(arg)` as a fresh
@@ -2146,8 +2209,7 @@ pub fn linux_clone(
     else {
         return Err(LINUX_EAGAIN);
     };
-    let kernel_stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
-    let kernel_top = stack_top(&kernel_stacks.0[slot]);
+    let kernel_top = slot_kernel_stack_top(slot)?;
 
     let mut thread = Task::new();
     thread.state = TaskState::Ready;
@@ -2246,8 +2308,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
             parent.sigaltstack,
         )
     };
-    let kernel_stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
-    let kernel_top = stack_top(&kernel_stacks.0[slot]);
+    let kernel_top = slot_kernel_stack_top(slot)?;
 
     let mut child = Task::new();
     child.state = TaskState::Ready;
@@ -2269,10 +2330,10 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.bind_file_state(slot);
     if parent_tgid < MAX_TASKS {
         let state = unsafe { &mut *FILE_STATE.0.get() };
-        state[slot].fds = state[parent_tgid].fds;
-        state[slot].eventfds = state[parent_tgid].eventfds;
-        state[slot].epolls = state[parent_tgid].epolls;
-        state[slot].timerfds = state[parent_tgid].timerfds;
+        state[slot].fds = state[parent_tgid].fds.clone();
+        state[slot].eventfds = state[parent_tgid].eventfds.clone();
+        state[slot].epolls = state[parent_tgid].epolls.clone();
+        state[slot].timerfds = state[parent_tgid].timerfds.clone();
         retain_memfd_fds(&state[slot].fds);
         // fork copies the parent's mappings into the child's own tables.
         let spaces = unsafe { &mut *ADDRESS_SPACES.0.get() };
@@ -4567,7 +4628,7 @@ pub fn linux_open_directory(path: &str) -> Result<u64, i64> {
 fn pseudo_dir_entry(
     directory: PseudoDir,
     index: usize,
-    fd_mask: u16,
+    open: &[bool],
 ) -> Option<([u8; 16], usize, u64, u8)> {
     const DT_DIR: u8 = 4;
     const DT_REG: u8 = 8;
@@ -4589,9 +4650,7 @@ fn pseudo_dir_entry(
         (PseudoDir::Dev, 5) => ("urandom", DT_REG),
         (PseudoDir::ProcSelfFd, _) => {
             let descriptor = index - 2;
-            if descriptor >= 3
-                && (descriptor >= crate::linux::MAX_FDS || fd_mask & (1 << descriptor) == 0)
-            {
+            if descriptor >= 3 && !open.get(descriptor).copied().unwrap_or(false) {
                 return None;
             }
             let mut value = descriptor;
@@ -4620,17 +4679,8 @@ fn pseudo_dir_entry(
 pub fn linux_getdents(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
-    let fd_mask = task
-        .linux_fds
-        .iter()
-        .enumerate()
-        .fold(0u16, |mask, (index, slot)| {
-            if slot.is_some() && index < 16 {
-                mask | (1 << index)
-            } else {
-                mask
-            }
-        });
+    // A snapshot, so the listing does not alias the descriptor it advances.
+    let open: Vec<bool> = task.linux_fds.iter().map(Option::is_some).collect();
     let Some(slot) = task.linux_fds.get_mut(fd as usize).and_then(Option::as_mut) else {
         return Err(LINUX_EBADF);
     };
@@ -4658,7 +4708,7 @@ pub fn linux_getdents(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
         return Err(LINUX_ENOTDIR);
     };
     while let Some((name, name_length, inode, kind)) =
-        pseudo_dir_entry(directory, slot.offset, fd_mask)
+        pseudo_dir_entry(directory, slot.offset, &open)
     {
         let record_length = (19 + name_length + 1 + 7) & !7;
         if written + record_length > out.len() {

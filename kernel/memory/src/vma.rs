@@ -87,6 +87,10 @@ pub struct VmaTable {
     window_start: u64,
     base: u64,
     limit: u64,
+    /// Every address in `base..first_gap` is mapped, so a first-fit search
+    /// can start here. Sequential `mmap` calls then cost `O(log n)` each
+    /// instead of rescanning every area below.
+    first_gap: u64,
     /// Areas keyed by start address; never overlapping, and neighbours with
     /// equal protections are always merged.
     entries: BTreeMap<u64, Vma>,
@@ -114,6 +118,7 @@ impl VmaTable {
             window_start,
             base: allocation_base,
             limit,
+            first_gap: allocation_base,
             entries: BTreeMap::new(),
         }
     }
@@ -179,6 +184,7 @@ impl VmaTable {
     /// Clears every area.
     pub fn reset(&mut self) {
         self.entries.clear();
+        self.first_gap = self.base;
     }
 
     /// Adds an area at the lowest free address that fits `length`.
@@ -187,14 +193,19 @@ impl VmaTable {
     pub fn insert(&mut self, length: u64, prot: u32) -> Result<u64, VmaError> {
         let length = checked_length(length)?;
         validate_protection(prot, true)?;
-        let mut candidate = self.base;
+        let mut candidate = self.first_gap.max(self.base);
         // An area that starts below the cursor may still reach past it.
         if let Some(entry) = self.get(candidate) {
             candidate = entry.end;
         }
+        // Stays true while every address skipped so far is mapped.
+        let mut contiguous = true;
         for entry in self.entries.range(candidate..).map(|(_, entry)| entry) {
             if entry.start - candidate >= length {
                 break;
+            }
+            if entry.start != candidate {
+                contiguous = false;
             }
             candidate = entry.end;
         }
@@ -205,6 +216,9 @@ impl VmaTable {
             return Err(VmaError::OutOfSpace);
         }
         self.insert_at(candidate, length, prot)?;
+        if contiguous {
+            self.first_gap = end;
+        }
         Ok(candidate)
     }
 
@@ -257,6 +271,7 @@ impl VmaTable {
             return Err(VmaError::OutOfSpace);
         }
         self.cut(start, end);
+        self.first_gap = self.first_gap.min(start);
         Ok(true)
     }
 
@@ -580,5 +595,36 @@ mod tests {
         assert_eq!(left[1].start, BASE + 31 * PAGE_SIZE);
         assert!(!map.covers(BASE, 2 * PAGE_SIZE));
         assert!(map.covers(BASE + 31 * PAGE_SIZE, PAGE_SIZE));
+    }
+
+    #[test]
+    fn first_fit_reuses_holes_below_the_sequential_cursor() {
+        let mut map = VmaTable::new(BASE, BASE + 64 * PAGE_SIZE);
+        let mut starts = alloc::vec::Vec::new();
+        for index in 0..8u64 {
+            let prot = if index % 2 == 0 { PROT_READ } else { PROT_EXEC };
+            starts.push(map.insert(PAGE_SIZE, prot).unwrap());
+        }
+        assert_eq!(starts[7], BASE + 7 * PAGE_SIZE);
+        map.remove(starts[2], PAGE_SIZE).unwrap();
+        assert_eq!(map.insert(PAGE_SIZE, PROT_READ).unwrap(), starts[2]);
+        assert_eq!(
+            map.insert(PAGE_SIZE, PROT_READ).unwrap(),
+            BASE + 8 * PAGE_SIZE
+        );
+        // A fixed mapping above the cursor is skipped, and a hole too small
+        // for the request is not used.
+        map.insert_at(BASE + 10 * PAGE_SIZE, PAGE_SIZE, PROT_READ)
+            .unwrap();
+        assert_eq!(
+            map.insert(2 * PAGE_SIZE, PROT_EXEC).unwrap(),
+            BASE + 11 * PAGE_SIZE
+        );
+        assert_eq!(
+            map.insert(PAGE_SIZE, PROT_EXEC).unwrap(),
+            BASE + 9 * PAGE_SIZE
+        );
+        map.reset();
+        assert_eq!(map.insert(PAGE_SIZE, PROT_READ).unwrap(), BASE);
     }
 }

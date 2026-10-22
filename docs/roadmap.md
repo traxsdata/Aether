@@ -461,8 +461,11 @@ gesture, and there is no GPU service.
   reused instead of accumulating for the rest of the boot.
 - [x] Ordered per-process VMA tables shared by threads, with a `large-apps`
   kernel feature that raises the per-table cap to 65,530 areas.
-- [ ] Heap-allocated task, kernel-stack, and descriptor tables so the
-  `large-apps` bounds can also raise task and descriptor limits.
+- [x] Kernel stacks allocated per task slot on first use, and descriptor
+  tables allocated per live process, so the `large-apps` feature can raise
+  the limits to 512 Linux tasks, 1,024 descriptors per process, and larger
+  pipe, eventfd, epoll, and timerfd tables without growing the kernel image
+  (`make large-apps-test`).
 - [ ] On-demand AppImage import. Every imported file still stays resident in
   the fixed heap arena; large applications need a selective import of the
   files they open.

@@ -86,7 +86,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test large-apps-test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -123,10 +123,11 @@ user:
 	cp target/$(KERNEL_TARGET)/release/aether-linuxd $(LINUXD_ELF)
 
 FIXTURE_GATE4_GUI := $(if $(findstring gate4-gui-test,$(KERNEL_FEATURES)),--defsym AETHER_GATE4_GUI=1)
+FIXTURE_LARGE_APPS := $(if $(findstring large-apps,$(KERNEL_FEATURES)),--defsym AETHER_LARGE_APPS=1)
 
 linux-fixture:
 	@mkdir -p $(BUILD)
-	$(AS) --64 $(FIXTURE_GATE4_GUI) tests/fixtures/linux/hello.S -o $(BUILD)/linux-hello.o
+	$(AS) --64 $(FIXTURE_GATE4_GUI) $(FIXTURE_LARGE_APPS) tests/fixtures/linux/hello.S -o $(BUILD)/linux-hello.o
 	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
 		$(BUILD)/linux-hello.o -o $(LINUX_ELF)
 	$(AS) --64 tests/fixtures/linux/dynamic.S -o $(BUILD)/linux-dynamic.o
@@ -397,6 +398,13 @@ iso-test: iso
 # Generate a VMware Workstation VM definition for the newest ISO.
 vmware-vmx:
 	sh tools/make-vmware-vmx.sh
+
+# The full boot with Linux-sized limits for large applications: the quota
+# fixture must still reach EMFILE at 1,024 descriptors and ENOMEM at 65,530
+# mapping areas.
+large-apps-test:
+	$(MAKE) KERNEL_FEATURES=large-apps image
+	$(PYTHON) tools/test-boot.py
 
 fault-test:
 	$(MAKE) KERNEL_FEATURES=fault-selftest image

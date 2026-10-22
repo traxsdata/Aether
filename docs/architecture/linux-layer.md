@@ -192,7 +192,11 @@ exact AppImage digest, and the runtime version.
   unknown protection bits. Each table is capped at 32 areas in the default
   boot, 512 with the Gate 4 GUI bounds, and 65,530 (Linux's default
   `vm.max_map_count`) with the `large-apps` kernel feature; a split that would
-  exceed the cap fails with `ENOMEM` before changing anything. Initial writable+executable mappings are allowed only for
+  exceed the cap fails with `ENOMEM` before changing anything. The same feature
+  raises the task limit to 512, descriptors to 1,024 per process, epoll
+  watches to 64 per instance, and the pipe, eventfd, and timerfd tables;
+  descriptor tables are allocated per live process and kernel stacks per
+  task slot, so these limits cost memory only when used. Initial writable+executable mappings are allowed only for
   an AppImage whose signed import record declares `memory=jit` (JIT code such
   as LLVM in lavapipe); every other task gets `EACCES`. A protection change
   that adds write to an executable mapping is always rejected. Anonymous
