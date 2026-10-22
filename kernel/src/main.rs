@@ -296,10 +296,10 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         frame_stats.total_bytes() / (1024 * 1024)
     );
     let Some((heap_start, heap_bytes)) = memory::init_heap() else {
-        boot_failure("bootstrap heap allocation failed");
+        boot_failure("kernel heap allocation failed");
     };
     serial_line!(
-        "boot: bootstrap heap start={:#x} size={} MiB",
+        "boot: kernel heap start={:#x} size={} MiB",
         heap_start,
         heap_bytes / (1024 * 1024)
     );

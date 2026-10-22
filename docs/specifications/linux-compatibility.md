@@ -583,8 +583,9 @@ or GUI compatibility claim is made.
 
 1. The runtime pin is derived from the host glibc and, for the Gate 4 profile,
    host Mesa/LLVM/Wayland packages. It is not reproducible across hosts until a
-   pinned artifact channel exists; the Gate 4 image also needs a 1.5 GiB import
-   heap because the bootstrap allocator never reclaims.
+   pinned artifact channel exists. The Gate 4 image keeps a 1.5 GiB kernel heap
+   sized for the old allocation-only importer; it has not been re-measured
+   since the heap started reclaiming.
 2. `linuxd` is a ring-3 launch-policy manager, but the Linux syscall
    dispatcher, ELF/library mapping, and VMA management remain in the kernel.
    The syscall-remoting ABI and removal of Linux dispatch from the kernel are
@@ -623,10 +624,10 @@ or GUI compatibility claim is made.
    is also not merged into the application's visible root: the selected program
    is read from the verified AppImage, while libraries and data resolve from the
    runtime rootfs.
-9. The kernel bootstrap heap is a 512 MiB fixed arena because the SquashFS
-   importer accumulates every AppImage file and decompression buffer and never
-   reclaims. A selective import of the selected program or a reclaiming scratch
-   allocator is required before this is a general runtime.
+9. The kernel heap is a fixed arena (512 MiB, 1.5 GiB for Gate 4) reserved at
+   boot. It now reclaims, so decompression scratch is reused, but the importer
+   still keeps every imported file resident. A selective or on-demand import is
+   required before large applications fit comfortably.
 
 These are ordered dependencies, not independent bugs. Gate 3 does not require
 graphics; Gate 4 does. Owners and test IDs are in the

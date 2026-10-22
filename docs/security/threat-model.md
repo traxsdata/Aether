@@ -127,7 +127,8 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
   revocation control; an already-open capability is not invalidated by grant
   revocation.
 - The kernel identity-maps physical memory and caps the map bitmap at 16 GiB;
-  there is no higher-half mapping, kernel heap, or guard page.
+  there is no higher-half mapping or guard page. The kernel heap is one
+  identity-mapped arena with no per-block guards or poisoning.
 - **No address-space layout randomization.** User images, the kernel image,
   and stacks load at fixed addresses, so the loss of a code-pointer leak
   cannot be made benign yet. This is documented as an exclusion and tracked
