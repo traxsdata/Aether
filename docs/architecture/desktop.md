@@ -177,6 +177,34 @@ and `DENY` controls. A request grants nothing; approval installs an exact-file
 record in the portal table, and revocation removes future authority. The same
 decisions are available from the console as `portal approve|deny|revoke <n>`.
 
+## Terminal
+
+The Terminal is a desktop window that runs a real ring-3 shell. Open it from
+the dock (the `>_` tile after Files) or by searching for `Terminal`.
+
+- **Emulator.** `kernel/term` (`aether-term`) implements the xterm subset that
+  shells and full-screen programs use: cursor movement, erase, scroll regions,
+  insert/delete, SGR colours (16, 256, and true colour mapped to the nearest
+  palette entry), the alternate screen, and cursor-position reports. It draws
+  an 80x24 grid with the Spleen 8x16 font (BSD-2-Clause,
+  `kernel/term/FONT-LICENSE`). Keys reach the program as VT100 sequences;
+  desktop shortcuts (Super/Alt chords, `Ctrl+Space`, `Ctrl+Tab`,
+  `Ctrl+1`-`4`, and `Ctrl+Left`/`Right`/`Up`) stay with the window manager.
+- **Session.** Opening the window starts `sh`; closing it ends every program
+  in the session. Ctrl+C ends the running job and returns to the prompt unless
+  the program asked for raw input (as `nano` and `htop` do). A full-screen
+  program that crashes or is killed has the screen restored for it.
+- **Userland.** `user/src/bin/userland` is one multi-call image (as BusyBox
+  is) embedded in the kernel. The shell starts every command through the
+  `spawn` system call as a separate process with its own address space,
+  connected to the terminal or to a pipe. Type `help` for the list of
+  commands. Files are limited by the RAM filesystem: 4 KiB per file and 96
+  inodes in total.
+- **Authority.** Terminal programs run as `user`: their root is `/home` (shown
+  as `/`), they start with no capabilities, `portal_open` is denied, and
+  `kill` reaches only programs in the same terminal. The kernel console shell
+  (`aether>` on the serial port) is a separate ring-0 diagnostic tool.
+
 ## Liquid Glass and accessibility
 
 Settings provides four live controls:

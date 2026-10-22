@@ -24,7 +24,7 @@ Deliberately omitted, so the experiment cannot be used as ransomware:
 - a fixed, printed, reversible XOR transform instead of encryption;
 - no key generation, sealing, or destruction (the test proves recovery);
 - no persistence, startup hook, network, propagation, or payment channel;
-- no real user files, only synthetic canaries in a 128 KiB ramdisk.
+- no real user files, only synthetic canaries in a 256 KiB ramdisk.
 
 A local run is `cd tests/ransomware-sim && cargo run`; because the directory is
 excluded from version control, a fresh checkout will not contain it.
@@ -281,6 +281,6 @@ on a filesystem that can be trusted after a crash or forced termination.
 - Key management, because the simulator intentionally has none.
 - A real external attacker, stolen publisher key, or physical access.
 
-The prototype's small volume, 4 KiB file cap, 8 open-file pool, and 8-grant
+The prototype's small volume, 4 KiB file cap, 16 open-file pool, and 8-grant
 table bound the blast radius today. Those are resource limits, not defenses;
 the recommendations above are what should remain true when the limits grow.

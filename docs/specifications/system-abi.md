@@ -145,6 +145,22 @@ Implemented calls:
 | 18 | `endpoint_close` | endpoint handle | 0; revokes every alias in the caller's table and destroys an owned endpoint |
 | 19 | `endpoint_receive_timeout` | same as 17, plus timeout ticks in `R8` (0 = no deadline) | bytes received, or `ETIMEDOUT` |
 | 20 | `portal_request` | path, path length, rights | pending consent-request index (grants nothing until approved) |
+| 21 | `spawn` | argument block, block length, stdin (0 = terminal, else a pipe id), stdout (same) | child process id |
+| 22 | `wait` | child process id | exit status (0–255, or 128 + n when killed or faulted); `EAGAIN` while it runs |
+| 23 | `kill` | process id | 0; `EACCES` outside the caller's terminal session |
+| 24 | `process_list` | buffer, length | number of 48-byte process records written |
+| 25 | `system_info` | buffer, length (at least 96) | bytes written |
+| 26 | `read_input` | buffer, length | bytes read from standard input; 0 at end of input; `EAGAIN` while empty |
+| 27 | `terminal_size` | — | `(columns << 16) \| rows` |
+| 28 | `pipe_create` | — | pipe id; the caller holds both ends |
+| 29 | `pipe_read` | pipe id, buffer, length | bytes read; 0 once every writer is gone; `EAGAIN` while empty |
+| 30 | `pipe_write` | pipe id, buffer, length | bytes accepted; `EAGAIN` when full; `EPIPE` without readers |
+| 31 | `pipe_close` | pipe id, end (1 = read, 2 = write) | 0 |
+| 32 | `remove` | path, path length | 0; `ENOTEMPTY` for a non-empty directory |
+| 33 | `rename` | source path, length, destination path, length | 0 |
+| 34 | `make_dir` | path, path length | 0; `EEXIST` when present |
+| 35 | `arguments` | buffer, length | length of the caller's argument block |
+| 36 | `terminal_mode` | set flag (1 = set), mode (`TERMINAL_RAW` or 0) | previous mode, plus stdin/stdout-is-terminal bits |
 
 Rules for this implementation:
 
@@ -196,8 +212,39 @@ Error numbers (two's-complement `i64` in `RAX`):
 | -9 | `EIO` | device or filesystem corruption |
 | -10 | `EAGAIN` | the endpoint queue is full (send) or empty (non-blocking receive); retry |
 | -11 | `ETIMEDOUT` | a blocking receive reached its tick deadline |
+| -12 | `EPIPE` | a pipe write with no reader left |
+| -13 | `EEXIST` | the path already exists |
+| -14 | `ENOTDIR` | a path component is not a directory |
+| -15 | `EISDIR` | a file operation named a directory |
+| -16 | `ENOTEMPTY` | `remove` of a directory that still has entries |
 
-Still planned: process creation/wait, derivation-tree capability slots and
+Terminal session calls (21–36) add these rules:
+
+- Only tasks attached to the desktop Terminal's session may use them; every
+  other task gets `EACCES` (or, for `arguments`, an empty block). The first
+  session task is the shell the kernel starts when the window opens; every
+  later one is a child that a session task spawned.
+- `spawn` starts only the programs named in `TERMINAL_PROGRAMS`, from the
+  kernel-embedded userland image; there is no path-based exec. The argument
+  block is NUL-separated text (working directory, program name, arguments),
+  at most 512 bytes and 32 entries. A child's stdin and stdout are the
+  terminal or pipe ends the caller already holds, so a program can never
+  attach to a pipe it was not given.
+- Session programs run as the ordinary user: their filesystem root is
+  `/home`, they hold no capabilities at start, and `portal_open` is denied.
+  The kernel console's ring-0 shell is unchanged and separate.
+- `kill` and `wait` reach only processes in the caller's session; kernel
+  tasks, services, and applications are out of reach. Ctrl+C in cooked mode
+  ends every session job except the shell; in raw mode (`terminal_mode`) the
+  byte is delivered to the program instead.
+- `process_list` reports every task (so `ps -e` and `htop` work), but only
+  identity, state, CPU ticks, and resident memory; no addresses or handles.
+- Pipes are eight fixed 1 KiB kernel buffers per session. A process holds a
+  bit mask of the ends it owns; exit releases them, and a reader sees end of
+  input once no writer remains.
+
+Still planned: general process creation for applications (terminal programs
+have `spawn`/`wait`), derivation-tree capability slots and
 mapping removal, a per-endpoint wait list with cancellation, memory-object
 mapping, window rendering syscalls, and a versioned SDK release process.
 

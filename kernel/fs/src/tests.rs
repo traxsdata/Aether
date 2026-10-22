@@ -396,6 +396,22 @@ fn corrupt_inode_metadata_is_rejected_without_panicking() {
     assert!(matches!(fs.read_inode(7), Err(FsError::Corrupt)));
 }
 
+#[test]
+fn usage_tracks_inodes_and_blocks() {
+    let mut fs = filesystem();
+    let before = fs.usage().expect("usage");
+    assert_eq!(before.inodes, MAX_INODES - 1);
+    // Root plus the six directories created by the fixture.
+    assert_eq!(before.used_inodes, 7);
+    fs.write_file("/", "/system/big.txt", &[7u8; 1500])
+        .expect("write");
+    let after = fs.usage().expect("usage");
+    assert_eq!(after.used_inodes, before.used_inodes + 1);
+    assert_eq!(after.used_blocks, before.used_blocks + 3);
+    fs.unlink("/", "/system/big.txt").expect("unlink");
+    assert_eq!(fs.usage().expect("usage"), before);
+}
+
 struct StressRng(u64);
 
 impl StressRng {
@@ -737,12 +753,15 @@ fn disk_pressure_reclaims_a_preimage_before_failing_a_write() {
     }
     let full = std::vec![0xaa; MAX_FILE_BYTES];
     let mut paths = std::vec::Vec::new();
-    for (directory, count) in [("a", 7), ("b", 7), ("c", 7), ("d", 8)] {
-        for index in 0..count {
-            let path = std::format!("{directory}/f{index}");
-            fs.write_file("/", &path, &full).expect("fill");
-            paths.push(path);
+    loop {
+        let usage = fs.usage().expect("usage");
+        if usage.blocks - usage.used_blocks < MAX_FILE_BLOCKS * 2 {
+            break;
         }
+        let directory = ["a", "b", "c", "d"][paths.len() % 4];
+        let path = std::format!("{directory}/f{}", paths.len() / 4);
+        fs.write_file("/", &path, &full).expect("fill");
+        paths.push(path);
     }
 
     // The first overwrite consumes the remaining space and retains its old

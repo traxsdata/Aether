@@ -8,7 +8,9 @@
 
 #![no_std]
 
-use aether_abi::user::{FileRights, Syscall, errno};
+use aether_abi::user::{
+    FileRights, PROCESS_RECORD_BYTES, ProcessRecord, SYSTEM_INFO_BYTES, Syscall, SystemInfo, errno,
+};
 
 /// Maximum bytes an IPC message payload may carry; enforced by the kernel.
 pub const MAX_MESSAGE_BYTES: usize = 64;
@@ -382,12 +384,251 @@ pub fn endpoint_receive_timeout(
     }
 }
 
+fn result(value: i64) -> Result<u64, i64> {
+    if value < 0 {
+        Err(value)
+    } else {
+        Ok(value as u64)
+    }
+}
+
+/// Starts a terminal program. `args` is the argument block: the working
+/// directory, the program name, then its arguments, NUL separated. `stdin`
+/// and `stdout` are 0 for the terminal or a pipe id the caller holds.
+pub fn spawn(args: &[u8], stdin: u64, stdout: u64) -> Result<u64, i64> {
+    // SAFETY: The slice is readable; the kernel validates the range.
+    result(unsafe {
+        syscall4(
+            Syscall::Spawn as u64,
+            args.as_ptr() as u64,
+            args.len() as u64,
+            stdin,
+            stdout,
+        )
+    })
+}
+
+/// Collects a child's exit status. Returns `Err(EAGAIN)` while it runs.
+pub fn wait(pid: u64) -> Result<i64, i64> {
+    // SAFETY: No pointers are involved.
+    let value = unsafe { syscall4(Syscall::Wait as u64, pid, 0, 0, 0) };
+    if value < 0 { Err(value) } else { Ok(value) }
+}
+
+/// Terminates a program in the caller's terminal session.
+pub fn kill(pid: u64) -> Result<(), i64> {
+    // SAFETY: No pointers are involved.
+    result(unsafe { syscall4(Syscall::Kill as u64, pid, 0, 0, 0) }).map(|_| ())
+}
+
+/// Fills `records` with the process table and returns how many were written.
+pub fn process_list(records: &mut [ProcessRecord]) -> Result<usize, i64> {
+    let mut buffer = [0u8; 4096];
+    let room = (records.len() * PROCESS_RECORD_BYTES).min(buffer.len());
+    // SAFETY: The buffer is writable; the kernel validates the range.
+    let count = result(unsafe {
+        syscall4(
+            Syscall::ProcessList as u64,
+            buffer.as_mut_ptr() as u64,
+            room as u64,
+            0,
+            0,
+        )
+    })? as usize;
+    for (index, record) in records.iter_mut().take(count).enumerate() {
+        let mut raw = [0u8; PROCESS_RECORD_BYTES];
+        raw.copy_from_slice(
+            &buffer[index * PROCESS_RECORD_BYTES..(index + 1) * PROCESS_RECORD_BYTES],
+        );
+        *record = ProcessRecord::decode(&raw);
+    }
+    Ok(count)
+}
+
+/// Returns the system summary.
+pub fn system_info() -> Result<SystemInfo, i64> {
+    let mut buffer = [0u8; SYSTEM_INFO_BYTES];
+    // SAFETY: The buffer is writable; the kernel validates the range.
+    result(unsafe {
+        syscall4(
+            Syscall::SystemInfo as u64,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+        )
+    })?;
+    Ok(SystemInfo::decode(&buffer))
+}
+
+/// Reads standard input. `Ok(0)` is end of input; `Err(EAGAIN)` means none
+/// is queued yet.
+pub fn read_input(buffer: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: The buffer is writable; the kernel validates the range.
+    result(unsafe {
+        syscall4(
+            Syscall::ReadInput as u64,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+        )
+    })
+    .map(|count| count as usize)
+}
+
+/// Returns the terminal size as `(columns, rows)`.
+pub fn terminal_size() -> Result<(u16, u16), i64> {
+    // SAFETY: No pointers are involved.
+    let value = result(unsafe { syscall4(Syscall::TerminalSize as u64, 0, 0, 0, 0) })?;
+    Ok(((value >> 16) as u16, value as u16))
+}
+
+/// Creates a pipe; the caller holds both ends.
+pub fn pipe_create() -> Result<u64, i64> {
+    // SAFETY: No pointers are involved.
+    result(unsafe { syscall4(Syscall::PipeCreate as u64, 0, 0, 0, 0) })
+}
+
+/// Reads from a pipe. `Ok(0)` is end of input; `Err(EAGAIN)` means empty.
+pub fn pipe_read(pipe: u64, buffer: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: The buffer is writable; the kernel validates the range.
+    result(unsafe {
+        syscall4(
+            Syscall::PipeRead as u64,
+            pipe,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+        )
+    })
+    .map(|count| count as usize)
+}
+
+/// Writes to a pipe; may accept fewer bytes than offered.
+pub fn pipe_write(pipe: u64, bytes: &[u8]) -> Result<usize, i64> {
+    // SAFETY: The slice is readable; the kernel validates the range.
+    result(unsafe {
+        syscall4(
+            Syscall::PipeWrite as u64,
+            pipe,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            0,
+        )
+    })
+    .map(|count| count as usize)
+}
+
+/// Releases one end of a pipe (`PIPE_READ` or `PIPE_WRITE`).
+pub fn pipe_close(pipe: u64, end: u64) -> Result<(), i64> {
+    // SAFETY: No pointers are involved.
+    result(unsafe { syscall4(Syscall::PipeClose as u64, pipe, end, 0, 0) }).map(|_| ())
+}
+
+/// Deletes a file or an empty directory.
+pub fn remove(path: &str) -> Result<(), i64> {
+    // SAFETY: The path slice is readable; the kernel validates it.
+    result(unsafe {
+        syscall4(
+            Syscall::Remove as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            0,
+            0,
+        )
+    })
+    .map(|_| ())
+}
+
+/// Renames or moves a path.
+pub fn rename(from: &str, to: &str) -> Result<(), i64> {
+    // SAFETY: Both slices are readable; the kernel validates them.
+    result(unsafe {
+        syscall4(
+            Syscall::Rename as u64,
+            from.as_ptr() as u64,
+            from.len() as u64,
+            to.as_ptr() as u64,
+            to.len() as u64,
+        )
+    })
+    .map(|_| ())
+}
+
+/// Creates a directory.
+pub fn make_dir(path: &str) -> Result<(), i64> {
+    // SAFETY: The path slice is readable; the kernel validates it.
+    result(unsafe {
+        syscall4(
+            Syscall::MakeDir as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            0,
+            0,
+        )
+    })
+    .map(|_| ())
+}
+
+/// Queries the terminal mode and standard stream kinds without changing them.
+pub fn terminal_mode() -> Result<u64, i64> {
+    // SAFETY: No pointers are involved.
+    result(unsafe { syscall4(Syscall::TerminalMode as u64, 0, 0, 0, 0) })
+}
+
+/// Sets the terminal mode (`TERMINAL_RAW` or 0) and returns the previous
+/// query result.
+pub fn set_terminal_mode(mode: u64) -> Result<u64, i64> {
+    // SAFETY: No pointers are involved.
+    result(unsafe { syscall4(Syscall::TerminalMode as u64, 1, mode, 0, 0) })
+}
+
+/// Copies the caller's argument block into `buffer`.
+pub fn arguments(buffer: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: The buffer is writable; the kernel validates the range.
+    result(unsafe {
+        syscall4(
+            Syscall::Arguments as u64,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+        )
+    })
+    .map(|count| count as usize)
+}
+
 /// Convenience constants for callers.
 pub const READ: u64 = FileRights::READ;
 /// Write access.
 pub const WRITE: u64 = FileRights::WRITE;
 /// Create on open.
 pub const CREATE: u64 = FileRights::CREATE;
+
+/// Human-readable error descriptions, in the style of `strerror`.
+#[must_use]
+pub fn error_message(error: i64) -> &'static str {
+    match error {
+        errno::ENOSYS => "Function not implemented",
+        errno::EINVAL => "Invalid argument",
+        errno::EACCES => "Permission denied",
+        errno::ENOENT => "No such file or directory",
+        errno::ENOSPC => "No space or resource left",
+        errno::EPERM => "Outside your home folder",
+        errno::EBADF => "Bad handle",
+        errno::ENOGRANT => "No portal grant",
+        errno::EIO => "Input/output error",
+        errno::EAGAIN => "Resource temporarily unavailable",
+        errno::ETIMEDOUT => "Timed out",
+        errno::EPIPE => "Broken pipe",
+        errno::EEXIST => "File exists",
+        errno::ENOTDIR => "Not a directory",
+        errno::EISDIR => "Is a directory",
+        errno::ENOTEMPTY => "Directory not empty",
+        _ => "Unknown error",
+    }
+}
 
 /// Error names for diagnostics.
 #[must_use]
@@ -404,6 +645,11 @@ pub fn error_name(error: i64) -> &'static str {
         errno::EIO => "EIO",
         errno::EAGAIN => "EAGAIN",
         errno::ETIMEDOUT => "ETIMEDOUT",
+        errno::EPIPE => "EPIPE",
+        errno::EEXIST => "EEXIST",
+        errno::ENOTDIR => "ENOTDIR",
+        errno::EISDIR => "EISDIR",
+        errno::ENOTEMPTY => "ENOTEMPTY",
         _ => "unknown",
     }
 }

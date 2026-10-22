@@ -8,16 +8,16 @@ production on-disk format.
 
 | Layer | Location | Responsibility |
 |---|---|---|
-| Virtual block device | `kernel/fs/src/lib.rs` (`RamDisk`) | 256 × 512-byte blocks in RAM |
+| Virtual block device | `kernel/fs/src/lib.rs` (`RamDisk`) | 512 × 512-byte blocks (256 KiB) in RAM |
 | Filesystem | `aether-fs` | superblock, inode table, directories, contiguous file blocks |
 | File service | `kernel/src/fs.rs` | per-process roots, open handles, path validation |
 | Capability layer | `kernel/ipc` + kernel `CapTable` | generation-checked `File` capabilities |
 | Portal | `kernel/src/portal.rs` | exact-path grants outside a process root |
 
-The format is intentionally bounded: 64 inodes, at most 8 blocks (4 KiB) per
-file, 25 entries per directory block, and an 8-slot open table. Four blocks are
-reserved for the inode table. Exhaustion is reported as `ENOSPC`; no metadata
-allocation can grow without bound.
+The format is intentionally bounded: 512 blocks (256 KiB), 96 inodes, at most
+8 blocks (4 KiB) per file, 25 entries per directory block, and a 16-slot open
+table. The inode table is reserved before the first data block. Exhaustion is
+reported as `ENOSPC`; no metadata allocation can grow without bound.
 
 The current user rights are `READ`, `WRITE`, and `CREATE`. Separate delete,
 rename, execute, and directory-listing rights from the specification are not

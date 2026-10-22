@@ -610,6 +610,22 @@ pub fn tick() {
     if clock_dirty {
         include(layout::menu_bar(wm.screen()));
     }
+    // The Terminal window owns a shell while it exists; opening it from the
+    // dock or search starts one and closing it ends the session.
+    let terminal = wm.window_id(WindowKind::Terminal);
+    crate::terminal::sync_window(terminal.is_some());
+    if let Some(id) = terminal
+        && crate::terminal::needs_paint()
+    {
+        let shown = wm
+            .window(id)
+            .is_some_and(|window| window.is_visible() && window.workspace == wm.workspace());
+        match wm.window_frame(id) {
+            Some(frame) if shown => include(layout::content_rect(frame)),
+            // A hidden grid is painted in full when its window is shown again.
+            _ => crate::terminal::mark_painted(),
+        }
+    }
     if live_dirty {
         include(layout::menu_bar(wm.screen()));
         for kind in [
@@ -780,6 +796,16 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
     if key == Key::Function(4) {
         set_applications_selected(0);
     }
+    let terminal_focused = wm
+        .focused_window()
+        .is_some_and(|window| window.kind == WindowKind::Terminal)
+        && !wm.overview_open()
+        && !wm.spotlight_open()
+        && wm.menu_state().is_none();
+    if terminal_focused && !desktop_shortcut(key, modifiers) {
+        crate::terminal::key(key, modifiers);
+        return;
+    }
     let translated = match key {
         Key::Char(byte) => WmKey::Char(byte),
         Key::Enter => WmKey::Enter,
@@ -869,6 +895,46 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
             serial_line!("desktop: action={label}");
         }
     }
+}
+
+/// Returns `true` for the keys the desktop keeps while the Terminal has focus:
+/// window and Space switching and search. Everything else, Ctrl letters
+/// included, belongs to the terminal program.
+fn desktop_shortcut(key: Key, modifiers: Modifiers) -> bool {
+    if modifiers.super_key || modifiers.alt {
+        return true;
+    }
+    modifiers.ctrl
+        && matches!(
+            key,
+            Key::Char(b' ' | b'1'..=b'4') | Key::Tab | Key::Left | Key::Right | Key::Up
+        )
+}
+
+/// Opens (or focuses) the Terminal window. Used by the console's `term open`.
+pub fn open_terminal() {
+    let Some(mut wm) = current() else {
+        return;
+    };
+    if wm.open(WindowKind::Terminal).is_some() {
+        wm.finish_animations();
+        let now = scheduler::ticks();
+        store(wm, now, now / 100, input::mouse().buttons);
+    }
+    crate::terminal::sync_window(true);
+}
+
+/// Closes the Terminal window, ending its session.
+pub fn close_terminal() {
+    let Some(mut wm) = current() else {
+        return;
+    };
+    if let Some(id) = wm.window_id(WindowKind::Terminal) {
+        wm.close_window(id);
+        let now = scheduler::ticks();
+        store(wm, now, now / 100, input::mouse().buttons);
+    }
+    crate::terminal::sync_window(false);
 }
 
 /// Opens or resizes the single Linux surface window.
@@ -1602,6 +1668,7 @@ fn paint_content(
         WindowKind::Recovery => paint_recovery(wm, content, palette),
         WindowKind::Log => paint_log(wm, content, palette),
         WindowKind::Welcome => paint_welcome(wm, content, focused, palette),
+        WindowKind::Terminal => crate::terminal::paint(content),
         WindowKind::Linux => crate::display::paint_content(0, content),
         WindowKind::Linux2 => crate::display::paint_content(1, content),
         WindowKind::Applications => paint_applications(wm, content, palette),

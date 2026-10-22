@@ -15,7 +15,7 @@
 /// Size of one storage block.
 pub const BLOCK_SIZE: usize = 512;
 /// Number of blocks in the virtual device.
-pub const BLOCK_COUNT: usize = 256;
+pub const BLOCK_COUNT: usize = 512;
 /// Total device size in bytes.
 pub const DISK_BYTES: usize = BLOCK_SIZE * BLOCK_COUNT;
 /// Maximum inode number.
@@ -23,7 +23,7 @@ pub const DISK_BYTES: usize = BLOCK_SIZE * BLOCK_COUNT;
 /// The user workspace and per-application private categories need more than
 /// the original bring-up table of 32 entries, while still fitting in the
 /// reserved inode blocks before the first data block.
-pub const MAX_INODES: usize = 64;
+pub const MAX_INODES: usize = 96;
 /// Blocks a file may occupy.
 pub const MAX_FILE_BLOCKS: usize = 8;
 /// Maximum file size.
@@ -37,15 +37,18 @@ pub const ENTRY_BYTES: usize = 20;
 /// Entries in one directory block.
 pub const MAX_ENTRIES: usize = BLOCK_SIZE / ENTRY_BYTES;
 /// Open file slots.
-pub const MAX_OPEN: usize = 8;
+pub const MAX_OPEN: usize = 16;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"AFS1");
 const VERSION: u16 = 2;
 const ROOT_INODE: u16 = 1;
 const INODE_TABLE_BLOCK: u16 = 1;
 const INODE_BYTES: usize = 32;
-const DATA_START_BLOCK: u16 = 5;
+const DATA_START_BLOCK: u16 =
+    INODE_TABLE_BLOCK + (MAX_INODES * INODE_BYTES).div_ceil(BLOCK_SIZE) as u16;
 const FREE_BITMAP_OFFSET: usize = 16;
+// The free-block bitmap shares the superblock.
+const _: () = assert!(FREE_BITMAP_OFFSET + BLOCK_COUNT.div_ceil(8) <= BLOCK_SIZE);
 const MODE_FREE: u8 = 0;
 const MODE_FILE: u8 = 1;
 const MODE_DIR: u8 = 2;
@@ -83,6 +86,19 @@ pub enum FsError {
     FileTooLarge,
     /// The open-file table is full.
     TooManyOpen,
+}
+
+/// Filesystem space use returned by [`AetherFs::usage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FsUsage {
+    /// Data blocks in use.
+    pub used_blocks: usize,
+    /// Data blocks available to files and directories.
+    pub blocks: usize,
+    /// Inodes in use, including the root directory.
+    pub used_inodes: usize,
+    /// Allocatable inodes.
+    pub inodes: usize,
 }
 
 /// A block device used by the filesystem.
@@ -796,6 +812,29 @@ impl<D: BlockDevice> AetherFs<D> {
         } else {
             self.unlink(scope, path)
         }
+    }
+
+    /// Reports space use: `(used data blocks, data blocks, used inodes,
+    /// inodes)`. Inode 0 is reserved and counted as neither.
+    pub fn usage(&mut self) -> Result<FsUsage, FsError> {
+        let mut used_blocks = 0usize;
+        for block in DATA_START_BLOCK..BLOCK_COUNT as u16 {
+            if self.block_used(block)? {
+                used_blocks += 1;
+            }
+        }
+        let mut used_inodes = 0usize;
+        for index in 1..MAX_INODES as u16 {
+            if self.read_inode(index)?.mode != MODE_FREE {
+                used_inodes += 1;
+            }
+        }
+        Ok(FsUsage {
+            used_blocks,
+            blocks: BLOCK_COUNT - usize::from(DATA_START_BLOCK),
+            used_inodes,
+            inodes: MAX_INODES - 1,
+        })
     }
 
     fn slot(&self, id: OpenId) -> Result<&OpenSlot, FsError> {

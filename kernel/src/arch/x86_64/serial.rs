@@ -59,6 +59,13 @@ pub fn try_read() -> Option<u8> {
     }
 }
 
+/// Returns `true` when the UART holds a received byte.
+#[must_use]
+pub fn input_pending() -> bool {
+    // SAFETY: Reading the line status register has no side effects.
+    unsafe { inb(COM1 + 5) & 1 != 0 }
+}
+
 /// Writes one byte, dropping it if the UART is not ready.
 pub fn write_byte(byte: u8) {
     crate::crash::record_byte(byte);

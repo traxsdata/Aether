@@ -21,6 +21,7 @@ aether-net = { path = "net" }
 aether-input = { path = "input" }
 aether-services = { path = "services" }
 aether-wm = { path = "wm" }
+aether-term = { path = "term" }
 aether-crypto = { path = "../crypto" }
 aether-packaging = { path = "../packaging" }
 aether-update = { path = "../updates" }

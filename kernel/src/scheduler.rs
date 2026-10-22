@@ -16,7 +16,11 @@ use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::{halt, timer};
 use crate::memory::paging::{self, PagingError};
 use crate::serial_line;
-use aether_abi::user::{USER_BASE, USER_LIMIT, USER_STACK_PAGES, USER_STACK_TOP, UserTestResult};
+use aether_abi::user::{
+    ARGUMENT_BLOCK_BYTES, MAX_ARGUMENTS, PROCESS_FLAG_SESSION, PROCESS_FLAG_USER,
+    PROCESS_NAME_BYTES, ProcessKind, ProcessRecord, ProcessState, USER_BASE, USER_LIMIT,
+    USER_STACK_PAGES, USER_STACK_TOP, UserTestResult, errno, fixed_name,
+};
 use aether_boot_common::elf;
 use aether_fs::FsError;
 use aether_ipc::{CapError, CapHandle, CapTable, IpcError, ObjectType, Rights};
@@ -56,6 +60,9 @@ const fn is_app_task(index: usize) -> bool {
 const MAX_TASKS: usize = WORKER_COUNT + 512;
 #[cfg(all(feature = "gate4-gui-test", not(feature = "large-apps")))]
 const MAX_TASKS: usize = WORKER_COUNT + 96;
+// Room for the boot tasks, a terminal session (the shell, a pipeline, and a
+// full-screen program), and the application thread tables. Feature builds keep
+// their larger budgets.
 #[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
 const MAX_TASKS: usize = WORKER_COUNT + 64;
 
@@ -76,6 +83,8 @@ const MAGIC_PREFIX: u64 = 0xa5a5_0000_0000_0000;
 static USER_ELF: &[u8] = include_bytes!(env!("AETHER_USER_ELF"));
 /// Native ring-3 `linuxd` service embedded by the kernel build.
 static LINUXD_ELF: &[u8] = include_bytes!(env!("AETHER_LINUXD_ELF"));
+/// Native userland (shell and commands) started by the terminal.
+static USERLAND_ELF: &[u8] = include_bytes!(env!("AETHER_USERLAND_ELF"));
 /// Static Linux program used to exercise the Linux syscall entry.
 static LINUX_ELF: &[u8] = include_bytes!(env!("AETHER_LINUX_ELF"));
 /// Path of the dynamic test image inside the imported runtime rootfs.
@@ -105,6 +114,8 @@ enum TaskKind {
     Linux,
     Thread,
     Process,
+    /// Native ring-3 program started in the terminal session.
+    Terminal,
 }
 
 /// Syscall ABI selected for a ring-3 task.
@@ -644,6 +655,17 @@ struct Task {
     /// verified AppImage record that declares `network=client`; inherited
     /// like `jit`. The user's consent is checked on every socket.
     network_client: bool,
+    /// Terminal session attachment and standard input/output routing.
+    io: crate::terminal::TaskIo,
+    /// Timer ticks this task was interrupted on the CPU.
+    cpu_ticks: u64,
+    /// Frames allocated for this task's address space, in KiB.
+    memory_kib: u32,
+    /// Display name for process listings (NUL padded).
+    name: [u8; PROCESS_NAME_BYTES],
+    /// Argument block of a terminal program (see `Syscall::Spawn`).
+    args: [u8; ARGUMENT_BLOCK_BYTES],
+    args_len: u16,
 }
 
 impl Task {
@@ -725,6 +747,12 @@ impl Task {
             display: false,
             jit: false,
             network_client: false,
+            io: crate::terminal::TaskIo::NONE,
+            cpu_ticks: 0,
+            memory_kib: 0,
+            name: [0; PROCESS_NAME_BYTES],
+            args: [0; ARGUMENT_BLOCK_BYTES],
+            args_len: 0,
         }
     }
 }
@@ -761,6 +789,9 @@ const FPU_STATE_ZERO: FpuState = FpuState([0; 1024]);
 static FPU_STATES: Global<[FpuState; MAX_TASKS]> =
     Global(UnsafeCell::new([FPU_STATE_ZERO; MAX_TASKS]));
 static FPU_XSAVE: AtomicBool = AtomicBool::new(false);
+/// Architectural default vector state, captured once at boot. A recycled task
+/// slot starts from it rather than from the previous owner's registers.
+static FPU_DEFAULT: Global<FpuState> = Global(UnsafeCell::new(FPU_STATE_ZERO));
 static EVENTFD_COUNTERS: Global<[[Option<u64>; MAX_EVENTFDS]; MAX_TASKS]> =
     Global(UnsafeCell::new([[None; MAX_EVENTFDS]; MAX_TASKS]));
 /// Pipe storage is global so `fork`-inherited descriptors share one buffer.
@@ -1311,6 +1342,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     let mut idle = Task::new();
     idle.state = TaskState::Running;
     idle.kind = TaskKind::Idle;
+    idle.name = fixed_name("kernel");
     idle.pml4 = kernel_pml4.start_address();
     idle.kernel_stack_top = kernel_stack_top(allocator, 0)?;
     tasks[0] = idle;
@@ -1328,6 +1360,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
         let mut task = Task::new();
         task.state = TaskState::Ready;
         task.kind = TaskKind::Worker;
+        task.name = fixed_name("kworker");
         task.saved_rsp = saved_rsp;
         task.pml4 = pml4.start_address();
         task.kernel_stack_top = kernel_stack_top(allocator, task_id)?;
@@ -1398,6 +1431,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     let mut user = Task::new();
     user.state = TaskState::Ready;
     user.kind = TaskKind::User;
+    user.name = fixed_name("aether-init");
     user.saved_rsp = user_saved_rsp;
     user.pml4 = user_pml4.start_address();
     user.kernel_stack_top = user_kernel_top;
@@ -1438,6 +1472,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     let mut linuxd_task = Task::new();
     linuxd_task.state = TaskState::Ready;
     linuxd_task.kind = TaskKind::Service;
+    linuxd_task.name = fixed_name("linuxd");
     linuxd_task.saved_rsp = linuxd_saved_rsp;
     linuxd_task.pml4 = linuxd_pml4.start_address();
     linuxd_task.kernel_stack_top = linuxd_kernel_top;
@@ -1467,6 +1502,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     let mut linux = Task::new();
     linux.state = TaskState::Ready;
     linux.kind = TaskKind::Linux;
+    linux.name = fixed_name("linux-hello");
     linux.abi = TaskAbi::Linux;
     linux.saved_rsp = linux_saved_rsp;
     linux.pml4 = linux_pml4.start_address();
@@ -1509,6 +1545,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     let mut dynamic_task = Task::new();
     dynamic_task.state = TaskState::Ready;
     dynamic_task.kind = TaskKind::Linux;
+    dynamic_task.name = fixed_name("linux-dynamic");
     dynamic_task.abi = TaskAbi::Linux;
     dynamic_task.saved_rsp = dynamic_saved_rsp;
     dynamic_task.pml4 = dynamic.pml4.start_address();
@@ -1725,6 +1762,7 @@ pub fn launch_appimage(slot: usize) -> Result<(), SchedulerError> {
     let mut app_task = Task::new();
     app_task.state = TaskState::Ready;
     app_task.kind = TaskKind::Linux;
+    app_task.name = fixed_name("appimage");
     app_task.abi = TaskAbi::Linux;
     app_task.saved_rsp = saved_rsp;
     app_task.pml4 = pml4.start_address();
@@ -2277,6 +2315,7 @@ pub fn linux_clone(
     let mut thread = Task::new();
     thread.state = TaskState::Ready;
     thread.kind = TaskKind::Thread;
+    thread.name = tasks[current].name;
     thread.abi = parent_abi;
     thread.saved_rsp = 0;
     thread.pml4 = parent_pml4;
@@ -2383,6 +2422,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     let mut child = Task::new();
     child.state = TaskState::Ready;
     child.kind = TaskKind::Process;
+    child.name = tasks[current].name;
     child.abi = abi;
     child.pml4 = child_pml4.start_address();
     child.kernel_stack_top = kernel_top;
@@ -4027,6 +4067,10 @@ pub fn with_current_ipc<R>(f: impl FnOnce(usize, &mut CapTable) -> R) -> R {
 pub fn user_exit(status: u64) -> *mut InterruptFrame {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
+    if tasks[current].kind == TaskKind::Terminal {
+        retire_terminal_task(current, (status & 0xff) as i64, false);
+        return schedule_next(current);
+    }
     if current == LINUXD_TASK && tasks[current].kind == TaskKind::Service {
         tasks[current].state = TaskState::Done;
         let closed = crate::fs::close_task_files(&mut tasks[current].caps);
@@ -4068,6 +4112,323 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
     );
 
     schedule_next(current)
+}
+
+/// Returns the argument block's program name (its second entry).
+fn program_name(args: &[u8]) -> Option<&str> {
+    let mut entries = args.split(|&byte| byte == 0);
+    let _directory = entries.next()?;
+    core::str::from_utf8(entries.next()?).ok()
+}
+
+/// Checks an argument block: UTF-8, a working directory, a known program, and
+/// at most [`MAX_ARGUMENTS`] entries.
+fn valid_arguments(args: &[u8]) -> Result<&str, i64> {
+    if args.is_empty() || args.len() > ARGUMENT_BLOCK_BYTES || core::str::from_utf8(args).is_err() {
+        return Err(errno::EINVAL);
+    }
+    let trimmed = args.strip_suffix(&[0]).unwrap_or(args);
+    if trimmed.split(|&byte| byte == 0).count() > MAX_ARGUMENTS {
+        return Err(errno::EINVAL);
+    }
+    let program = program_name(args).ok_or(errno::EINVAL)?;
+    if !aether_abi::user::is_terminal_program(program) {
+        return Err(errno::ENOENT);
+    }
+    Ok(program)
+}
+
+/// Starts a native terminal program as a child of `parent` (0 for the
+/// session's shell, which the desktop starts).
+///
+/// The program image is the kernel-embedded userland; its argument block
+/// selects the entry point. The child runs at CPL3 in a fresh address space
+/// under the user's terminal root, holds no capabilities, and inherits no
+/// pipe ends beyond the standard input and output in `io`.
+pub fn spawn_terminal_program(
+    parent: usize,
+    args: &[u8],
+    io: crate::terminal::TaskIo,
+) -> Result<usize, i64> {
+    let _guard = timer::InterruptGuard::enter();
+    let program = valid_arguments(args)?;
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let slot = tasks
+        .iter()
+        .position(|task| task.state == TaskState::Empty && !task.reserved)
+        .ok_or(errno::EAGAIN)?;
+    let image = elf::parse(USERLAND_ELF).map_err(|_| errno::EIO)?;
+    let (space, frames) = crate::memory::with_frame_allocator(|allocator| {
+        let before = allocator.stats().free_frames;
+        let space = paging::create_user_address_space(allocator, &image, USERLAND_ELF);
+        (space, before.saturating_sub(allocator.stats().free_frames))
+    })
+    .ok_or(errno::ENOSPC)?;
+    let pml4 = space.map_err(|_| errno::ENOSPC)?;
+
+    let kernel_top = slot_kernel_stack_top(slot)?;
+    let mut task = Task::new();
+    task.state = TaskState::Ready;
+    task.kind = TaskKind::Terminal;
+    task.saved_rsp = prepare_user_stack(kernel_top, image.entry(), (USER_STACK_TOP - 16) & !0xf);
+    task.pml4 = pml4.start_address();
+    task.kernel_stack_top = kernel_top;
+    task.root = crate::fs::TERMINAL_ROOT;
+    task.tgid = slot;
+    task.bind_file_state(slot);
+    task.parent = parent;
+    task.io = io;
+    task.memory_kib = (frames * (PAGE_SIZE / 1024)).min(u64::from(u32::MAX)) as u32;
+    task.name = fixed_name(program);
+    task.args[..args.len()].copy_from_slice(args);
+    task.args_len = args.len() as u16;
+    tasks[slot] = task;
+    // SAFETY: Interrupts are masked and the slot is not running.
+    unsafe { fpu_reset(slot) };
+    Ok(slot)
+}
+
+/// Retires a terminal program: releases its files, endpoints, pipe ends, and
+/// address space, then either keeps the status for its parent or frees the
+/// slot when no parent will collect it.
+fn retire_terminal_task(slot: usize, status: i64, faulted: bool) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[slot];
+    task.state = if faulted {
+        TaskState::Faulted
+    } else {
+        TaskState::Done
+    };
+    task.exit_status = status;
+    let _ = crate::fs::close_task_files(&mut task.caps);
+    let _ = crate::ipc::close_task_endpoints(&mut task.caps, slot as u16);
+    let io = task.io;
+    task.io = crate::terminal::TaskIo::NONE;
+    let pml4 = task.pml4;
+    let parent = task.parent;
+
+    // Exited children of this task can no longer be collected; running ones
+    // are orphaned and freed when they exit.
+    for (index, child) in tasks.iter_mut().enumerate() {
+        if index == slot || child.kind != TaskKind::Terminal || child.parent != slot {
+            continue;
+        }
+        if matches!(child.state, TaskState::Done | TaskState::Faulted) {
+            *child = Task::new();
+        } else {
+            child.parent = 0;
+        }
+    }
+    retire_address_space(pml4);
+    crate::terminal::task_exited(slot, io, status);
+
+    let parent_waits = parent != 0
+        && parent < MAX_TASKS
+        && tasks[parent].kind == TaskKind::Terminal
+        && !matches!(
+            tasks[parent].state,
+            TaskState::Empty | TaskState::Done | TaskState::Faulted
+        );
+    if !parent_waits {
+        // Nothing will collect the status. The slot's kernel stack is still
+        // the active stack when the task retires itself, but a new task can
+        // only be created by a later system call, after the switch.
+        tasks[slot] = Task::new();
+    }
+}
+
+fn terminal_task_live(task: &Task) -> bool {
+    task.kind == TaskKind::Terminal
+        && !matches!(
+            task.state,
+            TaskState::Empty | TaskState::Done | TaskState::Faulted
+        )
+}
+
+/// Collects a child's exit status without blocking.
+pub fn wait_child(pid: u64) -> i64 {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let Ok(pid) = usize::try_from(pid) else {
+        return errno::ENOENT;
+    };
+    if pid == 0 || pid >= MAX_TASKS {
+        return errno::ENOENT;
+    }
+    let child = &tasks[pid];
+    if child.kind != TaskKind::Terminal || child.parent != current {
+        return errno::ENOENT;
+    }
+    match child.state {
+        TaskState::Done | TaskState::Faulted => {
+            let status = child.exit_status;
+            tasks[pid] = Task::new();
+            status
+        }
+        _ => errno::EAGAIN,
+    }
+}
+
+/// Outcome of a terminal `kill` request.
+pub enum KillOutcome {
+    /// Another task was terminated.
+    Other,
+    /// The caller named itself and must be retired by the dispatcher.
+    Caller,
+}
+
+/// Terminates a live terminal program in the caller's session.
+pub fn kill_terminal_task(pid: u64) -> Result<KillOutcome, i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let pid = usize::try_from(pid).map_err(|_| errno::ENOENT)?;
+    if pid >= MAX_TASKS || tasks[pid].state == TaskState::Empty {
+        return Err(errno::ENOENT);
+    }
+    if !terminal_task_live(&tasks[pid]) || !tasks[pid].io.session {
+        // Kernel workers, services, applications, and exited programs are
+        // outside the terminal's authority.
+        return Err(errno::EACCES);
+    }
+    if pid == current {
+        return Ok(KillOutcome::Caller);
+    }
+    retire_terminal_task(pid, 128 + 9, false);
+    Ok(KillOutcome::Other)
+}
+
+/// Retires the calling terminal program with `status`.
+pub fn exit_current_terminal_task(status: i64) -> *mut InterruptFrame {
+    let current = CURRENT.load(Ordering::Relaxed);
+    retire_terminal_task(current, status, false);
+    schedule_next(current)
+}
+
+/// Terminates every live session program except `keep`, reporting `status`.
+/// Returns how many were terminated.
+pub fn kill_session(keep: usize, status: i64) -> usize {
+    let _guard = timer::InterruptGuard::enter();
+    let current = CURRENT.load(Ordering::Relaxed);
+    let mut killed = 0;
+    for slot in 1..MAX_TASKS {
+        let tasks = unsafe { &*TASKS.0.get() };
+        if slot == keep
+            || slot == current
+            || !terminal_task_live(&tasks[slot])
+            || !tasks[slot].io.session
+        {
+            continue;
+        }
+        retire_terminal_task(slot, status, false);
+        killed += 1;
+    }
+    killed
+}
+
+/// Returns `true` while a session program other than `leader` is running.
+pub fn session_has_jobs(leader: usize) -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks
+        .iter()
+        .enumerate()
+        .any(|(slot, task)| slot != leader && terminal_task_live(task) && task.io.session)
+}
+
+/// Returns the current task's terminal I/O routing.
+pub fn current_io() -> crate::terminal::TaskIo {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].io
+}
+
+/// Runs `f` on the current task's terminal I/O routing.
+pub fn with_current_io<R>(f: impl FnOnce(&mut crate::terminal::TaskIo) -> R) -> R {
+    let _guard = timer::InterruptGuard::enter();
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    f(&mut tasks[CURRENT.load(Ordering::Relaxed)].io)
+}
+
+/// Copies the current task's argument block into `out`.
+pub fn current_args(out: &mut [u8]) -> usize {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let length = usize::from(task.args_len).min(out.len());
+    out[..length].copy_from_slice(&task.args[..length]);
+    length
+}
+
+/// Fills `out` with one record per task and returns the count.
+pub fn process_records(out: &mut [ProcessRecord]) -> usize {
+    let _guard = timer::InterruptGuard::enter();
+    let tasks = unsafe { &*TASKS.0.get() };
+    let mut count = 0;
+    for (pid, task) in tasks.iter().enumerate() {
+        if task.state == TaskState::Empty || count == out.len() {
+            continue;
+        }
+        let kind = match task.kind {
+            TaskKind::Empty | TaskKind::Idle => ProcessKind::Idle,
+            TaskKind::Worker => ProcessKind::Kernel,
+            TaskKind::User => ProcessKind::Native,
+            TaskKind::Service => ProcessKind::Service,
+            TaskKind::Linux | TaskKind::Process => ProcessKind::Linux,
+            TaskKind::Thread => ProcessKind::LinuxThread,
+            TaskKind::Terminal => ProcessKind::Terminal,
+        };
+        let state = match task.state {
+            TaskState::Ready | TaskState::Empty => ProcessState::Ready,
+            TaskState::Running => ProcessState::Running,
+            TaskState::Blocked => ProcessState::Blocked,
+            TaskState::Done => ProcessState::Exited,
+            TaskState::Faulted => ProcessState::Faulted,
+        };
+        let mut flags = 0;
+        if task.io.session {
+            flags |= PROCESS_FLAG_SESSION;
+        }
+        if !matches!(task.kind, TaskKind::Idle | TaskKind::Worker) {
+            flags |= PROCESS_FLAG_USER;
+        }
+        let name = if task.name[0] == 0 {
+            fixed_name(match task.kind {
+                TaskKind::Idle | TaskKind::Empty => "kernel",
+                TaskKind::Worker => "kworker",
+                TaskKind::User => "aether-init",
+                TaskKind::Service => "service",
+                TaskKind::Linux | TaskKind::Process => "linux",
+                TaskKind::Thread => "linux-thread",
+                TaskKind::Terminal => "program",
+            })
+        } else {
+            task.name
+        };
+        out[count] = ProcessRecord {
+            pid: pid as u32,
+            parent: task.parent as u32,
+            state: state as u8,
+            kind: kind as u8,
+            flags,
+            memory_kib: task.memory_kib,
+            cpu_ticks: task.cpu_ticks,
+            name,
+        };
+        count += 1;
+    }
+    count
+}
+
+/// Returns `(live tasks, task capacity, idle ticks)` for system summaries.
+pub fn task_summary() -> (usize, usize, u64) {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let live = tasks
+        .iter()
+        .filter(|task| {
+            !matches!(
+                task.state,
+                TaskState::Empty | TaskState::Done | TaskState::Faulted
+            )
+        })
+        .count();
+    (live, MAX_TASKS, tasks[0].cpu_ticks)
 }
 
 const LINUX_EBADF: i64 = -9;
@@ -7446,6 +7807,15 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
             tasks[current].kind,
         )
     };
+    if kind == TaskKind::Terminal {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[current].saved_rsp = frame as u64;
+        // #AC is SIGBUS (7); every other fault is reported as SIGSEGV (11).
+        let signal = if vector == 17 { 7 } else { 11 };
+        serial_line!("terminal: program fault pid={current} vector={vector} address={address:#x}");
+        retire_terminal_task(current, 128 + signal, true);
+        return schedule_next(current);
+    }
     if kind != TaskKind::User && !linux && !thread && !process && !service {
         serial_line!("AETHER_BOOT_FAILED reason=user-fault on non-user task");
         halt()
@@ -7586,8 +7956,12 @@ pub fn init_fpu(xsave: bool) {
             mxcsr = in(reg) &mxcsr,
             options(nostack, preserves_flags, readonly)
         );
-        for task in 0..MAX_TASKS {
-            let ptr = FPU_STATES.0.get().cast::<FpuState>().add(task).cast::<u8>();
+        for task in 0..=MAX_TASKS {
+            let ptr = if task == MAX_TASKS {
+                FPU_DEFAULT.0.get().cast::<u8>()
+            } else {
+                FPU_STATES.0.get().cast::<FpuState>().add(task).cast::<u8>()
+            };
             if xsave {
                 asm!(
                     "xsave64 [{ptr}]",
@@ -7605,6 +7979,16 @@ pub fn init_fpu(xsave: bool) {
             }
         }
     }
+}
+
+/// Resets a task slot's saved vector state to the boot default.
+///
+/// # Safety
+///
+/// Runs at CPL0 with interrupts masked, for a slot that is not running.
+unsafe fn fpu_reset(task: usize) {
+    // SAFETY: Both areas are static; the caller guarantees exclusivity.
+    unsafe { (*FPU_STATES.0.get())[task] = *FPU_DEFAULT.0.get() };
 }
 
 /// Saves the live vector registers into a task's state area.
@@ -7832,6 +8216,11 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // Run the network stack before any task state is borrowed; it may wake
     // socket waiters.
     crate::net::poll();
+    {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        let running = CURRENT.load(Ordering::Relaxed);
+        tasks[running].cpu_ticks = tasks[running].cpu_ticks.wrapping_add(1);
+    }
     // Advance the linuxd launch handshake before the interrupted task is
     // saved. The application task is only created once an approval message
     // has been received; no boot path creates it directly.
@@ -7914,7 +8303,13 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     // gets the whole CPU instead of sharing round-robin slices with an idle
     // painter. Without the frame check, a guest that renders or polls without
     // blocking can starve presentation and make input feel laggy.
-    let input_pending = crate::input::pointer_pending() || crate::input::key_pending();
+    // Console input and terminal output count too: a terminal program that
+    // never blocks (`yes`) must not freeze the screen it writes to, or the
+    // console that could stop it.
+    let input_pending = crate::input::pointer_pending()
+        || crate::input::key_pending()
+        || crate::arch::x86_64::serial::input_pending()
+        || crate::terminal::paint_hint();
     let frame_pending = crate::desktop::frame_pending();
     let idle_ready = matches!(tasks[0].state, TaskState::Ready | TaskState::Running);
     let mut next = current;
