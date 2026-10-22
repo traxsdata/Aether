@@ -7,6 +7,16 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+### Security
+
+- Filesystem stress hardening: filenames with ASCII control bytes are rejected
+  before they can inject records into the service listing format, corrupted
+  directory entries with zero/out-of-range inodes, unknown kinds, or duplicate
+  names now fail closed, and file/directory data pointers into reserved
+  metadata blocks are rejected. Added randomized operation and corrupted-image
+  stress tests; remaining cross-link, open-handle replacement, and durability
+  issues are recorded in `docs/reviews/filesystem-stress.md`.
+
 - Unified filesystem user experience from AETHER-UX-002. A new host-tested
   `aether_services::ux` policy defines stable resource identities, ownership
   domains, the full file/folder right set, selected-file versus selected-folder

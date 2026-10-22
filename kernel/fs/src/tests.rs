@@ -364,6 +364,25 @@ fn corrupt_inode_metadata_is_rejected_without_panicking() {
     .expect("write raw inode");
     assert!(matches!(fs.read_inode(6), Err(FsError::Corrupt)));
 
+    // A data pointer into the superblock, inode table, or other reserved
+    // metadata blocks must be rejected rather than exposing metadata as file
+    // contents or allowing a later operation to treat it as data.
+    for block in 0..DATA_START_BLOCK {
+        fs.write_inode(
+            8,
+            Inode {
+                mode: MODE_FILE,
+                size: BLOCK_SIZE as u16,
+                blocks: [block, 0, 0, 0, 0, 0, 0, 0],
+            },
+        )
+        .expect("write raw inode");
+        assert!(
+            matches!(fs.read_inode(8), Err(FsError::Corrupt)),
+            "metadata block {block} was accepted as file data"
+        );
+    }
+
     // A directory size that is not a whole number of entries is corrupt.
     fs.write_inode(
         7,
@@ -375,4 +394,209 @@ fn corrupt_inode_metadata_is_rejected_without_panicking() {
     )
     .expect("write raw inode");
     assert!(matches!(fs.read_inode(7), Err(FsError::Corrupt)));
+}
+
+struct StressRng(u64);
+
+impl StressRng {
+    fn new(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
+
+    fn next(&mut self) -> u64 {
+        // xorshift64*, deterministic and dependency-free.
+        let mut value = self.0;
+        value ^= value >> 12;
+        value ^= value << 25;
+        value ^= value >> 27;
+        self.0 = value;
+        value.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, limit: usize) -> usize {
+        (self.next() as usize) % limit
+    }
+}
+
+#[test]
+fn control_characters_cannot_inject_listing_records() {
+    let mut fs = filesystem();
+    for name in [
+        "line\nbreak",
+        "tab\tname",
+        "nul\0name",
+        "carriage\rreturn",
+        "escape\x1bname",
+    ] {
+        assert_eq!(
+            fs.write_file("/", name, b"x"),
+            Err(FsError::NameTooLong),
+            "{name:?}"
+        );
+        assert_eq!(fs.mkdir("/", name), Err(FsError::NameTooLong), "{name:?}");
+    }
+    // A long-but-valid name still works.
+    fs.write_file("/", "abcdefghijklmnop", b"x")
+        .expect("maximum name length");
+}
+
+#[test]
+fn corrupt_directory_entries_fail_closed() {
+    let mut fs = filesystem();
+    fs.mkdir("/", "dir").expect("dir");
+    fs.write_file("/", "dir/file", b"x").expect("file");
+    let resolved = resolve("/", "dir").expect("resolve dir");
+    let inode_number = fs.lookup(&resolved).expect("dir inode");
+    let inode = fs.read_inode(inode_number).expect("inode");
+    let block = inode.blocks[0];
+    let mut data = [0u8; BLOCK_SIZE];
+    fs.device.read_block(block, &mut data).expect("read");
+
+    // A newline in a stored name would forge a second listing line.
+    let mut injected = data;
+    injected[0] = b'\n';
+    fs.device.write_block(block, &injected).expect("write");
+    let mut out = [0u8; 128];
+    assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
+
+    // A zero inode is not a valid directory entry.
+    let mut zero = data;
+    zero[16] = 0;
+    zero[17] = 0;
+    fs.device.write_block(block, &zero).expect("write");
+    assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
+
+    // An unknown kind byte is not silently treated as a regular file.
+    let mut kind = data;
+    kind[18] = 9;
+    fs.device.write_block(block, &kind).expect("write");
+    assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
+
+    fs.device.write_block(block, &data).expect("restore");
+    assert!(fs.list("/", "dir", &mut out).is_ok());
+}
+
+#[test]
+fn rename_to_the_same_missing_path_reports_not_found() {
+    let mut fs = filesystem();
+    assert_eq!(
+        fs.rename("/apps/demo", "private/missing", "private/missing"),
+        Err(FsError::NotFound)
+    );
+    fs.write_file("/apps/demo", "private/present", b"x")
+        .expect("write");
+    fs.rename("/apps/demo", "private/present", "private/present")
+        .expect("existing self rename is a no-op");
+}
+
+#[test]
+fn randomized_file_operations_never_panic_and_remain_consistent() {
+    let mut fs = filesystem();
+    let mut rng = StressRng::new(0xa37e_5eed);
+    let dirs = ["private", "private/d0", "private/d1", "private/d2"];
+    for dir in dirs {
+        let _ = fs.mkdir("/apps/demo", dir);
+    }
+
+    for _ in 0..4000 {
+        let dir = dirs[rng.below(dirs.len())];
+        let name = std::format!("f{}", rng.below(10));
+        let path = std::format!("{dir}/{name}");
+        match rng.below(8) {
+            0 | 1 => {
+                let length = rng.below(MAX_FILE_BYTES + 1);
+                let mut data = std::vec![0u8; length];
+                for (index, byte) in data.iter_mut().enumerate() {
+                    *byte = (index.wrapping_add(length)) as u8;
+                }
+                let _ = fs.write_file("/apps/demo", &path, &data);
+            }
+            2 => {
+                let _ = fs.copy_file("/apps/demo", &path, &std::format!("{dir}/copy"));
+            }
+            3 => {
+                let _ = fs.rename(
+                    "/apps/demo",
+                    &path,
+                    &std::format!("{dir}/moved{}", rng.below(10)),
+                );
+            }
+            4 => {
+                let _ = fs.remove("/apps/demo", &path);
+            }
+            5 => {
+                let mut out = [0u8; 256];
+                let _ = fs.list("/apps/demo", dir, &mut out);
+            }
+            6 => {
+                let mut buffer = [0u8; MAX_FILE_BYTES];
+                if let Ok(length) = fs.read_file("/apps/demo", &path, &mut buffer) {
+                    assert!(length <= MAX_FILE_BYTES);
+                }
+            }
+            _ => {
+                if let Ok(id) = fs.open("/apps/demo", &path, Access::READ) {
+                    let mut buffer = [0u8; 64];
+                    let _ = fs.read(id, &mut buffer);
+                    let _ = fs.close(id);
+                }
+            }
+        }
+    }
+
+    // The churn may legitimately exhaust the bounded inode or block table.
+    // Removing the known names must release space and leave the service usable.
+    for dir in dirs {
+        for index in 0..10 {
+            let _ = fs.remove("/apps/demo", &std::format!("{dir}/f{index}"));
+            let _ = fs.remove("/apps/demo", &std::format!("{dir}/moved{index}"));
+        }
+        let _ = fs.remove("/apps/demo", &std::format!("{dir}/copy"));
+    }
+    fs.write_file("/apps/demo", "private/final", b"final")
+        .expect("final write");
+    let mut buffer = [0u8; 16];
+    let length = fs
+        .read_file("/apps/demo", "private/final", &mut buffer)
+        .expect("final read");
+    assert_eq!(&buffer[..length], b"final");
+}
+
+#[test]
+fn corrupted_images_never_panic_metadata_paths() {
+    for seed in 1..=160u64 {
+        let mut fs = AetherFs::new(RamDisk::new());
+        fs.format().expect("format");
+        fs.mkdir("/", "home").expect("home");
+        fs.mkdir("/", "apps").expect("apps");
+        fs.write_file("/", "/home/welcome.txt", b"welcome\n")
+            .expect("welcome");
+
+        let mut rng = StressRng::new(seed);
+        // Flip a handful of bytes in the superblock, inode table, bitmap, and
+        // data area. Every operation must return an error or a safe result.
+        for _ in 0..(1 + rng.below(8)) {
+            let block = rng.below(BLOCK_COUNT) as u16;
+            let offset = rng.below(BLOCK_SIZE);
+            let mut data = [0u8; BLOCK_SIZE];
+            fs.device.read_block(block, &mut data).expect("read");
+            data[offset] ^= 1 << rng.below(8);
+            fs.device.write_block(block, &data).expect("write");
+        }
+
+        let mut out = [0u8; 512];
+        let _ = fs.list("/", "/", &mut out);
+        let _ = fs.list("/", "home", &mut out);
+        let _ = fs.read_file("/", "home/welcome.txt", &mut out);
+        let _ = fs.stat("/", "home/welcome.txt");
+        let _ = fs.mkdir("/", "newdir");
+        let _ = fs.write_file("/", "home/new.txt", b"data");
+        let _ = fs.rename("/", "home/new.txt", "home/other.txt");
+        let _ = fs.remove("/", "home/new.txt");
+        if let Ok(id) = fs.open("/", "home/welcome.txt", Access::READ) {
+            let mut small = [0u8; 32];
+            let _ = fs.read(id, &mut small);
+            let _ = fs.close(id);
+        }
+    }
 }

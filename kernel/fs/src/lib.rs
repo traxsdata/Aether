@@ -252,7 +252,7 @@ impl Inode {
                 }
                 for (index, block) in self.blocks.iter().enumerate() {
                     if index < blocks {
-                        if *block == 0 || usize::from(*block) >= BLOCK_COUNT {
+                        if *block < DATA_START_BLOCK || usize::from(*block) >= BLOCK_COUNT {
                             return Err(FsError::Corrupt);
                         }
                     } else if *block != 0 {
@@ -269,7 +269,10 @@ impl Inode {
                 if self.size != 0 && self.blocks[0] == 0 {
                     return Err(FsError::Corrupt);
                 }
-                if self.blocks[0] != 0 && usize::from(self.blocks[0]) >= BLOCK_COUNT {
+                if self.blocks[0] != 0
+                    && (self.blocks[0] < DATA_START_BLOCK
+                        || usize::from(self.blocks[0]) >= BLOCK_COUNT)
+                {
                     return Err(FsError::Corrupt);
                 }
                 if self.blocks[1..].iter().any(|block| *block != 0) {
@@ -641,6 +644,9 @@ impl<D: BlockDevice> AetherFs<D> {
         let source = resolve(scope, from)?;
         let destination = resolve(scope, to)?;
         if source.as_str() == destination.as_str() {
+            // Renaming a path to itself is a no-op only when the source
+            // actually exists; otherwise it must report NotFound.
+            self.lookup(&source)?;
             return Ok(());
         }
         let (source_parent_path, source_name) = source.parent_and_name()?;
@@ -966,7 +972,7 @@ impl<D: BlockDevice> AetherFs<D> {
     }
 
     fn dir_entries(&mut self, inode: Inode) -> Result<[Option<DirEntry>; MAX_ENTRIES], FsError> {
-        let mut entries = [None; MAX_ENTRIES];
+        let mut entries: [Option<DirEntry>; MAX_ENTRIES] = [None; MAX_ENTRIES];
         if !inode.is_dir() {
             return Err(FsError::NotDirectory);
         }
@@ -986,12 +992,37 @@ impl<D: BlockDevice> AetherFs<D> {
                 name.copy_from_slice(&data[start..start + MAX_NAME]);
                 let name_len = name.iter().position(|byte| *byte == 0).unwrap_or(MAX_NAME);
                 let inode_number = u16::from_le_bytes([data[start + 16], data[start + 17]]);
+                let kind = data[start + 18];
+                // Directory entries are untrusted on-disk bytes. Empty or
+                // control-bearing names would break the `name<TAB>kind<TAB>size`
+                // listing protocol, and a zero/out-of-range inode would name
+                // metadata that does not exist.
+                if name_len == 0
+                    || name[..name_len].iter().any(|byte| byte.is_ascii_control())
+                    || inode_number == 0
+                    || usize::from(inode_number) >= MAX_INODES
+                    || !matches!(kind, 1 | 2)
+                {
+                    return Err(FsError::Corrupt);
+                }
                 *entry = Some(DirEntry {
                     name,
                     name_len: name_len as u8,
                     inode: inode_number,
-                    is_dir: data[start + 18] == 2,
+                    is_dir: kind == 2,
                 });
+            }
+            for index in 1..count {
+                let Some(current) = entries[index] else {
+                    continue;
+                };
+                if entries[..index].iter().flatten().any(|existing| {
+                    existing.name_len == current.name_len
+                        && existing.name[..usize::from(existing.name_len)]
+                            == current.name[..usize::from(current.name_len)]
+                }) {
+                    return Err(FsError::Corrupt);
+                }
             }
         }
         Ok(entries)
@@ -1126,6 +1157,13 @@ impl FixedPath {
 
     fn push(&mut self, component: &str) -> Result<(), FsError> {
         if component.len() > MAX_NAME {
+            return Err(FsError::NameTooLong);
+        }
+        // A directory entry is a fixed-width byte field. Embedded NULs would
+        // truncate the displayed name, and tabs/newlines would inject extra
+        // records into the service listing protocol. Reject control bytes at
+        // the API boundary instead of trusting every caller to sanitize them.
+        if component.is_empty() || component.bytes().any(|byte| byte.is_ascii_control()) {
             return Err(FsError::NameTooLong);
         }
         let needed = self.len + component.len() + usize::from(self.len != 0);
