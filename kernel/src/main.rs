@@ -185,6 +185,15 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         parking
     );
     // SAFETY: Boot is single-threaded, interrupts are disabled, and no user
+    // task has run yet.
+    let protection = unsafe { arch::x86_64::cpu::enable_supervisor_protection() };
+    arch::x86_64::usercopy::set_smap(protection.smap);
+    serial_line!(
+        "boot: cpu: SMEP {}, SMAP {}",
+        if protection.smep { "on" } else { "unsupported" },
+        if protection.smap { "on" } else { "unsupported" }
+    );
+    // SAFETY: Boot is single-threaded, interrupts are disabled, and no user
     // task has run vector code yet.
     let xsave = unsafe { arch::x86_64::cpu::enable_extended_state() };
     scheduler::init_fpu(xsave);
@@ -372,6 +381,29 @@ fn usercopy_selftest() {
         };
         boot_failure("user-copy self-test: kernel-side fault was recovered");
     }
+
+    #[cfg(feature = "smap-fault-selftest")]
+    smap_selftest(pml4, source);
+}
+
+/// Maps a real user page and reads it directly from ring 0. With SMAP on,
+/// the read must fault and halt; reaching the end means SMAP is not in force.
+#[cfg(feature = "smap-fault-selftest")]
+fn smap_selftest(pml4: aether_memory::frame::PhysFrame, address: u64) {
+    use aether_memory::paging::PageFlags;
+    let mapped = memory::with_frame_allocator(|frames| {
+        let frame = frames.allocate()?;
+        memory::paging::map_user_page(pml4, frames, address, frame, PageFlags::WRITABLE).ok()
+    })
+    .flatten();
+    if mapped.is_none() {
+        boot_failure("SMAP self-test: could not map the probe page");
+    }
+    serial_line!("boot: SMAP self-test: reading a user page directly");
+    // SAFETY: Deliberately reads a mapped user page outside the copy routine;
+    // with SMAP on this faults and the handler halts.
+    let _ = unsafe { core::ptr::read_volatile(address as *const u8) };
+    boot_failure("SMAP self-test: direct user read was allowed");
 }
 
 fn boot_failure(reason: &str) -> ! {

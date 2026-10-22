@@ -491,6 +491,13 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Fixed
 
+- A fault on user memory during a syscall no longer halts the machine. The
+  kernel reads and writes user memory only through one copy routine whose
+  `rep movsb` is listed in a new `.ex_table`; a page fault there on a
+  user-window address returns `EFAULT`. The slice-returning `user_bytes` API
+  is gone, and SMEP and SMAP are enabled when the CPU reports them, with
+  `stac`/`clac` around the copy. New checks: `AETHER_USERCOPY_FIXUP_OK` at
+  boot, `make usercopy-fault-test`, and `make smap-fault-test`.
 - ISO pointer assertions wait for the guest's workspace slide to finish instead
   of treating logical workspace selection as completed on-screen movement.
 - The release-tamper harness reads the first checksum record only, ensuring a

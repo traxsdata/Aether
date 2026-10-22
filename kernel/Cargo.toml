@@ -29,6 +29,8 @@ aether-update = { path = "../updates" }
 fault-selftest = []
 # Boot with a user-copy fault on a kernel address, which must still halt.
 usercopy-fault-selftest = []
+# Boot with a direct ring-0 read of a user page, which SMAP must stop.
+smap-fault-selftest = []
 # Boot with a rollback self-test that removes the current image marker and
 # re-selects, exercising the lost-image branch on every test boot.
 recovery-rollback-selftest = []

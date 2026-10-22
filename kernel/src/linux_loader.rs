@@ -11,13 +11,13 @@
 //! and supplies the interpreter bytes; the loader validates that the main image
 //! names an interpreter and maps both images.
 
+use crate::arch::x86_64::usercopy;
 use crate::memory::paging;
 use aether_abi::user::{USER_BASE, USER_LIMIT, USER_STACK_TOP};
 use aether_linux_elf::{Image, ParseError, Segment};
 use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, PhysFrame};
 use aether_memory::paging::PageFlags;
-use core::ptr;
 
 /// Load bias for the main position-independent image.
 pub const MAIN_BASE: u64 = USER_BASE + 80 * 1024 * 1024;
@@ -222,10 +222,12 @@ fn copy_image(image: &Image<'_>, bias: u64) -> Result<(), LoadError> {
             .get(source_start..source_end)
             .ok_or(LoadError::Paging)?;
         // SAFETY: The destination range was mapped writable above and lies in
-        // the fresh address space. Interrupts are disabled during boot and the
-        // source is a validated slice of the embedded image.
-        unsafe {
-            ptr::copy_nonoverlapping(source.as_ptr(), start as *mut u8, source.len());
+        // the user window of the fresh, active address space; the source is a
+        // validated slice of the embedded image. The user-copy routine opens
+        // SMAP access for the copy.
+        let left = unsafe { usercopy::copy_raw(start as *mut u8, source.as_ptr(), source.len()) };
+        if left != 0 {
+            return Err(LoadError::Paging);
         }
     }
     Ok(())
@@ -361,10 +363,12 @@ fn build_stack(
     // Strings live above the vector area, so copy through whichever region
     // ends last rather than just through the auxv table.
     let copied = offset.max(string_cursor);
-    // SAFETY: The stack page was mapped writable in the active address space;
-    // all strings and vectors are within the copied prefix.
-    unsafe {
-        ptr::copy_nonoverlapping(page.as_ptr(), STACK_PAGE_BASE as *mut u8, copied);
+    // SAFETY: The stack page was mapped writable in the user window of the
+    // active address space; all strings and vectors are within the copied
+    // prefix. The user-copy routine opens SMAP access for the copy.
+    let left = unsafe { usercopy::copy_raw(STACK_PAGE_BASE as *mut u8, page.as_ptr(), copied) };
+    if left != 0 {
+        return Err(LoadError::Paging);
     }
     Ok(STACK_PAGE_BASE + VECTOR_BASE as u64)
 }
