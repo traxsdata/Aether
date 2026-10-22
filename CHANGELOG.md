@@ -511,6 +511,12 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Fixed
 
+- `make gate4-gui-portal-test` passes again. It waited for the quota and
+  Gate 4 display markers, which the fixture compiles out of the GUI build
+  (`.ifndef AETHER_GATE4_GUI`), so it always timed out after its portal,
+  save, and revoke checks had passed. Those five markers are now skipped
+  for that target only.
+
 - The Gate 3 and Gate 4 runtime builds no longer need squashfs-tools 4.7:
   they pin image timestamps with `-mkfs-time 0 -all-time 0` instead of
   `-repro-time 0`, which 4.6 (Ubuntu 24.04) rejects as an invalid option.
