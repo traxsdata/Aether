@@ -86,7 +86,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -401,6 +401,14 @@ vmware-vmx:
 fault-test:
 	$(MAKE) KERNEL_FEATURES=fault-selftest image
 	AETHER_EXPECT_FAULT=1 $(PYTHON) tools/test-boot.py
+
+# A user-copy fault on a kernel-side address must halt, not be recovered as a
+# user fault. The normal boot already proves the user-side fixup.
+usercopy-fault-test:
+	$(MAKE) KERNEL_FEATURES=usercopy-fault-selftest image
+	AETHER_EXPECT_BOOT_FAILURE=1 \
+		AETHER_EXPECT_FAILURE_TEXT='AETHER_BOOT_FAILED reason=exception vector=14' \
+		$(PYTHON) tools/test-boot.py
 
 # Boot with the rollback self-test feature and require its own marker on top
 # of the standard set, so the lost-image branch is a boot gate.

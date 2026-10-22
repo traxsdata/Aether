@@ -305,6 +305,7 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         heap_bytes / (1024 * 1024)
     );
     serial_line!("AETHER_MM_OK");
+    usercopy_selftest();
 
     #[cfg(feature = "fault-selftest")]
     {
@@ -316,6 +317,46 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     serial_line!("boot: x86-64 execution environment ready");
     scheduler::run()
+}
+
+/// Proves the user-copy fixup: a copy from an unmapped user-window page must
+/// come back short instead of halting. With `usercopy-fault-selftest`, a copy
+/// whose kernel side is unmapped must still halt, because only user-side
+/// faults are recoverable.
+fn usercopy_selftest() {
+    let Some(pml4) = memory::paging::current_pml4() else {
+        boot_failure("user-copy self-test: no active page table");
+    };
+    let source = aether_abi::user::USER_BASE;
+    if memory::paging::user_leaf_present(pml4, source) {
+        boot_failure("user-copy self-test: probe page is mapped");
+    }
+    let mut buffer = [0u8; 16];
+    // SAFETY: The source is in the user window and unmapped, so the copy
+    // faults and the exception table resumes it; `buffer` is a kernel buffer.
+    let left = unsafe {
+        arch::x86_64::usercopy::copy_raw(buffer.as_mut_ptr(), source as *const u8, buffer.len())
+    };
+    if left != buffer.len() {
+        boot_failure("user-copy self-test: unmapped source was copied");
+    }
+    serial_line!("AETHER_USERCOPY_FIXUP_OK");
+
+    #[cfg(feature = "usercopy-fault-selftest")]
+    {
+        // A lower-half address outside the user window with no PML4 entry.
+        let destination: u64 = 0x0000_7f00_0000_0000;
+        if memory::paging::pml4_slot_present(pml4, destination) {
+            boot_failure("user-copy self-test: kernel probe slot is mapped");
+        }
+        serial_line!("boot: user-copy self-test: faulting on a kernel address");
+        // SAFETY: Deliberately violates `copy_raw`'s contract with an
+        // unmapped kernel-side destination; the handler must halt.
+        let _ = unsafe {
+            arch::x86_64::usercopy::copy_raw(destination as *mut u8, buffer.as_ptr(), buffer.len())
+        };
+        boot_failure("user-copy self-test: kernel-side fault was recovered");
+    }
 }
 
 fn boot_failure(reason: &str) -> ! {

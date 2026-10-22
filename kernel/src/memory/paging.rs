@@ -949,6 +949,16 @@ pub fn read_user_bytes(pml4: PhysFrame, address: u64, bytes: &mut [u8]) -> bool 
     true
 }
 
+/// Returns `true` if the PML4 entry covering `address` is present.
+#[cfg(feature = "usercopy-fault-selftest")]
+#[must_use]
+pub fn pml4_slot_present(pml4: PhysFrame, address: u64) -> bool {
+    let [pml4_index, ..] = aether_memory::paging::indices(address);
+    // SAFETY: The PML4 is the active table and the kernel identity map covers
+    // every allocated page-table frame.
+    unsafe { (*table_ptr(pml4)).entry(pml4_index).is_present() }
+}
+
 /// Returns `true` if `address` has a leaf of the user mapping, including a
 /// `PROT_NONE` guard page.
 #[must_use]
