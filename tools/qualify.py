@@ -41,6 +41,7 @@ STEPS = [
     ("iso-boot", ["make", "iso-test"]),
     ("vmware-definition", ["make", "vmware-vmx"]),
     ("shell", ["make", "shell-test"]),
+    ("terminal", ["make", "terminal-test"]),
     ("fault-path", ["make", "fault-test"]),
     ("rollback-path", ["make", "rollback-test"]),
     ("negative-boot", ["make", "negative-test"]),

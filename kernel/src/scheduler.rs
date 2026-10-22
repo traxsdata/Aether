@@ -4194,6 +4194,9 @@ fn retire_terminal_task(slot: usize, status: i64, faulted: bool) {
     task.exit_status = status;
     let _ = crate::fs::close_task_files(&mut task.caps);
     let _ = crate::ipc::close_task_endpoints(&mut task.caps, slot as u16);
+    // The slot is reused by the next program, so its descriptor table must
+    // not outlive this one.
+    clear_file_state(slot);
     let io = task.io;
     task.io = crate::terminal::TaskIo::NONE;
     let pml4 = task.pml4;
