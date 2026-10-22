@@ -37,10 +37,8 @@ static UNTRUSTED_PACKAGE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../tests/fixtures/packages/untrusted.aether"
 ));
-static TRUSTED_KEY: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tests/fixtures/keys/test.pub"
-));
+/// The kernel's trust root, chosen at build time (see `kernel/build.rs`).
+static TRUSTED_KEY: &str = env!("AETHER_TRUST_PUBLIC_KEY");
 
 static TRUST: Global<[TrustedPublisher<'static>; 1]> =
     Global(UnsafeCell::new([TrustedPublisher {
@@ -78,6 +76,10 @@ pub fn init() -> Result<(), &'static str> {
     // SAFETY: Interrupts are masked and this runs once during boot. The trust
     // entry is static storage owned by this module.
     let trust = unsafe { &mut *TRUST.0.get() };
+    if env!("AETHER_TRUST_IS_TEST_KEY") == "1" {
+        // The checked-in test seed is public: anyone can sign for this key.
+        serial_line!("AETHER_TRUST_WARNING root=test-key release=unsafe");
+    }
     if from_hex(TRUSTED_KEY.trim().as_bytes(), &mut trust[0].key) != Some(32) {
         return Err("embedded publisher key is not 32-byte hex");
     }

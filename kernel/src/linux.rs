@@ -47,7 +47,8 @@ const APPIMAGE_ARGS: &str = match option_env!("AETHER_LINUX_APPIMAGE_ARGS") {
 /// Maximum configured arguments; the loader allows 16 argv entries including
 /// the program path that this list is prefixed with.
 pub const MAX_APPIMAGE_ARGUMENTS: usize = 15;
-const TRUST_PUBLIC_KEY: &str = include_str!("../../tests/fixtures/keys/test.pub");
+/// The kernel's trust root, chosen at build time (see `kernel/build.rs`).
+const TRUST_PUBLIC_KEY: &str = env!("AETHER_TRUST_PUBLIC_KEY");
 const TRUST_PUBLISHER: &str = "Aether Test Publisher";
 /// Build-time pin of the runtime manifest's SHA-256.
 const RUNTIME_PIN: &str = env!("AETHER_LINUX_RUNTIME_PIN");

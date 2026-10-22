@@ -81,10 +81,8 @@ static FORGED_IMAGE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../tests/fixtures/updates/images/image-0.3.0.bin"
 ));
-static TRUSTED_KEY: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tests/fixtures/keys/test.pub"
-));
+/// The kernel's trust root, chosen at build time (see `kernel/build.rs`).
+static TRUSTED_KEY: &str = env!("AETHER_TRUST_PUBLIC_KEY");
 
 /// Update status shown by the shell and security view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

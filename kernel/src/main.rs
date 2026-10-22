@@ -27,6 +27,7 @@ mod memfd;
 mod memory;
 mod packaging;
 mod portal;
+mod random;
 mod recovery;
 mod runtime;
 mod scheduler;

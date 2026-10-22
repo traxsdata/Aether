@@ -8,7 +8,13 @@
 # Required:
 #   AETHER_SIGNING_KEY   path to a 32-byte (64 hex character) Ed25519 seed
 #   AETHER_PUBLISHER     publisher display name
+#   AETHER_TRUST_PUBLIC_KEY_FILE
+#                        hex public key the kernel trusts for packages,
+#                        updates, and Linux runtimes; it must not be the
+#                        checked-in test key
 # Optional:
+#   AETHER_ALLOW_TEST_TRUST  set to 1 only for demos: lets the kernel keep the
+#                            test trust root, whose private seed is public
 #   AETHER_VERSION           default 0.2.0
 #   AETHER_RELEASE_CHANNEL   default developer
 #   AETHER_RELEASE_COUNTER   default the git commit count
@@ -28,6 +34,28 @@ if [ ! -f "$AETHER_SIGNING_KEY" ]; then
 fi
 if [ -z "${AETHER_PUBLISHER:-}" ]; then
     echo "error: set AETHER_PUBLISHER to the publisher display name" >&2
+    exit 1
+fi
+
+# The kernel embeds its trust root at build time. With the default (the
+# checked-in test key) anyone can sign packages, updates, and runtimes the
+# released kernel accepts, so a real release must name its own key.
+TEST_KEY=$(tr -d ' \n' < tests/fixtures/keys/test.pub | tr 'A-F' 'a-f')
+TRUST_KEY=$TEST_KEY
+if [ -n "${AETHER_TRUST_PUBLIC_KEY_FILE:-}" ]; then
+    if [ ! -f "$AETHER_TRUST_PUBLIC_KEY_FILE" ]; then
+        echo "error: trust key file not found: $AETHER_TRUST_PUBLIC_KEY_FILE" >&2
+        exit 1
+    fi
+    TRUST_KEY=$(tr -d ' \n' < "$AETHER_TRUST_PUBLIC_KEY_FILE" | tr 'A-F' 'a-f')
+    # Cargo runs the kernel build script from kernel/, so pass an absolute path.
+    AETHER_TRUST_PUBLIC_KEY_FILE=$(cd "$(dirname "$AETHER_TRUST_PUBLIC_KEY_FILE")" && pwd)/$(basename "$AETHER_TRUST_PUBLIC_KEY_FILE")
+    export AETHER_TRUST_PUBLIC_KEY_FILE
+fi
+if [ "$TRUST_KEY" = "$TEST_KEY" ] && [ "${AETHER_ALLOW_TEST_TRUST:-0}" != "1" ]; then
+    echo "error: the kernel would trust the checked-in test key, whose seed is public" >&2
+    echo "       set AETHER_TRUST_PUBLIC_KEY_FILE to the release public key" >&2
+    echo "       (AETHER_ALLOW_TEST_TRUST=1 is for demos only)" >&2
     exit 1
 fi
 

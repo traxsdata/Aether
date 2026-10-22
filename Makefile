@@ -502,6 +502,7 @@ release-demo:
 	rm -rf $(BUILD)/release-demo
 	AETHER_SIGNING_KEY=tests/fixtures/keys/test.seed \
 	AETHER_PUBLISHER="Aether Test Publisher" \
+	AETHER_ALLOW_TEST_TRUST=1 \
 	AETHER_VERSION=0.2.0 \
 	AETHER_RELEASE_DIR=$(abspath $(BUILD)/release-demo) \
 		sh tools/release.sh

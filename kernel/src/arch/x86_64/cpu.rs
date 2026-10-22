@@ -22,6 +22,8 @@ const EFER_SCE: u64 = 1 << 0;
 const IA32_STAR: u32 = 0xc000_0081;
 const IA32_LSTAR: u32 = 0xc000_0082;
 const IA32_FMASK: u32 = 0xc000_0084;
+/// RFLAGS bits cleared on `syscall` entry: TF, IF, DF, IOPL, NT, and AC.
+const SYSCALL_FLAG_MASK: u64 = (1 << 8) | (1 << 9) | (1 << 10) | (3 << 12) | (1 << 14) | (1 << 18);
 const IA32_FS_BASE: u32 = 0xc000_0100;
 
 const CR0_WP: u64 = 1 << 16;
@@ -53,8 +55,11 @@ pub unsafe fn enable_syscall(entry: u64, kernel_code: u16, user_code: u16) {
     unsafe {
         write_msr(IA32_STAR, star);
         write_msr(IA32_LSTAR, entry);
-        // Clear IF on entry; the assembly stub runs with interrupts masked.
-        write_msr(IA32_FMASK, 1 << 9);
+        // Clear IF so the stub runs with interrupts masked, and clear every
+        // flag a guest could use against ring 0: TF (a #DB before the stack
+        // switch), DF (backwards string copies), IOPL, NT (an `iretq` fault),
+        // and AC. The user values return through R11 on `iretq`.
+        write_msr(IA32_FMASK, SYSCALL_FLAG_MASK);
         write_msr(IA32_EFER, read_msr(IA32_EFER) | EFER_SCE);
     }
 }

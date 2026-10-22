@@ -2005,6 +2005,10 @@ after_thread:
     test %rax, %rax
     jne fail_siginfo
     movl $3, 0xe0(%r12)
+    pushfq
+    pop %rax
+    test $0x7000, %rax          /* IOPL and NT must not be restorable */
+    jne fail_siginfo
     cmpl $1, 0x48(%r12)
     jne fail_siginfo
     cmpq $10, 0x20(%r12)
@@ -4886,6 +4890,9 @@ siginfo_handler:
     mov 24(%rdx), %eax          /* ucontext.uc_stack.ss_flags */
     mov %rax, 0x60(%r12)
     incl 0x48(%r12)
+    /* Ask for IOPL=3 and NT in the restored flags. rt_sigreturn must drop
+     * both: only the user-changeable flag bits survive a signal return. */
+    orq $0x7000, 176(%rdx)      /* ucontext.uc_mcontext.eflags */
     movq $0xdeadbeef, %rbx
     movq $0xdeadbeef, %r13
     movq $0xdeadbeef, %r14
