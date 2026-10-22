@@ -86,9 +86,9 @@ PACKAGED_SHA=$(sha256sum "$ROOT/etc/aether-runtime.manifest" | cut -d' ' -f1)
 printf '%s\n' "$PACKAGED_SHA" > "$PIN"
 cp "$ROOT/etc/aether-runtime.manifest" "$MANIFEST"
 
-# -repro-time makes the image itself deterministic for a fixed host rootfs.
+# Fixed timestamps make the image itself deterministic for a fixed host rootfs.
 mksquashfs "$ROOT" "$OUT" \
-    -comp zstd -noappend -all-root -no-xattrs -no-progress -repro-time 0 >/dev/null
+    -comp zstd -noappend -all-root -no-xattrs -no-progress -mkfs-time 0 -all-time 0 >/dev/null
 
 cargo run -q -p aether-appimage --bin appimage-manifest -- \
     sign "$SEED" "$OUT" org.aether.linux-runtime "$GLIBC" \

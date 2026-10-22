@@ -26,6 +26,7 @@ The first Cargo invocation downloads Rust 1.99.1 and the
 make unittest      # Rust host tests (including input/browser/actual renderer)
                    # and Python build-tooling tests
 make test          # build the image and boot it under QEMU/OVMF
+make large-apps-test # the same boot with Linux-sized task/descriptor/VMA limits
 make glibc-test    # opt-in: package host glibc + hello and boot through ld.so
 make gate3-test    # stage the pinned GridCraft AppImage and run its headless CLI
 make photocraft-test # stage the pinned PhotoCraft AppImage and run its headless CLI

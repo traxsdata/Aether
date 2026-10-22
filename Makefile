@@ -106,7 +106,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -143,10 +143,11 @@ user:
 	cp target/$(KERNEL_TARGET)/release/aether-linuxd $(LINUXD_ELF)
 
 FIXTURE_GATE4_GUI := $(if $(findstring gate4-gui-test,$(KERNEL_FEATURES)),--defsym AETHER_GATE4_GUI=1)
+FIXTURE_LARGE_APPS := $(if $(findstring large-apps,$(KERNEL_FEATURES)),--defsym AETHER_LARGE_APPS=1)
 
 linux-fixture:
 	@mkdir -p $(BUILD)
-	$(AS) --64 $(FIXTURE_GATE4_GUI) tests/fixtures/linux/hello.S -o $(BUILD)/linux-hello.o
+	$(AS) --64 $(FIXTURE_GATE4_GUI) $(FIXTURE_LARGE_APPS) tests/fixtures/linux/hello.S -o $(BUILD)/linux-hello.o
 	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
 		$(BUILD)/linux-hello.o -o $(LINUX_ELF)
 	$(AS) --64 tests/fixtures/linux/dynamic.S -o $(BUILD)/linux-dynamic.o
@@ -489,6 +490,8 @@ gate4-test: gate4-runtime
 # the real workbook grant. This exercises the GUI feature without the Wayland
 # display path. The windowed GridCraft target consumes the same feature and
 # passes GATE4_GUI_NAMESPACE as argv.
+# The fixture compiles its display and quota tests out of this build
+# (`.ifndef AETHER_GATE4_GUI`), so their markers are skipped.
 gate4-gui-portal-test:
 	$(MAKE) linux-fixture
 	sh tools/build-appimage-fixture.sh $(GATE4_GUI_APPIMAGE) $(GATE4_GUI_APPIMAGE_RECORD) \
@@ -498,7 +501,7 @@ gate4-gui-portal-test:
 		LINUX_APPIMAGE_ARGS='$(GATE4_GUI_NAMESPACE)' \
 		STAGED_APPIMAGE=$(GATE4_GUI_APPIMAGE) \
 		STAGED_APPIMAGE_RECORD=$(GATE4_GUI_APPIMAGE_RECORD) image
-	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK,AETHER_LINUX_QUOTA_OK,AETHER_GATE4_DISPLAY_CREATE_OK,AETHER_GATE4_PRESENT_OK,AETHER_GATE4_INPUT_OK,AETHER_GATE4_GUEST_DISPLAY_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GATE4_PORTAL_OK,AETHER_GATE4_SAVE_OK,AETHER_GATE4_REVOKE_OK \
 	AETHER_REQUIRE_TEXT='portal: seeded Gate 4 GUI workbook grant|id=5b428ae53860eb72|AETHER_GATE4_PORTAL_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_bytes=4089|AETHER_GATE4_SAVE_OK file=/home/gate4-gui.xlsx bytes=4089 staging=sctmp+rename source=kernel|AETHER_GATE4_REVOKE_OK path=/run/aether/portal/5b428ae53860eb72/gate4-gui.xlsx read_denials=1 write_denials=1' \
 	$(PYTHON) tools/test-boot.py
@@ -523,6 +526,13 @@ iso-test: iso
 # Generate a VMware Workstation VM definition for the newest ISO.
 vmware-vmx:
 	sh tools/make-vmware-vmx.sh
+
+# The full boot with Linux-sized limits for large applications: the quota
+# fixture must still reach EMFILE at 1,024 descriptors and ENOMEM at 65,530
+# mapping areas.
+large-apps-test:
+	$(MAKE) KERNEL_FEATURES=large-apps image
+	$(PYTHON) tools/test-boot.py
 
 fault-test:
 	$(MAKE) KERNEL_FEATURES=fault-selftest image

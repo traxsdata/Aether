@@ -1241,11 +1241,13 @@ fn paint_window(
     );
 
     // Layered shadow: darker nearest the frame, softer further away. Omit it
-    // during a drag/resize gesture or a Spaces slide: the two translucent
-    // layers are a third of a window's cost, and the window is moving too
-    // fast to read the shadow. The gesture or slide end damages the whole
-    // frame, so the shadow returns.
-    if !wm.is_dragging() && !wm.transition().active {
+    // for the window under a drag/resize gesture and during a Spaces slide:
+    // the two translucent layers are a third of a window's cost, and the
+    // window is moving too fast to read the shadow. The gesture or slide end
+    // damages the whole frame, so the shadow returns. Windows the gesture
+    // only uncovers keep theirs, since nothing repaints them afterwards.
+    let moving = wm.dragging_id() == Some(window.id);
+    if !moving && !wm.transition().active {
         for (offset, spread, strength) in [(0, 10, 78u8), (4, 20, 34)] {
             graphics::blend_round_rect_around(
                 frame.x - spread / 2,
@@ -1265,7 +1267,7 @@ fn paint_window(
     } else {
         palette.window_inactive
     };
-    if wm.is_dragging() {
+    if moving {
         // An opaque base avoids a full-window alpha blend on every drag step.
         graphics::fill_round_rect(frame.x, frame.y, frame.width, frame.height, radius, body);
     } else {
