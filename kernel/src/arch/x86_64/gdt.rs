@@ -56,6 +56,18 @@ impl TaskStateSegment {
 
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
+/// IST slot (1-based, as the IDT encodes it) for NMI, #DF, and #MC.
+pub const EMERGENCY_IST: u8 = 1;
+
+const EMERGENCY_STACK_SIZE: usize = 16 * 1024;
+
+#[repr(align(16))]
+#[allow(dead_code)]
+struct EmergencyStack([u8; EMERGENCY_STACK_SIZE]);
+
+/// Dedicated stack for exceptions that must not trust the interrupted RSP.
+static mut EMERGENCY_STACK: EmergencyStack = EmergencyStack([0; EMERGENCY_STACK_SIZE]);
+
 /// Null, ring-0 code/data, ring-3 data/code, and a TSS descriptor.
 const GDT: [u64; 7] = [
     0,
@@ -92,6 +104,15 @@ fn tss_descriptor(base: u64, limit: u16) -> (u64, u64) {
 pub fn init() {
     // SAFETY: Boot is single-threaded, interrupts are disabled, and this is the
     // only code that mutates the static GDT/TSS before the scheduler starts.
+    // SAFETY: Boot-time single writer; the TSS is not loaded yet.
+    unsafe {
+        let top = core::ptr::addr_of!(EMERGENCY_STACK) as u64 + EMERGENCY_STACK_SIZE as u64;
+        let tss = core::ptr::addr_of_mut!(TSS);
+        core::ptr::addr_of_mut!((*tss).ist)
+            .cast::<u64>()
+            .add(usize::from(EMERGENCY_IST) - 1)
+            .write_unaligned(top);
+    }
     let (tss_low, tss_high) = tss_descriptor(core::ptr::addr_of!(TSS) as u64, 103);
     let mut gdt = GDT;
     gdt[5] = tss_low;

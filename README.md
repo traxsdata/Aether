@@ -392,6 +392,11 @@ make clean
 
 `make release` requires `AETHER_SIGNING_KEY` (a 32-byte hex seed file outside the
 repository) and `AETHER_PUBLISHER`; it refuses to produce an unsigned bundle.
+It also requires `AETHER_TRUST_PUBLIC_KEY_FILE`, the public key the kernel embeds
+as its trust root for packages, updates, and Linux runtimes, and refuses when
+that would be the checked-in test key. The kernel's boot self-tests use
+test-signed fixtures, so a kernel built with a release key needs fixtures signed
+by that key (follow-up work).
 `make release-demo` uses the checked-in test key and proves the mechanism, not a
 release trust root. `make qualify` runs every gate and records the commit,
 toolchain, emulator, step results, boot markers, and artifact digests.

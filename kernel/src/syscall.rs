@@ -2286,7 +2286,7 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
             linux_result(frame, result)
         }
         5 => {
-            // FUTEX_WAKE_OP: conditionally wake `value` waiters at `uaddr` and
+            // FUTEX_WAKE_OP: wake `value` waiters at `uaddr` and conditionally
             // `arg4` waiters at `uaddr2`, per the packed algorithm in `arg5`.
             // `arg5` encodes command|compare|operand|comparand exactly as the
             // Linux `FUTEX_OP` macro does: 3-bit command, 4-bit comparison,
@@ -2328,11 +2328,9 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
             if !store_ok {
                 return linux_result(frame, LINUX_EFAULT);
             }
-            let first_woken = if matched {
-                scheduler::linux_futex_wake(uaddr, u64::from(value))
-            } else {
-                0
-            };
+            // Linux always wakes `uaddr`; only the `uaddr2` wake depends on
+            // the comparison.
+            let first_woken = scheduler::linux_futex_wake(uaddr, u64::from(value));
             let second_woken = if matched {
                 scheduler::linux_futex_wake(uaddr2, arg4)
             } else {
@@ -2566,17 +2564,8 @@ fn linux_getrandom(pml4: PhysFrame, pointer: u64, length: u64) -> i64 {
     if length as usize > MAX_SYSCALL_IO {
         return LINUX_EINVAL;
     }
-    let mut state = scheduler::ticks()
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .wrapping_add(scheduler::current_task() as u64)
-        | 1;
     let mut buffer = [0u8; MAX_SYSCALL_IO];
-    for byte in buffer.iter_mut().take(length as usize) {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        *byte = state as u8;
-    }
+    crate::random::fill(&mut buffer[..length as usize]);
     write_user_bytes(pml4, pointer, &buffer[..length as usize])
         .map_or(LINUX_EFAULT, |()| length as i64)
 }

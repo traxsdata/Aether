@@ -152,7 +152,9 @@ sh tests/fixtures/build.sh   # rebuild packages, manifests, and manifests' diges
 ```
 
 `keys/test.seed` and `keys/untrusted.seed` are test keys. The kernel trust store
-embeds `keys/test.pub`; regenerating the seeds regenerates the public key, so the
+embeds `keys/test.pub` unless `AETHER_TRUST_PUBLIC_KEY_FILE` names another key
+at build time, and boots print `AETHER_TRUST_WARNING` while it is the test key;
+regenerating the seeds regenerates the public key, so the
 two stay consistent. Never sign a release with a fixture key. See
 [`tests/fixtures/README.md`](../tests/fixtures/README.md).
 

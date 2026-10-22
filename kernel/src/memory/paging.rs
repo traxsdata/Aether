@@ -867,6 +867,19 @@ pub fn read_user_bytes(pml4: PhysFrame, address: u64, bytes: &mut [u8]) -> bool 
     true
 }
 
+/// Returns the physical address behind a present user mapping.
+#[must_use]
+pub fn user_physical_address(pml4: PhysFrame, address: u64) -> Option<u64> {
+    if !(USER_BASE..USER_LIMIT).contains(&address) {
+        return None;
+    }
+    let entry = user_leaf_entry(pml4, address)?;
+    if !entry.is_present() || !entry.flags().contains(PageFlags::USER) {
+        return None;
+    }
+    Some(entry.address() + (address & (PAGE_SIZE - 1)))
+}
+
 fn user_leaf_entry(pml4: PhysFrame, address: u64) -> Option<PageTableEntry> {
     let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
     // SAFETY: The PML4 is the active or a task-owned table and the kernel

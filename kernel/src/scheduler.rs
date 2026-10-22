@@ -2346,15 +2346,33 @@ pub fn linux_set_tid_address(pointer: u64) -> i64 {
     current as i64
 }
 
+/// Returns the wait-queue key for a futex word in the current address space.
+///
+/// Waiters are keyed by the word's physical address, not its virtual one. A
+/// virtual key would let one application wake or requeue another
+/// application's waiters that happen to use the same address. Threads share
+/// a page table and so a key; `MAP_SHARED` memory is the same frame in every
+/// process that maps it, so shared futexes still meet across `fork`.
+fn futex_key(address: u64) -> Option<u64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let pml4 = PhysFrame::from_address(tasks[CURRENT.load(Ordering::Relaxed)].pml4)?;
+    paging::user_physical_address(pml4, address)
+}
+
 /// Blocks the current Linux task on a futex word.
 pub fn linux_futex_wait(
     frame: *mut InterruptFrame,
     address: u64,
     timeout_ticks: Option<u64>,
 ) -> *mut InterruptFrame {
+    let Some(key) = futex_key(address) else {
+        // SAFETY: `frame` is the live Linux syscall frame on this task's stack.
+        unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+        return frame;
+    };
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
-    tasks[current].futex_address = address;
+    tasks[current].futex_address = key;
     tasks[current].futex_deadline = timeout_ticks
         .and_then(|ticks| TICKS.load(Ordering::Relaxed).checked_add(ticks))
         .unwrap_or(0);
@@ -2371,6 +2389,9 @@ pub fn linux_futex_wait(
 
 /// Wakes up to `count` tasks blocked on `address`.
 pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
+    let Some(address) = futex_key(address) else {
+        return 0;
+    };
     let tasks = unsafe { &mut *TASKS.0.get() };
     let mut woken = 0u64;
     for task in tasks.iter_mut() {
@@ -2394,6 +2415,9 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
 /// word to `target`, so a later `FUTEX_WAKE(target)` reaches it. This mirrors
 /// the POSIX condition-variable hand-off glibc performs on broadcast.
 pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -> i64 {
+    let (Some(address), Some(target)) = (futex_key(address), futex_key(target)) else {
+        return LINUX_EFAULT;
+    };
     let tasks = unsafe { &mut *TASKS.0.get() };
     let mut woken = 0u64;
     let mut moved = 0u64;
@@ -3268,6 +3292,11 @@ pub fn linux_deliver_signal(frame: *mut InterruptFrame) -> bool {
     deliver_signal_to(CURRENT.load(Ordering::Relaxed), frame)
 }
 
+/// RFLAGS bits a signal frame may change: CF, PF, AF, ZF, SF, TF, DF, OF, AC, RF.
+const SIGRETURN_USER_RFLAGS: u64 = 0x0004_0dd5 | (1 << 16);
+/// RFLAGS every restored user context starts from: IF plus reserved bit 1.
+const SIGRETURN_BASE_RFLAGS: u64 = 0x202;
+
 /// Consumes a signal frame and restores the interrupted context.
 pub fn linux_sigreturn(frame: *mut InterruptFrame) -> bool {
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -3288,7 +3317,7 @@ pub fn linux_sigreturn(frame: *mut InterruptFrame) -> bool {
     // SAFETY: The complete rt_sigframe was validated as readable.
     let saved = unsafe { *(frame_pointer as *const RtSigFrame) };
     let context = saved.context;
-    if context.mcontext.cs & 3 != 3
+    if context.mcontext.cs != USER_CODE_SELECTOR
         || context.mcontext.rip < USER_BASE
         || context.mcontext.rip >= USER_LIMIT
         || context.mcontext.rsp < USER_BASE
@@ -3315,8 +3344,14 @@ pub fn linux_sigreturn(frame: *mut InterruptFrame) -> bool {
         (*frame).rcx = context.mcontext.rcx;
         (*frame).rsp = context.mcontext.rsp;
         (*frame).rip = context.mcontext.rip;
-        (*frame).rflags = context.mcontext.eflags;
-        (*frame).cs = context.mcontext.cs as u64;
+        // Only the arithmetic, direction, trap, alignment, and resume flags
+        // are user-controlled, as with Linux `FIX_EFLAGS`. IOPL, NT, and the
+        // rest stay at their kernel-chosen values, and IF is always set: an
+        // unmasked restore would let a guest gain port I/O or make `iretq`
+        // fault in ring 0.
+        (*frame).rflags = SIGRETURN_BASE_RFLAGS | (context.mcontext.eflags & SIGRETURN_USER_RFLAGS);
+        (*frame).cs = u64::from(USER_CODE_SELECTOR);
+        (*frame).ss = u64::from(USER_DATA_SELECTOR);
     }
     task.sigblocked = context.sigmask;
     task.sigaltstack_active = false;
@@ -3751,6 +3786,7 @@ pub fn user_exit(status: u64) -> *mut InterruptFrame {
 }
 
 const LINUX_EBADF: i64 = -9;
+const LINUX_EFAULT: i64 = -14;
 const LINUX_EACCES: i64 = -13;
 const LINUX_ECHILD: i64 = -10;
 const LINUX_EEXIST: i64 = -17;
@@ -5301,17 +5337,7 @@ fn pseudo_read(
         return Ok(out.len());
     }
     if kind == PseudoFile::DevRandom {
-        let mut state = TICKS
-            .load(Ordering::Relaxed)
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .wrapping_add(tgid as u64)
-            | 1;
-        for byte in out.iter_mut() {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            *byte = state as u8;
-        }
+        crate::random::fill(out);
         return Ok(out.len());
     }
     if kind == PseudoFile::SyscallAudit {

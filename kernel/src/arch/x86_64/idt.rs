@@ -93,6 +93,8 @@ isr_common:
     push r14
     push r15
 
+    /* Rust code assumes DF=0; the interrupted context may have set it. */
+    cld
     mov rbp, rsp
     and rsp, -16
     mov rdi, rbp
@@ -186,6 +188,8 @@ irq_common:
     push r14
     push r15
 
+    /* Rust code assumes DF=0; the interrupted context may have set it. */
+    cld
     mov rbp, rsp
     and rsp, -16
     mov rdi, rbp
@@ -258,6 +262,8 @@ linux_syscall_entry:
     push r14
     push r15
 
+    /* Rust code assumes DF=0; the interrupted context may have set it. */
+    cld
     mov rbp, rsp
     and rsp, -16
     mov rdi, rbp
@@ -311,6 +317,8 @@ syscall_common:
     push r14
     push r15
 
+    /* Rust code assumes DF=0; the interrupted context may have set it. */
+    cld
     mov rbp, rsp
     and rsp, -16
     mov rdi, rbp
@@ -475,6 +483,15 @@ pub fn init() {
         // SAFETY: `index` is bounded by the 32-entry handler array and the
         // static IDT has 256 entries.
         unsafe { (*idt.add(index)).set_handler(*handler as usize as u64) };
+    }
+
+    // NMI, double fault, and machine check can arrive with an unusable stack
+    // (for example inside the `syscall` window before the stack switch, or
+    // after a kernel stack overflow). Give them a known-good IST stack so the
+    // diagnostic still prints instead of escalating to a triple fault.
+    for vector in [2usize, 8, 18] {
+        // SAFETY: The vectors are inside the IDT and were initialized above.
+        unsafe { (*idt.add(vector)).ist = crate::arch::x86_64::gdt::EMERGENCY_IST };
     }
 
     // IRQ0 (timer), IRQ1 (keyboard), and IRQ12 (mouse) are vectors 32, 33, and

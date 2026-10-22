@@ -30,6 +30,7 @@ or system-image writer.
 make release \
     AETHER_SIGNING_KEY=/secure/keys/aether-release.seed \
     AETHER_PUBLISHER="Aether Contributors" \
+    AETHER_TRUST_PUBLIC_KEY_FILE=/secure/keys/aether-release.pub \
     AETHER_VERSION=0.2.0
 make release-check AETHER_TRUST="Aether Contributors:<public key hex>"
 ```
@@ -39,8 +40,13 @@ A bundle contains the ISO, its signed update manifest, `SHA256SUMS`, and
 publisher key, or a malformed manifest. See
 [signed updates](../architecture/updates.md).
 
-`make release-demo` runs the same flow with the checked-in test key. It proves
-the mechanism and is not a releasable artifact.
+`AETHER_TRUST_PUBLIC_KEY_FILE` is the key the kernel trusts for packages,
+updates, and Linux runtimes. `make release` refuses to build a kernel that
+trusts the checked-in test key, because that key's seed is public.
+
+`make release-demo` runs the same flow with the checked-in test key
+(`AETHER_ALLOW_TEST_TRUST=1`). It proves the mechanism and is not a releasable
+artifact.
 
 ## What the system verifies at boot
 
