@@ -570,6 +570,7 @@ pub fn tick() {
         }
     }
     store(wm, now, second, last_buttons);
+    reconcile_linux_windows(&wm);
     let mut damage = painted.map_or(Damage::from_rect(wm.screen()), |before| {
         wm.damage_region_since(&before)
     });
@@ -718,7 +719,8 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
     };
     // While the Linux surface owns focus, keys go to its endpoint instead of
     // the native window manager. Overlays and menus keep native focus.
-    let global_shortcut = matches!(key, Key::Function(3 | 4 | 10));
+    let global_shortcut =
+        matches!(key, Key::Function(3 | 4 | 10)) || (modifiers.command() && key == Key::Char(b'w'));
     let linux_focused = wm
         .focused_window()
         .and_then(|window| window.kind.linux_slot())
@@ -916,6 +918,21 @@ pub fn close_linux_window(slot: usize, id: u8) {
     let now = scheduler::ticks();
     store(wm, now, now / 100, input::mouse().buttons);
     mark_linux_frame_dirty();
+}
+
+/// Tells an app to exit when its compositor window has been closed.
+///
+/// Closing a window is the user's request to quit that app, matching the dock
+/// taskbar model. The app gets one close event through the display endpoint;
+/// when its task exits the domain is released for a later launch.
+fn reconcile_linux_windows(wm: &Wm) {
+    for slot in 0..crate::linux::MAX_APPS {
+        if let Some(id) = crate::display::window_id(slot)
+            && wm.window(id).is_none()
+        {
+            crate::display::request_close(slot);
+        }
+    }
 }
 
 /// Restores the welcome window as the focused, frontmost window.
@@ -1653,10 +1670,15 @@ fn applications_click(content: Rect, point: aether_wm::Point) {
 fn launch_craft(index: usize) {
     if let Some(slot) = crate::linux::running_slot(index) {
         if let Some(mut wm) = current() {
-            let _ = wm.open(linux_kind(slot));
-            let now = scheduler::ticks();
-            store(wm, now, now / 100, input::mouse().buttons);
-            mark_linux_frame_dirty();
+            let kind = linux_kind(slot);
+            if wm.window_id(kind).is_some() {
+                let _ = wm.open(kind);
+                let now = scheduler::ticks();
+                store(wm, now, now / 100, input::mouse().buttons);
+                mark_linux_frame_dirty();
+            } else {
+                serial_line!("desktop: craft app index={index} is still closing");
+            }
         }
         return;
     }

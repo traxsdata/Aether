@@ -14,6 +14,8 @@ versioning scheme until the kernel ABI stabilises.
   apps can stay open together. The desktop gains an Applications launcher
   (dock tile or F4, arrow keys, Enter) and keeps a running indicator on the
   dock. There is no boot-time picker; app selection is part of the desktop.
+  Closing a Craft window quits that app and releases its domain, so the dock
+  and Applications view stop reporting it as running.
 
 ### Security
 

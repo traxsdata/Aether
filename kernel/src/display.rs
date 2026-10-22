@@ -62,9 +62,7 @@ const EVENT_POINTER_BUTTON: u32 = 4;
 const EVENT_POINTER_AXIS: u32 = 5;
 const EVENT_ENTER: u32 = 6;
 const EVENT_LEAVE: u32 = 7;
-// Only the Gate 4 GUI test path asks the bridge to close the toplevel; in
-// every other build nothing emits this event, so it stays compiled out.
-#[cfg(feature = "gate4-gui-test")]
+// A compositor window close asks the app to exit through the same event path.
 const EVENT_CLOSE: u32 = 8;
 const EVENT_FRAME: u32 = 9;
 
@@ -148,6 +146,8 @@ struct DisplayState {
     create_marker: bool,
     present_marker: bool,
     input_marker: bool,
+    /// A compositor window close already asked this app to exit.
+    close_requested: bool,
     focused: bool,
     last_pointer: (i32, i32),
     last_buttons: u8,
@@ -181,6 +181,7 @@ impl DisplayState {
             create_marker: false,
             present_marker: false,
             input_marker: false,
+            close_requested: false,
             focused: false,
             last_pointer: (0, 0),
             last_buttons: 0,
@@ -701,24 +702,40 @@ fn present(
     })
 }
 
-/// Asks the bridge to close the toplevel after a completed save.
+/// Returns the compositor window currently owned by one app domain.
+#[must_use]
+pub fn window_id(slot: usize) -> Option<u8> {
+    if !valid_slot(slot) {
+        return None;
+    }
+    read_state(slot, |state| state.window)
+}
+
+/// Asks one app domain to close its toplevel and exit.
 ///
-/// This is used by the Gate 4 GUI test path once the portal commit has landed;
-/// it is not an application-controlled close.
-#[cfg(feature = "gate4-gui-test")]
-pub fn request_close() {
-    let slot = slot();
+/// The compositor calls this when its window is closed, and the Gate 4 portal
+/// path calls it after a completed save. The request is sent once per open
+/// endpoint so a stuck app is not flooded with close events.
+pub fn request_close(slot: usize) {
     if !valid_slot(slot) {
         return;
     }
     with_state(slot, |state| {
-        if state.open && state.window.is_some() {
+        if state.open && state.window.is_some() && !state.close_requested {
+            state.close_requested = true;
             state.enqueue(DisplayEvent {
                 kind: EVENT_CLOSE,
                 ..DisplayEvent::EMPTY
             });
+            serial_line!("display: close requested slot={slot}");
         }
     });
+}
+
+/// Asks the current task's app domain to close.
+#[cfg(feature = "gate4-gui-test")]
+pub fn request_close_current() {
+    request_close(slot());
 }
 
 /// Drains one or more events into a validated guest buffer.
