@@ -1362,6 +1362,12 @@ impl Wm {
         self.dragging.is_some()
     }
 
+    /// The window being moved or resized by a pointer gesture, if any.
+    #[must_use]
+    pub fn dragging_id(&self) -> Option<u8> {
+        self.dragging.map(|drag| drag.id)
+    }
+
     /// Sets a window's logical and restore frame.
     ///
     /// The display endpoint uses this so a client-requested surface size maps
@@ -1453,6 +1459,9 @@ impl Wm {
                     && (self.focus == Some(*id) || before.focus == Some(*id)))
                 || self.workspace != before.workspace
                 || self.transition != before.transition
+                // The painter drops a dragged window's shadow and translucent
+                // body for the gesture, so they return when it starts or ends.
+                || ((self.dragging_id() == Some(*id)) != (before.dragging_id() == Some(*id)))
             {
                 if let Some(frame) = before.window_frame(*id) {
                     include(frame.inset(-24));

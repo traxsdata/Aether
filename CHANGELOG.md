@@ -519,6 +519,15 @@ versioning scheme until the kernel ABI stabilises.
   fixture's nanosleep EINTR check also retries (up to three times) when the
   parent is preempted for longer than the child's 50 ms delay, which made
   `AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_ret` an occasional TCG flake.
+- Dragging a window no longer leaves the windows it passed over without
+  their shadows. The drag fast path dropped the shadow and translucent body
+  of every window, not just the moving one, and nothing repainted the
+  uncovered ones afterwards; it now applies only to the dragged window, and
+  the end of a gesture damages that window so its own shadow returns at
+  once. `make iso-test` caught this as a damage/full-paint mismatch once its
+  pointer step was fixed: the test drove the cursor assuming one pixel per
+  PS/2 count, but the kernel applies a 2x gain, so it overshot back and
+  forth and never reached its target.
 - A fault on user memory during a syscall no longer halts the machine. The
   kernel reads and writes user memory only through one copy routine whose
   `rep movsb` is listed in a new `.ex_table`; a page fault there on a

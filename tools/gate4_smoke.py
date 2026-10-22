@@ -205,10 +205,11 @@ def main() -> int:
                     target_x, target_y = int(parts[0]), int(parts[1])
                 except ValueError:
                     pass
-            dx, dy = target_x - 640, target_y - 400
+            # The kernel moves the cursor MOUSE_GAIN (2) pixels per count.
+            dx, dy = (target_x - 640) // 2, (target_y - 400) // 2
             while dx or dy:
-                step_x = max(-30, min(30, dx))
-                step_y = max(-30, min(30, dy))
+                step_x = max(-15, min(15, dx))
+                step_y = max(-15, min(15, dy))
                 send_hmp(qmp_file, f"mouse_move {step_x} {step_y}")
                 dx -= step_x
                 dy -= step_y
