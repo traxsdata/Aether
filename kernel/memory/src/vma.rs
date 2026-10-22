@@ -8,19 +8,28 @@
 //! directly, while [`VmaTable::protect`] rejects adding write to an executable
 //! mapping so a later protection change still enforces W^X.
 //!
-//! A fixed table keeps every operation bounded. Range insertion, removal, and
-//! protection may split an existing area; a failed split reports
-//! [`VmaError::OutOfSpace`] instead of corrupting the table.
+//! The table is an ordered map keyed by start address, so lookups and splits
+//! cost `O(log n)` and a large application can hold tens of thousands of
+//! areas. The entry count is still capped per table ([`MAX_VMAS`], like
+//! Linux's `vm.max_map_count`); range insertion, removal, and protection may
+//! split an existing area, and a split that would exceed the cap reports
+//! [`VmaError::OutOfSpace`] before anything changes.
+
+extern crate alloc;
 
 use crate::{PAGE_SIZE, align_up};
+use alloc::collections::BTreeMap;
 
-/// Maximum number of tracked areas.
-#[cfg(feature = "gate4")]
+/// Maximum number of tracked areas per table.
+///
+/// `large-apps` matches Linux's default `vm.max_map_count` for programs such
+/// as Firefox. The other values keep the boot fixture's quota test small.
+#[cfg(feature = "large-apps")]
+pub const MAX_VMAS: usize = 65_530;
+#[cfg(all(feature = "gate4", not(feature = "large-apps")))]
 pub const MAX_VMAS: usize = 512;
-#[cfg(not(feature = "gate4"))]
+#[cfg(not(any(feature = "gate4", feature = "large-apps")))]
 pub const MAX_VMAS: usize = 32;
-/// Fragment scratch capacity for split operations.
-const MAX_FRAGMENTS: usize = MAX_VMAS * 2 + 1;
 
 /// Read permission bit, matching the Linux `PROT_READ` value.
 pub const PROT_READ: u32 = 1;
@@ -72,13 +81,19 @@ pub enum VmaError {
     InvalidProtection,
 }
 
-/// Fixed-size virtual-memory-area table.
-#[derive(Clone, Copy, Debug)]
+/// Ordered virtual-memory-area table.
+#[derive(Clone, Debug)]
 pub struct VmaTable {
     window_start: u64,
     base: u64,
     limit: u64,
-    entries: [Option<Vma>; MAX_VMAS],
+    /// Every address in `base..first_gap` is mapped, so a first-fit search
+    /// can start here. Sequential `mmap` calls then cost `O(log n)` each
+    /// instead of rescanning every area below.
+    first_gap: u64,
+    /// Areas keyed by start address; never overlapping, and neighbours with
+    /// equal protections are always merged.
+    entries: BTreeMap<u64, Vma>,
 }
 
 impl VmaTable {
@@ -103,7 +118,8 @@ impl VmaTable {
             window_start,
             base: allocation_base,
             limit,
-            entries: [None; MAX_VMAS],
+            first_gap: allocation_base,
+            entries: BTreeMap::new(),
         }
     }
 
@@ -122,23 +138,23 @@ impl VmaTable {
     /// Number of tracked areas.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.iter().flatten().count()
+        self.entries.len()
     }
 
     /// Returns `true` when no area is tracked.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.entries.is_empty()
     }
 
     /// Returns the area containing `address`.
     #[must_use]
     pub fn get(&self, address: u64) -> Option<Vma> {
         self.entries
-            .iter()
-            .flatten()
-            .copied()
-            .find(|entry| entry.contains(address))
+            .range(..=address)
+            .next_back()
+            .map(|(_, entry)| *entry)
+            .filter(|entry| entry.contains(address))
     }
 
     /// Returns `true` when every page in `start..start+length` is mapped.
@@ -150,24 +166,25 @@ impl VmaTable {
         let Some(end) = start.checked_add(length) else {
             return false;
         };
-        let mut page = start;
-        while page < end {
-            if self.get(page).is_none() {
-                return false;
+        let mut cursor = start;
+        while cursor < end {
+            match self.get(cursor) {
+                Some(entry) => cursor = entry.end,
+                None => return false,
             }
-            page += PAGE_SIZE;
         }
         true
     }
 
     /// Iterates over tracked areas in address order.
     pub fn iter(&self) -> impl Iterator<Item = Vma> + '_ {
-        self.entries.iter().flatten().copied()
+        self.entries.values().copied()
     }
 
     /// Clears every area.
     pub fn reset(&mut self) {
-        self.entries = [None; MAX_VMAS];
+        self.entries.clear();
+        self.first_gap = self.base;
     }
 
     /// Adds an area at the lowest free address that fits `length`.
@@ -176,12 +193,21 @@ impl VmaTable {
     pub fn insert(&mut self, length: u64, prot: u32) -> Result<u64, VmaError> {
         let length = checked_length(length)?;
         validate_protection(prot, true)?;
-        let mut candidate = self.base;
-        for entry in self.entries.iter().flatten() {
-            if entry.start >= candidate && entry.start - candidate >= length {
+        let mut candidate = self.first_gap.max(self.base);
+        // An area that starts below the cursor may still reach past it.
+        if let Some(entry) = self.get(candidate) {
+            candidate = entry.end;
+        }
+        // Stays true while every address skipped so far is mapped.
+        let mut contiguous = true;
+        for entry in self.entries.range(candidate..).map(|(_, entry)| entry) {
+            if entry.start - candidate >= length {
                 break;
             }
-            candidate = candidate.max(entry.end);
+            if entry.start != candidate {
+                contiguous = false;
+            }
+            candidate = entry.end;
         }
         let end = candidate
             .checked_add(length)
@@ -190,6 +216,9 @@ impl VmaTable {
             return Err(VmaError::OutOfSpace);
         }
         self.insert_at(candidate, length, prot)?;
+        if contiguous {
+            self.first_gap = end;
+        }
         Ok(candidate)
     }
 
@@ -209,19 +238,17 @@ impl VmaTable {
         }
         if self
             .entries
-            .iter()
-            .flatten()
-            .any(|entry| entry.start < end && start < entry.end)
+            .range(..end)
+            .next_back()
+            .is_some_and(|(_, entry)| entry.end > start)
         {
             return Err(VmaError::Overlap);
         }
-        let slot = self
-            .entries
-            .iter_mut()
-            .find(|entry| entry.is_none())
-            .ok_or(VmaError::OutOfSpace)?;
-        *slot = Some(Vma { start, end, prot });
-        self.compact();
+        if self.entries.len() >= MAX_VMAS {
+            return Err(VmaError::OutOfSpace);
+        }
+        self.entries.insert(start, Vma { start, end, prot });
+        self.merge_around(start, end);
         Ok(())
     }
 
@@ -236,40 +263,16 @@ impl VmaTable {
             return Err(VmaError::InvalidRange);
         }
         let end = start.checked_add(length).ok_or(VmaError::InvalidRange)?;
-        let mut fragments = [None; MAX_FRAGMENTS];
-        let mut count = 0usize;
-        let mut removed = false;
-        for entry in self.entries.iter().flatten().copied() {
-            if entry.end <= start || entry.start >= end {
-                push_fragment(&mut fragments, &mut count, Some(entry))?;
-                continue;
-            }
-            removed = true;
-            if entry.start < start {
-                push_fragment(
-                    &mut fragments,
-                    &mut count,
-                    Some(Vma {
-                        start: entry.start,
-                        end: start,
-                        prot: entry.prot,
-                    }),
-                )?;
-            }
-            if entry.end > end {
-                push_fragment(
-                    &mut fragments,
-                    &mut count,
-                    Some(Vma {
-                        start: end,
-                        end: entry.end,
-                        prot: entry.prot,
-                    }),
-                )?;
-            }
+        let (overlapping, pieces) = self.split_cost(start, end);
+        if overlapping == 0 {
+            return Ok(false);
         }
-        self.replace(fragments, count)?;
-        Ok(removed)
+        if self.entries.len() - overlapping + pieces > MAX_VMAS {
+            return Err(VmaError::OutOfSpace);
+        }
+        self.cut(start, end);
+        self.first_gap = self.first_gap.min(start);
+        Ok(true)
     }
 
     /// Changes protections on a fully mapped range.
@@ -283,99 +286,112 @@ impl VmaTable {
             return Err(VmaError::InvalidRange);
         }
         let end = start.checked_add(length).ok_or(VmaError::InvalidRange)?;
-        let mut page = start;
-        while page < end {
-            if self.get(page).is_none() {
-                return Err(VmaError::NotFound);
-            }
-            page += PAGE_SIZE;
+        if !self.covers(start, length) {
+            return Err(VmaError::NotFound);
         }
+        let (overlapping, pieces) = self.split_cost(start, end);
+        if self.entries.len() - overlapping + pieces + 1 > MAX_VMAS {
+            return Err(VmaError::OutOfSpace);
+        }
+        self.cut(start, end);
+        self.entries.insert(start, Vma { start, end, prot });
+        self.merge_around(start, end);
+        Ok(())
+    }
 
-        let mut fragments = [None; MAX_FRAGMENTS];
-        let mut count = 0usize;
-        for entry in self.entries.iter().flatten().copied() {
-            if entry.end <= start || entry.start >= end {
-                push_fragment(&mut fragments, &mut count, Some(entry))?;
+    /// Counts the areas overlapping `start..end` and the edge pieces that
+    /// would survive cutting the range out of them.
+    fn split_cost(&self, start: u64, end: u64) -> (usize, usize) {
+        let mut overlapping = 0usize;
+        let mut pieces = 0usize;
+        for entry in self.overlapping(start, end) {
+            overlapping += 1;
+            if entry.start < start {
+                pieces += 1;
+            }
+            if entry.end > end {
+                pieces += 1;
+            }
+        }
+        (overlapping, pieces)
+    }
+
+    fn overlapping(&self, start: u64, end: u64) -> impl Iterator<Item = Vma> + '_ {
+        let first = self
+            .entries
+            .range(..=start)
+            .next_back()
+            .map_or(start, |(key, _)| *key);
+        self.entries
+            .range(first..end)
+            .map(|(_, entry)| *entry)
+            .filter(move |entry| entry.end > start)
+    }
+
+    /// Removes `start..end`, keeping the parts of split areas outside it.
+    ///
+    /// The caller has checked the entry cap.
+    fn cut(&mut self, start: u64, end: u64) {
+        let mut cursor = self
+            .entries
+            .range(..=start)
+            .next_back()
+            .map_or(start, |(key, _)| *key);
+        while cursor < end
+            && let Some((&key, &entry)) = self.entries.range(cursor..end).next()
+        {
+            cursor = entry.end;
+            if entry.end <= start {
                 continue;
             }
+            self.entries.remove(&key);
             if entry.start < start {
-                push_fragment(
-                    &mut fragments,
-                    &mut count,
-                    Some(Vma {
+                self.entries.insert(
+                    entry.start,
+                    Vma {
                         start: entry.start,
                         end: start,
                         prot: entry.prot,
-                    }),
-                )?;
+                    },
+                );
             }
             if entry.end > end {
-                push_fragment(
-                    &mut fragments,
-                    &mut count,
-                    Some(Vma {
+                self.entries.insert(
+                    end,
+                    Vma {
                         start: end,
                         end: entry.end,
                         prot: entry.prot,
-                    }),
-                )?;
+                    },
+                );
             }
         }
-        push_fragment(&mut fragments, &mut count, Some(Vma { start, end, prot }))?;
-        self.replace(fragments, count)?;
-        Ok(())
     }
 
-    fn replace(
-        &mut self,
-        fragments: [Option<Vma>; MAX_FRAGMENTS],
-        count: usize,
-    ) -> Result<(), VmaError> {
-        if count > MAX_VMAS {
-            return Err(VmaError::OutOfSpace);
-        }
-        self.entries = [None; MAX_VMAS];
-        for fragment in fragments.into_iter().take(count).flatten() {
-            if let Some(slot) = self.entries.iter_mut().find(|entry| entry.is_none()) {
-                *slot = Some(fragment);
-            }
-        }
-        self.compact();
-        Ok(())
-    }
-
-    /// Sorts the table and coalesces adjacent areas with equal protections.
+    /// Coalesces the area at `start..end` with equal-protection neighbours.
     ///
     /// Linux merges neighbouring VMAs, and clients such as the LLVM JIT make
     /// many small mappings and protection changes. Without the merge the
-    /// fixed table fills with fragments and later `mmap`/`mprotect` calls fail
-    /// with `ENOMEM` even though the address space is free.
-    fn compact(&mut self) {
-        self.sort();
-        let mut write = 0usize;
-        for read in 0..MAX_VMAS {
-            let Some(current) = self.entries[read] else {
-                continue;
-            };
-            if write > 0
-                && let Some(previous) = self.entries[write - 1].as_mut()
-                && previous.end == current.start
-                && previous.prot == current.prot
-            {
-                previous.end = current.end;
-                continue;
-            }
-            self.entries[write] = Some(current);
-            write += 1;
+    /// table fills with fragments and later `mmap`/`mprotect` calls fail with
+    /// `ENOMEM` even though the address space is free.
+    fn merge_around(&mut self, start: u64, end: u64) {
+        let Some(mut merged) = self.entries.get(&start).copied() else {
+            return;
+        };
+        if let Some(next) = self.entries.get(&end).copied()
+            && next.prot == merged.prot
+        {
+            self.entries.remove(&end);
+            merged.end = next.end;
         }
-        for entry in self.entries[write..].iter_mut() {
-            *entry = None;
+        if let Some((&key, previous)) = self.entries.range(..start).next_back()
+            && previous.end == start
+            && previous.prot == merged.prot
+        {
+            self.entries.remove(&start);
+            merged.start = key;
         }
-    }
-
-    fn sort(&mut self) {
-        self.entries
-            .sort_unstable_by_key(|entry| entry.map_or(u64::MAX, |vma| vma.start));
+        self.entries.insert(merged.start, merged);
     }
 }
 
@@ -398,23 +414,6 @@ fn validate_protection(prot: u32, allow_write_exec: bool) -> Result<(), VmaError
     if !allow_write_exec && prot & (PROT_WRITE | PROT_EXEC) == PROT_WRITE | PROT_EXEC {
         return Err(VmaError::InvalidProtection);
     }
-    Ok(())
-}
-
-fn push_fragment(
-    fragments: &mut [Option<Vma>; MAX_FRAGMENTS],
-    count: &mut usize,
-    fragment: Option<Vma>,
-) -> Result<(), VmaError> {
-    let Some(fragment) = fragment else {
-        return Ok(());
-    };
-    if fragment.start >= fragment.end {
-        return Ok(());
-    }
-    let slot = fragments.get_mut(*count).ok_or(VmaError::OutOfSpace)?;
-    *slot = Some(fragment);
-    *count += 1;
     Ok(())
 }
 
@@ -515,5 +514,117 @@ mod tests {
         map.remove(BASE + PAGE_SIZE, 15 * PAGE_SIZE).unwrap();
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(BASE).unwrap().start, BASE);
+    }
+
+    #[test]
+    fn coalesces_equal_neighbours_and_keeps_distinct_ones() {
+        let mut map = table();
+        map.insert_at(BASE, PAGE_SIZE, PROT_READ).unwrap();
+        map.insert_at(BASE + 2 * PAGE_SIZE, PAGE_SIZE, PROT_READ)
+            .unwrap();
+        map.insert_at(BASE + PAGE_SIZE, PAGE_SIZE, PROT_READ)
+            .unwrap();
+        assert_eq!(map.len(), 1);
+        map.protect(BASE + PAGE_SIZE, PAGE_SIZE, PROT_READ | PROT_WRITE)
+            .unwrap();
+        assert_eq!(map.len(), 3);
+        map.protect(BASE + PAGE_SIZE, PAGE_SIZE, PROT_READ).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(BASE + 2 * PAGE_SIZE).unwrap().start, BASE);
+    }
+
+    #[test]
+    fn insert_skips_an_area_that_straddles_the_cursor() {
+        let mut map = VmaTable::with_window(BASE - 4 * PAGE_SIZE, BASE, LIMIT);
+        map.insert_at(BASE - PAGE_SIZE, 2 * PAGE_SIZE, PROT_READ)
+            .unwrap();
+        assert_eq!(
+            map.insert(PAGE_SIZE, PROT_READ | PROT_WRITE).unwrap(),
+            BASE + PAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn a_split_past_the_cap_changes_nothing() {
+        let limit = BASE + (3 * MAX_VMAS as u64 + 4) * PAGE_SIZE;
+        let mut map = VmaTable::new(BASE, limit);
+        for index in 0..MAX_VMAS as u64 {
+            let prot = if index % 2 == 0 {
+                PROT_READ
+            } else {
+                PROT_READ | PROT_WRITE
+            };
+            map.insert_at(BASE + index * 3 * PAGE_SIZE, 3 * PAGE_SIZE, prot)
+                .unwrap();
+        }
+        assert_eq!(map.len(), MAX_VMAS);
+        let before = map.clone();
+        assert_eq!(
+            map.remove(BASE + PAGE_SIZE, PAGE_SIZE),
+            Err(VmaError::OutOfSpace)
+        );
+        assert_eq!(
+            map.protect(BASE, PAGE_SIZE, PROT_READ | PROT_WRITE),
+            Err(VmaError::OutOfSpace)
+        );
+        assert_eq!(
+            map.iter().collect::<alloc::vec::Vec<_>>(),
+            before.iter().collect::<alloc::vec::Vec<_>>()
+        );
+        // Removing a whole area needs no new entry and still succeeds.
+        assert_eq!(map.remove(BASE, 3 * PAGE_SIZE), Ok(true));
+        assert_eq!(map.len(), MAX_VMAS - 1);
+    }
+
+    #[test]
+    fn remove_and_protect_span_many_areas() {
+        let mut map = VmaTable::new(BASE, BASE + 64 * PAGE_SIZE);
+        for index in 0..8u64 {
+            let prot = if index % 2 == 0 { PROT_READ } else { PROT_EXEC };
+            map.insert_at(BASE + index * 4 * PAGE_SIZE, 4 * PAGE_SIZE, prot)
+                .unwrap();
+        }
+        map.protect(BASE + 2 * PAGE_SIZE, 28 * PAGE_SIZE, PROT_READ)
+            .unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(BASE).unwrap().end, BASE + 30 * PAGE_SIZE);
+        assert_eq!(map.remove(BASE + PAGE_SIZE, 30 * PAGE_SIZE), Ok(true));
+        let left: alloc::vec::Vec<_> = map.iter().collect();
+        assert_eq!(left.len(), 2);
+        assert_eq!((left[0].start, left[0].end), (BASE, BASE + PAGE_SIZE));
+        assert_eq!(left[1].start, BASE + 31 * PAGE_SIZE);
+        assert!(!map.covers(BASE, 2 * PAGE_SIZE));
+        assert!(map.covers(BASE + 31 * PAGE_SIZE, PAGE_SIZE));
+    }
+
+    #[test]
+    fn first_fit_reuses_holes_below_the_sequential_cursor() {
+        let mut map = VmaTable::new(BASE, BASE + 64 * PAGE_SIZE);
+        let mut starts = alloc::vec::Vec::new();
+        for index in 0..8u64 {
+            let prot = if index % 2 == 0 { PROT_READ } else { PROT_EXEC };
+            starts.push(map.insert(PAGE_SIZE, prot).unwrap());
+        }
+        assert_eq!(starts[7], BASE + 7 * PAGE_SIZE);
+        map.remove(starts[2], PAGE_SIZE).unwrap();
+        assert_eq!(map.insert(PAGE_SIZE, PROT_READ).unwrap(), starts[2]);
+        assert_eq!(
+            map.insert(PAGE_SIZE, PROT_READ).unwrap(),
+            BASE + 8 * PAGE_SIZE
+        );
+        // A fixed mapping above the cursor is skipped, and a hole too small
+        // for the request is not used.
+        map.insert_at(BASE + 10 * PAGE_SIZE, PAGE_SIZE, PROT_READ)
+            .unwrap();
+        assert_eq!(
+            map.insert(2 * PAGE_SIZE, PROT_EXEC).unwrap(),
+            BASE + 11 * PAGE_SIZE
+        );
+        assert_eq!(
+            map.insert(PAGE_SIZE, PROT_EXEC).unwrap(),
+            BASE + 9 * PAGE_SIZE
+        );
+        map.reset();
+        assert_eq!(map.insert(PAGE_SIZE, PROT_READ).unwrap(), BASE);
     }
 }

@@ -5,6 +5,19 @@
  * two calls a freestanding program needs to report and terminate. Any failed
  * step writes a failure marker and exits nonzero, which fails the boot gate.
  */
+/* Upper bounds for the quota loops. The large-apps kernel raises the
+ * descriptor and mapping limits to Linux sizes, so the loops must run past
+ * them (1,024 descriptors, 65,530 areas) to still prove EMFILE and ENOMEM.
+ * Descriptors are stored from offset 512 of the frame, four bytes each. */
+.ifdef AETHER_LARGE_APPS
+    .set QUOTA_FRAME, 8192
+    .set QUOTA_FDS, 1100
+    .set QUOTA_VMAS, 70000
+.else
+    .set QUOTA_FRAME, 1024
+    .set QUOTA_FDS, 24
+    .set QUOTA_VMAS, 64
+.endif
     .section .text
     .global _start
     .type _start, @function
@@ -3610,7 +3623,7 @@ g2_block_joined:
 
 .ifndef AETHER_GATE4_GUI
     /* Quotas: overlay bytes, descriptor count, then VMA count. */
-    sub $1024, %rsp
+    sub $QUOTA_FRAME, %rsp
     mov $257, %rax
     mov $-100, %rdi
     lea g2_q2_path(%rip), %rsi
@@ -3650,7 +3663,7 @@ g2_fd_loop:
     js g2_fd_done
     mov %eax, 512(%rsp,%r14,4)
     inc %r14
-    cmp $24, %r14
+    cmp $QUOTA_FDS, %r14
     jb g2_fd_loop
     jmp g2_fail_quota
 g2_fd_done:
@@ -3737,7 +3750,7 @@ g2_vma_prot_ready:
     test %rax, %rax
     js g2_vma_done
     inc %r13
-    cmp $64, %r13
+    cmp $QUOTA_VMAS, %r13
     jb g2_vma_loop
     jmp g2_fail_quota
 g2_vma_done:
@@ -3748,7 +3761,7 @@ g2_vma_done:
     lea g2_quota_message(%rip), %rsi
     mov $g2_quota_message_len, %rdx
     syscall
-    add $1024, %rsp
+    add $QUOTA_FRAME, %rsp
     jmp g2_extras_done
 .endif
     jmp g2_extras_done
