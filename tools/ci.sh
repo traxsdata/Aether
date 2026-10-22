@@ -19,6 +19,7 @@ make iso-test
 make vmware-vmx
 make shell-test
 make fault-test
+make crash-screen-test
 make rollback-test
 make negative-test
 make release-demo

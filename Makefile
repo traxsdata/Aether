@@ -86,7 +86,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -416,6 +416,19 @@ smap-fault-test:
 	$(MAKE) KERNEL_FEATURES=smap-fault-selftest image
 	AETHER_EXPECT_BOOT_FAILURE=1 \
 		AETHER_EXPECT_FAILURE_TEXT='page fault (14) error=0x1' \
+		$(PYTHON) tools/test-boot.py
+
+# A fatal error must replace the screen with the crash report. The first boot
+# page-faults in the kernel after the desktop is up (exception path, CPU
+# state); the second panics right after graphics init (panic path).
+crash-screen-test:
+	$(MAKE) KERNEL_FEATURES=crash-screen-selftest image
+	AETHER_EXPECT_BOOT_FAILURE=1 AETHER_EXPECT_CRASH_SCREEN=1 \
+		AETHER_EXPECT_FAILURE_TEXT='AETHER_CRASH_SCREEN shown=1 reason=unhandled kernel exception: page fault' \
+		$(PYTHON) tools/test-boot.py
+	$(MAKE) KERNEL_FEATURES=crash-screen-panic-selftest image
+	AETHER_EXPECT_BOOT_FAILURE=1 AETHER_EXPECT_CRASH_SCREEN=1 \
+		AETHER_EXPECT_FAILURE_TEXT='AETHER_CRASH_SCREEN shown=1 reason=kernel panic: crash screen self-test' \
 		$(PYTHON) tools/test-boot.py
 
 # Boot with the rollback self-test feature and require its own marker on top

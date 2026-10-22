@@ -7,6 +7,17 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Crash screen: every fatal kernel path (a panic, an unhandled kernel
+  exception including a double fault, and every `AETHER_BOOT_FAILED` halt)
+  now replaces the display with a full-screen blue report instead of leaving
+  a frozen desktop. It shows the reason, the version and commit, the
+  exception and every saved register when there is one, and the last console
+  lines from an 8 KiB ring that records all serial output, so the cause is
+  visible without a saved serial log. The report allocates nothing, takes no
+  locks, writes the framebuffer directly from its own copy of the geometry
+  (so it also works before or without the graphics service), and a fault or
+  panic while painting halts without painting again. `make
+  crash-screen-test` checks both paths with a QEMU screendump.
 - Desktop performance after boot: the kernel parks the application processors
   the firmware left in its idle loop (an INIT IPI through the xAPIC page or
   x2APIC MSR), so a `-smp 2` QEMU guest idles at ~1% host CPU instead of a

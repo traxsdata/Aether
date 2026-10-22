@@ -12,6 +12,7 @@
 
 mod apps;
 mod arch;
+mod crash;
 mod desktop;
 mod display;
 mod fs;
@@ -89,6 +90,12 @@ _start:
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
+    // A panic raised while the first one was being formatted skips straight
+    // to the halt; formatting it again could recurse until the stack is gone.
+    if !crash::record_panic(info) {
+        arch::x86_64::serial::write_str("AETHER_KERNEL_PANIC nested\n");
+        crash::fatal()
+    }
     arch::x86_64::serial::write_str("AETHER_KERNEL_PANIC\n");
     serial_line!("kernel panic: {info}");
     arch::x86_64::halt()
@@ -124,6 +131,9 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         serial_line!("AETHER_BOOT_FAILED reason=boot-info: {error}");
         arch::x86_64::halt();
     }
+    // Until the kernel's own page tables are live, the firmware identity map
+    // covers the framebuffer, so an early failure can already be shown.
+    crash::set_framebuffer(&info.framebuffer);
     serial_line!(
         "boot: hand-off validated (version {}, {} bytes)",
         info.version,
@@ -282,6 +292,7 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                         info.framebuffer.format
                     );
                 } else {
+                    crash::clear_framebuffer();
                     serial_line!("boot: framebuffer unavailable; graphics disabled");
                 }
                 paging.framebuffer_mapped
@@ -294,7 +305,11 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         };
 
     match graphics::init(&info.framebuffer, framebuffer_mapped) {
-        Ok(true) => serial_line!("boot: graphics service ready"),
+        Ok(true) => {
+            serial_line!("boot: graphics service ready");
+            #[cfg(feature = "crash-screen-panic-selftest")]
+            panic!("crash screen self-test: deliberate panic after graphics init");
+        }
         Ok(false) => serial_line!("boot: graphics service headless"),
         Err(error) => {
             serial_line!("AETHER_BOOT_FAILED reason=graphics: {error:?}");

@@ -61,6 +61,7 @@ pub fn try_read() -> Option<u8> {
 
 /// Writes one byte, dropping it if the UART is not ready.
 pub fn write_byte(byte: u8) {
+    crate::crash::record_byte(byte);
     let mut spins = 0u32;
     // SAFETY: COM1 is valid on the supported platform.
     unsafe {

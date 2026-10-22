@@ -31,6 +31,7 @@ make gate3-test    # stage the pinned GridCraft AppImage and run its headless CL
 make iso-test      # UEFI ISO, VGA/SVGA, actual PS/2 windows and Files workflows
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # boot a kernel that executes int3 after paging is enabled
+make crash-screen-test # a kernel page fault and a panic must paint the crash report
 make negative-test # prove the boot harness rejects a deliberately failing kernel
 make compat-test   # compatibility database and classification rules
 make update-test   # package and update policy crates
@@ -208,7 +209,10 @@ a pull request:
    `services`, `portal`/`portal approve`/`portal deny`/`portal revoke`, `cp`, `mv`, `recovery`, `packages`, `runtime`,
    `updates`, `desktop`, `input`, and `uptime` over a serial socket.
 9. `make fault-test` — deliberate `int3` after paging, requiring the IDT report
-   and failure marker.
+   and failure marker. `make crash-screen-test` then page-faults in the kernel
+   after the desktop is up, and panics right after graphics init; each boot
+   must print `AETHER_CRASH_SCREEN shown=1` and a QEMU screendump must show
+   the blue crash report with text on it.
 10. `make rollback-test` — discard the current image marker and require the
    previous image with its user data, printing
    `AETHER_RECOVERY_ROLLBACK_OK`.
