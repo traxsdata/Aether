@@ -97,6 +97,7 @@ pub fn init() -> Result<(), FsError> {
         "system/images",
         "system/updates",
         "system/portal",
+        "system/network",
         "home",
         "portal",
     ] {

@@ -26,6 +26,7 @@ mod linux_policy;
 mod linuxd;
 mod memfd;
 mod memory;
+mod net;
 mod packaging;
 mod portal;
 mod random;
@@ -346,6 +347,7 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     );
     serial_line!("AETHER_MM_OK");
     usercopy_selftest();
+    net::init();
 
     #[cfg(feature = "fault-selftest")]
     {

@@ -298,6 +298,8 @@ enum PseudoFile {
     DevNull,
     DevZero,
     DevRandom,
+    /// `/etc/resolv.conf`, generated from the DHCP lease.
+    ResolvConf,
 }
 
 /// Pseudo-directory enumerated by `getdents64`.
@@ -1137,6 +1139,7 @@ pub fn run() -> ! {
         // input/desktop path before parking for the next interrupt.
         crate::input::poll();
         crate::desktop::tick();
+        crate::net::poll();
         timer::halt_until_interrupt();
     }
 }
@@ -1170,6 +1173,7 @@ fn console_loop() -> ! {
         crate::shell::poll();
         crate::input::poll();
         crate::desktop::tick();
+        crate::net::poll();
         timer::halt_until_interrupt();
     }
 }
@@ -1251,6 +1255,7 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     #[cfg(feature = "recovery-rollback-selftest")]
     crate::recovery::rollback_self_test().map_err(SchedulerError::Filesystem)?;
     crate::portal::init();
+    crate::net::consent::init();
     let revocation_checks = crate::portal::self_test().map_err(|_| SchedulerError::Portal)?;
     serial_line!("AETHER_REVOCATION_OK checks={revocation_checks}");
     crate::apps::init();
@@ -4269,6 +4274,7 @@ fn pseudo_file(path: &str) -> Option<PseudoFile> {
         "/dev/null" => Some(PseudoFile::DevNull),
         "/dev/zero" => Some(PseudoFile::DevZero),
         "/dev/random" | "/dev/urandom" => Some(PseudoFile::DevRandom),
+        "/etc/resolv.conf" => Some(PseudoFile::ResolvConf),
         _ => None,
     }
 }
@@ -4289,9 +4295,10 @@ fn pseudo_stat(kind: PseudoFile) -> (u64, u64, u32) {
         PseudoFile::ProcExe => (LINUX_ELF.len() as u64, 3, 0o100555),
         PseudoFile::DevNull | PseudoFile::DevZero => (0, 4, 0o020666),
         PseudoFile::DevRandom => (0, 5, 0o020666),
-        PseudoFile::ProcMaps | PseudoFile::ProcStatus | PseudoFile::SyscallAudit => {
-            (0, 6, 0o100444)
-        }
+        PseudoFile::ProcMaps
+        | PseudoFile::ProcStatus
+        | PseudoFile::SyscallAudit
+        | PseudoFile::ResolvConf => (0, 6, 0o100444),
     }
 }
 
@@ -5506,6 +5513,14 @@ fn pseudo_read(
         PseudoFile::ProcExe => None,
         PseudoFile::ProcMaps => Some(proc_maps_text(vmas)),
         PseudoFile::ProcStatus => Some(proc_status_text(vmas, tgid, parent)),
+        PseudoFile::ResolvConf => {
+            let mut text = PseudoText {
+                buffer: [0; 4096],
+                length: 0,
+            };
+            text.length = crate::net::resolv_conf(&mut text.buffer);
+            Some(text)
+        }
         _ => None,
     };
     if let Some(text) = text.as_ref() {
@@ -7642,6 +7657,9 @@ pub fn yield_current(frame: *mut InterruptFrame) -> *mut InterruptFrame {
 /// Called from the timer interrupt before returning to a task.
 pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     let now = TICKS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    // Run the network stack before any task state is borrowed; it may wake
+    // socket waiters.
+    crate::net::poll();
     // Advance the linuxd launch handshake before the interrupted task is
     // saved. The application task is only created once an approval message
     // has been received; no boot path creates it directly.
