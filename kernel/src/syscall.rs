@@ -695,11 +695,18 @@ fn linux_mmap(
     {
         return LINUX_EINVAL;
     }
-    // Linux permits writable and executable mappings. LLVM's section
-    // allocator asks for them directly on some paths, so rejecting the
-    // combination breaks lavapipe shader compilation.
     if protections & !7 != 0 {
         return LINUX_EINVAL;
+    }
+    // Writable+executable memory is for JIT compilers only (LLVM's section
+    // allocator in lavapipe asks for it directly). An application gets it
+    // only when its signed import record declares `memory=jit`.
+    if protections & 6 == 6 && !scheduler::linux_jit_allowed() {
+        serial_line!(
+            "linux: W+X mapping denied pid={} (record lacks memory=jit)",
+            scheduler::linux_getpid()
+        );
+        return LINUX_EACCES;
     }
     let mut file_identity = None;
     if anonymous {
@@ -1566,9 +1573,10 @@ fn linux_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags
 
 /// Page flags for the initial `mmap`.
 ///
-/// An initial mapping may be writable+executable: Linux permits it and the
-/// LLVM section allocator used by lavapipe asks for it directly. The stricter
-/// [`linux_page_flags`] applies to later protection changes.
+/// An initial mapping may be writable+executable when the task's record
+/// declares `memory=jit` (checked by `linux_mmap`): the LLVM section allocator
+/// used by lavapipe asks for it directly. The stricter [`linux_page_flags`]
+/// applies to later protection changes.
 fn linux_mmap_page_flags(protections: u64) -> Option<aether_memory::paging::PageFlags> {
     if protections & !7 != 0 {
         return None;

@@ -292,8 +292,8 @@ _start:
     mov %r13, %rdi
     syscall
 
-    /* Writable+executable anonymous memory is allowed: Linux permits it and
-     * the LLVM section allocator used by lavapipe asks for it directly. */
+    /* Writable+executable anonymous memory is refused: this program has no
+     * signed import record declaring memory=jit. */
     mov $9, %rax
     xor %rdi, %rdi
     mov $4096, %rsi
@@ -302,14 +302,8 @@ _start:
     mov $-1, %r8
     xor %r9, %r9
     syscall
-    test %rax, %rax
-    js fail_vma
-    mov %rax, %rdi
-    mov $4096, %rsi
-    mov $11, %rax
-    syscall
-    test %rax, %rax
-    js fail_vma
+    cmp $-13, %rax              /* EACCES */
+    jne fail_vma
 
     /* A file mapping may be executable, but mprotect cannot add write. */
     mov $257, %rax

@@ -176,6 +176,15 @@ fn digest_pins_one_exact_artifact() {
 }
 
 fn signed_record(image: &[u8], runtime: &str, mutate: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    signed_record_with(image, runtime, "", mutate)
+}
+
+fn signed_record_with(
+    image: &[u8],
+    runtime: &str,
+    extra: &str,
+    mutate: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
     let digest = Digest::of(image);
     let mut hex = [0u8; 64];
     let length = aether_crypto::to_hex(digest.as_bytes(), &mut hex).unwrap();
@@ -185,7 +194,7 @@ fn signed_record(image: &[u8], runtime: &str, mutate: impl FnOnce(&mut Vec<u8>))
     let length = aether_crypto::to_hex(&key, &mut key_hex).unwrap();
     let key_text = core::str::from_utf8(&key_hex[..length]).unwrap();
     let body = format!(
-        "id=org.artcraft.gridcraft\nversion=0.8.0\nsha256={digest_text}\nruntime={runtime}\npublisher={TEST_PUBLISHER}\npublisher-key={key_text}\n"
+        "id=org.artcraft.gridcraft\nversion=0.8.0\nsha256={digest_text}\nruntime={runtime}\npublisher={TEST_PUBLISHER}\npublisher-key={key_text}\n{extra}"
     );
     let signature = aether_crypto::ed25519::sign(&test_seed(), body.as_bytes());
     let mut record = Vec::new();
@@ -219,6 +228,42 @@ fn signed_import_record_verifies_the_image() {
     assert_eq!(
         manifest::verify_image(&record, &trust, &other_image).unwrap_err(),
         ManifestError::DigestMismatch
+    );
+}
+
+#[test]
+fn memory_jit_is_a_signed_opt_in() {
+    let image = image();
+    let key = aether_crypto::ed25519::public_key_from_seed(&test_seed());
+    let publishers = [TrustedPublisher {
+        name: TEST_PUBLISHER,
+        key,
+    }];
+    let trust = TrustStore::new(&publishers);
+    let plain = signed_record(&image, "linux-appimage", |_| {});
+    assert!(
+        !manifest::verify_image(&plain, &trust, &image)
+            .expect("verified")
+            .jit
+    );
+
+    let jit = signed_record_with(&image, "linux-appimage", "memory=jit\n", |_| {});
+    assert!(
+        manifest::verify_image(&jit, &trust, &image)
+            .expect("verified")
+            .jit
+    );
+
+    let unknown = signed_record_with(&image, "linux-appimage", "memory=wx\n", |_| {});
+    assert_eq!(
+        manifest::verify(&unknown, &trust).unwrap_err(),
+        ManifestError::Field
+    );
+    let duplicate =
+        signed_record_with(&image, "linux-appimage", "memory=jit\nmemory=jit\n", |_| {});
+    assert_eq!(
+        manifest::verify(&duplicate, &trust).unwrap_err(),
+        ManifestError::Field
     );
 }
 

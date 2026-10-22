@@ -8,16 +8,20 @@
 # runtime stub with a zstd SquashFS image appended; the signed linux-appimage
 # record pins its digest, identity, version, and publisher.
 #
-# Usage: build-appimage-fixture.sh <out.AppImage> <out.record> <seed> <app-elf>
+# Pass memory=jit as the fifth argument to declare writable+executable
+# memory in the signed record.
+#
+# Usage: build-appimage-fixture.sh <out.AppImage> <out.record> <seed> <app-elf> [memory=jit]
 set -eu
-if [ "$#" -ne 4 ]; then
-    echo "usage: build-appimage-fixture.sh <out.AppImage> <out.record> <seed> <app-elf>" >&2
+if [ "$#" -ne 4 ] && [ "$#" -ne 5 ]; then
+    echo "usage: build-appimage-fixture.sh <out.AppImage> <out.record> <seed> <app-elf> [memory=jit]" >&2
     exit 2
 fi
 OUT=$1
 RECORD=$2
 SEED=$3
 APP=$4
+MEMORY=${5:-}
 
 if [ ! -f "$APP" ]; then
     echo "error: app ELF not found: $APP" >&2
@@ -61,6 +65,6 @@ PY
 
 cargo run -q -p aether-appimage --bin appimage-manifest -- \
     sign "$SEED" "$OUT" org.example.aether-appimage-demo 1.0.0 \
-    "Aether Test Publisher" "$RECORD" linux-appimage >/dev/null
+    "Aether Test Publisher" "$RECORD" linux-appimage $MEMORY >/dev/null
 
 echo "built signed AppImage fixture: $OUT"

@@ -114,6 +114,25 @@ _start:
     mov %r12, %rdi
     syscall
 
+    /* This fixture's signed record declares memory=jit, so a
+     * writable+executable anonymous mapping is allowed. */
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $7, %rdx                /* PROT_READ|PROT_WRITE|PROT_EXEC */
+    mov $0x22, %r10             /* PRIVATE|ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail
+    mov %rax, %rdi
+    mov $4096, %rsi
+    mov $11, %rax
+    syscall
+    test %rax, %rax
+    jne fail
+
     mov $1, %rax
     mov $1, %rdi
     lea success(%rip), %rsi
@@ -144,7 +163,7 @@ logs_path:
 large_path:
     .asciz "/settings/large"
 success:
-    .ascii "AETHER_LINUX_APPIMAGE_EXEC_OK settings=ok logs=ok quota=ok\n"
+    .ascii "AETHER_LINUX_APPIMAGE_EXEC_OK settings=ok logs=ok quota=ok jit=ok\n"
     .set success_len, . - success
 failure:
     .ascii "AETHER_LINUX_APPIMAGE_EXEC_FAIL\n"

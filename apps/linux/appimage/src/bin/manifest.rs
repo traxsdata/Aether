@@ -16,7 +16,7 @@ fn main() -> ExitCode {
         Some("verify") => verify(&args),
         _ => {
             eprintln!(
-                "usage:\n  appimage-manifest sign <seed-hex-file> <image> <id> <version> <publisher> <out> [linux-appimage|linux-rootfs]\n  appimage-manifest verify <record> <image> <publisher:pubkey-hex>"
+                "usage:\n  appimage-manifest sign <seed-hex-file> <image> <id> <version> <publisher> <out> [linux-appimage|linux-rootfs] [memory=jit]\n  appimage-manifest verify <record> <image> <publisher:pubkey-hex>"
             );
             ExitCode::from(2)
         }
@@ -24,9 +24,9 @@ fn main() -> ExitCode {
 }
 
 fn sign(args: &[String]) -> ExitCode {
-    if args.len() != 8 && args.len() != 9 {
+    if !(8..=10).contains(&args.len()) {
         eprintln!(
-            "usage: appimage-manifest sign <seed-hex-file> <image> <id> <version> <publisher> <out> [linux-appimage|linux-rootfs]"
+            "usage: appimage-manifest sign <seed-hex-file> <image> <id> <version> <publisher> <out> [linux-appimage|linux-rootfs] [memory=jit]"
         );
         return ExitCode::from(2);
     }
@@ -35,6 +35,14 @@ fn sign(args: &[String]) -> ExitCode {
         eprintln!("manifest: runtime must be linux-appimage or linux-rootfs");
         return ExitCode::from(2);
     }
+    let memory = match args.get(9).map(String::as_str) {
+        None => "",
+        Some("memory=jit") => "memory=jit\n",
+        Some(_) => {
+            eprintln!("manifest: the only memory policy is memory=jit");
+            return ExitCode::from(2);
+        }
+    };
     let seed_text = match fs::read_to_string(&args[2]) {
         Ok(text) => text,
         Err(error) => {
@@ -61,13 +69,14 @@ fn sign(args: &[String]) -> ExitCode {
     let mut key_hex = [0u8; 64];
     let key_len = aether_crypto::to_hex(&key, &mut key_hex).unwrap();
     let body = format!(
-        "id={}\nversion={}\nsha256={}\nruntime={}\npublisher={}\npublisher-key={}\n",
+        "id={}\nversion={}\nsha256={}\nruntime={}\npublisher={}\npublisher-key={}\n{}",
         args[4],
         args[5],
         core::str::from_utf8(&digest_hex[..digest_len]).unwrap(),
         runtime,
         args[6],
-        core::str::from_utf8(&key_hex[..key_len]).unwrap()
+        core::str::from_utf8(&key_hex[..key_len]).unwrap(),
+        memory
     );
     let signature = aether_crypto::ed25519::sign(&seed, body.as_bytes());
     let mut record = Vec::new();
@@ -81,8 +90,13 @@ fn sign(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     println!(
-        "signed id={} version={} runtime={} publisher={} out={}",
-        args[4], args[5], runtime, args[6], args[7]
+        "signed id={} version={} runtime={} publisher={} jit={} out={}",
+        args[4],
+        args[5],
+        runtime,
+        args[6],
+        !memory.is_empty(),
+        args[7]
     );
     ExitCode::SUCCESS
 }

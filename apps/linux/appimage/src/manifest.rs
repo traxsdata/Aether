@@ -13,6 +13,11 @@
 //! signature   64 bytes  Ed25519 over the body
 //! ```
 //!
+//! The optional `memory=jit` field declares that the application generates
+//! code at run time and needs writable+executable mappings. Linux tasks
+//! without it are refused W+X memory. It is part of the signed body, so only
+//! the publisher can grant it.
+//!
 //! Verification order is strict: framing, field policy, trusted publisher key,
 //! publisher-name match, signature, then the image digest. A valid signature
 //! says who vouched for an artifact; it does not make the application safe.
@@ -73,6 +78,8 @@ pub struct ImportManifest<'a> {
     pub publisher: &'a str,
     /// Publisher Ed25519 public key.
     pub publisher_key: [u8; 32],
+    /// Whether the record declares `memory=jit` (writable+executable memory).
+    pub jit: bool,
     /// Signed canonical body.
     pub body: &'a [u8],
     /// Ed25519 signature over `body`.
@@ -115,6 +122,7 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
     let mut runtime = None;
     let mut publisher = None;
     let mut publisher_key = None;
+    let mut memory = None;
     for line in body_text.split('\n') {
         if line.is_empty() {
             continue;
@@ -127,6 +135,7 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
             "runtime" => &mut runtime,
             "publisher" => &mut publisher,
             "publisher-key" => &mut publisher_key,
+            "memory" => &mut memory,
             _ => return Err(ManifestError::Field),
         };
         if slot.replace(value).is_some() {
@@ -143,6 +152,13 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
     if runtime != "linux-appimage" && runtime != "linux-rootfs" {
         return Err(ManifestError::Runtime);
     }
+    // `jit` is the only memory policy; anything else is a malformed record
+    // rather than a silently ignored request.
+    let jit = match memory {
+        None => false,
+        Some("jit") => true,
+        Some(_) => return Err(ManifestError::Field),
+    };
     if version.is_empty() || version.len() > 32 || publisher.is_empty() || publisher.len() > 64 {
         return Err(ManifestError::Field);
     }
@@ -162,6 +178,7 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
         runtime,
         publisher,
         publisher_key: key,
+        jit,
         body,
         signature,
     })
