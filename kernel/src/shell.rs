@@ -135,8 +135,10 @@ fn execute_line() {
         }
         "updates" => crate::updates::print_status(),
         "desktop" => {
-            if argument == "redraw" {
-                crate::desktop::redraw();
+            match argument {
+                "redraw" => crate::desktop::redraw(),
+                "reset" => crate::desktop::reset_paint_stats(),
+                _ => {}
             }
             desktop();
         }
@@ -169,7 +171,7 @@ fn print_help() {
     serial_line!("  linuxd           Linux runtime manager and AppImage status");
     serial_line!("  linux-erase APP  erase an application's settings/logs overlay");
     serial_line!("  updates          signed update and rollback status");
-    serial_line!("  desktop [redraw] compositor state and rendering timings");
+    serial_line!("  desktop [redraw|reset] compositor state and rendering timings");
     serial_line!("  clear            clear the terminal");
 }
 

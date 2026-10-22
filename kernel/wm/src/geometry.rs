@@ -225,3 +225,117 @@ impl Rect {
         )
     }
 }
+
+/// Most rectangles a [`Damage`] keeps apart before merging.
+pub const DAMAGE_RECTS: usize = 4;
+
+/// A frame's damage as a few rectangles instead of one bounding box.
+///
+/// Independent changes, such as the menu bar, a window, and the dock, often
+/// sit at opposite edges of the screen. Their bounding box repaints and
+/// presents everything between them. Rectangles are merged when the merge
+/// paints no more pixels than keeping them apart, so adjacent or heavily
+/// overlapping damage still paints once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Damage {
+    rects: [Rect; DAMAGE_RECTS],
+    len: usize,
+}
+
+impl Default for Damage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Damage {
+    /// No damage.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            rects: [Rect::new(0, 0, 0, 0); DAMAGE_RECTS],
+            len: 0,
+        }
+    }
+
+    /// Damage covering exactly one rectangle.
+    #[must_use]
+    pub fn from_rect(rect: Rect) -> Self {
+        let mut damage = Self::new();
+        damage.include(rect);
+        damage
+    }
+
+    /// Returns the damaged rectangles. Their order is unspecified.
+    #[must_use]
+    pub fn rects(&self) -> &[Rect] {
+        &self.rects[..self.len]
+    }
+
+    /// Returns `true` when nothing is damaged.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the bounding box of all damage.
+    #[must_use]
+    pub fn bounds(&self) -> Option<Rect> {
+        self.rects().iter().copied().reduce(Rect::union)
+    }
+
+    /// Adds a rectangle, merging where that costs no extra area. Kept
+    /// rectangles may overlap; a painter must repaint each one completely.
+    pub fn include(&mut self, rect: Rect) {
+        if rect.is_empty() {
+            return;
+        }
+        let mut rect = rect;
+        // A merge can make the result mergeable with another rectangle.
+        while let Some(index) = (0..self.len).find(|index| merge_is_free(self.rects[*index], rect))
+        {
+            rect = rect.union(self.rects[index]);
+            self.len -= 1;
+            self.rects[index] = self.rects[self.len];
+        }
+        if self.len < DAMAGE_RECTS {
+            self.rects[self.len] = rect;
+            self.len += 1;
+            return;
+        }
+        // Full: grow whichever rectangle wastes the least area.
+        let index = (0..self.len)
+            .min_by_key(|index| waste(self.rects[*index], rect))
+            .unwrap_or(0);
+        let merged = self.rects[index].union(rect);
+        self.len -= 1;
+        self.rects[index] = self.rects[self.len];
+        self.include(merged);
+    }
+
+    /// Clips every rectangle to `bounds`, dropping those outside it.
+    #[must_use]
+    pub fn clipped(&self, bounds: Rect) -> Self {
+        let mut damage = Self::new();
+        for rect in self.rects() {
+            if let Some(rect) = rect.intersection(bounds) {
+                damage.include(rect);
+            }
+        }
+        damage
+    }
+}
+
+fn area(rect: Rect) -> i64 {
+    i64::from(rect.width.max(0)) * i64::from(rect.height.max(0))
+}
+
+/// Extra area painting the bounding box of `a` and `b` costs over painting
+/// both separately (an overlap is painted twice when kept apart).
+fn waste(a: Rect, b: Rect) -> i64 {
+    area(a.union(b)) - area(a) - area(b)
+}
+
+fn merge_is_free(a: Rect, b: Rect) -> bool {
+    waste(a, b) <= 0
+}

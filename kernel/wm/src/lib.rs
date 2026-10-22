@@ -24,7 +24,7 @@ pub mod model;
 pub mod theme;
 
 pub use anim::{Anim, ease_in_out, ease_out_cubic};
-pub use geometry::{Point, Rect, Size};
+pub use geometry::{DAMAGE_RECTS, Damage, Point, Rect, Size};
 pub use layout::{
     DOCK_HEIGHT, DOCK_ICON_BASE, DOCK_ITEMS, DOCK_MARGIN, DOCK_SLOT_WIDTH, DockSlot,
     MENU_BAR_HEIGHT, TITLE_BAR_HEIGHT, WINDOW_RADIUS, default_window_frame, dock_icon_rects,

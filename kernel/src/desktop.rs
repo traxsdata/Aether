@@ -12,7 +12,7 @@
 //! a coding rule, not containment of a compromised compositor. Ring-3 migration
 //! is required to enforce the specification's desktop security boundary.
 
-use crate::arch::x86_64::timer::InterruptGuard;
+use crate::arch::x86_64::timer::{self, InterruptGuard};
 use crate::graphics;
 use crate::icons;
 use crate::input::{self, Key};
@@ -22,8 +22,8 @@ use aether_packaging::manifest::Version;
 use aether_wm::browser::{Browser, BrowserLayout, LOCATIONS};
 use aether_wm::layout::{self, DOCK_SLOTS, DockSlot};
 use aether_wm::{
-    Command, GlassLevel, Key as WmKey, MenuKind, Modifiers, Rect, Settings, WORKSPACES, Window,
-    WindowKind, Wm,
+    Command, Damage, GlassLevel, Key as WmKey, MenuKind, Modifiers, Rect, Settings, WORKSPACES,
+    Window, WindowKind, Wm,
 };
 use core::cell::UnsafeCell;
 
@@ -55,6 +55,11 @@ struct DesktopState {
     cursor_paints: u64,
     last_paint_ticks: u64,
     max_paint_ticks: u64,
+    /// TSC-timed scene paint durations; the tick counters above are 10 ms
+    /// granular, which hides most partial repaints.
+    last_paint_us: u64,
+    max_paint_us: u64,
+    total_paint_us: u64,
     fast_paints: u64,
     slow_paints: u64,
     rename: RenameState,
@@ -97,6 +102,9 @@ impl DesktopState {
             cursor_paints: 0,
             last_paint_ticks: 0,
             max_paint_ticks: 0,
+            last_paint_us: 0,
+            max_paint_us: 0,
+            total_paint_us: 0,
             fast_paints: 0,
             slow_paints: 0,
             rename: RenameState::new(),
@@ -243,6 +251,9 @@ pub fn reset_paint_stats() {
         state.cursor_paints = 0;
         state.last_paint_ticks = 0;
         state.max_paint_ticks = 0;
+        state.last_paint_us = 0;
+        state.max_paint_us = 0;
+        state.total_paint_us = 0;
         state.fast_paints = 0;
         state.slow_paints = 0;
     }
@@ -342,11 +353,12 @@ pub fn redraw() {
     let Some(wm) = current() else {
         return;
     };
-    paint_frame(&wm, wm.screen());
+    paint_frame(&wm, Damage::from_rect(wm.screen()));
 }
 
-fn paint_frame(wm: &Wm, mut damage: Rect) {
+fn paint_frame(wm: &Wm, mut damage: Damage) {
     let started = scheduler::ticks();
+    let started_tsc = timer::tsc();
     let palette = wm.palette();
     let glass = effective_glass(wm.settings());
     let screen = wm.screen();
@@ -363,36 +375,48 @@ fn paint_frame(wm: &Wm, mut damage: Rect) {
         && wm
             .window_id(WindowKind::Linux)
             .and_then(|id| wm.window_frame(id))
-            .is_some_and(|frame| layout::content_rect(frame) == damage)
+            .is_some_and(|frame| damage.rects() == [layout::content_rect(frame)])
         && crate::display::surface_opaque();
-    if theme_changed
-        || (!opaque_content
-            && !graphics::restore_wallpaper(damage.x, damage.y, damage.width, damage.height))
-    {
-        damage = screen;
+    // Without a cached wallpaper (first frame or direct mode) every region
+    // restore fails alike, so the first rectangle decides.
+    let restorable = opaque_content
+        || damage.rects().first().is_some_and(|rect| {
+            graphics::restore_wallpaper(rect.x, rect.y, rect.width, rect.height)
+        });
+    if theme_changed || !restorable {
+        damage = Damage::from_rect(screen);
         paint_wallpaper(screen, palette, wm.settings().high_contrast);
         graphics::cache_wallpaper();
     }
-    graphics::set_damage(damage.x, damage.y, damage.width, damage.height);
-    paint_windows(wm, palette, damage);
-    if wm.overview_open() || wm.overview_progress() > 0 {
-        paint_overview(wm, palette);
+    // Rectangles may overlap. Each one restores its wallpaper and repaints
+    // every layer, so an overlap is painted twice but never blended twice.
+    for (index, rect) in damage.rects().iter().enumerate() {
+        if index > 0 {
+            graphics::restore_wallpaper(rect.x, rect.y, rect.width, rect.height);
+        }
+        graphics::set_damage(rect.x, rect.y, rect.width, rect.height);
+        paint_windows(wm, palette, *rect);
+        if wm.overview_open() || wm.overview_progress() > 0 {
+            paint_overview(wm, palette);
+        }
+        paint_dock(wm, palette, glass);
+        paint_menu_bar(wm, palette, glass);
+        if wm.menu_state().is_some() {
+            paint_menu(wm, palette, glass);
+        }
+        if wm.spotlight_open() {
+            paint_spotlight(wm, palette, glass);
+        }
+        graphics::clear_damage();
     }
-    paint_dock(wm, palette, glass);
-    paint_menu_bar(wm, palette, glass);
-    if wm.menu_state().is_some() {
-        paint_menu(wm, palette, glass);
-    }
-    if wm.spotlight_open() {
-        paint_spotlight(wm, palette, glass);
-    }
-    graphics::clear_damage();
     graphics::save_cursor_background(wm.cursor().x, wm.cursor().y);
     paint_cursor(wm.cursor(), palette);
-    if damage == screen {
+    if damage.rects() == [screen] {
         graphics::present();
     } else {
-        graphics::present_region(damage.x, damage.y, damage.width, damage.height);
+        for rect in damage.rects() {
+            graphics::present_region(rect.x, rect.y, rect.width, rect.height);
+        }
         if let Some((x, y, width, height)) = old_cursor {
             graphics::present_region(x, y, width, height);
         }
@@ -404,6 +428,7 @@ fn paint_frame(wm: &Wm, mut damage: Rect) {
         );
     }
     let finished = scheduler::ticks();
+    let micros = timer::tsc_micros(timer::tsc().saturating_sub(started_tsc), finished);
     let _guard = InterruptGuard::enter();
     // SAFETY: No rendering or service borrow is live during this state update.
     unsafe {
@@ -421,6 +446,9 @@ fn paint_frame(wm: &Wm, mut damage: Rect) {
         state.scene_paints = state.scene_paints.saturating_add(1);
         state.last_paint_ticks = finished.saturating_sub(started);
         state.max_paint_ticks = state.max_paint_ticks.max(state.last_paint_ticks);
+        state.last_paint_us = micros;
+        state.max_paint_us = state.max_paint_us.max(micros);
+        state.total_paint_us = state.total_paint_us.saturating_add(micros);
         if state.last_paint_ticks < 3 {
             state.fast_paints = state.fast_paints.saturating_add(1);
         } else if state.last_paint_ticks > 10 {
@@ -502,10 +530,10 @@ pub fn tick() {
         }
     }
     store(wm, now, second, last_buttons);
-    let mut damage = painted.map_or(Some(wm.screen()), |before| wm.damage_since(&before));
-    let mut include = |rect: Rect| {
-        damage = Some(damage.map_or(rect, |old| old.union(rect)));
-    };
+    let mut damage = painted.map_or(Damage::from_rect(wm.screen()), |before| {
+        wm.damage_region_since(&before)
+    });
+    let mut include = |rect: Rect| damage.include(rect);
     // SAFETY: Only the idle task writes desktop state; IRQs only enqueue input.
     let (files_dirty, linux_dirty, linux_frame_dirty, live_dirty, clock_dirty) = unsafe {
         (
@@ -550,7 +578,8 @@ pub fn tick() {
     }
     // Batch all queued keys and pointer events into at most one scene frame per
     // three ticks. A fast click's press/release is still processed in order.
-    if let Some(damage) = damage.and_then(|rect| rect.intersection(wm.screen())) {
+    let damage = damage.clipped(wm.screen());
+    if !damage.is_empty() {
         if now.saturating_sub(last_paint) >= 3 {
             paint_frame(&wm, damage);
         }
@@ -1031,11 +1060,14 @@ pub fn print_state() {
     // SAFETY: Read-only snapshot while interrupts are masked.
     let state = unsafe { &*DESKTOP.0.get() };
     serial_line!(
-        "desktop: render scene={} cursor={} last_ms={} max_ms={}",
+        "desktop: render scene={} cursor={} last_ms={} max_ms={} last_us={} max_us={} total_us={}",
         state.scene_paints,
         state.cursor_paints,
         state.last_paint_ticks * 10,
-        state.max_paint_ticks * 10
+        state.max_paint_ticks * 10,
+        state.last_paint_us,
+        state.max_paint_us,
+        state.total_paint_us
     );
     serial_line!(
         "desktop: files path={} entries={} selected={} preview={} error={:?}",
@@ -1149,15 +1181,23 @@ fn paint_windows(wm: &Wm, palette: aether_wm::Palette, damage: Rect) {
         if !shadow.intersects(damage) {
             continue;
         }
-        paint_window(wm, window, frame, wm.focus_id() == Some(*id), palette);
+        paint_window(
+            wm,
+            window,
+            frame,
+            wm.focus_id() == Some(*id),
+            palette,
+            damage,
+        );
     }
     if wm.transition().active {
         let label = workspace_label(wm.workspace());
+        let pill = layout::space_pill(screen);
         draw_pill(
-            screen.x + screen.width / 2 - 50,
-            screen.y + screen.height - 110,
-            100,
-            24,
+            pill.x,
+            pill.y,
+            pill.width,
+            pill.height,
             palette,
             label,
             palette.accent,
@@ -1165,7 +1205,14 @@ fn paint_windows(wm: &Wm, palette: aether_wm::Palette, damage: Rect) {
     }
 }
 
-fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: aether_wm::Palette) {
+fn paint_window(
+    wm: &Wm,
+    window: &Window,
+    frame: Rect,
+    focused: bool,
+    palette: aether_wm::Palette,
+    damage: Rect,
+) {
     if frame.width < 24 || frame.height < 24 {
         return;
     }
@@ -1194,10 +1241,11 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
     );
 
     // Layered shadow: darker nearest the frame, softer further away. Omit it
-    // during a drag/resize gesture: the two translucent layers cover several
-    // million pixels, and the window is moving too fast to read the shadow.
-    // The gesture end damages the whole frame, so the shadow returns.
-    if !wm.is_dragging() {
+    // during a drag/resize gesture or a Spaces slide: the two translucent
+    // layers are a third of a window's cost, and the window is moving too
+    // fast to read the shadow. The gesture or slide end damages the whole
+    // frame, so the shadow returns.
+    if !wm.is_dragging() && !wm.transition().active {
         for (offset, spread, strength) in [(0, 10, 78u8), (4, 20, 34)] {
             graphics::blend_round_rect_around(
                 frame.x - spread / 2,
@@ -1279,21 +1327,26 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
         55,
     );
 
-    graphics::set_round_clip(frame.x, frame.y, frame.width, frame.height, radius);
-    // An opaque Linux surface is about to overwrite this rectangle completely.
-    if !linux_opaque {
-        graphics::fill_rect(
-            content.x,
-            content.y,
-            content.width,
-            content.height,
-            palette.window,
-        );
+    // Damage that touches only the shadow or title bar, such as a hover over
+    // the traffic lights, leaves the content pixels as they are; every pixel
+    // would be clipped, but walking a text-heavy view still costs.
+    if content.intersects(damage) {
+        graphics::set_round_clip(frame.x, frame.y, frame.width, frame.height, radius);
+        // An opaque Linux surface is about to overwrite this rectangle completely.
+        if !linux_opaque {
+            graphics::fill_rect(
+                content.x,
+                content.y,
+                content.width,
+                content.height,
+                palette.window,
+            );
+        }
+        graphics::set_clip(content.x, content.y, content.width, content.height);
+        paint_content(wm, window, content, focused, palette);
+        graphics::clear_clip();
+        graphics::clear_round_clip();
     }
-    graphics::set_clip(content.x, content.y, content.width, content.height);
-    paint_content(wm, window, content, focused, palette);
-    graphics::clear_clip();
-    graphics::clear_round_clip();
 
     let lights = layout::traffic_lights(frame);
     paint_traffic_lights(wm, &lights, focused, palette);

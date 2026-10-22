@@ -793,6 +793,111 @@ fn moving_a_window_damages_old_and_new_frames_including_shadows() {
 }
 
 #[test]
+fn damage_keeps_distant_rectangles_apart_and_merges_free_ones() {
+    use crate::Damage;
+    let mut damage = Damage::new();
+    assert!(damage.is_empty());
+    damage.include(Rect::new(0, 0, 0, 10));
+    assert!(damage.is_empty());
+    // A menu bar and a dock strip stay separate.
+    damage.include(Rect::new(0, 0, 1280, 27));
+    damage.include(Rect::new(400, 700, 480, 90));
+    assert_eq!(damage.rects().len(), 2);
+    assert_eq!(damage.bounds(), Some(Rect::new(0, 0, 1280, 790)));
+    // An adjacent strip of the same width merges without waste.
+    damage.include(Rect::new(0, 27, 1280, 10));
+    assert_eq!(damage.rects().len(), 2);
+    assert!(damage.rects().contains(&Rect::new(0, 0, 1280, 37)));
+    // A rectangle inside another is absorbed.
+    damage.include(Rect::new(500, 710, 10, 10));
+    assert_eq!(damage.rects().len(), 2);
+    // Past capacity, rectangles merge but every pixel stays covered.
+    let parts = [
+        Rect::new(0, 100, 10, 10),
+        Rect::new(300, 200, 10, 10),
+        Rect::new(600, 300, 10, 10),
+        Rect::new(900, 400, 10, 10),
+    ];
+    for part in parts {
+        damage.include(part);
+    }
+    assert!(damage.rects().len() <= crate::DAMAGE_RECTS);
+    for part in parts {
+        assert!(
+            damage
+                .rects()
+                .iter()
+                .any(|rect| rect.intersection(part) == Some(part))
+        );
+    }
+    let clipped = damage.clipped(Rect::new(0, 0, 640, 480));
+    assert!(
+        clipped
+            .rects()
+            .iter()
+            .all(|rect| rect.right() <= 640 && rect.bottom() <= 480)
+    );
+}
+
+#[test]
+fn switching_spaces_keeps_menu_bar_and_dock_damage_separate() {
+    let mut wm = sample();
+    wm.finish_animations();
+    let before = wm;
+    wm.cycle_workspace(1);
+    let region = wm.damage_region_since(&before);
+    assert!(region.rects().len() > 1);
+    let painted: i64 = region
+        .rects()
+        .iter()
+        .map(|rect| i64::from(rect.width) * i64::from(rect.height))
+        .sum();
+    let screen = wm.screen();
+    assert!(painted < i64::from(screen.width) * i64::from(screen.height));
+}
+
+#[test]
+fn workspace_slide_damages_only_moving_windows_and_the_pill() {
+    let mut wm = sample();
+    wm.finish_animations();
+    let screen = wm.screen();
+    let pill = crate::layout::space_pill(screen);
+    let mut before = wm;
+    wm.cycle_workspace(1);
+    assert!(wm.transition().active);
+    let first = wm.damage_since(&before).unwrap();
+    assert_eq!(first.intersection(pill), Some(pill));
+    assert_eq!(
+        first.intersection(crate::layout::menu_bar(screen)),
+        Some(crate::layout::menu_bar(screen))
+    );
+    let mut frames = 0;
+    while wm.transition().active {
+        before = wm;
+        wm.tick(3);
+        frames += 1;
+        let damage = wm.damage_since(&before).unwrap();
+        // Every window frame painted before or after the step is covered.
+        for id in before.order().iter().chain(wm.order()) {
+            for frame in [before.window_frame(*id), wm.window_frame(*id)]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(visible) = frame.inset(-24).intersection(screen) {
+                    assert_eq!(damage.intersection(visible), Some(visible));
+                }
+            }
+        }
+        // The menu bar and dock rows are static and not repainted wholesale.
+        assert!(damage.height < screen.height);
+    }
+    assert!(frames > 1);
+    // The step that ends the slide removes the pill.
+    let last = wm.damage_since(&before).unwrap();
+    assert_eq!(last.intersection(pill), Some(pill));
+}
+
+#[test]
 fn hit_testing_tracks_animated_not_logical_window_frames() {
     let mut wm = Wm::new(Rect::new(0, 0, 1280, 800));
     let id = wm.open(WindowKind::Settings).unwrap();
