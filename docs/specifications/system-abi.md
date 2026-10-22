@@ -60,7 +60,7 @@ runtime. The kernel verifies the record and digest before parsing.
 An absent framebuffer is all zero. A present descriptor must use a linear
 32-bit format, have non-zero dimensions, a stride of at least `width`, and a
 size covering the visible rows. The kernel maps the framebuffer identity,
-cache-disabled, and non-executable. Bitmask and blit-only modes are rejected
+write-combining (cache-disabled when the CPU has no PAT), and non-executable. Bitmask and blit-only modes are rejected
 for the current software compositor.
 
 Dimensions and stride are bounded to 8192 pixels, and the aperture to 512 MiB.

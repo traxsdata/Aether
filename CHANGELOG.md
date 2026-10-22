@@ -7,6 +7,16 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Desktop performance after boot: the kernel parks the application processors
+  the firmware left in its idle loop (an INIT IPI through the xAPIC page or
+  x2APIC MSR), so a `-smp 2` QEMU guest idles at ~1% host CPU instead of a
+  full core spinning in OVMF's `mwait` loop. The framebuffer is mapped
+  write-combining through PAT entry 1. The compositor no longer blends window
+  shadows and translucent bodies under the opaque content rectangle, blends
+  red and blue in two lanes of one word (bit-identical to per-channel
+  division), and repaints only the Search panel while typing. Under TCG at
+  1920x1200 a full repaint drops from ~50 ms to ~10 ms and a window-move frame
+  is ~5x cheaper; rendered pixels are unchanged.
 - GridCraft interaction performance for the Gate 4 prototype: the compositor
   clips the Linux blit to damage once, copies opaque rows as packed words,
   uses exact shift-based alpha division, hashes only the first presented

@@ -1244,11 +1244,16 @@ impl<'a, 'b> Tables<'a, 'b> {
         Ok(())
     }
 
-    /// Maps the linear framebuffer identity with write-combining disabled.
+    /// Maps the linear framebuffer identity, write-combining when available.
     ///
     /// Firmware memory maps classify the framebuffer as MMIO, which the
     /// general identity map deliberately skips. The graphics service needs it,
-    /// so it is mapped explicitly, non-executable and cache-disabled.
+    /// so it is mapped explicitly and non-executable. The compositor only
+    /// streams rows into it, so it uses the write-combining PAT entry when
+    /// [`cpu::enable_write_combining`] installed one, and cache-disabled
+    /// otherwise.
+    ///
+    /// [`cpu::enable_write_combining`]: crate::arch::x86_64::cpu::enable_write_combining
     fn map_framebuffer(&mut self, framebuffer: &FramebufferInfo) -> Result<bool, PagingError> {
         if !framebuffer.is_present() {
             return Ok(false);
@@ -1262,10 +1267,12 @@ impl<'a, 'b> Tables<'a, 'b> {
         }
         let start = framebuffer.base & !(PAGE_SIZE - 1);
         let end = align_up_page(end)?;
-        let flags = PageFlags::PRESENT
-            | PageFlags::WRITABLE
-            | PageFlags::CACHE_DISABLE
-            | PageFlags::NO_EXECUTE;
+        let memory_type = if crate::arch::x86_64::cpu::write_combining_enabled() {
+            PageFlags::WRITE_THROUGH
+        } else {
+            PageFlags::CACHE_DISABLE
+        };
+        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | memory_type | PageFlags::NO_EXECUTE;
 
         let mut address = start;
         while address < end {

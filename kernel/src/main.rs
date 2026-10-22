@@ -169,6 +169,21 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         arch::x86_64::halt();
     }
     serial_line!("boot: cpu: NX and write-protect enabled");
+    // SAFETY: Boot is single-threaded, interrupts are disabled, and the kernel
+    // page tables, the only ones that will use the PAT entry, are not live.
+    let write_combining = unsafe { arch::x86_64::cpu::enable_write_combining() };
+    // SAFETY: This is the bootstrap processor, interrupts are disabled, and
+    // nothing has been handed to another processor.
+    let parking = unsafe { arch::x86_64::cpu::park_application_processors() };
+    serial_line!(
+        "boot: cpu: framebuffer {}, application processors {:?}",
+        if write_combining {
+            "write-combining"
+        } else {
+            "uncached"
+        },
+        parking
+    );
     // SAFETY: Boot is single-threaded, interrupts are disabled, and no user
     // task has run vector code yet.
     let xsave = unsafe { arch::x86_64::cpu::enable_extended_state() };

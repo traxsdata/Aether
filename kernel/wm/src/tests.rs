@@ -757,6 +757,28 @@ fn static_overlays_do_not_force_continuous_full_screen_repaints() {
 }
 
 #[test]
+fn typing_in_search_damages_only_the_panel_and_its_shadow() {
+    let mut wm = sample();
+    wm.open_spotlight();
+    let before = wm;
+    wm.key(Key::Char(b's'), Modifiers::default());
+    let panel = crate::layout::spotlight_panel(wm.screen());
+    let damage = wm.damage_since(&before).unwrap();
+    // The panel shadow is offset (5, 10) from the panel.
+    let shadow = Rect::new(panel.x + 5, panel.y + 10, panel.width, panel.height);
+    assert_eq!(damage.intersection(panel), Some(panel));
+    assert_eq!(damage.intersection(shadow), Some(shadow));
+    assert!(damage.width < wm.screen().width);
+    let before = wm;
+    wm.key(Key::Down, Modifiers::default());
+    assert_eq!(wm.damage_since(&before), Some(damage));
+    // Closing search undims the whole screen.
+    let before = wm;
+    wm.close_spotlight();
+    assert_eq!(wm.damage_since(&before), Some(wm.screen()));
+}
+
+#[test]
 fn moving_a_window_damages_old_and_new_frames_including_shadows() {
     let mut wm = sample();
     let before = wm;

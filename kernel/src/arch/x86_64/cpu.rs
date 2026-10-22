@@ -14,6 +14,7 @@
 
 use core::arch::asm;
 use core::arch::x86_64::__cpuid;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const IA32_EFER: u32 = 0xc000_0080;
 const EFER_NXE: u64 = 1 << 11;
@@ -212,4 +213,193 @@ unsafe fn write_cr0(value: u64) {
             options(nomem, nostack, preserves_flags)
         );
     }
+}
+
+const IA32_PAT: u32 = 0x277;
+const CPUID_PAT: u32 = 1 << 16;
+/// PAT entry 1, selected by `PWT=1, PCD=0, PAT=0`.
+const PAT_ENTRY_WRITE_THROUGH: u32 = 1;
+const PAT_WRITE_COMBINING: u64 = 0x01;
+
+static WRITE_COMBINING: AtomicBool = AtomicBool::new(false);
+
+/// Repurposes PAT entry 1 (power-on default: write-through) as
+/// write-combining and returns `true` when the processor supports PAT.
+///
+/// No kernel mapping sets `WRITE_THROUGH` on its own, so after this call the
+/// flag selects write-combining. The framebuffer uses it: the compositor only
+/// streams whole rows into it, and an uncached aperture turns every 4-byte
+/// store into its own bus transaction.
+///
+/// # Safety
+///
+/// Must run once during boot, at CPL0, with interrupts disabled and before
+/// the kernel activates page tables that map anything with `WRITE_THROUGH`.
+pub unsafe fn enable_write_combining() -> bool {
+    if __cpuid(1).edx & CPUID_PAT == 0 {
+        return false;
+    }
+    let shift = PAT_ENTRY_WRITE_THROUGH * 8;
+    // SAFETY: IA32_PAT is architectural when CPUID reports PAT. Only entry 1
+    // changes, and the caller guarantees no live mapping selects it yet.
+    unsafe {
+        let pat = read_msr(IA32_PAT);
+        write_msr(
+            IA32_PAT,
+            (pat & !(0xff << shift)) | (PAT_WRITE_COMBINING << shift),
+        );
+        // A PAT change does not invalidate cached translations of the firmware
+        // tables still in CR3; reload it so no stale memory type survives.
+        write_cr3(read_cr3());
+    }
+    WRITE_COMBINING.store(true, Ordering::Relaxed);
+    true
+}
+
+/// Returns `true` once [`enable_write_combining`] reprogrammed the PAT.
+#[must_use]
+pub fn write_combining_enabled() -> bool {
+    WRITE_COMBINING.load(Ordering::Relaxed)
+}
+
+const IA32_APIC_BASE: u32 = 0x1b;
+const APIC_BASE_BSP: u64 = 1 << 8;
+const APIC_BASE_X2APIC: u64 = 1 << 10;
+const APIC_BASE_ENABLE: u64 = 1 << 11;
+const CPUID_X2APIC: u32 = 1 << 21;
+const X2APIC_ICR: u32 = 0x830;
+const APIC_BASE_ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+const XAPIC_ICR_LOW: u64 = 0x300;
+const XAPIC_ICR_HIGH: u64 = 0x310;
+const XAPIC_DELIVERY_PENDING: u32 = 1 << 12;
+/// INIT, level assert, destination shorthand "all excluding self".
+const ICR_INIT_ALL_EXCLUDING_SELF: u64 = (0b101 << 8) | (1 << 14) | (0b11 << 18);
+
+/// How the bootstrap processor dealt with firmware-owned application
+/// processors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApParking {
+    /// An INIT IPI moved every other processor into wait-for-SIPI.
+    Parked,
+    /// The local APIC is disabled or this is not the bootstrap processor.
+    NoApic,
+    /// The processor has no x2APIC and the current page tables do not
+    /// identity-map the xAPIC registers.
+    Unsupported,
+}
+
+/// Parks the application processors the firmware left running.
+///
+/// The kernel is single-core. After `ExitBootServices` the firmware keeps the
+/// other processors in its own idle loop, which may be a `monitor`/`mwait`
+/// spin: on QEMU TCG with `-smp 2` that loop costs a full host core forever.
+/// An INIT IPI puts each one in wait-for-SIPI, where it executes nothing until
+/// a future SMP bring-up sends a startup IPI.
+///
+/// The APIC stays in the mode the firmware left it in, so legacy PIC delivery
+/// through LINT0 is unchanged. An xAPIC is programmed through its MMIO page,
+/// which is used only after a walk of the active page tables proves it is
+/// identity-mapped; otherwise an x2APIC's MSR interface is used.
+///
+/// # Safety
+///
+/// Must run once during boot on the bootstrap processor, at CPL0, with
+/// interrupts disabled, while the firmware's identity-mapped page tables are
+/// still active, and before any code relies on another processor.
+pub unsafe fn park_application_processors() -> ApParking {
+    // SAFETY: IA32_APIC_BASE is architectural on every x86-64 processor.
+    let base = unsafe { read_msr(IA32_APIC_BASE) };
+    if base & APIC_BASE_ENABLE == 0 || base & APIC_BASE_BSP == 0 {
+        return ApParking::NoApic;
+    }
+    if base & APIC_BASE_X2APIC != 0 {
+        // SAFETY: x2APIC mode is active. The IPI excludes this processor, and
+        // the kernel has not handed any work to another processor.
+        unsafe { write_msr(X2APIC_ICR, ICR_INIT_ALL_EXCLUDING_SELF) };
+        return ApParking::Parked;
+    }
+    let registers = base & APIC_BASE_ADDRESS_MASK;
+    // SAFETY: The caller guarantees the firmware's page tables are active and
+    // identity-map their own table frames.
+    if unsafe { identity_mapped(registers) } {
+        // SAFETY: The walk proved the xAPIC page is mapped at its physical
+        // address. ICR writes are architectural; the shorthand excludes this
+        // processor. The delivery-status wait is bounded.
+        unsafe {
+            let icr_low = (registers + XAPIC_ICR_LOW) as *mut u32;
+            ((registers + XAPIC_ICR_HIGH) as *mut u32).write_volatile(0);
+            icr_low.write_volatile(ICR_INIT_ALL_EXCLUDING_SELF as u32);
+            for _ in 0..100_000 {
+                if icr_low.read_volatile() & XAPIC_DELIVERY_PENDING == 0 {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+        }
+        return ApParking::Parked;
+    }
+    if __cpuid(1).ecx & CPUID_X2APIC == 0 {
+        return ApParking::Unsupported;
+    }
+    // SAFETY: CPUID reports x2APIC and the APIC is globally enabled, so the
+    // xAPIC -> x2APIC transition is permitted and preserves the LVT entries.
+    // The IPI excludes this processor.
+    unsafe {
+        write_msr(IA32_APIC_BASE, base | APIC_BASE_X2APIC);
+        write_msr(X2APIC_ICR, ICR_INIT_ALL_EXCLUDING_SELF);
+    }
+    ApParking::Parked
+}
+
+/// Returns `true` when the active page tables map the 4 KiB page at
+/// `address` to the same physical address, present and writable.
+///
+/// # Safety
+///
+/// The active page tables must identity-map their own table frames, as the
+/// UEFI hand-off tables do.
+unsafe fn identity_mapped(address: u64) -> bool {
+    const PRESENT: u64 = 1 << 0;
+    const WRITABLE: u64 = 1 << 1;
+    const HUGE: u64 = 1 << 7;
+    const FRAME: u64 = 0x000f_ffff_ffff_f000;
+    const CR4_LA57: u64 = 1 << 12;
+    // SAFETY: Reading CR4 is valid at CPL0. The walk below is four-level.
+    if unsafe { read_cr4() } & CR4_LA57 != 0 {
+        return false;
+    }
+    // SAFETY: Reading CR3 is valid at CPL0.
+    let mut table = unsafe { read_cr3() } & FRAME;
+    for level in (0..4u32).rev() {
+        let shift = 12 + 9 * level;
+        let index = (address >> shift) & 0x1ff;
+        // SAFETY: The caller guarantees table frames are identity-mapped, and
+        // `index` is within the 512-entry table.
+        let entry = unsafe { ((table + index * 8) as *const u64).read_volatile() };
+        if entry & (PRESENT | WRITABLE) != (PRESENT | WRITABLE) {
+            return false;
+        }
+        let size = 1u64 << shift;
+        if level == 0 || (entry & HUGE != 0 && (level == 1 || level == 2)) {
+            // A huge leaf's PAT bit sits at bit 12; mask it with the offset.
+            let frame = entry & FRAME & !(size - 1);
+            return frame == address & !(size - 1);
+        }
+        table = entry & FRAME;
+    }
+    false
+}
+
+unsafe fn read_cr3() -> u64 {
+    let value: u64;
+    // SAFETY: Reading CR3 is valid at CPL0 and has no side effects.
+    unsafe {
+        asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+unsafe fn write_cr3(value: u64) {
+    // SAFETY: The caller reloads the current, valid top-level table.
+    unsafe { asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) };
 }

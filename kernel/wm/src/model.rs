@@ -1423,9 +1423,6 @@ impl Wm {
             || (self.overview_open
                 && (self.windows != before.windows || self.order != before.order))
             || self.spotlight_open != before.spotlight_open
-            || self.spotlight_query != before.spotlight_query
-            || self.spotlight_len != before.spotlight_len
-            || self.spotlight_selected != before.spotlight_selected
         {
             return Some(self.screen);
         }
@@ -1433,6 +1430,16 @@ impl Wm {
         let mut include = |rect: Rect| {
             damage = Some(damage.map_or(rect, |old| old.union(rect)));
         };
+        // Opening or closing search dims or undims the whole screen. Typing or
+        // moving the selection while it is open only changes the panel; the
+        // dimming overlay is uniform, so repainting the panel and its offset
+        // shadow reproduces the full-screen result.
+        if self.spotlight_query != before.spotlight_query
+            || self.spotlight_len != before.spotlight_len
+            || self.spotlight_selected != before.spotlight_selected
+        {
+            include(layout::spotlight_panel(self.screen).inset(-16));
+        }
         for id in self.order().iter().chain(before.order()) {
             if self.window(*id) != before.window(*id)
                 || (self.focus != before.focus
