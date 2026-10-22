@@ -60,12 +60,11 @@ pub const fn classify(number: u64) -> Class {
         // read, write, close, stat, fstat, lstat, poll (sync), lseek, pread64,
         // writev, access, dup/dup2, getdents64, openat, statx, readlink,
         // fcntl, prlimit64, sched_getaffinity, inotify, exec/atexit helpers,
-        // getcwd, rename, unlink, and getrandom (a file-descriptor-adjacent
-        // utility with no device handle in this prototype).
-        0 | 1 | 3 | 4 | 5 | 6 | 8 | 17 | 20 | 21 | 28 | 32 | 33 | 72 | 77 | 78 | 79 | 80 | 82
-        | 87 | 89 | 204 | 217 | 254 | 255 | 257 | 262 | 267 | 294 | 302 | 318 | 319 | 332 => {
-            Class::File
-        }
+        // getcwd, mkdir/mkdirat, rename, unlink, and getrandom (a file-
+        // descriptor-adjacent utility with no device handle in this prototype).
+        0 | 1 | 3 | 4 | 5 | 6 | 8 | 17 | 20 | 21 | 28 | 32 | 33 | 72 | 74 | 75 | 77 | 78 | 79
+        | 80 | 82 | 83 | 87 | 89 | 204 | 217 | 254 | 255 | 257 | 258 | 262 | 267 | 294 | 302
+        | 318 | 319 | 332 => Class::File,
         // mmap, mprotect, munmap, brk, mremap, msync, arch_prctl.
         9 | 10 | 11 | 12 | 25 | 26 | 158 => Class::Memory,
         // clone, fork, vfork, execve, exit, wait4, getpid, set/get groups,

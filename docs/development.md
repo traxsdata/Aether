@@ -28,6 +28,7 @@ make unittest      # Rust host tests (including input/browser/actual renderer)
 make test          # build the image and boot it under QEMU/OVMF
 make glibc-test    # opt-in: package host glibc + hello and boot through ld.so
 make gate3-test    # stage the pinned GridCraft AppImage and run its headless CLI
+make photocraft-test # stage the pinned PhotoCraft AppImage and run its headless CLI
 make iso-test      # UEFI ISO, VGA/SVGA, actual PS/2 windows and Files workflows
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # boot a kernel that executes int3 after paging is enabled

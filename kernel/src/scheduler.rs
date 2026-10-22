@@ -46,7 +46,7 @@ pub const LINUXD_TASK: usize = APPIMAGE_TASK + 1;
 #[cfg(feature = "gate4-gui-test")]
 const MAX_TASKS: usize = WORKER_COUNT + 96;
 #[cfg(not(feature = "gate4-gui-test"))]
-const MAX_TASKS: usize = WORKER_COUNT + 12;
+const MAX_TASKS: usize = WORKER_COUNT + 64;
 
 /// Maximum number of `MAP_SHARED` VMA entries per Linux application domain.
 #[cfg(feature = "gate4-gui-test")]
@@ -4402,6 +4402,26 @@ pub fn linux_ftruncate(fd: u64, length: i64) -> i64 {
     crate::memfd::ftruncate(index, length as usize).map_or_else(|error| error, |()| 0)
 }
 
+/// Accepts `fsync`/`fdatasync` for an open descriptor.
+///
+/// Every writable byte lives in RAM-backed storage in this prototype, so there
+/// is no medium to flush. An invalid descriptor still fails closed with
+/// `EBADF` rather than silently succeeding.
+pub fn linux_fsync(fd: u64) -> i64 {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    if task
+        .linux_fds
+        .get(fd as usize)
+        .and_then(Option::as_ref)
+        .is_some()
+    {
+        0
+    } else {
+        LINUX_EBADF
+    }
+}
+
 /// Returns `true` for a path mapped to the per-application writable store.
 #[must_use]
 pub fn is_overlay_path(path: &str) -> bool {
@@ -4696,6 +4716,33 @@ pub fn linux_overlay_open(
         linux_inotify_emit(path, IN_MODIFY, false);
     }
     Ok(fd)
+}
+
+/// Creates a virtual directory in the writable overlay namespace.
+///
+/// The bounded overlay stores files, not directory inodes. A directory under
+/// `/tmp`, `/settings`, or `/logs` is therefore accepted and later file opens
+/// beneath it work; `getdents64` does not list it until a file is created
+/// there. The root namespace is read-only, so any other path fails with
+/// `EROFS` after existing directories report `EEXIST`.
+pub fn linux_overlay_mkdir(path: &str) -> Result<(), i64> {
+    if !crate::linux::valid_path(path) {
+        return Err(LINUX_EINVAL);
+    }
+    let app = overlay_task_app()?;
+    if crate::linux::is_dir(path)
+        || pseudo_dir(path).is_some()
+        || overlay_index(app, path).is_some()
+    {
+        return Err(LINUX_EEXIST);
+    }
+    if !is_overlay_path(path) && !matches!(path, "/tmp" | "/settings" | "/logs") {
+        return Err(LINUX_EROFS);
+    }
+    if path.len() > OVERLAY_PATH {
+        return Err(LINUX_ENAMETOOLONG);
+    }
+    Ok(())
 }
 
 /// Validates a path that a mutating overlay operation may touch.

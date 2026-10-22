@@ -50,6 +50,11 @@ GATECRAFT_APPIMAGE ?= /tmp/opencode/gridcraft.AppImage
 GATE3_APP_PROGRAM ?= /usr/bin/gridcraft-cli
 GATE3_APP_ARGS ?= run|--in|/usr/share/gridcraft/gate3-in.csv|--cmd|formulas.evaluate={"formula":"=1+1"}|--cmd|cell.set={"cell":"A4","input":"total"}|--cmd|cell.set={"cell":"B4","input":"=SUM(B2:B3)"}|--out|/tmp/gate3-out.csv|--print|A1:B4|--csv
 GATE3_RUNTIME_VERSION ?= $(shell getconf GNU_LIBC_VERSION | tr ' ' '-')
+# Headless PhotoCraft (Craft app) through the same Gate 3 glibc runtime.
+PHOTOCRAFT_APPIMAGE ?= /tmp/opencode/photocraft-0.12.0-linux-x86_64.AppImage
+PHOTOCRAFT_PIN := da821339afce93b72991c7900a28f589eb06a885e0ab59ea702ddec9a280ac66
+PHOTOCRAFT_APP_PROGRAM ?= /usr/bin/photocraft-cli
+PHOTOCRAFT_APP_ARGS ?= run|/usr/share/photocraft/photo-in.png|--cmd|image.imageSize|--params|{"width":4,"height":4}|--out|/tmp/photocraft-out.png|--format|png
 LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
 LINUX_DYN_PATH ?= /usr/bin/dynamic
 LINUX_RUNTIME_PREBUILT ?= 0
@@ -86,7 +91,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test photocraft-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -245,6 +250,44 @@ gate3-test:
 	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
 	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK,AETHER_GATE3_DENIAL_OK \
 	AETHER_REQUIRE_TEXT='AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=19024376|AETHER_GATE3_APP_OK|AETHER_GATE3_DENIAL_OK|wrote /tmp/gate3-out.csv|item,value|alpha,1|beta,2|total,3|{"command":"formulas.evaluate","result":2.0}|{"command":"cell.set","result":{"cell":"B4","value":"3"}}' \
+	$(PYTHON) tools/test-boot.py
+
+# Headless PhotoCraft: the second Craft app, run unmodified from its signed
+# AppImage through PT_INTERP and the Gate 3 glibc runtime. The CLI opens a
+# fixture PNG, resizes it, and writes a new PNG to its private overlay. The
+# kernel-owned markers prove the import and the sandbox; the guest output is
+# matched only as evidence that the engine ran.
+photocraft-test:
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 linux-fixture
+	sh tools/build-gate3-runtime.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
+		$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED)
+	@mkdir -p $(BUILD)/gate3-runtime-root/usr/bin \
+		$(BUILD)/gate3-runtime-root/usr/share/photocraft
+	printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\nAETHER_GATE3_ROOT_OK source=/etc/motd\n' \
+		> $(BUILD)/gate3-runtime-root/etc/motd
+	cp $(LINUX_INTERP_ELF) $(BUILD)/gate3-runtime-root/lib/ld-aether.so
+	cp $(LINUX_DYN_ELF) $(BUILD)/gate3-runtime-root/usr/bin/dynamic
+	cp $(LINUX_EXEC_ELF) $(BUILD)/gate3-runtime-root/usr/bin/exec
+	cp $(LINUX_DYN_EXEC_ELF) $(BUILD)/gate3-runtime-root/usr/bin/dynamic-exec
+	cp tests/fixtures/craft/photo-in.png \
+		$(BUILD)/gate3-runtime-root/usr/share/photocraft/photo-in.png
+	sh tools/build-runtime-rootfs.sh $(BUILD)/gate3-runtime-root \
+		$(LINUX_ROOTFS) $(LINUX_RUNTIME_SEED) org.aether.linux-runtime \
+		"$(GATE3_RUNTIME_VERSION)" "Aether Test Publisher" \
+		$(LINUX_ROOTFS_RECORD)
+	sh tools/build-craft-appimage.sh $(PHOTOCRAFT_APPIMAGE) \
+		$(BUILD)/photocraft.import $(LINUX_RUNTIME_SEED) \
+		ai.storyteller.photocraft 0.12.0 $(PHOTOCRAFT_PIN)
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		LINUX_APPIMAGE_PROGRAM=$(PHOTOCRAFT_APP_PROGRAM) \
+		LINUX_APPIMAGE_ARGS='$(PHOTOCRAFT_APP_ARGS)' \
+		STAGED_APPIMAGE=$(PHOTOCRAFT_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(BUILD)/photocraft.import \
+		IMAGE_SIZE=128M image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK,AETHER_GATE3_DENIAL_OK \
+	AETHER_MEMORY=2G \
+	AETHER_REQUIRE_TEXT='AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=80026104|AETHER_GATE3_APP_OK|AETHER_GATE3_DENIAL_OK|{"command":"image.imageSize","result":{"height":4,"width":4}}' \
 	$(PYTHON) tools/test-boot.py
 
 # Gate 4 portal slice: run a small static Linux AppImage fixture that opens a

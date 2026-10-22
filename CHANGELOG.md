@@ -7,6 +7,15 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Headless PhotoCraft: `make photocraft-test` signs, imports, and runs the
+  pinned PhotoCraft 0.12.0 AppImage's `photocraft-cli` under the Gate 3
+  host-glibc runtime. It opens and resizes an 8x8 PNG and writes the result to
+  its private overlay. Testing found and fixed an ld.so/main-image overlap
+  (the interpreter base moved to 512 MiB with an explicit overlap check), a
+  32 MiB staged-AppImage cap that excluded the larger Craft apps (now
+  128 MiB), missing `mkdir`/`mkdirat` and `fsync`/`fdatasync` syscalls, and a
+  task table too small for the application's threads. The PhotoCraft
+  compatibility record remains `limited`, and the GUI was not tested.
 - Crash screen: every fatal kernel path (a panic, an unhandled kernel
   exception including a double fault, and every `AETHER_BOOT_FAILED` halt)
   now replaces the display with a full-screen blue report instead of leaving

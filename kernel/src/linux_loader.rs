@@ -23,11 +23,13 @@ use aether_memory::paging::PageFlags;
 pub const MAIN_BASE: u64 = USER_BASE + 80 * 1024 * 1024;
 /// Load bias for the interpreter.
 ///
-/// The GridCraft GUI's main image is ~34 MiB. It starts at `MAIN_BASE`
-/// (80 MiB), so a 96 MiB interpreter base would overlap it and corrupt the
-/// interpreter's GOT. Keep the interpreter above the largest accepted main
-/// image; the 128 MiB user window still leaves room for the stack.
-pub const INTERP_BASE: u64 = USER_BASE + 120 * 1024 * 1024;
+/// A main image starts at `MAIN_BASE` (80 MiB) and may be as large as the
+/// 128 MiB staged-AppImage bound, so it can end near 208 MiB. The interpreter
+/// must sit above that. PhotoCraft 0.12.0's main image is ~68 MiB, which
+/// overlapped the previous 120 MiB interpreter base and corrupted ld.so's
+/// data. The [`load`] path also rejects any main/interpreter overlap so a
+/// future larger image fails closed instead of starting corrupted.
+pub const INTERP_BASE: u64 = USER_BASE + 512 * 1024 * 1024;
 
 /// A loaded Linux process image.
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +55,8 @@ pub enum LoadError {
     Paging,
     /// The image does not fit the user window.
     OutsideWindow,
+    /// A main-image segment overlaps an interpreter segment.
+    Overlap,
     /// The stack could not be represented.
     Stack,
 }
@@ -90,6 +94,7 @@ pub fn load(
     let interp_bias = bias(&interp, INTERP_BASE);
     check_window(&main, main_bias)?;
     check_window(&interp, interp_bias)?;
+    check_no_overlap(&main, main_bias, &interp, interp_bias)?;
 
     let pml4 = paging::create_empty_user_address_space(allocator)?;
     paging::map_user_stack(allocator, pml4)?;
@@ -173,6 +178,40 @@ fn map_segment(
         page_end - page_start,
         PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
     )?;
+    Ok(())
+}
+
+fn check_no_overlap(
+    main: &Image<'_>,
+    main_bias: u64,
+    interp: &Image<'_>,
+    interp_bias: u64,
+) -> Result<(), LoadError> {
+    for main_segment in main.segments() {
+        let main_start = main_bias
+            .checked_add(main_segment.vaddr)
+            .ok_or(LoadError::OutsideWindow)?;
+        let main_end = main_start
+            .checked_add(main_segment.memory_size)
+            .ok_or(LoadError::OutsideWindow)?;
+        if main_end <= main_start {
+            continue;
+        }
+        for interp_segment in interp.segments() {
+            let interp_start = interp_bias
+                .checked_add(interp_segment.vaddr)
+                .ok_or(LoadError::OutsideWindow)?;
+            let interp_end = interp_start
+                .checked_add(interp_segment.memory_size)
+                .ok_or(LoadError::OutsideWindow)?;
+            if interp_end <= interp_start {
+                continue;
+            }
+            if main_start < interp_end && interp_start < main_end {
+                return Err(LoadError::Overlap);
+            }
+        }
+    }
     Ok(())
 }
 
