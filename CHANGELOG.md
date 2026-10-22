@@ -511,6 +511,14 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Fixed
 
+- A signal sent to a task blocked in `nanosleep`, `poll`, `epoll_wait`, or a
+  pipe wait could be lost as an `EINTR`: if the timer tick landed just as the
+  woken task resumed at its rewound `syscall`, the tick ran the handler first
+  and the restarted wait then slept to its deadline. The tick now leaves that
+  delivery to the re-executed syscall, as `kill` already did. The Linux
+  fixture's nanosleep EINTR check also retries (up to three times) when the
+  parent is preempted for longer than the child's 50 ms delay, which made
+  `AETHER_LINUX_NANOSLEEP_FAIL stage=eintr_ret` an occasional TCG flake.
 - A fault on user memory during a syscall no longer halts the machine. The
   kernel reads and writes user memory only through one copy routine whose
   `rep movsb` is listed in a new `.ex_table`; a page fault there on a

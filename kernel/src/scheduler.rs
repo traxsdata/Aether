@@ -579,6 +579,8 @@ struct Task {
     restart_syscall: u64,
     restart_deadline: u64,
     restart_infinite: bool,
+    /// Address of the rewound `syscall` instruction of a parked wait.
+    restart_rip: u64,
     sigactions: [Option<SigAction>; MAX_SIGNALS],
     sigqueue: [Option<SigInfo>; MAX_SIGNALS],
     sigblocked: u64,
@@ -659,6 +661,7 @@ impl Task {
             restart_syscall: u64::MAX,
             restart_deadline: 0,
             restart_infinite: false,
+            restart_rip: 0,
             sigactions: [None; MAX_SIGNALS],
             sigqueue: [None; MAX_SIGNALS],
             sigblocked: 0,
@@ -2708,6 +2711,7 @@ pub fn linux_park(
     // kernel stack; the Linux entry stub is always reached through `syscall`
     // (0f 05), so rewinding two bytes re-executes the instruction on resume.
     unsafe { (*frame).rip = (*frame).rip.wrapping_sub(2) };
+    tasks[current].restart_rip = unsafe { (*frame).rip };
     yield_current(frame)
 }
 
@@ -7553,6 +7557,17 @@ pub fn yield_current(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     schedule_next(current)
 }
 
+/// Returns true when `frame` is about to re-execute the parked wait of task
+/// `index`.
+fn at_rewound_syscall(index: usize, frame: *mut InterruptFrame) -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[index];
+    // SAFETY: the timer stub passes the live frame of the interrupted task.
+    task.restart_syscall != u64::MAX
+        && !frame.is_null()
+        && unsafe { (*frame).rip } == task.restart_rip
+}
+
 /// Called from the timer interrupt before returning to a task.
 pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     let now = TICKS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
@@ -7562,8 +7577,14 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     crate::linuxd::service_tick();
     let current = CURRENT.load(Ordering::Relaxed);
     // Deliver a pending signal to the interrupted Linux task before it is
-    // saved and possibly scheduled out.
-    let _ = linux_deliver_signal(frame);
+    // saved and possibly scheduled out. A task resumed at the rewound
+    // `syscall` of a parked wait is left alone: the re-executed syscall
+    // reports EINTR and delivers the signal on exit, as `linux_kill` defers
+    // it. Delivering here would run the handler first, and the restarted
+    // wait would then sleep to its deadline instead of returning EINTR.
+    if !at_rewound_syscall(current, frame) {
+        let _ = linux_deliver_signal(frame);
+    }
     let default_exit = {
         let tasks = unsafe { &mut *TASKS.0.get() };
         if tasks[current].signal_exit != 0 {

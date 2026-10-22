@@ -1296,7 +1296,13 @@ guard_done:
     test %rax, %rax
     jne fail_sleep_abs
 
-    /* --- A deliverable signal interrupts nanosleep with EINTR. --- */
+    /* --- A deliverable signal interrupts nanosleep with EINTR. The child
+     * signals after 50 ms. If the parent is preempted for that long before
+     * it reaches nanosleep, the handler runs first and the sleep completes;
+     * that attempt says nothing about EINTR, so it is retried. */
+    movq $3, 112(%rsp)          /* attempts */
+.Lintr_attempt:
+    movl $0, (%r12)
     mov $57, %rax               /* fork */
     syscall
     test %rax, %rax
@@ -1315,10 +1321,18 @@ guard_done:
     lea 0(%rsp), %rdi
     xor %rsi, %rsi
     syscall
-    cmp $-4, %rax               /* -EINTR */
-    jne fail_sleep_intr_ret
+    mov %rax, 104(%rsp)
     cmpl $1, (%r12)             /* the SIGUSR1 handler ran */
-    jne fail_sleep_intr_handler
+    je .Lintr_handled
+    cmp $-4, %rax               /* -EINTR */
+    je fail_sleep_intr_handler
+    jmp fail_sleep_intr_ret
+.Lintr_handled:
+    cmp $-4, %rax
+    je .Lintr_reap
+    test %rax, %rax             /* only a completed sleep may be retried */
+    jne fail_sleep_intr_ret
+.Lintr_reap:
     sub $16, %rsp
     mov $61, %rax
     mov %r15, %rdi
@@ -1339,6 +1353,12 @@ guard_done:
     je fail_sleep_intr_einval
     jmp fail_sleep_intr
 .Lintr_reaped:
+    cmpq $-4, 104(%rsp)
+    je .Lintr_passed
+    decq 112(%rsp)
+    jnz .Lintr_attempt
+    jmp fail_sleep_intr_ret
+.Lintr_passed:
     mov $1, %rax
     mov $1, %rdi
     lea nanosleep_message(%rip), %rsi
