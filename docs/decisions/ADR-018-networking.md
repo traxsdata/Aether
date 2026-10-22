@@ -1,6 +1,7 @@
 # ADR-018: Networking and the network permission
 
-- **Status:** Accepted; landing in stages (socket layer first)
+- **Status:** Accepted; landing in stages (socket layer, then driver, stack,
+  and Internet sockets; the desktop consent prompt follows)
 - **Date:** 2026-10-22
 - **Supersedes in part:** the "network denied" decision D-08 in the
   [host-interface inventory](../specifications/linux-host-interface-inventory.md#decisions)
@@ -30,6 +31,12 @@ configuration.
      application creates asks the user; the answer is stored per application
      and can be changed in Security Center.
 
+   Answers live in `/system/network/consent` (a RAM-disk store like the
+   portal grants, so they last until power-off). Until the user answers, a
+   TCP connect waits and sends nothing: blocking calls park, non-blocking
+   ones report `EINPROGRESS`. UDP sends fail with `EACCES` until allowed.
+   The serial console's `net allow|deny|forget <app>` changes an answer.
+
    An application without the field gets `EACCES` for every Internet socket,
    exactly as before. `bind`, `listen`, and `accept` on Internet sockets are
    refused for `network=client`.
@@ -53,6 +60,16 @@ configuration.
 6. **Configuration.** DHCPv4 configures the interface. Linux applications see
    a generated `/etc/resolv.conf` naming the DHCP DNS server; name resolution
    happens inside the application (glibc or Firefox's own resolver).
+
+## Testing
+
+`make net-test` boots QEMU once with an e1000 and once with an e1000e. Each
+boot takes a DHCP lease, fetches a page from the host over a kernel TCP
+socket, and runs a Linux fixture signed with `network=client`. The fixture
+checks that `bind` and `listen` are refused and loopback is unreachable, then
+makes a blocking `connect` that waits for the consent request (answered by
+the test build after half a second), fetches the same page, and reads
+`/etc/resolv.conf`.
 
 ## Consequences
 
