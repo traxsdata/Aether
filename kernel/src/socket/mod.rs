@@ -521,7 +521,13 @@ fn socketpair(pml4: PhysFrame, domain: u64, kind: u64, protocol: u64, pointer: u
     let mut buffer = [0u8; 8];
     buffer[..4].copy_from_slice(&(a as u32).to_ne_bytes());
     buffer[4..].copy_from_slice(&(b as u32).to_ne_bytes());
-    copy_to_user(pml4, pointer, &buffer).map_or(EFAULT, |()| 0)
+    if copy_to_user(pml4, pointer, &buffer).is_none() {
+        // The caller never learns the numbers, so nothing could close them.
+        let _ = scheduler::linux_close(a);
+        let _ = scheduler::linux_close(b);
+        return EFAULT;
+    }
+    0
 }
 
 fn connect(pml4: PhysFrame, fd: u64, pointer: u64, len: u64, restarted: bool) -> Outcome {

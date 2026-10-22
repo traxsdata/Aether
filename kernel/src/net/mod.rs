@@ -36,6 +36,8 @@ pub const MTU: usize = 1500;
 const EPHEMERAL_FIRST: u16 = 49152;
 /// How long a closed TCP socket may take to finish its shutdown (10 s).
 const RETIRE_TICKS: u64 = 1000;
+/// Destinations remembered per UDP socket for the inbound filter.
+const UDP_PEERS: usize = 8;
 
 struct Global<T>(UnsafeCell<T>);
 
@@ -57,6 +59,11 @@ pub struct Net {
     /// Closed TCP sockets finishing their shutdown, with the tick after
     /// which they are dropped regardless.
     retired: Vec<(SocketHandle, u64)>,
+    /// Remote endpoints each UDP socket has sent to; only they may answer.
+    udp_peers: Vec<(SocketHandle, Flow)>,
+    /// Reused flow list for the firewall, so polling does not allocate once
+    /// it has grown to the number of open flows.
+    flow_cache: Vec<Flow>,
     link_reported: bool,
     /// Inbound frames the firewall dropped.
     pub firewall_drops: u64,
@@ -138,6 +145,8 @@ pub fn init() {
             dns: Vec::new(),
             next_port,
             retired: Vec::new(),
+            udp_peers: Vec::new(),
+            flow_cache: Vec::new(),
             link_reported: false,
             firewall_drops: 0,
             #[cfg(feature = "net-selftest")]
@@ -172,7 +181,8 @@ impl Net {
             self.link_reported = true;
             serial_line!("AETHER_NET_LINK_OK model={}", self.nic.model);
         }
-        let flows = self.flows();
+        let mut flows = core::mem::take(&mut self.flow_cache);
+        self.collect_flows(&mut flows);
         let mut device = NicDevice {
             nic: &mut self.nic,
             flows: &flows,
@@ -182,6 +192,7 @@ impl Net {
         };
         let result = self.iface.poll(now(), &mut device, &mut self.sockets);
         self.firewall_drops += device.drops;
+        self.flow_cache = flows;
         let event = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll();
         match event {
             Some(dhcpv4::Event::Configured(config)) => {
@@ -238,36 +249,63 @@ impl Net {
     }
 
     /// The local flows the firewall lets back in: every open TCP socket's
-    /// connection and every bound UDP socket's port.
-    fn flows(&self) -> Vec<Flow> {
-        let mut flows = Vec::new();
+    /// connection and every destination a UDP socket has sent to.
+    fn collect_flows(&self, flows: &mut Vec<Flow>) {
+        flows.clear();
         for (_, socket) in self.sockets.iter() {
-            match socket {
-                smoltcp::socket::Socket::Tcp(socket) => {
-                    if let (Some(local), Some(remote)) =
-                        (socket.local_endpoint(), socket.remote_endpoint())
-                        && let smoltcp::wire::IpAddress::Ipv4(ip) = remote.addr
-                    {
-                        flows.push(Flow {
-                            protocol: Protocol::Tcp,
-                            local_port: local.port,
-                            remote_ip: ip.octets(),
-                            remote_port: remote.port,
-                        });
-                    }
-                }
-                smoltcp::socket::Socket::Udp(socket) if socket.is_open() => {
-                    flows.push(Flow {
-                        protocol: Protocol::Udp,
-                        local_port: socket.endpoint().port,
-                        remote_ip: [0; 4],
-                        remote_port: 0,
-                    });
-                }
-                _ => {}
+            if let smoltcp::socket::Socket::Tcp(socket) = socket
+                && let (Some(local), Some(remote)) =
+                    (socket.local_endpoint(), socket.remote_endpoint())
+                && let smoltcp::wire::IpAddress::Ipv4(ip) = remote.addr
+            {
+                flows.push(Flow {
+                    protocol: Protocol::Tcp,
+                    local_port: local.port,
+                    remote_ip: ip.octets(),
+                    remote_port: remote.port,
+                });
             }
         }
-        flows
+        flows.extend(self.udp_peers.iter().map(|(_, flow)| *flow));
+    }
+
+    /// Records that the UDP socket `handle` sent to `remote`, so its reply is
+    /// let in. Each socket keeps its most recent [`UDP_PEERS`] destinations.
+    pub fn note_udp_peer(&mut self, handle: SocketHandle, remote_ip: [u8; 4], remote_port: u16) {
+        let local_port = self.udp(handle).endpoint().port;
+        let flow = Flow {
+            protocol: Protocol::Udp,
+            local_port,
+            remote_ip,
+            remote_port,
+        };
+        if self
+            .udp_peers
+            .iter()
+            .any(|(owner, known)| *owner == handle && *known == flow)
+        {
+            return;
+        }
+        let owned = self
+            .udp_peers
+            .iter()
+            .filter(|(owner, _)| *owner == handle)
+            .count();
+        if owned >= UDP_PEERS
+            && let Some(oldest) = self
+                .udp_peers
+                .iter()
+                .position(|(owner, _)| *owner == handle)
+        {
+            self.udp_peers.remove(oldest);
+        }
+        self.udp_peers.push((handle, flow));
+    }
+
+    /// Removes a UDP socket and the destinations it was answering.
+    pub fn remove_udp(&mut self, handle: SocketHandle) {
+        self.udp_peers.retain(|(owner, _)| *owner != handle);
+        self.sockets.remove(handle);
     }
 
     /// The interface address, once DHCP configured one.
@@ -431,12 +469,7 @@ struct NicDevice<'a> {
 
 impl NicDevice<'_> {
     fn allowed(flows: &[Flow], flow: &Flow) -> bool {
-        flows.iter().any(|open| {
-            open.protocol == flow.protocol
-                && open.local_port == flow.local_port
-                && (open.protocol == Protocol::Udp
-                    || (open.remote_ip == flow.remote_ip && open.remote_port == flow.remote_port))
-        })
+        flows.contains(flow)
     }
 }
 

@@ -1196,14 +1196,6 @@ pub fn run() -> ! {
                 RELEASED_SPACES.load(Ordering::Relaxed),
                 RELEASED_FRAMES.load(Ordering::Relaxed)
             );
-            if let Some((id, version, path)) = crate::linux::app_identity(0) {
-                serial_line!(
-                    "AETHER_LINUX_APPIMAGE_OK id={} version={} path={}",
-                    id,
-                    version,
-                    path
-                );
-            }
             crate::linuxd::post_app_exit();
             serial_line!(
                 "AETHER_LINUX_DYN_OK abi=linux exits={} faults={}",
@@ -7712,6 +7704,10 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     } else if is_app_task(current) {
         if current == APPIMAGE_TASK {
             APPIMAGE_RESULT.store(result as usize, Ordering::Release);
+            // The slot is released just below, so report the identity now.
+            if let Some((id, version, path)) = crate::linux::app_identity(app_slot) {
+                serial_line!("AETHER_LINUX_APPIMAGE_OK id={id} version={version} path={path}");
+            }
         }
         if app_slot < crate::linux::MAX_APPS {
             crate::display::close();

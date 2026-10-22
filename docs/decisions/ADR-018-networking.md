@@ -36,6 +36,10 @@ configuration.
    TCP connect waits and sends nothing: blocking calls park, non-blocking
    ones report `EINPROGRESS`. UDP sends fail with `EACCES` until allowed.
 
+   One request is shown at a time. If a second app asks while a prompt is
+   open, its connection keeps waiting and its own prompt appears once the
+   first is answered.
+
    The request opens Security Center with an Allow / Deny prompt drawn by
    the kernel desktop. Allow ignores clicks for the first 500 ms so a click
    aimed at something else cannot answer it. Security Center's Network
@@ -48,7 +52,13 @@ configuration.
    refused for `network=client`.
 2. **Inbound firewall.** Inbound connections are dropped by default. No
    listening Internet socket exists for applications, unsolicited TCP and UDP
-   are dropped without a reply, and ICMP echo requests are not answered.
+   are dropped without a reply, and ICMP echo requests are not answered. A
+   flow is exact (protocol, local port, remote address and port): TCP
+   matches an open connection, and UDP matches a destination the socket has
+   sent to (its last eight). ICMP unreachable and time-exceeded messages are
+   accepted only when the packet they quote belongs to an open flow, so a
+   forged error cannot tear down a connection. ARP is accepted unfiltered;
+   it trusts the local segment like any IPv4 host.
 3. **One socket layer.** `kernel/src/socket/` decodes the Linux socket calls
    once and owns a global socket table. A descriptor names a slot
    (`LinuxFileSource::Socket`); `dup`, `fork`, and threads share it. Families
