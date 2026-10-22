@@ -217,6 +217,8 @@ struct LinuxTimerFd {
     next_expiry: u64,
     interval: u64,
     armed: bool,
+    /// Created on `CLOCK_REALTIME`: absolute deadlines are wall-clock time.
+    realtime: bool,
 }
 
 impl LinuxTimerFd {
@@ -224,6 +226,7 @@ impl LinuxTimerFd {
         next_expiry: 0,
         interval: 0,
         armed: false,
+        realtime: false,
     };
 }
 
@@ -2762,6 +2765,7 @@ pub fn linux_get_robust_list(pid: usize) -> Result<(u64, u64), i64> {
     let tasks = unsafe { &*TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     let session = tasks[current].sid;
+    let domain = tasks[current].overlay_app;
     let target = if pid == 0 {
         Some(current)
     } else {
@@ -2770,6 +2774,7 @@ pub fn linux_get_robust_list(pid: usize) -> Result<(u64, u64), i64> {
                 && task.state != TaskState::Done
                 && task.abi == TaskAbi::Linux
                 && task.sid == session
+                && task.overlay_app == domain
                 && (task.tgid == pid || (task.kind != TaskKind::Thread && task.tgid == pid))
         })
     };
@@ -2943,6 +2948,9 @@ pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     let session = tasks[current].sid;
+    // Session ids are task slots and can be reused, so the application
+    // domain is checked too: a recycled session never reaches another app.
+    let domain = tasks[current].overlay_app;
     let sender = tasks[current].tgid as u32;
     let targets: [bool; MAX_TASKS] = core::array::from_fn(|index| {
         let task = &tasks[index];
@@ -2950,6 +2958,7 @@ pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64
             && task.state != TaskState::Done
             && task.abi == TaskAbi::Linux
             && task.sid == session
+            && task.overlay_app == domain
             && task.tgid == tgid
             && match tid {
                 Some(tid) => tid == index,
@@ -3584,7 +3593,10 @@ pub fn linux_setpgid(pid: usize, pgid: usize) -> i64 {
         return LINUX_EPERM;
     }
     // A session leader cannot change its process group.
-    if tasks[index].sid == target || tasks[index].sid != tasks[current].sid {
+    if tasks[index].sid == target
+        || tasks[index].sid != tasks[current].sid
+        || tasks[index].overlay_app != tasks[current].overlay_app
+    {
         return LINUX_EPERM;
     }
     let group = if pgid == 0 { target } else { pgid };
@@ -3599,6 +3611,7 @@ pub fn linux_setpgid(pid: usize, pgid: usize) -> i64 {
                 && task.abi == TaskAbi::Linux
                 && task.pgid == group
                 && task.sid == tasks[current].sid
+                && task.overlay_app == tasks[current].overlay_app
         })
     {
         // The requested group does not exist in the caller's session.
@@ -3639,6 +3652,9 @@ pub fn linux_send_signal_group(pgid: usize, signal: u64) -> i64 {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     let session = tasks[current].sid;
+    // Session ids are task slots and can be reused, so the application
+    // domain is checked too: a recycled session never reaches another app.
+    let domain = tasks[current].overlay_app;
     let sender = tasks[current].tgid as u32;
     let targets: [bool; MAX_TASKS] = core::array::from_fn(|index| {
         let task = &tasks[index];
@@ -3646,6 +3662,7 @@ pub fn linux_send_signal_group(pgid: usize, signal: u64) -> i64 {
             && task.state != TaskState::Done
             && task.abi == TaskAbi::Linux
             && task.sid == session
+            && task.overlay_app == domain
             && task.pgid == pgid
             && task.kind != TaskKind::Thread
     });
@@ -4860,7 +4877,10 @@ pub fn linux_timerfd_create(clockid: u64, flags: u64) -> Result<u64, i64> {
     let Some(index) = task.linux_timerfds.iter().position(|timer| timer.is_none()) else {
         return Err(LINUX_EMFILE);
     };
-    task.linux_timerfds[index] = Some(LinuxTimerFd::EMPTY);
+    task.linux_timerfds[index] = Some(LinuxTimerFd {
+        realtime: clockid == 0,
+        ..LinuxTimerFd::EMPTY
+    });
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
         if slot.is_none() {
             *slot = Some(LinuxFile {
@@ -4890,6 +4910,13 @@ fn timerfd_slot(fd: u64) -> Result<(usize, usize), i64> {
         return Err(LINUX_EBADF);
     }
     Ok((current, index))
+}
+
+/// Returns `true` if a timer descriptor was created on `CLOCK_REALTIME`.
+pub fn linux_timerfd_is_realtime(fd: u64) -> Result<bool, i64> {
+    let (current, index) = timerfd_slot(fd)?;
+    let tasks = unsafe { &*TASKS.0.get() };
+    Ok(tasks[current].linux_timerfds[index].is_some_and(|timer| timer.realtime))
 }
 
 /// Arms or disarms a timer descriptor. `deadline` is an absolute tick count;

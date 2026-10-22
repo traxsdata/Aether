@@ -4,6 +4,7 @@
 pub mod cpu;
 pub mod gdt;
 pub mod idt;
+pub mod rtc;
 pub mod serial;
 pub mod timer;
 
