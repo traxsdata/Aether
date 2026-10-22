@@ -19,7 +19,7 @@ pub const DOCK_ICON_BASE: i32 = 42;
 /// Horizontal slot reserved for each dock item.
 pub const DOCK_SLOT_WIDTH: i32 = 50;
 /// Number of dock items.
-pub const DOCK_ITEMS: usize = 8;
+pub const DOCK_ITEMS: usize = 9;
 /// Window title-bar height.
 pub const TITLE_BAR_HEIGHT: i32 = 31;
 /// Window corner radius.
@@ -58,6 +58,7 @@ pub const DOCK_SLOTS: [DockSlot; DOCK_ITEMS] = [
     DockSlot::App(WindowKind::Recovery),
     DockSlot::App(WindowKind::Log),
     DockSlot::App(WindowKind::Welcome),
+    DockSlot::App(WindowKind::Applications),
     DockSlot::Overview,
 ];
 
@@ -197,6 +198,8 @@ pub fn default_window_frame(kind: WindowKind, screen: Rect, cascade: i32) -> Rec
         WindowKind::Log => (44, 44),
         WindowKind::Welcome => (36, 46),
         WindowKind::Linux => (52, 62),
+        WindowKind::Linux2 => (52, 62),
+        WindowKind::Applications => (62, 68),
     };
     let width = (area.width * width_percent / 100)
         .max(MIN_WINDOW_WIDTH)
@@ -219,9 +222,13 @@ pub fn default_window_frame(kind: WindowKind, screen: Rect, cascade: i32) -> Rec
             area.x + (area.width - width) / 2 - cascade / 2,
             area.y + (area.height - height) / 2,
         ),
-        WindowKind::Linux => (
+        WindowKind::Linux | WindowKind::Linux2 => (
             area.x + (area.width - width) / 2 + cascade / 2,
             area.y + (area.height - height) / 2 + cascade / 2,
+        ),
+        WindowKind::Applications => (
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
         ),
     };
     Rect::new(x, y, width, height).clamp_inside(area)

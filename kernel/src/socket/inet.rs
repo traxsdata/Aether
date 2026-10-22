@@ -106,7 +106,7 @@ pub struct InetSocket {
 
 /// The current application's identity for the consent store.
 fn app_id() -> &'static str {
-    crate::linux::app_identity().map_or("", |(id, _, _)| id)
+    crate::linux::app_identity(crate::scheduler::current_app_slot()).map_or("", |(id, _, _)| id)
 }
 
 fn to_smoltcp(endpoint: Endpoint) -> IpEndpoint {

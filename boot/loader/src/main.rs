@@ -65,6 +65,13 @@ const RUNTIME_ROOTFS_RECORD_PATH: &[u16] = &[
 ];
 const RUNTIME_ROOTFS_RECORD_PATH_NAME: &str = "\\linux\\runtime.import";
 
+/// Optional multi-app pack. When the index is present, the loader stages the
+/// pack in place of the single AppImage and the index in place of its record.
+/// The kernel verifies every selected entry against the signature and digest
+/// in that pack; the loader never chooses an app.
+const APPS_INDEX_PATH_NAME: &str = "\\linux\\apps.index";
+const APPS_PACK_PATH_NAME: &str = "\\linux\\apps.pack";
+
 /// Fixed buffer for the firmware file-info record. File names on the boot
 /// volume are short, so this comfortably exceeds the variable-length header.
 const FILE_INFO_BYTES: usize = 512;
@@ -273,25 +280,71 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
     // Stage the application artifacts from the boot volume. These pages stay
     // allocated across ExitBootServices; the kernel receives their physical
     // extents and must verify the signed record before parsing the container.
-    // SAFETY: Boot services are active and `handle` is this image's handle.
-    let linux_appimage = unsafe {
-        load_staged_file(
-            services,
-            handle,
-            APPIMAGE_PATH,
-            APPIMAGE_PATH_NAME,
-            MAX_STAGED_APPIMAGE_BYTES,
-        )?
+    //
+    // A Craft suite ISO carries \linux\apps.index. Its presence selects the
+    // pack path; otherwise the single-app layout is unchanged.
+    let mut apps_index_path = [0u16; 64];
+    let index_length = ascii_path(APPS_INDEX_PATH_NAME, &mut apps_index_path);
+    let staged_index = if index_length == 0 {
+        None
+    } else {
+        // SAFETY: Boot services are active and `handle` is this image's handle.
+        match unsafe {
+            load_staged_file(
+                services,
+                handle,
+                &apps_index_path[..index_length],
+                APPS_INDEX_PATH_NAME,
+                MAX_STAGED_RECORD_BYTES,
+            )
+        } {
+            Ok(artifact) => Some(artifact),
+            Err(LoadError::BootFileMissing { .. }) => None,
+            Err(error) => return Err(error),
+        }
     };
-    // SAFETY: Same contract as the AppImage read.
-    let linux_appimage_record = unsafe {
-        load_staged_file(
-            services,
-            handle,
-            APPIMAGE_RECORD_PATH,
-            APPIMAGE_RECORD_PATH_NAME,
-            MAX_STAGED_RECORD_BYTES,
-        )?
+    let (linux_appimage, linux_appimage_record) = if let Some(index) = staged_index {
+        let mut apps_pack_path = [0u16; 64];
+        let pack_length = ascii_path(APPS_PACK_PATH_NAME, &mut apps_pack_path);
+        if pack_length == 0 {
+            return Err(LoadError::BootFileMissing {
+                path: APPS_PACK_PATH_NAME,
+                status: 0,
+            });
+        }
+        // SAFETY: Boot services are active and `handle` is this image's handle.
+        let pack = unsafe {
+            load_staged_file(
+                services,
+                handle,
+                &apps_pack_path[..pack_length],
+                APPS_PACK_PATH_NAME,
+                MAX_STAGED_APPIMAGE_BYTES,
+            )?
+        };
+        (pack, index)
+    } else {
+        // SAFETY: Boot services are active and `handle` is this image's handle.
+        let appimage = unsafe {
+            load_staged_file(
+                services,
+                handle,
+                APPIMAGE_PATH,
+                APPIMAGE_PATH_NAME,
+                MAX_STAGED_APPIMAGE_BYTES,
+            )?
+        };
+        // SAFETY: Same contract as the AppImage read.
+        let record = unsafe {
+            load_staged_file(
+                services,
+                handle,
+                APPIMAGE_RECORD_PATH,
+                APPIMAGE_RECORD_PATH_NAME,
+                MAX_STAGED_RECORD_BYTES,
+            )?
+        };
+        (appimage, record)
     };
     serial_line!(
         "loader: staged appimage address={:#x} length={} record_address={:#x} record_length={}",
@@ -431,6 +484,21 @@ unsafe fn boot(handle: Handle, system_table: *mut SystemTable) -> Result<(), Loa
     }
 
     Err(LoadError::ExitBootServices(last_status))
+}
+
+/// Converts an ASCII boot-volume path into a NUL-terminated UTF-16 buffer.
+///
+/// Returns the length including the terminator, or zero when the path does
+/// not fit. The loader only builds the fixed paths in this module.
+fn ascii_path(path: &str, out: &mut [u16]) -> usize {
+    if path.len() + 1 > out.len() {
+        return 0;
+    }
+    for (index, byte) in path.bytes().enumerate() {
+        out[index] = u16::from(byte);
+    }
+    out[path.len()] = 0;
+    path.len() + 1
 }
 
 /// Reads a staged boot file into loader-owned pages.

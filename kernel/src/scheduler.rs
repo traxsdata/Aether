@@ -40,10 +40,15 @@ pub const USER_TASK: usize = WORKER_COUNT + 1;
 pub const LINUX_TASK: usize = USER_TASK + 1;
 /// Task index of the dynamic Linux loader test.
 pub const LINUX_DYN_TASK: usize = LINUX_TASK + 1;
-/// Task index of the program launched from the imported user AppImage.
+/// First task index of the programs launched from imported user AppImages.
 pub const APPIMAGE_TASK: usize = LINUX_DYN_TASK + 1;
 /// Task index of the ring-3 `linuxd` launch-policy service.
-pub const LINUXD_TASK: usize = APPIMAGE_TASK + 1;
+pub const LINUXD_TASK: usize = APPIMAGE_TASK + crate::linux::MAX_APPS;
+
+/// Returns `true` for a reserved imported-app task index.
+const fn is_app_task(index: usize) -> bool {
+    index >= APPIMAGE_TASK && index < APPIMAGE_TASK + crate::linux::MAX_APPS
+}
 
 // Linux-sized bounds for large applications such as Firefox: a browser runs
 // several processes with dozens of threads each.
@@ -585,6 +590,8 @@ struct Task {
     /// Descriptors of the owning process. The threads of one process share
     /// the table, so the view names the thread group id.
     linux_fds: FdSlots,
+    /// Imported app-domain slot; `crate::linux::MAX_APPS` for native tasks.
+    app_slot: usize,
     /// Per-application overlay store selected by the runtime manager.
     overlay_app: u8,
     inotify_wait_pointer: u64,
@@ -683,6 +690,7 @@ impl Task {
             futex_deadline: 0,
             clear_child_tid: 0,
             linux_fds: FdSlots(0),
+            app_slot: crate::linux::MAX_APPS,
             overlay_app: 0,
             inotify_wait_pointer: 0,
             inotify_wait_length: 0,
@@ -1138,8 +1146,8 @@ pub fn run() -> ! {
             // Kernel-owned evidence that a dynamically linked AppImage task
             // exited with status zero. The selected path comes from the signed
             // record; a guest string alone is not accepted as proof of a run.
-            if crate::linux::app_is_dynamic() {
-                let path = crate::linux::app_identity().map_or("unknown", |(_, _, path)| path);
+            if crate::linux::app_is_dynamic(0) {
+                let path = crate::linux::app_identity(0).map_or("unknown", |(_, _, path)| path);
                 serial_line!("AETHER_GATE3_APP_OK status=0 pid={APPIMAGE_TASK} path={path}");
                 // Kernel-owned denial evidence: the imported task carries no
                 // portal or native capability, sees the imported tree as
@@ -1157,7 +1165,7 @@ pub fn run() -> ! {
                 RELEASED_SPACES.load(Ordering::Relaxed),
                 RELEASED_FRAMES.load(Ordering::Relaxed)
             );
-            if let Some((id, version, path)) = crate::linux::app_identity() {
+            if let Some((id, version, path)) = crate::linux::app_identity(0) {
                 serial_line!(
                     "AETHER_LINUX_APPIMAGE_OK id={} version={} path={}",
                     id,
@@ -1404,13 +1412,16 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     let (root_files, root_bytes) = crate::linux::init().map_err(|_| SchedulerError::LinuxRoot)?;
     serial_line!("AETHER_LINUX_IMPORT_OK files={root_files} bytes={root_bytes}");
 
-    // Reserve the imported application's task slot. Process and thread
-    // creation skip it; the slot stays empty until `linuxd` approves launch.
-    tasks[APPIMAGE_TASK] = Task::new();
-    tasks[APPIMAGE_TASK].reserved = true;
+    // Reserve every imported-application task slot. Process and thread
+    // creation skip them; a slot stays empty until `linuxd` approves launch.
+    for slot in 0..crate::linux::MAX_APPS {
+        tasks[APPIMAGE_TASK + slot] = Task::new();
+        tasks[APPIMAGE_TASK + slot].reserved = true;
+    }
     serial_line!(
-        "sched: linux appimage slot reserved pid={} state=awaiting-linuxd",
-        APPIMAGE_TASK
+        "sched: linux appimage slots reserved base={} count={} state=awaiting-linuxd",
+        APPIMAGE_TASK,
+        crate::linux::MAX_APPS
     );
 
     // Load the ring-3 launch manager into its own PML4. It receives exactly
@@ -1571,11 +1582,23 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
 /// The signed image is parsed and mapped here, not at boot. Until
 /// `linuxd::service_tick` observes the approval message, no application task
 /// exists and nothing can be scheduled from the imported payload.
-pub fn launch_appimage() -> Result<(), SchedulerError> {
-    if APPIMAGE_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize {
+/// Records that the resident launch service completed its approval handshake.
+///
+/// The service intentionally stays alive for later desktop launches, so boot
+/// completion cannot wait for its task to exit.
+pub fn mark_linuxd_ready() {
+    LINUXD_RESULT.store(UserTestResult::Passed as usize, Ordering::Release);
+}
+
+pub fn launch_appimage(slot: usize) -> Result<(), SchedulerError> {
+    if slot >= crate::linux::MAX_APPS {
         return Err(SchedulerError::Linuxd);
     }
-    let program = crate::linux::app_program().ok_or(SchedulerError::Linuxd)?;
+    let task_index = APPIMAGE_TASK + slot;
+    if slot == 0 && APPIMAGE_RESULT.load(Ordering::Acquire) != UserTestResult::Pending as usize {
+        return Err(SchedulerError::Linuxd);
+    }
+    let program = crate::linux::app_program(slot).ok_or(SchedulerError::Linuxd)?;
     // The Linux parser rejects the static fixture's linker layout (its program
     // headers are not covered by a PT_LOAD), so a parse failure falls back to
     // the existing static loader rather than becoming a hard error. A malformed
@@ -1588,7 +1611,7 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
         }
     };
     let tasks = unsafe { &mut *TASKS.0.get() };
-    if tasks[APPIMAGE_TASK].state != TaskState::Empty || !tasks[APPIMAGE_TASK].reserved {
+    if tasks[task_index].state != TaskState::Empty || !tasks[task_index].reserved {
         return Err(SchedulerError::Linuxd);
     }
 
@@ -1608,11 +1631,11 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             serial_line!("sched: appimage interpreter parse failed: {error:?}");
             SchedulerError::LinuxAppImage
         })?;
-        let program_path = crate::linux::app_identity()
+        let program_path = crate::linux::app_identity(slot)
             .map(|(_, _, path)| path)
             .ok_or(SchedulerError::LinuxAppImage)?;
         let (configured, count) =
-            crate::linux::app_arguments().ok_or(SchedulerError::LinuxAppArguments)?;
+            crate::linux::app_arguments(slot).ok_or(SchedulerError::LinuxAppArguments)?;
         let mut arguments = [""; crate::linux::MAX_APPIMAGE_ARGUMENTS + 1];
         arguments[0] = program_path;
         arguments[1..1 + count].copy_from_slice(&configured[..count]);
@@ -1696,7 +1719,7 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     // This task slot was reserved for the imported payload; no other task owns
     // its stack.
     let kernel_top =
-        crate::memory::with_frame_allocator(|allocator| kernel_stack_top(allocator, APPIMAGE_TASK))
+        crate::memory::with_frame_allocator(|allocator| kernel_stack_top(allocator, task_index))
             .ok_or(SchedulerError::OutOfMemory)??;
     let saved_rsp = prepare_user_stack(kernel_top, entry, stack_pointer);
     let mut app_task = Task::new();
@@ -1708,11 +1731,12 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     app_task.kernel_stack_top = kernel_top;
     app_task.root = crate::fs::DEMO_ROOT;
     app_task.brk = paging::LINUX_ARENA_BASE;
-    app_task.overlay_app = crate::linuxd::APP_OVERLAY_ID;
-    app_task.tgid = APPIMAGE_TASK;
-    app_task.bind_file_state(APPIMAGE_TASK);
-    app_task.pgid = APPIMAGE_TASK;
-    app_task.sid = APPIMAGE_TASK;
+    app_task.app_slot = slot;
+    app_task.overlay_app = slot as u8;
+    app_task.tgid = task_index;
+    app_task.bind_file_state(task_index);
+    app_task.pgid = task_index;
+    app_task.sid = task_index;
     #[cfg(feature = "gate4-gui-test")]
     {
         // wayland-client's connect_to_env() consumes a supplied fd before the
@@ -1731,13 +1755,13 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     // test build grants the endpoint to any signed AppImage so the same
     // display path can be exercised for other Craft apps.
     #[cfg(feature = "gate4-gui-test")]
-    let display_granted = crate::linux::app_identity().is_some();
+    let display_granted = crate::linux::app_identity(slot).is_some();
     #[cfg(not(feature = "gate4-gui-test"))]
     let display_granted =
-        crate::linux::app_identity().is_some_and(|(id, _, _)| id == "ai.storyteller.gridcraft");
+        crate::linux::app_identity(slot).is_some_and(|(id, _, _)| id == "ai.storyteller.gridcraft");
     app_task.display = display_granted;
-    app_task.jit = crate::linux::app_jit();
-    app_task.network_client = crate::linux::app_network_client();
+    app_task.jit = crate::linux::app_jit(slot);
+    app_task.network_client = crate::linux::app_network_client(slot);
     if let Some((_, main_image, interpreter_image)) = dynamic {
         seed_linux_vmas(&mut app_task, &main_image, crate::linux_loader::MAIN_BASE);
         seed_linux_vmas(
@@ -1751,14 +1775,14 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             aether_memory::vma::PROT_READ | aether_memory::vma::PROT_WRITE,
         );
     }
-    tasks[APPIMAGE_TASK] = app_task;
+    tasks[task_index] = app_task;
     // The runtime and AppImage imports run with interrupts masked. Recover
     // any PS/2 bytes the user generated during that window before the window
     // starts accepting pointer input.
     crate::input::rearm_mouse();
     serial_line!(
         "sched: linux appimage task ready pid={} pml4={:#018x} entry={:#018x} approved=linuxd dynamic={}",
-        APPIMAGE_TASK,
+        task_index,
         pml4.start_address(),
         entry,
         dynamic.is_some()
@@ -2112,6 +2136,16 @@ pub fn current_task() -> usize {
     CURRENT.load(Ordering::Relaxed)
 }
 
+/// Returns the imported app-domain slot of the current task.
+///
+/// Native and service tasks return [`crate::linux::MAX_APPS`], which no app
+/// domain can occupy.
+#[must_use]
+pub fn current_app_slot() -> usize {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].app_slot
+}
+
 /// Returns the current task's PML4, or `None` if CR3 is not interpretable.
 #[must_use]
 pub fn current_pml4() -> Option<PhysFrame> {
@@ -2270,6 +2304,7 @@ pub fn linux_clone(
     // `CLONE_FILES`, so the views keep naming the parent's thread group.
     thread.tgid = parent_tgid;
     thread.bind_file_state(parent_tgid);
+    thread.app_slot = tasks[current].app_slot;
     thread.overlay_app = parent_overlay_app;
     thread.handles = parent_handles;
     thread.jit = tasks[current].jit;
@@ -2358,6 +2393,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.pgid = tasks[current].pgid;
     child.sid = tasks[current].sid;
     child.parent = current;
+    child.app_slot = tasks[current].app_slot;
     child.overlay_app = overlay_app;
     child.jit = tasks[current].jit;
     child.network_client = tasks[current].network_client;
@@ -2802,9 +2838,7 @@ pub fn linux_trace_fdcall(number: u64, fd: u64, result: i64) {
 /// Returns `true` when the current task belongs to the Gate 4 GUI program.
 #[cfg(feature = "gate4-gui-test")]
 pub fn linux_is_appimage_task() -> bool {
-    let tasks = unsafe { &*TASKS.0.get() };
-    let current = CURRENT.load(Ordering::Relaxed);
-    current < tasks.len() && tasks[current].tgid == APPIMAGE_TASK
+    current_app_slot() < crate::linux::MAX_APPS
 }
 
 /// Traces a task that is about to block, with the system call it is in.
@@ -2820,7 +2854,7 @@ fn trace_block(kind: &str) {
     static TRACED: AtomicUsize = AtomicUsize::new(0);
     let tasks = unsafe { &*TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
-    if current >= tasks.len() || tasks[current].tgid != APPIMAGE_TASK {
+    if current >= tasks.len() || tasks[current].app_slot >= crate::linux::MAX_APPS {
         return;
     }
     if TRACED.fetch_add(1, Ordering::Relaxed) >= TRACE_LIMIT {
@@ -7283,7 +7317,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         linux_release_task_pipes();
         return schedule_next(current);
     }
-    if (current != LINUX_TASK && current != LINUX_DYN_TASK && current != APPIMAGE_TASK)
+    if (current != LINUX_TASK && current != LINUX_DYN_TASK && !is_app_task(current))
         || kind != TaskKind::Linux
     {
         serial_line!("AETHER_BOOT_FAILED reason=linux exit from wrong task");
@@ -7310,11 +7344,19 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
     } else {
         UserTestResult::Failed
     };
+    let app_slot = tasks[current].app_slot;
     if current == LINUX_DYN_TASK {
         LINUX_DYN_EXITS.fetch_add(1, Ordering::Release);
         LINUX_DYN_RESULT.store(result as usize, Ordering::Release);
-    } else if current == APPIMAGE_TASK {
-        APPIMAGE_RESULT.store(result as usize, Ordering::Release);
+    } else if is_app_task(current) {
+        if current == APPIMAGE_TASK {
+            APPIMAGE_RESULT.store(result as usize, Ordering::Release);
+        }
+        if app_slot < crate::linux::MAX_APPS {
+            crate::display::close();
+            crate::linux::release_app(app_slot);
+            tasks[current].app_slot = crate::linux::MAX_APPS;
+        }
     } else {
         LINUX_EXITS.fetch_add(1, Ordering::Release);
         LINUX_RESULT.store(result as usize, Ordering::Release);
@@ -7493,9 +7535,17 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
         if current == LINUX_DYN_TASK {
             LINUX_DYN_FAULTS.fetch_add(1, Ordering::Release);
             LINUX_DYN_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
-        } else if current == APPIMAGE_TASK {
-            APPIMAGE_FAULTS.fetch_add(1, Ordering::Release);
-            APPIMAGE_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+        } else if is_app_task(current) {
+            if current == APPIMAGE_TASK {
+                APPIMAGE_FAULTS.fetch_add(1, Ordering::Release);
+                APPIMAGE_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);
+            }
+            let app_slot = tasks[current].app_slot;
+            if app_slot < crate::linux::MAX_APPS {
+                crate::display::close();
+                crate::linux::release_app(app_slot);
+                tasks[current].app_slot = crate::linux::MAX_APPS;
+            }
         } else {
             LINUX_FAULTS.fetch_add(1, Ordering::Release);
             LINUX_RESULT.store(UserTestResult::Faulted as usize, Ordering::Release);

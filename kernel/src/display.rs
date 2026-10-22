@@ -270,18 +270,36 @@ struct Global<T>(UnsafeCell<T>);
 // compositor never keeps a borrow across a syscall.
 unsafe impl<T> Sync for Global<T> {}
 
-static DISPLAY: Global<DisplayState> = Global(UnsafeCell::new(DisplayState::new()));
+static DISPLAYS: Global<[DisplayState; crate::linux::MAX_APPS]> = Global(UnsafeCell::new(
+    [const { DisplayState::new() }; crate::linux::MAX_APPS],
+));
 
-fn with_state<R>(f: impl FnOnce(&mut DisplayState) -> R) -> R {
-    let _guard = InterruptGuard::enter();
-    // SAFETY: Interrupts are masked, so this is the only mutable access.
-    unsafe { f(&mut *DISPLAY.0.get()) }
+fn slot() -> usize {
+    let slot = crate::scheduler::current_app_slot();
+    // The static Linux ABI fixtures are not imported app domains but still
+    // exercise the endpoint. They use the first surface; an app task that
+    // opens the endpoint later resets and owns it.
+    if slot < crate::linux::MAX_APPS {
+        slot
+    } else {
+        0
+    }
 }
 
-fn read_state<R>(f: impl FnOnce(&DisplayState) -> R) -> R {
+fn with_state<R>(slot: usize, f: impl FnOnce(&mut DisplayState) -> R) -> R {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked, so this is the only mutable access.
+    unsafe { f(&mut (*DISPLAYS.0.get())[slot]) }
+}
+
+fn read_state<R>(slot: usize, f: impl FnOnce(&DisplayState) -> R) -> R {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked, so no writer can run during the call.
-    unsafe { f(&*DISPLAY.0.get()) }
+    unsafe { f(&(*DISPLAYS.0.get())[slot]) }
+}
+
+fn valid_slot(slot: usize) -> bool {
+    slot < crate::linux::MAX_APPS
 }
 
 /// Returns `true` when the current task may own the display endpoint.
@@ -295,7 +313,11 @@ pub fn open() -> Result<(), i64> {
     if !allowed() {
         return Err(EACCES);
     }
-    with_state(|state| {
+    let slot = slot();
+    if !valid_slot(slot) {
+        return Err(EACCES);
+    }
+    with_state(slot, |state| {
         if state.open {
             return Err(EBUSY);
         }
@@ -308,9 +330,9 @@ pub fn open() -> Result<(), i64> {
 
 /// Emits compositor and presentation counters at the end of a Gate 4 run.
 #[cfg(feature = "gate4-gui-test")]
-fn log_perf() {
+fn log_perf(slot: usize) {
     let (scene, cursor, last, max, fast, slow) = desktop::paint_stats();
-    let frames = read_state(|state| state.frames);
+    let frames = read_state(slot, |state| state.frames);
     serial_line!(
         "AETHER_GATE4_PERF frames={} scene_paints={} cursor_paints={} last_paint_ms={} max_paint_ms={} fast_paints={} slow_paints={}",
         frames,
@@ -325,7 +347,11 @@ fn log_perf() {
 
 /// Closes the endpoint and retires its window and surface.
 pub fn close() {
-    let window = with_state(|state| {
+    let slot = slot();
+    if !valid_slot(slot) {
+        return;
+    }
+    let window = with_state(slot, |state| {
         if !state.open {
             return None;
         }
@@ -340,8 +366,8 @@ pub fn close() {
     });
     if let Some(id) = window {
         #[cfg(feature = "gate4-gui-test")]
-        log_perf();
-        desktop::close_linux_window(id);
+        log_perf(slot);
+        desktop::close_linux_window(slot, id);
     }
 }
 
@@ -350,19 +376,22 @@ pub fn close() {
 /// The compositor uses this to skip the wallpaper restore and background fill
 /// that an opaque guest surface immediately overwrites.
 #[must_use]
-pub fn surface_opaque() -> bool {
-    read_state(|state| state.open && state.presented && state.opaque)
+pub fn surface_opaque(slot: usize) -> bool {
+    valid_slot(slot) && read_state(slot, |state| state.open && state.presented && state.opaque)
 }
 
-/// Returns the current window title, or an empty string.
+/// Returns a window title, or an empty string.
 #[must_use]
-pub fn title() -> &'static str {
+pub fn title(slot: usize) -> &'static str {
+    if !valid_slot(slot) {
+        return "";
+    }
     let _guard = InterruptGuard::enter();
     // SAFETY: The byte array lives in static storage and is only rewritten
     // under the same interrupt guard. The returned borrow is bounded by the
     // desktop paint call, which does not mutate the endpoint.
     unsafe {
-        let state = &*DISPLAY.0.get();
+        let state = &(*DISPLAYS.0.get())[slot];
         core::str::from_utf8(&state.title[..state.title_len]).unwrap_or("")
     }
 }
@@ -419,12 +448,16 @@ pub fn write_request(pml4: aether_memory::frame::PhysFrame, data: &[u8]) -> i64 
     } else if length != 0 {
         return EINVAL;
     }
+    let slot = slot();
+    if !valid_slot(slot) {
+        return EACCES;
+    }
     let result = match kind {
-        KIND_CREATE => create(width, height, format, &title[..length]),
-        KIND_PRESENT => present(pml4, width, height, stride, format, buffer),
-        KIND_SET_TITLE => set_title(&title[..length]),
+        KIND_CREATE => create(slot, width, height, format, &title[..length]),
+        KIND_PRESENT => present(slot, pml4, width, height, stride, format, buffer),
+        KIND_SET_TITLE => set_title(slot, &title[..length]),
         KIND_DESTROY => {
-            destroy();
+            destroy(slot);
             0
         }
         _ => return EINVAL,
@@ -447,13 +480,13 @@ fn valid_dimensions(width: u32, height: u32) -> bool {
     (1..=MAX_WIDTH).contains(&width) && (1..=MAX_HEIGHT).contains(&height)
 }
 
-fn create(width: u32, height: u32, format: u32, title: &[u8]) -> i64 {
+fn create(slot: usize, width: u32, height: u32, format: u32, title: &[u8]) -> i64 {
     if !valid_dimensions(width, height) || format > 1 {
         return EINVAL;
     }
     let title = core::str::from_utf8(title).unwrap_or("");
-    let window = desktop::open_linux_window(width, height, title);
-    with_state(|state| {
+    let window = desktop::open_linux_window(slot, width, height, title);
+    with_state(slot, |state| {
         if !state.open {
             return EBADF;
         }
@@ -490,8 +523,8 @@ fn create(width: u32, height: u32, format: u32, title: &[u8]) -> i64 {
     })
 }
 
-fn set_title(title: &[u8]) -> i64 {
-    with_state(|state| {
+fn set_title(slot: usize, title: &[u8]) -> i64 {
+    with_state(slot, |state| {
         if !state.open {
             return EBADF;
         }
@@ -506,20 +539,21 @@ fn set_title(title: &[u8]) -> i64 {
     0
 }
 
-fn destroy() {
-    let window = with_state(|state| {
+fn destroy(slot: usize) {
+    let window = with_state(slot, |state| {
         let window = state.window.take();
         state.clear_surface();
         window
     });
     if let Some(id) = window {
         #[cfg(feature = "gate4-gui-test")]
-        log_perf();
-        desktop::close_linux_window(id);
+        log_perf(slot);
+        desktop::close_linux_window(slot, id);
     }
 }
 
 fn present(
+    slot: usize,
     pml4: aether_memory::frame::PhysFrame,
     width: u32,
     height: u32,
@@ -527,7 +561,7 @@ fn present(
     format: u32,
     buffer: u64,
 ) -> i64 {
-    let (expected_width, expected_height) = match with_state(|state| {
+    let (expected_width, expected_height) = match with_state(slot, |state| {
         if !state.open {
             return Err(EBADF);
         }
@@ -561,7 +595,7 @@ fn present(
     // separate whole-range pre-walk would only double the page-table work.
     let row_bytes = pixel_bytes as usize;
     let stride_bytes = stride as usize;
-    with_state(|state| {
+    with_state(slot, |state| {
         // The bridge usually presents a tightly packed surface. Copy the whole
         // validated range in one pass instead of re-walking the page table for
         // every scan line.
@@ -673,7 +707,11 @@ fn present(
 /// it is not an application-controlled close.
 #[cfg(feature = "gate4-gui-test")]
 pub fn request_close() {
-    with_state(|state| {
+    let slot = slot();
+    if !valid_slot(slot) {
+        return;
+    }
+    with_state(slot, |state| {
         if state.open && state.window.is_some() {
             state.enqueue(DisplayEvent {
                 kind: EVENT_CLOSE,
@@ -685,11 +723,15 @@ pub fn request_close() {
 
 /// Drains one or more events into a validated guest buffer.
 pub fn read_events(out: &mut [u8]) -> Result<usize, i64> {
+    let slot = slot();
+    if !valid_slot(slot) {
+        return Err(EACCES);
+    }
     if out.len() < EVENT_SIZE {
         return Err(EINVAL);
     }
     let capacity = (out.len() / EVENT_SIZE).min(QUEUE_LEN);
-    with_state(|state| {
+    with_state(slot, |state| {
         if !state.open {
             return Err(EBADF);
         }
@@ -734,7 +776,11 @@ pub fn read_events(out: &mut [u8]) -> Result<usize, i64> {
 /// Returns `true` when at least one event is queued.
 #[must_use]
 pub fn readable() -> bool {
-    read_state(|state| state.open && state.len != 0)
+    let slot = slot();
+    if !valid_slot(slot) {
+        return false;
+    }
+    read_state(slot, |state| state.open && state.len != 0)
 }
 
 /// Routes a decoded key while the Linux window owns focus.
@@ -742,7 +788,7 @@ pub fn readable() -> bool {
 /// The input decoder emits make events only. The endpoint therefore queues a
 /// press immediately followed by a release so a bridge can synthesize both
 /// `wl_keyboard.key` transitions without inventing a hold timer in the kernel.
-pub fn key(key: Key, modifiers: crate::input::Modifiers) {
+pub fn key(slot: usize, key: Key, modifiers: crate::input::Modifiers) {
     let mut modifier_bits = 0u32;
     if modifiers.shift {
         modifier_bits |= 1;
@@ -769,7 +815,7 @@ pub fn key(key: Key, modifiers: crate::input::Modifiers) {
         Key::Right => 0x1008,
         Key::Function(number) => 0x1100 | u32::from(number),
     };
-    with_state(|state| {
+    with_state(slot, |state| {
         if !state.open || state.window.is_none() {
             return;
         }
@@ -810,13 +856,14 @@ fn surface_coordinate(value: i32, origin: i32, extent: i32, surface: u32) -> i32
 /// client area. Coordinates delivered to the guest are in surface pixel space,
 /// not compositor window space.
 pub fn sync_input(
+    slot: usize,
     focused: Option<u8>,
     content: Option<Rect>,
     pointer_x: i32,
     pointer_y: i32,
     buttons: u8,
 ) {
-    with_state(|state| {
+    with_state(slot, |state| {
         if !state.open {
             return;
         }
@@ -918,8 +965,8 @@ pub fn sync_input(
 }
 
 /// Paints the current surface into a compositor content rectangle.
-pub fn paint_content(content: Rect) {
-    let available = with_state(|state| {
+pub fn paint_content(slot: usize, content: Rect) {
+    let available = with_state(slot, |state| {
         if !state.open {
             return None;
         }
@@ -949,7 +996,10 @@ pub fn paint_content(content: Rect) {
     // SAFETY: The pixel array is static kernel storage and the paint call is
     // the only reader. Interrupts are masked so `present` cannot rewrite it
     // while the compositor samples it.
-    let pixels = unsafe { &(*DISPLAY.0.get()).pixels };
+    if !valid_slot(slot) {
+        return;
+    }
+    let pixels = unsafe { &(*DISPLAYS.0.get())[slot].pixels };
     graphics::blit_surface_scaled(
         content.x,
         content.y,

@@ -53,7 +53,8 @@ const DENY_IDENTITY: u8 = 2;
 const DENY_PROTOCOL: u8 = 3;
 
 const MAX_FIELD: usize = 63;
-const MAX_ROUNDS: usize = 4;
+/// The service stays resident so the desktop can launch several apps.
+const MAX_ROUNDS: usize = 64;
 const IDLE_LIMIT: usize = 200_000;
 
 fn puts(text: &str) {
@@ -308,8 +309,9 @@ pub extern "C" fn _start() -> ! {
                 puts_field("linuxd: approved version ", request.version());
                 puts_field("linuxd: approved path ", request.path());
                 send_approval();
-                puts("linuxd: approval sent; exiting\n");
-                sdk::exit(0)
+                puts("linuxd: approval sent\n");
+                request.reset();
+                continue;
             }
             Err(_) => {
                 idle += 1;
