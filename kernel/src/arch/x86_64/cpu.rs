@@ -13,7 +13,7 @@
 //! on firmware state for a security property.
 
 use core::arch::asm;
-use core::arch::x86_64::__cpuid;
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const IA32_EFER: u32 = 0xc000_0080;
@@ -29,6 +29,12 @@ const IA32_FS_BASE: u32 = 0xc000_0100;
 
 const CR0_WP: u64 = 1 << 16;
 const CR4_OSXSAVE: u64 = 1 << 18;
+const CR4_SMEP: u64 = 1 << 20;
+const CR4_SMAP: u64 = 1 << 21;
+
+const CPUID_STRUCTURED_FEATURES: u32 = 7;
+const CPUID_SMEP: u32 = 1 << 7;
+const CPUID_SMAP: u32 = 1 << 20;
 
 const CPUID_EXTENDED_MAX: u32 = 0x8000_0000;
 const CPUID_EXTENDED_FEATURES: u32 = 0x8000_0001;
@@ -101,6 +107,50 @@ pub unsafe fn init() -> Result<(), CpuError> {
         write_cr0(read_cr0() | CR0_WP);
     }
     Ok(())
+}
+
+/// Supervisor protections enabled by [`enable_supervisor_protection`].
+#[derive(Clone, Copy, Debug)]
+pub struct SupervisorProtection {
+    /// Ring 0 cannot execute user pages.
+    pub smep: bool,
+    /// Ring 0 cannot read or write user pages outside `stac`/`clac`.
+    pub smap: bool,
+}
+
+/// Enables SMEP and SMAP when the processor implements them.
+///
+/// With SMAP on, the kernel can touch user memory only inside the user-copy
+/// routine, which brackets its single copy with `stac`/`clac`. Any other
+/// access faults at a RIP outside the exception table and halts, so a missed
+/// conversion shows up in testing instead of working by accident.
+///
+/// # Safety
+///
+/// Must run once during boot, at CPL0, with interrupts disabled, before any
+/// user task runs.
+pub unsafe fn enable_supervisor_protection() -> SupervisorProtection {
+    let mut protection = SupervisorProtection {
+        smep: false,
+        smap: false,
+    };
+    if __cpuid(0).eax < CPUID_STRUCTURED_FEATURES {
+        return protection;
+    }
+    let features = __cpuid_count(CPUID_STRUCTURED_FEATURES, 0).ebx;
+    protection.smep = features & CPUID_SMEP != 0;
+    protection.smap = features & CPUID_SMAP != 0;
+    let mut bits = 0;
+    if protection.smep {
+        bits |= CR4_SMEP;
+    }
+    if protection.smap {
+        bits |= CR4_SMAP;
+    }
+    // SAFETY: CR4 is writable at CPL0, CPUID reported both bits, and no code
+    // that executes or accesses user pages outside the copy routine runs yet.
+    unsafe { write_cr4(read_cr4() | bits) };
+    protection
 }
 
 /// Enables the extended processor state used by SSE and AVX.

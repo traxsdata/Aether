@@ -538,6 +538,7 @@ pub fn init() {
 /// returns the next runnable frame, so a misbehaving application cannot take
 /// the kernel down.
 extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    crate::arch::x86_64::usercopy::clear_ac();
     // Read the fields the handler needs individually rather than copying the
     // whole frame. (In 64-bit mode the CPU pushes `SS:RSP` on every
     // interrupt, so the frame is complete for ring-0 faults too.)
@@ -619,6 +620,7 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
 
 /// PIC interrupt entry, called from `irq_common`.
 extern "C" fn irq_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    crate::arch::x86_64::usercopy::clear_ac();
     // SAFETY: The assembly stub passes a complete live frame.
     let vector = unsafe { (*frame).vector };
     crate::arch::x86_64::timer::acknowledge_vector(vector);
@@ -638,6 +640,7 @@ extern "C" fn irq_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
 
 /// System call entry, called from `syscall_common`.
 extern "C" fn syscall_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    crate::arch::x86_64::usercopy::clear_ac();
     crate::syscall::dispatch(frame)
 }
 
