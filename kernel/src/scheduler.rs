@@ -957,7 +957,7 @@ pub fn run() -> ! {
             let messages = MESSAGES.load(Ordering::Acquire);
             if denied != 2 || messages != 3 {
                 serial_line!("AETHER_BOOT_FAILED reason=ipc denials={denied} messages={messages}");
-                halt()
+                self_tests_failed()
             }
             let user_result = USER_RESULT.load(Ordering::Acquire);
             if user_result != UserTestResult::Passed as usize {
@@ -966,7 +966,7 @@ pub fn run() -> ! {
                     user_result,
                     USER_FAULTS.load(Ordering::Acquire)
                 );
-                halt()
+                self_tests_failed()
             }
             let linux_result = LINUX_RESULT.load(Ordering::Acquire);
             if linux_result != UserTestResult::Passed as usize {
@@ -975,7 +975,7 @@ pub fn run() -> ! {
                     linux_result,
                     LINUX_FAULTS.load(Ordering::Acquire)
                 );
-                halt()
+                self_tests_failed()
             }
             let dyn_result = LINUX_DYN_RESULT.load(Ordering::Acquire);
             if dyn_result != UserTestResult::Passed as usize {
@@ -984,7 +984,7 @@ pub fn run() -> ! {
                     dyn_result,
                     LINUX_DYN_FAULTS.load(Ordering::Acquire)
                 );
-                halt()
+                self_tests_failed()
             }
             let linuxd_result = LINUXD_RESULT.load(Ordering::Acquire);
             if linuxd_result != UserTestResult::Passed as usize {
@@ -993,11 +993,11 @@ pub fn run() -> ! {
                     linuxd_result,
                     LINUXD_FAULTS.load(Ordering::Acquire)
                 );
-                halt()
+                self_tests_failed()
             }
             if !crate::linuxd::launch_approved() {
                 serial_line!("AETHER_BOOT_FAILED reason=app launched without linuxd approval");
-                halt()
+                self_tests_failed()
             }
             let app_result = APPIMAGE_RESULT.load(Ordering::Acquire);
             if app_result != UserTestResult::Passed as usize {
@@ -1006,7 +1006,7 @@ pub fn run() -> ! {
                     app_result,
                     APPIMAGE_FAULTS.load(Ordering::Acquire)
                 );
-                halt()
+                self_tests_failed()
             }
             // Kernel-owned evidence that a dynamically linked AppImage task
             // exited with status zero. The selected path comes from the signed
@@ -1056,7 +1056,7 @@ pub fn run() -> ! {
             let escapes = crate::fs::escape_denials();
             if escapes < 2 {
                 serial_line!("AETHER_BOOT_FAILED reason=sandbox escapes={escapes}");
-                halt()
+                self_tests_failed()
             }
             // The ring-3 IPC demo must have exercised the bound positive and
             // negative paths: sends, receives, and at least one denial of
@@ -1081,7 +1081,7 @@ pub fn run() -> ! {
                     crate::syscall::ipc_closes(),
                     crate::fs::quota_denials()
                 );
-                halt()
+                self_tests_failed()
             }
             serial_line!(
                 "AETHER_USER_OK tasks={} exits={} faults={}",
@@ -1115,18 +1115,33 @@ pub fn run() -> ! {
             );
             // The boot self-tests are complete. Keep the console alive so the
             // shell test and a human can inspect the running system.
-            timer::enable_interrupts();
-            loop {
-                crate::shell::poll();
-                crate::input::poll();
-                crate::desktop::tick();
-                timer::halt_until_interrupt();
-            }
+            console_loop()
         }
         crate::shell::poll();
         // The display boot test injects a real PS/2 key and pointer packet
         // while the Linux task waits in `poll`. Route them through the normal
         // input/desktop path before parking for the next interrupt.
+        crate::input::poll();
+        crate::desktop::tick();
+        timer::halt_until_interrupt();
+    }
+}
+
+/// Keeps the console and desktop running after a boot self-test failed.
+///
+/// The `AETHER_BOOT_FAILED` marker is already on the serial line, so the
+/// harnesses still see the failure. Halting with interrupts off here only
+/// froze the desktop a person was looking at.
+fn self_tests_failed() -> ! {
+    serial_line!("boot: self-tests failed; the console and desktop stay interactive");
+    console_loop()
+}
+
+/// Services the shell, input, and desktop once the boot self-tests are done.
+fn console_loop() -> ! {
+    timer::enable_interrupts();
+    loop {
+        crate::shell::poll();
         crate::input::poll();
         crate::desktop::tick();
         timer::halt_until_interrupt();
@@ -1423,7 +1438,7 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     let linux_image = match aether_linux_elf::parse(program) {
         Ok(image) => Some(image),
         Err(error) => {
-            serial_line!("sched: appimage ELF parse failed: {error:?}");
+            serial_line!("sched: appimage uses the static loader ({error:?})");
             None
         }
     };

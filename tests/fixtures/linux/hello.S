@@ -1347,10 +1347,8 @@ guard_done:
     jmp .Lpipe_block_start
 
 .Lintr_child:
-    mov $5000000, %ecx
-.Lintr_delay:
-    dec %ecx
-    jnz .Lintr_delay
+    mov $50, %rdi               /* let the parent enter its 2 s sleep */
+    call pause_ms
     mov $110, %rax              /* getppid */
     syscall
     mov %rax, %rdi
@@ -1629,10 +1627,8 @@ guard_done:
     syscall
 
 .Lpoll_event_thread:
-    mov $20000000, %ecx
-.Lpoll_event_delay:
-    dec %ecx
-    jnz .Lpoll_event_delay
+    mov $50, %rdi               /* let the parent block in the infinite poll */
+    call pause_ms
     mov (%r12), %rdi
     movq $1, 16(%r12)
     mov $1, %rax
@@ -2430,10 +2426,9 @@ restart_child_go:
     mov $10, %rsi
     mov $62, %rax
     syscall
-    mov $2000000, %ecx
+    mov $20, %rdi
+    call pause_ms
 15:
-    dec %ecx
-    jne 15b
     mov $60, %rax
     mov $7, %rdi
     syscall
@@ -2454,18 +2449,15 @@ interrupt_child_go:
     mov $110, %rax
     syscall
     mov %rax, %r13
-    mov $2000000, %ecx
-16:
-    dec %ecx
-    jne 16b
+    mov $20, %rdi               /* let the parent block in wait4 */
+    call pause_ms
     mov %r13, %rdi
     mov $10, %rsi
     mov $62, %rax
     syscall
-    mov $2000000, %ecx
+    mov $20, %rdi
+    call pause_ms
 17:
-    dec %ecx
-    jne 17b
     mov $60, %rax
     mov $8, %rdi
     syscall
@@ -2474,16 +2466,18 @@ interrupt_child_go:
 after_signals:
     /* ---- SIGTERM handler and SIGKILL default action ---- */
     sub $16, %rsp
+    call ready_open
+    test %rax, %rax
+    jne fail_default
     mov $57, %rax
     syscall
     test %rax, %rax
     js fail_default
     jz term_child
     mov %rax, %r14
-    mov $10000000, %ecx
-18:
-    dec %ecx
-    jne 18b
+    call ready_wait             /* the child's SIGTERM handler is installed */
+    cmp $1, %rax
+    jne fail_default
     mov %r14, %rdi
     mov $15, %rsi               /* SIGTERM */
     mov $62, %rax
@@ -2503,16 +2497,18 @@ after_signals:
     add $16, %rsp
 
     sub $16, %rsp
+    call ready_open
+    test %rax, %rax
+    jne fail_default
     mov $57, %rax
     syscall
     test %rax, %rax
     js fail_default
     jz kill_child
     mov %rax, %r14
-    mov $10000000, %ecx
-19:
-    dec %ecx
-    jne 19b
+    call ready_wait             /* the child is running and waiting */
+    cmp $1, %rax
+    jne fail_default
     mov %r14, %rdi
     mov $9, %rsi                /* SIGKILL default action */
     mov $62, %rax
@@ -2553,10 +2549,11 @@ term_child:
     test %rax, %rax
     jne fail_default
     movl $0, 0x530(%r12)
-    mov $20000000, %ecx
-20:
-    dec %ecx
-    jne 20b
+    call ready_signal
+    cmp $1, %rax
+    jne fail_default
+    lea 0x530(%r12), %rdi
+    call wait_for_flag
     mov $60, %rax
     cmpl $1, 0x530(%r12)
     jne 21f
@@ -2568,10 +2565,13 @@ term_child:
     jmp 21b
 
 kill_child:
-    mov $20000000, %ecx
+    call ready_signal
+    cmp $1, %rax
+    jne fail_default
+    movl $0, 0x54c(%r12)        /* never set: only SIGKILL ends the wait */
+    lea 0x54c(%r12), %rdi
+    call wait_for_flag
 22:
-    dec %ecx
-    jne 22b
     mov $60, %rax
     mov $1, %rdi
     syscall
@@ -2601,16 +2601,18 @@ after_default:
     mov %rax, 0x520(%r12)
 
     sub $16, %rsp
+    call ready_open
+    test %rax, %rax
+    jne fail_group
     mov $57, %rax
     syscall
     test %rax, %rax
     js fail_group
     jz group_child
     mov %rax, %r14              /* child becomes its own group leader */
-    mov $10000000, %ecx
-23:
-    dec %ecx
-    jne 23b
+    call ready_wait             /* the child's group and handler are set */
+    cmp $1, %rax
+    jne fail_group
     mov %r14, %rdi
     neg %rdi                    /* kill(-child_pgid, SIGUSR1) */
     mov $10, %rsi
@@ -2702,10 +2704,20 @@ group_child:
     test %rax, %rax
     jne fail_group
     movl $0, 0x510(%r12)
-    mov $40000000, %ecx
+    call ready_signal
+    cmp $1, %rax
+    jne fail_group
+    lea 0x510(%r12), %rdi
+    call wait_for_flag
+    /* Stay alive a little longer so a second delivery, such as the parent's
+     * own-group signal leaking across groups, is counted. */
+    movq $0, 0x550(%r12)
+    movq $100000000, 0x558(%r12)
+    mov $35, %rax
+    lea 0x550(%r12), %rdi
+    xor %rsi, %rsi
+    syscall
 25:
-    dec %ecx
-    jne 25b
     mov $60, %rax
     mov 0x510(%r12), %rdi
     syscall
@@ -2946,10 +2958,8 @@ clone3_done:
     syscall
     cmpl $1, 0x450(%r12)
     jne 29b
-    mov $1000000, %ecx
-30:
-    dec %ecx
-    jne 30b
+    mov $20, %rdi               /* let the waiter block in FUTEX_WAIT */
+    call pause_ms
     movl $1, 0x44c(%r12)
     mov $202, %rax
     lea 0x44c(%r12), %rdi
@@ -5060,6 +5070,71 @@ restart_handler:
 
 term_handler:
     movl $1, 0x530(%r12)
+    ret
+
+/* Readiness handshake for the fork-and-signal tests. The child reports that
+ * it is ready for the signal by writing one byte to the pipe whose ends are
+ * stored at 0x540/0x544; the parent blocks on that byte. Fixed spin delays
+ * here raced on fast hardware, where a whole spin fits in one timer tick. */
+ready_open:                     /* pipe2(0x540, 0); returns 0 or -errno */
+    mov $293, %rax
+    lea 0x540(%r12), %rdi
+    xor %rsi, %rsi
+    syscall
+    ret
+
+ready_wait:                     /* parent: returns 1 once the child is ready */
+    mov $3, %rax                /* drop our write end so a dead child is EOF */
+    movslq 0x544(%r12), %rdi
+    syscall
+    mov $0, %rax
+    movslq 0x540(%r12), %rdi
+    lea 0x548(%r12), %rsi
+    mov $1, %rdx
+    syscall
+    push %rax
+    mov $3, %rax
+    movslq 0x540(%r12), %rdi
+    syscall
+    pop %rax
+    ret
+
+ready_signal:                   /* child: returns 1 once the byte is sent */
+    movb $0x52, 0x548(%r12)
+    mov $1, %rax
+    movslq 0x544(%r12), %rdi
+    lea 0x548(%r12), %rsi
+    mov $1, %rdx
+    syscall
+    ret
+
+pause_ms:                       /* nanosleep for %rdi (< 1000) milliseconds */
+    sub $16, %rsp
+    imul $1000000, %rdi, %rax
+    movq $0, 0(%rsp)
+    mov %rax, 8(%rsp)
+    mov %rsp, %rdi
+    xor %rsi, %rsi
+    mov $35, %rax
+    syscall
+    add $16, %rsp
+    ret
+
+wait_for_flag:                  /* sleep in 1 ms steps, up to 5 s, until (%rdi) != 0 */
+    mov %rdi, %r8
+    mov $5000, %r9d
+1:
+    cmpl $0, (%r8)
+    jne 2f
+    movq $0, 0x550(%r12)
+    movq $1000000, 0x558(%r12)
+    mov $35, %rax
+    lea 0x550(%r12), %rdi
+    xor %rsi, %rsi
+    syscall
+    dec %r9d
+    jnz 1b
+2:
     ret
 
 group_handler:
