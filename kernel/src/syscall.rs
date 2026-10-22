@@ -1171,15 +1171,9 @@ fn linux_writev(pml4: PhysFrame, descriptor: u64, iovec_pointer: u64, count: u64
         let Some(bytes) = user_bytes(pml4, base, length, false) else {
             return LINUX_EFAULT;
         };
-        if descriptor == 1 || descriptor == 2 {
-            serial::write_bytes(bytes);
-            total += length as i64;
-        } else {
-            let written = scheduler::linux_write_file(descriptor, bytes);
-            match written {
-                Ok(count) => total += count as i64,
-                Err(error) => return error,
-            }
+        match scheduler::linux_write_file(descriptor, bytes) {
+            Ok(count) => total += count as i64,
+            Err(error) => return error,
         }
     }
     total
@@ -2739,10 +2733,6 @@ fn linux_write(
     let Some(bytes) = user_bytes(pml4, pointer, length, false) else {
         return linux_result(frame, LINUX_EFAULT);
     };
-    if descriptor == 1 || descriptor == 2 {
-        serial::write_bytes(bytes);
-        return linux_result(frame, length as i64);
-    }
     if scheduler::linux_display_fd(descriptor) {
         return linux_result(frame, crate::display::write_request(pml4, bytes));
     }

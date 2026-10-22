@@ -147,6 +147,10 @@ enum LinuxFileSource {
     },
     /// The task's one synthetic display endpoint.
     Display,
+    /// The serial console. Descriptors 0, 1 and 2 start here, and `dup2`
+    /// can replace them like any other descriptor. Writes go to the serial
+    /// port; reads report end-of-file because the console has no input.
+    Console,
 }
 
 /// Maximum backing-path bytes carried by a portal descriptor.
@@ -730,8 +734,17 @@ struct LinuxFileState {
 
 impl LinuxFileState {
     const fn new() -> Self {
+        const CONSOLE: Option<LinuxFile> = Some(LinuxFile {
+            source: LinuxFileSource::Console,
+            offset: 0,
+            writable: true,
+        });
+        let mut fds = [None; crate::linux::MAX_FDS];
+        fds[0] = CONSOLE;
+        fds[1] = CONSOLE;
+        fds[2] = CONSOLE;
         Self {
-            fds: [None; crate::linux::MAX_FDS],
+            fds,
             eventfds: [None; MAX_EVENTFDS],
             epolls: [None; MAX_EPOLLS],
             timerfds: [None; MAX_TIMERFDS],
@@ -5237,6 +5250,9 @@ pub fn linux_poll(fd: u64, events: i16) -> i16 {
         LinuxFileSource::MemFd { .. } => {
             ready = events & (POLL_IN | POLL_OUT);
         }
+        LinuxFileSource::Console => {
+            ready = events & (POLL_IN | POLL_OUT);
+        }
         LinuxFileSource::Display => {
             if events & POLL_IN != 0 && crate::display::readable() {
                 ready |= POLL_IN;
@@ -5488,6 +5504,7 @@ pub fn linux_read(fd: u64, out: &mut [u8]) -> Result<usize, i64> {
             // The syscall layer drains the endpoint before it borrows the task
             // table, because queueing a wakeup touches the scheduler too.
             LinuxFileSource::Display => Err(LINUX_EINVAL),
+            LinuxFileSource::Console => Ok(0),
             LinuxFileSource::Pipe {
                 index,
                 write: false,
@@ -5678,6 +5695,10 @@ pub fn linux_write_file(fd: u64, data: &[u8]) -> Result<usize, i64> {
                 Ok(count)
             }
             LinuxFileSource::Display => Err(LINUX_EINVAL),
+            LinuxFileSource::Console => {
+                crate::arch::x86_64::serial::write_bytes(data);
+                Ok(data.len())
+            }
             LinuxFileSource::Pipe { index, write: true } => {
                 let Some(pipe) = (unsafe { &mut (*PIPES.0.get())[index] }).as_mut() else {
                     return Err(LINUX_EBADF);
@@ -6098,6 +6119,7 @@ pub fn linux_pread(fd: u64, out: &mut [u8], offset: u64) -> Result<usize, i64> {
         } => crate::portal::read_temp(index, generation, offset, out).map_err(portal_error_code),
         LinuxFileSource::MemFd { index } => crate::memfd::read(index, offset, out),
         LinuxFileSource::Display => Err(LINUX_EINVAL),
+        LinuxFileSource::Console => Err(LINUX_ESPIPE),
         LinuxFileSource::Directory { .. } => Err(LINUX_EISDIR),
         LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
@@ -6292,7 +6314,7 @@ pub fn linux_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
             index, generation, ..
         } => crate::portal::temp_len(index, generation).unwrap_or(0),
         LinuxFileSource::MemFd { index } => crate::memfd::len(index).unwrap_or(0),
-        LinuxFileSource::Display => 0,
+        LinuxFileSource::Display | LinuxFileSource::Console => 0,
         LinuxFileSource::Directory { .. }
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }
@@ -6700,6 +6722,7 @@ pub fn linux_stat_fd(fd: u64) -> Result<(u64, u64, u32), i64> {
             Ok((length as u64, crate::memfd::file_key(index), 0o100666))
         }
         LinuxFileSource::Display => Ok((0, 7, 0o020600)),
+        LinuxFileSource::Console => Ok((0, 8, 0o020620)),
         LinuxFileSource::Directory { .. } | LinuxFileSource::PseudoDir(_) => Ok((0, 2, 0o040755)),
         LinuxFileSource::Pseudo(kind) => Ok(pseudo_stat(kind)),
         LinuxFileSource::Pipe { .. }
@@ -6788,7 +6811,7 @@ pub fn linux_file_len(fd: u64) -> Result<u64, i64> {
         LinuxFileSource::MemFd { index } => crate::memfd::len(index)
             .map(|length| length as u64)
             .ok_or(LINUX_EBADF),
-        LinuxFileSource::Display => Ok(0),
+        LinuxFileSource::Display | LinuxFileSource::Console => Ok(0),
         LinuxFileSource::Directory { .. }
         | LinuxFileSource::Pipe { .. }
         | LinuxFileSource::EventFd { .. }

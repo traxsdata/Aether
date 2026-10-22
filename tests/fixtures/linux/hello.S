@@ -507,6 +507,47 @@ _start:
     jne fail_pipe
     cmpl $0x676e6970, 24(%rsp)  /* "ping" */
     jne fail_pipe
+    /* dup2 redirection: point stdout at the pipe, write through fd 1, and
+     * restore stdout before checking, so a failure is still reported. */
+    mov $32, %rax               /* dup(1) saves stdout */
+    mov $1, %rdi
+    syscall
+    test %rax, %rax
+    js fail_pipe
+    mov %rax, 40(%rsp)
+    mov $33, %rax               /* dup2(write fd, 1) */
+    mov %r14, %rdi
+    mov $1, %rsi
+    syscall
+    cmp $1, %rax
+    jne fail_pipe
+    mov $1, %rax                /* write(1, "ping") lands in the pipe */
+    mov $1, %rdi
+    lea pipe_data(%rip), %rsi
+    mov $4, %rdx
+    syscall
+    mov %rax, 48(%rsp)
+    mov $33, %rax               /* dup2(saved, 1) restores stdout */
+    mov 40(%rsp), %rdi
+    mov $1, %rsi
+    syscall
+    cmp $1, %rax
+    jne fail_pipe
+    mov $3, %rax
+    mov 40(%rsp), %rdi
+    syscall
+    cmpq $4, 48(%rsp)
+    jne fail_pipe
+    movl $0, 24(%rsp)
+    mov $0, %rax                /* the redirected bytes are in the pipe */
+    mov %r13, %rdi
+    lea 24(%rsp), %rsi
+    mov $4, %rdx
+    syscall
+    cmp $4, %rax
+    jne fail_pipe
+    cmpl $0x676e6970, 24(%rsp)
+    jne fail_pipe
     mov $3, %rax
     mov %r13, %rdi
     syscall
