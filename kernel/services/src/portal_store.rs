@@ -608,6 +608,20 @@ mod tests {
     }
 
     #[test]
+    fn portal_records_are_exact_files_not_folders_or_bulk_rights() {
+        // A trailing slash names a directory and must never become a grant.
+        assert!(PortalGrant::new("/apps", "/home/Documents/", READ).is_none());
+        assert!(PortalGrant::new("/apps", "/home/Documents", READ).is_some());
+        // DELETE, RENAME, and ENUMERATE are outside the portal's right set.
+        for rights in [4u64, 8, 16, READ | 8, WRITE | 16] {
+            assert!(
+                PortalGrant::new("/apps", "/home/Documents/taxes.txt", rights).is_none(),
+                "rights {rights} must not be representable"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_duplicate_and_oversized_stores_are_rejected() {
         let mut out = [PortalGrant::EMPTY; MAX_GRANTS];
         assert_eq!(parse(b"/apps\t/home/a\t1\n", &mut out), Ok(1));

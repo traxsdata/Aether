@@ -51,6 +51,10 @@ when a move fails.
   absolute path in a bounded `/system/trash/index` store. Activating an item in
   Trash restores it only to that recorded location, refusing to overwrite an
   existing file. Deleting from `Trash` is the explicit permanent action.
+  Names that collide in Trash are uniquely prefixed without discarding the
+  record of the item already there, and a Trash item cannot be renamed or
+  duplicated out from under the restoration index. System and application
+  locations delete permanently rather than entering the user Trash.
   Application-private cleanup is a separate service operation and does not use
   the user Trash.
 - The existing portal keeps exact-file grants, bounded staging files, and

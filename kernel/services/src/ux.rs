@@ -321,12 +321,12 @@ impl ResourceTable {
             }
         }
         let name = self.get(id)?.name;
-        if self
-            .slots
-            .iter()
-            .flatten()
-            .any(|resource| resource.id != id && resource.parent == parent && resource.name == name)
-        {
+        if self.slots.iter().flatten().any(|resource| {
+            resource.id != id
+                && resource.parent == parent
+                && resource.name == name
+                && resource.kind != ResourceKind::Deleted
+        }) {
             return Err(UxError::Exists);
         }
         let slot = self.slot(id)?;
@@ -517,6 +517,14 @@ impl Grant {
             || !rights.is_valid()
             || !self.rights.contains(rights)
         {
+            return false;
+        }
+        // A folder grant on an ancestor must not become a route into another
+        // application's private vault.
+        let Ok(object) = resources.get(resource) else {
+            return false;
+        };
+        if object.owner.is_application_private() && object.owner != Owner::Application(app) {
             return false;
         }
         match self.scope {

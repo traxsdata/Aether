@@ -477,6 +477,66 @@ fn corrupt_directory_entries_fail_closed() {
 }
 
 #[test]
+fn directory_entries_must_match_their_inode_kind_and_name_rules() {
+    let mut fs = filesystem();
+    fs.mkdir("/", "dir").expect("dir");
+    fs.write_file("/", "dir/file", b"x").expect("file");
+    let inode_number = fs
+        .lookup(&resolve("/", "dir").expect("resolve"))
+        .expect("dir inode");
+    let block = fs.read_inode(inode_number).expect("inode").blocks[0];
+    let mut data = [0u8; BLOCK_SIZE];
+    fs.device.read_block(block, &mut data).expect("read");
+
+    // The file's inode cannot be described as a directory entry.
+    let mut wrong_kind = data;
+    wrong_kind[18] = 2;
+    fs.device.write_block(block, &wrong_kind).expect("write");
+    let mut out = [0u8; 128];
+    assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
+
+    // Slash-bearing and traversal names cannot enter the listing protocol.
+    for name in [b"/etc".as_slice(), b".".as_slice(), b"..".as_slice()] {
+        let mut bad_name = data;
+        bad_name[..MAX_NAME].fill(0);
+        bad_name[..name.len()].copy_from_slice(name);
+        fs.device.write_block(block, &bad_name).expect("write");
+        assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
+    }
+
+    fs.device.write_block(block, &data).expect("restore");
+    assert!(fs.list("/", "dir", &mut out).is_ok());
+}
+
+#[test]
+fn whole_file_replacement_invalidates_stale_writable_handles() {
+    let mut fs = filesystem();
+    fs.write_file("/", "/apps/demo/private/notes.txt", b"old")
+        .expect("write");
+    let handle = fs
+        .open(
+            "/apps/demo",
+            "private/notes.txt",
+            Access::READ | Access::WRITE,
+        )
+        .expect("open");
+    fs.write_file("/", "/apps/demo/private/notes.txt", b"replacement")
+        .expect("replace");
+    assert_eq!(
+        fs.write(handle, b"x"),
+        Err(FsError::Access),
+        "a handle opened against the old contents must not overwrite the replacement"
+    );
+    fs.close(handle).expect("close");
+
+    let mut buffer = [0u8; 32];
+    let length = fs
+        .read_file("/apps/demo", "private/notes.txt", &mut buffer)
+        .expect("read");
+    assert_eq!(&buffer[..length], b"replacement");
+}
+
+#[test]
 fn rename_to_the_same_missing_path_reports_not_found() {
     let mut fs = filesystem();
     assert_eq!(
@@ -560,6 +620,151 @@ fn randomized_file_operations_never_panic_and_remain_consistent() {
         .read_file("/apps/demo", "private/final", &mut buffer)
         .expect("final read");
     assert_eq!(&buffer[..length], b"final");
+}
+
+#[test]
+fn overwrite_retains_a_restorable_previous_version() {
+    let mut fs = filesystem();
+    let path = "private/report.txt";
+    fs.write_file("/apps/demo", path, b"first edition")
+        .expect("first");
+    fs.write_file("/apps/demo", path, b"second edition")
+        .expect("second");
+    assert!(
+        fs.has_previous("/apps/demo", path)
+            .expect("previous exists"),
+        "an overwrite must retain the old contents"
+    );
+
+    let mut buffer = [0u8; 32];
+    let length = fs
+        .restore_previous("/apps/demo", path)
+        .expect("restore previous");
+    assert_eq!(length, b"first edition".len());
+    let read = fs.read_file("/apps/demo", path, &mut buffer).expect("read");
+    assert_eq!(&buffer[..read], b"first edition");
+
+    // Restore swaps rather than discards, so it is itself undoable.
+    let length = fs
+        .restore_previous("/apps/demo", path)
+        .expect("undo restore");
+    assert_eq!(length, b"second edition".len());
+    let read = fs.read_file("/apps/demo", path, &mut buffer).expect("read");
+    assert_eq!(&buffer[..read], b"second edition");
+}
+
+#[test]
+fn restore_invalidates_handles_opened_against_the_other_version() {
+    let mut fs = filesystem();
+    let path = "private/report.txt";
+    fs.write_file("/apps/demo", path, b"old").expect("old");
+    fs.write_file("/apps/demo", path, b"new").expect("new");
+    let handle = fs
+        .open("/apps/demo", path, Access::READ | Access::WRITE)
+        .expect("open");
+    fs.restore_previous("/apps/demo", path).expect("restore");
+    assert_eq!(
+        fs.write(handle, b"x"),
+        Err(FsError::Access),
+        "a handle describing the replaced contents must not write after restore"
+    );
+    fs.close(handle).expect("close");
+}
+
+#[test]
+fn deleting_a_file_discards_its_preimage() {
+    let mut fs = filesystem();
+    let path = "private/report.txt";
+    fs.write_file("/apps/demo", path, b"old").expect("old");
+    fs.write_file("/apps/demo", path, b"new").expect("new");
+    fs.remove("/apps/demo", path).expect("remove");
+
+    // Creating a new file at the same path must not inherit the old version.
+    fs.write_file("/apps/demo", path, b"recreated")
+        .expect("recreate");
+    assert!(
+        !fs.has_previous("/apps/demo", path).expect("stat"),
+        "a new inode must start without a stale pre-image"
+    );
+}
+
+#[test]
+fn truncate_then_first_write_keeps_the_pre_truncate_version() {
+    let mut fs = filesystem();
+    let path = "private/report.txt";
+    fs.write_file("/apps/demo", path, b"original")
+        .expect("original");
+    // `portal_truncate` is a zero-length replacement. The following write must
+    // not evict the pre-truncate version before it can be restored.
+    fs.write_file("/apps/demo", path, b"").expect("truncate");
+    fs.write_file("/apps/demo", path, b"replacement")
+        .expect("write");
+    let length = fs
+        .restore_previous("/apps/demo", path)
+        .expect("restore original");
+    assert_eq!(length, b"original".len());
+    let mut buffer = [0u8; 32];
+    let read = fs.read_file("/apps/demo", path, &mut buffer).expect("read");
+    assert_eq!(&buffer[..read], b"original");
+}
+
+#[test]
+fn rename_moves_the_preimage_with_the_inode() {
+    let mut fs = filesystem();
+    fs.write_file("/apps/demo", "private/old.txt", b"before")
+        .expect("before");
+    fs.write_file("/apps/demo", "private/old.txt", b"after")
+        .expect("after");
+    fs.rename("/apps/demo", "private/old.txt", "private/new.txt")
+        .expect("rename");
+    let length = fs
+        .restore_previous("/apps/demo", "private/new.txt")
+        .expect("restore at the new name");
+    assert_eq!(length, b"before".len());
+    let mut buffer = [0u8; 32];
+    let read = fs
+        .read_file("/apps/demo", "private/new.txt", &mut buffer)
+        .expect("read");
+    assert_eq!(&buffer[..read], b"before");
+}
+
+#[test]
+fn disk_pressure_reclaims_a_preimage_before_failing_a_write() {
+    let mut fs = AetherFs::new(RamDisk::new());
+    fs.format().expect("format");
+    for directory in ["a", "b", "c", "d"] {
+        fs.mkdir("/", directory).expect("directory");
+    }
+    let full = std::vec![0xaa; MAX_FILE_BYTES];
+    let mut paths = std::vec::Vec::new();
+    for (directory, count) in [("a", 7), ("b", 7), ("c", 7), ("d", 8)] {
+        for index in 0..count {
+            let path = std::format!("{directory}/f{index}");
+            fs.write_file("/", &path, &full).expect("fill");
+            paths.push(path);
+        }
+    }
+
+    // The first overwrite consumes the remaining space and retains its old
+    // blocks. The second can only complete by reclaiming that pre-image.
+    fs.write_file("/", &paths[0], &std::vec![0xbb; MAX_FILE_BYTES])
+        .expect("first overwrite");
+
+    fs.write_file("/", &paths[1], &std::vec![0xcc; MAX_FILE_BYTES])
+        .expect("second overwrite must reclaim space");
+
+    assert!(
+        !fs.has_previous("/", &paths[0]).expect("first stat"),
+        "the older pre-image is the reclamation candidate"
+    );
+    assert!(
+        fs.has_previous("/", &paths[1]).expect("second stat"),
+        "the newest overwrite keeps its pre-image"
+    );
+    let mut buffer = [0u8; MAX_FILE_BYTES];
+    let read = fs.read_file("/", &paths[1], &mut buffer).expect("read");
+    assert_eq!(buffer[0], 0xcc);
+    assert_eq!(read, MAX_FILE_BYTES);
 }
 
 #[test]

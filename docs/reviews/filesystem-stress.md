@@ -29,6 +29,10 @@ follow-up work.
 | Medium | A corrupted file inode could point at the superblock, inode table, or another reserved metadata block, exposing metadata as file contents. | All file and directory data-block pointers must be in the data region (`block >= DATA_START_BLOCK`). |
 | Medium | Corrupt directory entries with inode 0, an out-of-range inode, an unknown kind byte, or a duplicate name were accepted and could produce ambiguous lookups or misleading listings. | `dir_entries` validates the inode range, the entry kind, name bytes, and duplicate names. |
 | Low | `rename(path, path)` returned success even when the source did not exist. | The source is now looked up before the self-rename no-op succeeds. |
+| Medium | A directory entry could name an inode of the opposite kind (or a free inode), letting a file path free a directory's block or the reverse. A stored name could also contain `/` or traversal text. | Entries must now agree with the referenced inode's kind and carry a non-empty, control-free, slash-free UTF-8 name that is not `.` or `..`. |
+| Medium | A writable handle opened before `write_file` replaced the same inode could write at an old offset into the new contents. | Whole-file replacement bumps an in-memory inode version; a handle whose version differs now receives `Access`. |
+| Low | A failed rename rollback could leave a directory block allocated when the destination directory had no block before the rename. | Rollback releases that block and clears the directory pointer. |
+| Low | Releasing old blocks after a committed replacement could return an error even though the new contents were durable. | The write reports success after commit; a cleanup failure can only leak space. |
 
 ## Remaining issues and recommendations
 
@@ -44,36 +48,7 @@ verifies:
 - no data block is referenced by two inodes;
 - every used data bitmap bit is reachable from an inode or reserved region.
 
-### 2. Open handles survive replacement (Medium, data integrity)
-
-`unlink` refuses to delete a file while a handle is open, but `write_file`
-(including portal commit and kernel console writes) can replace the same
-inode's contents. A writable handle opened before the replacement can then
-write at its old offset into the newer content. This is not a sandbox escape,
-but it can lose data under concurrent editing. Recommendation: add an inode
-version/generation and reject stale writes, or refuse replacement while a
-writable handle is open. Portal save must still support the current
-stage-then-commit flow.
-
-### 3. Directory block leak on a failed rename rollback (Low)
-
-`rename` adds the destination entry, then removes the source entry. If the
-source removal fails after the destination parent allocated its first
-directory block, the rollback removes the entry but leaves the empty block
-allocated. This requires a device error or a corrupt directory during the
-operation. Recommendation: track whether `dir_add` allocated the block and
-release it on rollback.
-
-### 4. Post-commit cleanup can report failure (Low)
-
-After a successful inode commit, `write_inode_blocks` releases the old blocks.
-If a block release fails, the operation returns an error even though the new
-contents are already committed, and the remaining old blocks leak. The new
-contents are safe, but the caller sees an ambiguous result. Recommendation:
-separate "commit failed" from "committed with leaked space" and report the
-latter as a diagnostic.
-
-### 5. Resource bounds are intentionally small (Informational)
+### 2. Resource bounds are intentionally small (Informational)
 
 - 128 KiB device, 256 blocks.
 - 64 inodes, 8 data blocks (4 KiB) per file.
@@ -86,13 +61,13 @@ smaller than the 2 MiB portal staging limit, so a staged save larger than the
 filesystem limit fails at commit rather than corrupting the target. This is
 safe but should be aligned before larger files are supported.
 
-### 6. Stack use in read/write (Informational)
+### 3. Stack use in read/write (Informational)
 
 `read` and `write` each place a 4 KiB file buffer on the stack. The current
 kernel stack is sufficient in testing, but future nesting or larger file
 limits must be checked against the actual kernel stack budget.
 
-### 7. Durability and isolation are not present (Documented limitation)
+### 4. Durability and isolation are not present (Documented limitation)
 
 The block device is a RAM disk. The Trash index, portal grants, and files do
 not survive a power cycle. The filesystem service and desktop adapters are
@@ -104,6 +79,8 @@ compromise-contained application isolation.
 
 - `control_characters_cannot_inject_listing_records`
 - `corrupt_directory_entries_fail_closed`
+- `directory_entries_must_match_their_inode_kind_and_name_rules`
+- `whole_file_replacement_invalidates_stale_writable_handles`
 - `rename_to_the_same_missing_path_reports_not_found`
 - `randomized_file_operations_never_panic_and_remain_consistent`
 - `corrupted_images_never_panic_metadata_paths`
