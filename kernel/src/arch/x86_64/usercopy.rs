@@ -60,9 +60,9 @@ struct ExTableEntry {
 ///
 /// # Safety
 ///
-/// Exactly one of `destination` and `source` may be a user address, and its
-/// range must already be checked to lie in the user window. The other must be
-/// a valid kernel buffer of `length` bytes.
+/// Each of `destination` and `source` is either a kernel buffer of `length`
+/// valid bytes or a user range already checked to lie in the user window of
+/// the active address space. A fault is recovered only on the user side.
 #[must_use]
 pub unsafe fn copy_raw(destination: *mut u8, source: *const u8, length: usize) -> usize {
     // SAFETY: The caller provides the range guarantees above. A user-side

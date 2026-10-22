@@ -3358,12 +3358,15 @@ pub fn linux_sigreturn(frame: *mut InterruptFrame) -> bool {
     let Some(frame_pointer) = unsafe { (*frame).rsp }.checked_sub(8) else {
         return false;
     };
-    let frame_size = core::mem::size_of::<RtSigFrame>() as u64;
-    if !paging::user_range_valid(pml4, frame_pointer, frame_size, false) {
+    // Copy the frame out through the page tables rather than dereferencing
+    // the user address.
+    let mut raw = [0u8; core::mem::size_of::<RtSigFrame>()];
+    if !paging::read_user_bytes(pml4, frame_pointer, &mut raw) {
         return false;
     }
-    // SAFETY: The complete rt_sigframe was validated as readable.
-    let saved = unsafe { *(frame_pointer as *const RtSigFrame) };
+    // SAFETY: `raw` holds a complete `RtSigFrame`, a `repr(C)` record of
+    // integers for which every bit pattern is valid.
+    let saved: RtSigFrame = unsafe { ptr::read_unaligned(raw.as_ptr().cast()) };
     let context = saved.context;
     if context.mcontext.cs != USER_CODE_SELECTOR
         || context.mcontext.rip < USER_BASE
@@ -3743,11 +3746,11 @@ fn clear_child_tid(index: usize) {
     let Some(pml4) = PhysFrame::from_address(pml4) else {
         return;
     };
-    if !paging::user_range_valid(pml4, pointer, 4, true) {
+    // Write through the exiting task's own page tables: it need not be the
+    // address space that is active now.
+    if !paging::write_user_bytes(pml4, pointer, &0u32.to_ne_bytes()) {
         return;
     }
-    // SAFETY: The four-byte user range was validated as writable above.
-    unsafe { ptr::write(pointer as *mut u32, 0) };
     let _ = linux_futex_wake(pointer, 1);
 }
 

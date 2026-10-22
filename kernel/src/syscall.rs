@@ -327,6 +327,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             let Some(path) = user_cstr(pml4, second, 256) else {
                 return linux_result(frame, LINUX_EFAULT);
             };
+            let path = path.as_str();
             scheduler::linux_inotify_add(first, path, third as u32)
                 .map_or_else(|error| error, i64::from)
         }
@@ -432,6 +433,7 @@ fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i6
     let Some(path) = user_cstr(pml4, pointer, 256) else {
         return LINUX_EFAULT;
     };
+    let path = path.as_str();
     if path.as_bytes().first() != Some(&b'/') {
         return LINUX_ENOENT;
     }
@@ -497,9 +499,11 @@ fn linux_rename(pml4: PhysFrame, old_pointer: u64, new_pointer: u64) -> i64 {
     let Some(old) = user_cstr(pml4, old_pointer, 256) else {
         return LINUX_EFAULT;
     };
+    let old = old.as_str();
     let Some(new) = user_cstr(pml4, new_pointer, 256) else {
         return LINUX_EFAULT;
     };
+    let new = new.as_str();
     if old.starts_with(aether_services::portal_store::PORTAL_PREFIX)
         || new.starts_with(aether_services::portal_store::PORTAL_PREFIX)
     {
@@ -513,6 +517,7 @@ fn linux_unlink(pml4: PhysFrame, pointer: u64) -> i64 {
     let Some(path) = user_cstr(pml4, pointer, 256) else {
         return LINUX_EFAULT;
     };
+    let path = path.as_str();
     if path.starts_with(aether_services::portal_store::PORTAL_PREFIX) {
         return scheduler::linux_portal_unlink(path).map_or_else(|error| error, |()| 0);
     }
@@ -533,20 +538,22 @@ fn linux_read(
     if length == 0 {
         return linux_result(frame, 0);
     }
-    // SAFETY: The range is validated once and the syscall path is
-    // non-preemptible; the buffer remains mapped while the task is parked.
-    let Some(buffer) = (unsafe { user_bytes_mut(pml4, pointer, length) }) else {
+    // Check the destination before consuming any data, then fill a kernel
+    // buffer and copy out what was read.
+    if !user_range_writable(pml4, pointer, length) {
         return linux_result(frame, LINUX_EFAULT);
-    };
+    }
+    let mut storage = [0u8; MAX_SYSCALL_IO];
+    let buffer = &mut storage[..length as usize];
     if scheduler::linux_display_fd(descriptor) {
         return match crate::display::read_events(buffer) {
-            Ok(count) => linux_result(frame, count as i64),
+            Ok(count) => linux_result(frame, copy_out_count(pml4, pointer, &buffer[..count])),
             Err(LINUX_EAGAIN) => linux_result(frame, LINUX_EAGAIN),
             Err(error) => linux_result(frame, error),
         };
     }
     match scheduler::linux_read(descriptor, buffer) {
-        Ok(count) => linux_result(frame, count as i64),
+        Ok(count) => linux_result(frame, copy_out_count(pml4, pointer, &buffer[..count])),
         Err(LINUX_EAGAIN) => {
             if let Some((index, false)) = scheduler::linux_pipe_end(descriptor) {
                 // An empty pipe with no writer is end-of-file, not a wait.
@@ -575,18 +582,22 @@ fn linux_read(
 fn linux_pread(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64, offset: u64) -> i64 {
     // A short count is allowed; only one bounce-buffer-sized chunk is copied.
     let length = length.min(MAX_SYSCALL_IO as u64);
-    // SAFETY: The range is validated and the syscall path is non-preemptible.
-    let Some(buffer) = (unsafe { user_bytes_mut(pml4, pointer, length) }) else {
+    if !user_range_writable(pml4, pointer, length) {
         return LINUX_EFAULT;
-    };
-    scheduler::linux_pread(descriptor, buffer, offset)
-        .map_or_else(|error| error, |count| count as i64)
+    }
+    let mut storage = [0u8; MAX_SYSCALL_IO];
+    let buffer = &mut storage[..length as usize];
+    scheduler::linux_pread(descriptor, buffer, offset).map_or_else(
+        |error| error,
+        |count| copy_out_count(pml4, pointer, &buffer[..count]),
+    )
 }
 
 fn linux_access(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
     let Some(path) = user_cstr(pml4, pointer, 256) else {
         return LINUX_EFAULT;
     };
+    let path = path.as_str();
     if !scheduler::linux_access(path) {
         return LINUX_ENOENT;
     }
@@ -597,25 +608,61 @@ fn linux_access(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
     0
 }
 
-fn user_cstr<'a>(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<&'a str> {
+fn user_cstr(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<UserString> {
     // A string may end near a page boundary while the caller's maximum scan
-    // length crosses into the next, unmapped page. Validate one page at a time
+    // length crosses into the next, unmapped page. Copy one page at a time
     // and stop at the terminator instead of requiring the whole maximum range.
+    let maximum = maximum.min(USER_STRING_MAX as u64);
+    let mut string = UserString::empty();
     let mut scanned = 0u64;
     while scanned < maximum {
         let page_offset = (pointer + scanned) & 0xfff;
         let chunk = (0x1000 - page_offset).min(maximum - scanned);
-        let bytes = user_bytes(pml4, pointer + scanned, chunk, false)?;
-        if let Some(position) = bytes.iter().position(|byte| *byte == 0) {
-            let length = usize::try_from(scanned + position as u64).ok()?;
-            // SAFETY: Every byte up to the terminator was validated page by
-            // page above, and the range lies in the caller's user mapping.
-            let bytes = unsafe { core::slice::from_raw_parts(pointer as *const u8, length) };
-            return core::str::from_utf8(bytes).ok();
+        let start = scanned as usize;
+        let end = start + chunk as usize;
+        copy_from_user(pml4, pointer + scanned, &mut string.bytes[start..end])?;
+        if let Some(position) = string.bytes[start..end].iter().position(|byte| *byte == 0) {
+            return string.finish(start + position);
         }
         scanned += chunk;
     }
     None
+}
+
+const USER_STRING_MAX: usize = 256;
+
+/// A user string copied into a kernel buffer and checked as UTF-8.
+pub struct UserString {
+    bytes: [u8; USER_STRING_MAX],
+    length: usize,
+}
+
+impl UserString {
+    const fn empty() -> Self {
+        Self {
+            bytes: [0; USER_STRING_MAX],
+            length: 0,
+        }
+    }
+
+    fn finish(mut self, length: usize) -> Option<Self> {
+        core::str::from_utf8(&self.bytes[..length]).ok()?;
+        self.length = length;
+        Some(self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        // `finish` checked these bytes as UTF-8.
+        core::str::from_utf8(&self.bytes[..self.length]).unwrap_or("")
+    }
+}
+
+impl core::ops::Deref for UserString {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
 }
 
 /// Traces the path arguments of the Gate 4 GUI save transaction.
@@ -641,6 +688,7 @@ fn gate4_trace_path_call(
         87 => (user_cstr(pml4, first, 256), None),
         _ => (None, None),
     };
+    let (from, to) = (from.as_deref(), to.as_deref());
     if !from.is_some_and(interesting) && !to.is_some_and(interesting) {
         return;
     }
@@ -1033,14 +1081,19 @@ fn linux_mremap(
         let _ = scheduler::linux_vma_remove(new_start, new_size);
         return LINUX_ENOMEM;
     }
-    // SAFETY: Both ranges are mapped in the current address space, do not
-    // overlap, and the syscall path has interrupts masked.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            old_address as *const u8,
+    // SAFETY: Both ranges are mapped user memory in the current address
+    // space and do not overlap. A fault on either side is a user-window fault
+    // and is recovered by the exception table.
+    let left = unsafe {
+        usercopy::copy_raw(
             new_start as *mut u8,
+            old_address as *const u8,
             old_size as usize,
-        );
+        )
+    };
+    if left != 0 {
+        let _ = scheduler::linux_vma_remove(new_start, new_size);
+        return LINUX_EFAULT;
     }
     let Some(page_flags) = linux_page_flags(prot as u64) else {
         return LINUX_EINVAL;
@@ -1151,6 +1204,7 @@ fn linux_stat(pml4: PhysFrame, path_pointer: u64, stat_pointer: u64) -> i64 {
     let Some(path) = user_cstr(pml4, path_pointer, 256) else {
         return LINUX_EFAULT;
     };
+    let path = path.as_str();
     let Some((size, inode, mode)) = scheduler::linux_stat_path(path) else {
         return LINUX_ENOENT;
     };
@@ -1164,9 +1218,12 @@ fn linux_writev(pml4: PhysFrame, descriptor: u64, iovec_pointer: u64, count: u64
     if count > 16 {
         return LINUX_EINVAL;
     }
-    let Some(iovecs) = user_bytes(pml4, iovec_pointer, count * 16, false) else {
+    let mut iovec_storage = [0u8; 16 * 16];
+    let iovecs = &mut iovec_storage[..count as usize * 16];
+    if copy_from_user(pml4, iovec_pointer, iovecs).is_none() {
         return LINUX_EFAULT;
-    };
+    }
+    let mut storage = [0u8; MAX_SYSCALL_IO];
     let mut total = 0i64;
     for index in 0..count as usize {
         let offset = index * 16;
@@ -1176,9 +1233,12 @@ fn linux_writev(pml4: PhysFrame, descriptor: u64, iovec_pointer: u64, count: u64
         if length == 0 {
             continue;
         }
-        let Some(bytes) = user_bytes(pml4, base, length, false) else {
+        let Some(bytes) = storage.get_mut(..length as usize) else {
             return LINUX_EFAULT;
         };
+        if copy_from_user(pml4, base, bytes).is_none() {
+            return LINUX_EFAULT;
+        }
         match scheduler::linux_write_file(descriptor, bytes) {
             Ok(count) => total += count as i64,
             Err(error) => return error,
@@ -1219,6 +1279,7 @@ fn linux_newfstatat(pml4: PhysFrame, directory: u64, path_pointer: u64, stat_poi
     let Some(path) = user_cstr(pml4, path_pointer, 256) else {
         return LINUX_EFAULT;
     };
+    let path = path.as_str();
     if path.is_empty() {
         return linux_fstat(pml4, directory, stat_pointer);
     }
@@ -1254,15 +1315,17 @@ fn linux_statx(
     const AT_EMPTY_PATH: u64 = 0x1000;
     let mut buffer = [0u8; 256];
     let mut use_fd = path_pointer == 0;
-    let mut path = "";
-    if !use_fd {
+    let user_path = if use_fd {
+        None
+    } else {
         let Some(value) = user_cstr(pml4, path_pointer, 256) else {
             return LINUX_EFAULT;
         };
-        path = value;
-        if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
-            use_fd = true;
-        }
+        Some(value)
+    };
+    let path = user_path.as_deref().unwrap_or("");
+    if !use_fd && path.is_empty() && flags & AT_EMPTY_PATH != 0 {
+        use_fd = true;
     }
     if !use_fd && let Some(error) = unsupported_dirfd(directory, path) {
         return error;
@@ -1300,6 +1363,7 @@ fn linux_readlink(
     let Some(path) = user_cstr(pml4, path_pointer, 256) else {
         return LINUX_EFAULT;
     };
+    let path = path.as_str();
     let target: &[u8] = match path {
         "/proc/self/exe" | "/proc/thread-self/exe" => b"/usr/bin/aether-linux",
         "/proc/self/cwd" | "/proc/thread-self/cwd" => b"/",
@@ -1417,11 +1481,15 @@ fn linux_poll(
         None => linux_poll_deadline(timeout),
     };
     let length = count * 8;
-    // SAFETY: The pollfd array is validated as writable user memory on
-    // every entry; the task is parked with the syscall rewound.
-    let Some(fds) = (unsafe { user_bytes_mut(pml4, fds_pointer, length) }) else {
+    // The pollfd array is read and written back on every entry; the task is
+    // parked with the syscall rewound.
+    let mut storage = [0u8; 16 * 8];
+    let fds = &mut storage[..length as usize];
+    if !user_range_writable(pml4, fds_pointer, length)
+        || copy_from_user(pml4, fds_pointer, fds).is_none()
+    {
         return linux_result(frame, LINUX_EFAULT);
-    };
+    }
     let mut ready = 0i64;
     for index in 0..count as usize {
         let offset = index * 8;
@@ -1436,6 +1504,9 @@ fn linux_poll(
         if revents != 0 {
             ready += 1;
         }
+    }
+    if copy_to_user(pml4, fds_pointer, fds).is_none() {
+        return linux_result(frame, LINUX_EFAULT);
     }
     if ready != 0 || (count == 0 && timeout == 0) {
         return linux_result(frame, ready);
@@ -1458,12 +1529,15 @@ fn linux_getdents(
     if buffer_length as usize > MAX_SYSCALL_IO {
         return LINUX_EINVAL;
     }
-    // SAFETY: The range is validated as writable user memory and the syscall
-    // path holds interrupts masked.
-    let Some(buffer) = (unsafe { user_bytes_mut(pml4, buffer_pointer, buffer_length) }) else {
+    if !user_range_writable(pml4, buffer_pointer, buffer_length) {
         return LINUX_EFAULT;
-    };
-    scheduler::linux_getdents(descriptor, buffer).map_or_else(|error| error, |count| count as i64)
+    }
+    let mut storage = [0u8; MAX_SYSCALL_IO];
+    let buffer = &mut storage[..buffer_length as usize];
+    scheduler::linux_getdents(descriptor, buffer).map_or_else(
+        |error| error,
+        |count| copy_out_count(pml4, buffer_pointer, &buffer[..count]),
+    )
 }
 
 fn linux_fcntl(fd: u64, command: u64, _argument: u64) -> i64 {
@@ -1595,15 +1669,16 @@ fn copy_file_range(
     let mut offset = 0u64;
     while offset < length {
         let chunk = (length - offset).min(MAX_SYSCALL_IO as u64);
-        // SAFETY: The range is inside the Linux task's mapped arena and the
-        // syscall path has interrupts masked.
-        let Some(buffer) = (unsafe { user_bytes_mut(pml4, address + offset, chunk) }) else {
+        if !user_range_writable(pml4, address + offset, chunk) {
             return Err(LINUX_EFAULT);
-        };
+        }
+        let mut storage = [0u8; MAX_SYSCALL_IO];
+        let buffer = &mut storage[..chunk as usize];
         let Some(position) = file_offset.checked_add(offset) else {
             return Err(LINUX_EINVAL);
         };
         let read = scheduler::linux_file_read_at(fd, position, buffer)?;
+        copy_to_user(pml4, address + offset, &buffer[..read]).ok_or(LINUX_EFAULT)?;
         if read < chunk as usize {
             // The file ended early; the remaining bytes stay zero-filled.
             break;
@@ -1826,6 +1901,7 @@ fn linux_execve(
         unsafe { (*frame).rax = LINUX_EFAULT as u64 };
         return frame;
     };
+    let user_path = user_path.as_str();
     let mut path_storage = [0u8; 256];
     if user_path.is_empty() || user_path.len() >= path_storage.len() {
         unsafe { (*frame).rax = LINUX_ENAMETOOLONG as u64 };
@@ -1963,10 +2039,21 @@ fn linux_execve(
     };
 
     paging::activate(new_pml4);
-    // SAFETY: The new address space maps the stack page writable, and the
-    // syscall path has interrupts masked.
+    // SAFETY: The new, active address space maps the stack page writable in
+    // the user window, and `page` is a kernel buffer.
+    let left = unsafe { usercopy::copy_raw(stack_page as *mut u8, page.as_ptr(), page.len()) };
+    if left != 0 {
+        // The old image is still intact: go back to it and drop the new one.
+        paging::activate(pml4);
+        let _ = crate::memory::with_frame_allocator(|allocator| {
+            // SAFETY: The new space is no longer active and no task uses it.
+            unsafe { paging::destroy_user_address_space(allocator, new_pml4) };
+        });
+        unsafe { (*frame).rax = LINUX_EFAULT as u64 };
+        return frame;
+    }
+    // SAFETY: `frame` is the live syscall frame.
     unsafe {
-        core::ptr::copy_nonoverlapping(page.as_ptr(), stack_page as *mut u8, page.len());
         (*frame).rax = 0;
         (*frame).rip = image.entry();
         (*frame).rsp = stack_pointer;
@@ -2168,9 +2255,10 @@ fn linux_clone3(
         return LINUX_EINVAL;
     }
     let read = size.min(CLONE_ARGS_SIZE);
-    let Some(raw) = user_bytes(pml4, arguments_pointer, read, false) else {
+    let mut raw = [0u8; CLONE_ARGS_SIZE as usize];
+    if copy_from_user(pml4, arguments_pointer, &mut raw[..read as usize]).is_none() {
         return LINUX_EFAULT;
-    };
+    }
     let field = |offset: usize| -> u64 {
         raw.get(offset..offset + 8)
             .and_then(|bytes| bytes.try_into().ok())
@@ -2303,8 +2391,10 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
             if !address_valid(pml4, uaddr) {
                 return linux_result(frame, LINUX_EFAULT);
             }
-            // SAFETY: The four-byte user word was validated above.
-            let observed = unsafe { core::ptr::read(uaddr as *const u32) } as u64;
+            let Some(observed) = read_user_u32(pml4, uaddr) else {
+                return linux_result(frame, LINUX_EFAULT);
+            };
+            let observed = u64::from(observed);
             if observed != u64::from(value) {
                 return linux_result(frame, LINUX_EAGAIN);
             }
@@ -2356,8 +2446,10 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
             if !address_valid(pml4, uaddr) || !address_valid(pml4, uaddr2) {
                 return linux_result(frame, LINUX_EFAULT);
             }
-            // SAFETY: The four-byte user word was validated above.
-            let observed = unsafe { core::ptr::read(uaddr as *const u32) } as u64;
+            let Some(observed) = read_user_u32(pml4, uaddr) else {
+                return linux_result(frame, LINUX_EFAULT);
+            };
+            let observed = u64::from(observed);
             if observed != u64::from(arg5) {
                 return linux_result(frame, LINUX_EAGAIN);
             }
@@ -2374,8 +2466,9 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
             if !address_valid(pml4, uaddr) || !address_valid(pml4, uaddr2) {
                 return linux_result(frame, LINUX_EFAULT);
             }
-            // SAFETY: The four-byte user word was validated above.
-            let old = unsafe { core::ptr::read(uaddr2 as *const u32) };
+            let Some(old) = read_user_u32(pml4, uaddr2) else {
+                return linux_result(frame, LINUX_EFAULT);
+            };
             let wake_op_cmd = (arg5 >> 28) & 0xf;
             let compare = (arg5 >> 24) & 0xf;
             let operand = (arg5 >> 12) & 0xfff;
@@ -2742,9 +2835,12 @@ fn linux_write(
     // Short write: never copy more than one bounce buffer, even when the
     // caller's iovec or buffer is larger.
     let length = length.min(MAX_SYSCALL_IO as u64);
-    let Some(bytes) = user_bytes(pml4, pointer, length, false) else {
+    let mut storage = [0u8; MAX_SYSCALL_IO];
+    let bytes = &mut storage[..length as usize];
+    if copy_from_user(pml4, pointer, bytes).is_none() {
         return linux_result(frame, LINUX_EFAULT);
-    };
+    }
+    let bytes = &*bytes;
     if scheduler::linux_display_fd(descriptor) {
         return linux_result(frame, crate::display::write_request(pml4, bytes));
     }
@@ -2773,9 +2869,11 @@ fn write_console(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) ->
     if length as usize > MAX_SYSCALL_IO {
         return errno::EINVAL;
     }
-    let Some(bytes) = user_bytes(pml4, pointer, length, false) else {
+    let mut storage = [0u8; MAX_SYSCALL_IO];
+    let bytes = &mut storage[..length as usize];
+    if copy_from_user(pml4, pointer, bytes).is_none() {
         return errno::EINVAL;
-    };
+    }
     serial::write_bytes(bytes);
     length as i64
 }
@@ -2812,9 +2910,12 @@ fn endpoint_send(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, transf
     if length as usize > MAX_MESSAGE_BYTES {
         return ipc_denied_usage();
     }
-    let Some(payload) = user_bytes(pml4, pointer, length, false) else {
+    let mut storage = [0u8; MAX_MESSAGE_BYTES];
+    let payload = &mut storage[..length as usize];
+    if copy_from_user(pml4, pointer, payload).is_none() {
         return ipc_denied_usage();
-    };
+    }
+    let payload = &*payload;
     let transfer = if transfer == 0 {
         None
     } else {
@@ -2947,40 +3048,31 @@ fn receive_once(
     pointer: u64,
     out: u64,
 ) -> Result<usize, IpcError> {
-    let Some(buffer) = (unsafe {
-        // SAFETY: The range was validated by the caller, including the user
-        // bit and write permission.
-        user_bytes_mut(pml4, pointer, MAX_MESSAGE_BYTES as u64)
-    }) else {
-        return Err(IpcError::MessageTooLong);
-    };
+    let mut buffer = [0u8; MAX_MESSAGE_BYTES];
+    let mut transferred = 0u32;
     let mut received_len = 0usize;
     scheduler::with_current_ipc(|_current, caps| match crate::ipc::receive(caps, cap) {
         Ok(message) => {
             let payload = message.payload();
-            let transferred = match message.transferred {
+            transferred = match message.transferred {
                 Some(transferred) => {
                     (u32::from(transferred.generation) << 8) | u32::from(transferred.index)
                 }
                 None => 0,
             };
             buffer[..payload.len()].copy_from_slice(payload);
-            for byte in buffer[payload.len()..].iter_mut() {
-                *byte = 0;
-            }
-            // SAFETY: `out` was validated as a four-byte writable user range
-            // and is disjoint from the payload buffer; the byte-wise copy
-            // avoids alignment requirements, and interrupts are masked so no
-            // context switch can occur inside the store.
-            unsafe {
-                let bytes = transferred.to_ne_bytes();
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
-            }
             received_len = payload.len();
             Ok(())
         }
         Err(error) => Err(error),
     })?;
+    // The caller validated both ranges as writable user memory, so a failed
+    // copy here means the mapping changed underneath the call.
+    if copy_to_user(pml4, pointer, &buffer).is_none()
+        || copy_to_user(pml4, out, &transferred.to_ne_bytes()).is_none()
+    {
+        return Err(IpcError::MessageTooLong);
+    }
     Ok(received_len)
 }
 
@@ -3000,67 +3092,15 @@ fn endpoint_close(handle: u64) -> i64 {
     }
 }
 
-/// Returns a validated read-only user slice.
-///
-/// # Safety
-///
-/// The returned slice aliases user memory. The caller must not hold it across a
-/// context switch and must not use it after the task's address space changes.
-pub fn user_bytes<'a>(pml4: PhysFrame, pointer: u64, length: u64, write: bool) -> Option<&'a [u8]> {
-    if length as usize > MAX_SYSCALL_IO {
-        return None;
-    }
-    if pointer >= USER_LIMIT {
-        return None;
-    }
-    if !linux_user_range_valid(pml4, pointer, length, write) {
-        return None;
-    }
-    if length == 0 {
-        return Some(&[]);
-    }
-    // SAFETY: The range lies inside the caller's user window and every page
-    // was validated as present (and writable when required). The kernel runs
-    // with interrupts masked by the syscall gate, so the mapping cannot change
-    // underneath the copy.
-    Some(unsafe { core::slice::from_raw_parts(pointer as *const u8, length as usize) })
-}
-
-/// Returns a validated mutable user slice with the same lifetime caveats as
-/// [`user_bytes`].
-///
-/// # Safety
-///
-/// The caller must ensure the task does not concurrently access the range.
-pub unsafe fn user_bytes_mut<'a>(
-    pml4: PhysFrame,
-    pointer: u64,
-    length: u64,
-) -> Option<&'a mut [u8]> {
-    if length as usize > MAX_SYSCALL_IO {
-        return None;
-    }
-    if pointer >= USER_LIMIT {
-        return None;
-    }
-    if !linux_user_range_valid(pml4, pointer, length, true) {
-        return None;
-    }
-    if length == 0 {
-        return Some(&mut []);
-    }
-    // SAFETY: The range is inside the user window and every page is present
-    // and writable. The caller supplies the aliasing guarantee.
-    Some(unsafe { core::slice::from_raw_parts_mut(pointer as *mut u8, length as usize) })
-}
-
 /// Copies `buffer.len()` bytes from the current task's user memory.
 ///
-/// The range is validated as for [`user_bytes`]; the copy itself goes through
-/// the fixup-protected routine, so a page that disappears after validation
-/// returns `None` (`EFAULT`) instead of halting the kernel. Unlike
-/// [`user_bytes`], no reference into user memory escapes.
-fn copy_from_user(pml4: PhysFrame, pointer: u64, buffer: &mut [u8]) -> Option<()> {
+/// The range is validated page by page (faulting in lazy anonymous pages);
+/// the copy itself goes through the fixup-protected routine, so a page that
+/// disappears after validation returns `None` (`EFAULT`) instead of halting
+/// the kernel. No reference into user memory escapes: this and
+/// [`copy_to_user`] are the only ways the syscall layer touches user memory
+/// through the current address space.
+pub fn copy_from_user(pml4: PhysFrame, pointer: u64, buffer: &mut [u8]) -> Option<()> {
     let length = buffer.len() as u64;
     if buffer.len() > MAX_SYSCALL_IO || pointer >= USER_LIMIT {
         return None;
@@ -3078,7 +3118,7 @@ fn copy_from_user(pml4: PhysFrame, pointer: u64, buffer: &mut [u8]) -> Option<()
 
 /// Copies `bytes` into the current task's user memory with the same checks
 /// and fault behaviour as [`copy_from_user`].
-fn copy_to_user(pml4: PhysFrame, pointer: u64, bytes: &[u8]) -> Option<()> {
+pub fn copy_to_user(pml4: PhysFrame, pointer: u64, bytes: &[u8]) -> Option<()> {
     let length = bytes.len() as u64;
     if bytes.len() > MAX_SYSCALL_IO || pointer >= USER_LIMIT {
         return None;
@@ -3093,6 +3133,24 @@ fn copy_to_user(pml4: PhysFrame, pointer: u64, bytes: &[u8]) -> Option<()> {
     (left == 0).then_some(())
 }
 
+/// Returns `true` if the whole user range can be written, faulting in lazy
+/// anonymous pages. Calls that consume data check this before copying out.
+pub fn user_range_writable(pml4: PhysFrame, pointer: u64, length: u64) -> bool {
+    length as usize <= MAX_SYSCALL_IO
+        && pointer < USER_LIMIT
+        && linux_user_range_valid(pml4, pointer, length, true)
+}
+
+/// Copies `bytes` to user memory and returns their count, or `EFAULT`.
+fn copy_out_count(pml4: PhysFrame, pointer: u64, bytes: &[u8]) -> i64 {
+    copy_to_user(pml4, pointer, bytes).map_or(LINUX_EFAULT, |()| bytes.len() as i64)
+}
+
+/// Reads a futex word or other 32-bit user value.
+fn read_user_u32(pml4: PhysFrame, pointer: u64) -> Option<u32> {
+    read_user_array::<4>(pml4, pointer).map(u32::from_ne_bytes)
+}
+
 /// Reads a fixed-size user record, such as a `timespec` or `sigaction`.
 fn read_user_array<const N: usize>(pml4: PhysFrame, pointer: u64) -> Option<[u8; N]> {
     let mut buffer = [0u8; N];
@@ -3105,12 +3163,12 @@ fn linux_user_range_valid(pml4: PhysFrame, pointer: u64, length: u64, write: boo
         || scheduler::linux_page_in_user_range(pml4, pointer, length, write)
 }
 
-/// Copies a bounded user string after validating its range.
-pub fn user_str<'a>(pml4: PhysFrame, pointer: u64, length: u64) -> Option<&'a str> {
-    const MAX_PATH: u64 = 256;
-    if length == 0 || length > MAX_PATH {
+/// Copies a bounded, length-delimited user string into a kernel buffer.
+pub fn user_str(pml4: PhysFrame, pointer: u64, length: u64) -> Option<UserString> {
+    if length == 0 || length > USER_STRING_MAX as u64 {
         return None;
     }
-    let bytes = user_bytes(pml4, pointer, length, false)?;
-    core::str::from_utf8(bytes).ok()
+    let mut string = UserString::empty();
+    copy_from_user(pml4, pointer, &mut string.bytes[..length as usize])?;
+    string.finish(length as usize)
 }
