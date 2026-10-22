@@ -1119,6 +1119,10 @@ pub fn run() -> ! {
                 crate::syscall::ipc_timeouts(),
                 crate::syscall::ipc_closes()
             );
+            // Before AETHER_BOOT_OK, so the harness cannot take the boot
+            // for a success; the desktop is already on screen.
+            #[cfg(feature = "crash-screen-selftest")]
+            crash_screen_selftest();
             serial_line!(
                 "AETHER_BOOT_OK stage=kernel version={}",
                 env!("CARGO_PKG_VERSION")
@@ -1135,6 +1139,18 @@ pub fn run() -> ! {
         crate::desktop::tick();
         timer::halt_until_interrupt();
     }
+}
+
+/// Faults on an unmapped kernel address once the desktop is on screen and
+/// every self-test passed, so the crash report must replace the desktop.
+#[cfg(feature = "crash-screen-selftest")]
+fn crash_screen_selftest() {
+    const PROBE: u64 = 0x0000_7f00_dead_0000;
+    serial_line!("boot: crash screen self-test: reading {PROBE:#x}");
+    // SAFETY: Deliberately reads an address with no PML4 entry; the page
+    // fault is fatal and the handler paints the crash report.
+    let _ = unsafe { core::ptr::read_volatile(PROBE as *const u64) };
+    serial_line!("AETHER_BOOT_FAILED reason=crash screen self-test did not fault");
 }
 
 /// Keeps the console and desktop running after a boot self-test failed.

@@ -31,6 +31,11 @@ fault-selftest = []
 usercopy-fault-selftest = []
 # Boot with a direct ring-0 read of a user page, which SMAP must stop.
 smap-fault-selftest = []
+# Fault on an unmapped kernel address after a successful boot, so the crash
+# report must replace the desktop.
+crash-screen-selftest = []
+# Panic right after graphics init to exercise the panic path of the report.
+crash-screen-panic-selftest = []
 # Boot with a rollback self-test that removes the current image marker and
 # re-selects, exercising the lost-image branch on every test boot.
 recovery-rollback-selftest = []

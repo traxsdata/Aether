@@ -225,6 +225,9 @@ grants, and the desktop is not a security authority.
   runtime, update, recovery, desktop, and input commands.
 - `make fault-test`, which executes `int3` after paging and requires the IDT
   handler to report the breakpoint.
+- `make crash-screen-test`, which requires a kernel page fault (after the
+  desktop is up) and a kernel panic to replace the screen with the crash
+  report, checked through a QEMU screendump.
 - `make rollback-test`, which boots a kernel with the
   `recovery-rollback-selftest` feature: the current image marker is removed and
   the previous image must be selected with the user data still readable
@@ -374,6 +377,7 @@ make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
 make glibc-test    # opt-in host-glibc rootfs + dynamically linked hello boot
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # exception-path test: int3 after paging must reach the IDT
+make crash-screen-test # fatal errors must paint the full-screen crash report
 make rollback-test # recovery rollback branch test with its own marker
 make negative-test # boot harness must detect a deliberately failing kernel
 make docs-check    # relative Markdown links

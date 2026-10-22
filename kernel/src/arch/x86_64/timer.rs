@@ -6,6 +6,7 @@
 //! the bring-up path small.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const PIC1_COMMAND: u16 = 0x20;
 const PIC1_DATA: u16 = 0x21;
@@ -18,6 +19,9 @@ const PIT_COMMAND: u16 = 0x43;
 pub const TIMER_HZ: u32 = 100;
 
 const PIT_BASE_HZ: u32 = 1_193_182;
+
+/// Time-stamp counter value when the periodic timer was programmed.
+static TSC_AT_INIT: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 unsafe fn outb(port: u16, value: u8) {
@@ -77,6 +81,36 @@ pub fn init() {
         outb(PIT_CHANNEL0, (divisor & 0xff) as u8);
         outb(PIT_CHANNEL0, (divisor >> 8) as u8);
     }
+    TSC_AT_INIT.store(tsc(), Ordering::Relaxed);
+}
+
+/// Reads the time-stamp counter.
+#[must_use]
+pub fn tsc() -> u64 {
+    let low: u32;
+    let high: u32;
+    // SAFETY: RDTSC is unprivileged, has no memory effects, and is available
+    // on every x86-64 processor.
+    unsafe {
+        asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
+    }
+    (u64::from(high) << 32) | u64::from(low)
+}
+
+/// Converts a TSC interval to microseconds.
+///
+/// The TSC rate is calibrated against the PIT: `ticks` timer interrupts have
+/// elapsed since [`init`]. The first second is too coarse to calibrate, so it
+/// reports zero rather than a wrong figure. This is for diagnostics only.
+#[must_use]
+pub fn tsc_micros(delta: u64, ticks: u64) -> u64 {
+    let elapsed = tsc().saturating_sub(TSC_AT_INIT.load(Ordering::Relaxed));
+    if ticks < u64::from(TIMER_HZ) || elapsed == 0 {
+        return 0;
+    }
+    let micros = u128::from(delta) * u128::from(ticks) * (1_000_000 / u128::from(TIMER_HZ))
+        / u128::from(elapsed);
+    micros.min(u128::from(u64::MAX)) as u64
 }
 
 /// Acknowledges an IRQ by its remapped vector.
