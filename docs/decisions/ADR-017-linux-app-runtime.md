@@ -2,7 +2,9 @@
 
 - **Status:** Accepted; Gate 3 headless GridCraft CLI and Gate 4 windowed
   GridCraft run at QEMU prototype scope; the production runtime remains
-  incomplete
+  incomplete. The Linux ABI currently runs in ring 0, which deviates from
+  layer 2 of this decision (see
+  [Current deviation](#current-deviation-linux-abi-in-ring-0))
 - **Date:** 2026-10-20
 - **Supersedes:** none
 - **Related:** [Linux compatibility](../specifications/linux-compatibility.md),
@@ -116,6 +118,55 @@ clipboard, interactive resize and window chrome, a D-Bus desktop file chooser,
 high-resolution timers, file-backed shared writeback, durable overlay storage,
 a user-supplied AppImage picker, a reproducible cross-host runtime pin, nested
 epoll, and complete inotify/signal semantics.
+
+## Current deviation: Linux ABI in ring 0
+
+Layer 2 of the decision puts Linux-specific emulation in a user-space runtime
+service, and the alternatives below reject the Linux ABI inside the kernel.
+The shipped prototype does not meet that yet. Only launch approval runs in the
+ring-3 `linuxd` service. The Linux `syscall` trap and dispatcher, ELF and
+`PT_INTERP` loading, VMA and page-table management, file descriptors, pipes,
+epoll, inotify, timers, futexes, signal frames, `fork`/`execve`/`wait4`, and
+the synthetic `/proc` and `/dev` nodes all run in the kernel, mainly in
+`kernel/src/syscall.rs`, `kernel/src/scheduler.rs`, `kernel/src/linux.rs`, and
+`kernel/src/linux_loader.rs`.
+
+This is recorded as a deviation, not a change of decision. While it stands:
+
+- **Trusted computing base.** Every Linux syscall handler is kernel code. A
+  memory-safety or logic bug in one is a kernel compromise, not a contained
+  `linuxd` failure.
+- **Crash containment.** A fault in user mode retires only the faulting
+  domain. A fault the kernel takes while servicing a Linux syscall halts the
+  machine, because ring-0 exceptions have no recovery path. The layer avoids
+  such faults by validating every user pointer, page by page, before it uses
+  it, and by refusing guard pages. A missed check still stops the whole
+  system.
+- **Controls that apply now.** The syscall entry masks IF, TF, DF, NT, AC, and
+  IOPL and clears DF; NMI, #DF, and #MC run on a separate IST stack;
+  `rt_sigreturn` keeps only the user-changeable flags and forces the user code
+  and data selectors; writable+executable memory requires a signed
+  `memory=jit` import record; `PROT_NONE` pages are supervisor-only guard
+  pages; futex waiters are keyed by physical address; and signals and
+  process groups are scoped to the application domain.
+- **Claims.** No compatibility record or release note may describe the Linux
+  layer as a user-space service or as outside the kernel's trusted computing
+  base while this deviation stands.
+
+The deviation closes in one of two ways:
+
+1. **Move the emulation out.** `linuxd` receives Linux syscalls through a
+   remoting path, owns descriptor, signal, and loader state, and drives the
+   kernel only through the primitives listed in layer 2. The kernel-side
+   handlers are removed as each facility moves.
+2. **Accept a kernel-resident ABI.** A new ADR supersedes layer 2 and the
+   rejected alternative, with its own threat-model review, a ring-0
+   exception-fixup mechanism so that a faulting user copy returns `EFAULT`
+   instead of halting, and fuzzing of the syscall surface.
+
+Until one of these lands, new Linux facilities should keep their logic in
+self-contained, host-testable code (as `apps/linux/appimage` and
+`apps/linux/squashfs` already do) so they can move to `linuxd` later.
 
 ## Consequences
 
