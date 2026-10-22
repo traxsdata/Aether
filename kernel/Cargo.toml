@@ -49,3 +49,5 @@ gate4-runtime = []
 # Boot the Gate 4 GUI portal slice with a real XLSX grant, immediate save
 # evidence, and kernel-driven post-exit revocation checks.
 gate4-gui-test = ["aether-memory/gate4"]
+# Linux-sized mapping limits for large applications such as Firefox.
+large-apps = ["aether-memory/large-apps"]
