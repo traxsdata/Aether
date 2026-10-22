@@ -1,10 +1,17 @@
 # Linux compatibility layer
 
 Aether's Linux layer runs unmodified Linux x86-64 applications, including
-AppImages, without a virtual machine. It is a user-space compatibility service,
-not a Linux kernel and not a second operating system. The goal is to provide
-Linux semantics to the application while Aether keeps its own capability,
-filesystem, lifecycle, and compositor boundaries.
+AppImages, without a virtual machine. It is not a Linux kernel and not a
+second operating system. The goal is to provide Linux semantics to the
+application while Aether keeps its own capability, filesystem, lifecycle, and
+compositor boundaries.
+
+The design target is a user-space compatibility service. In the current
+prototype only launch approval runs in ring 3 (`linuxd`); the syscall
+dispatcher, loader, and all Linux emulation run in the kernel. ADR-017 records
+this as a
+[deviation](../decisions/ADR-017-linux-app-runtime.md#current-deviation-linux-abi-in-ring-0),
+with the controls that apply and how it closes.
 
 The architectural decision is recorded in
 [ADR-017](../decisions/ADR-017-linux-app-runtime.md); the requirement inventory
@@ -108,7 +115,7 @@ an attempt to open a host device.
 | Devices | No `/dev/dri`, `/dev/input`, block devices, or raw PCI access. Input and display are service protocols. |
 | Resource limits | Address-space, thread, file, and CPU limits are enforced per domain; exhaustion retires the domain. |
 | Update integrity | AppImages and runtime packages are digest- and publisher-verified before import. |
-| Crash containment | A fault in the layer or application terminates only that domain; unrelated apps and the desktop continue. |
+| Crash containment | A user-mode fault in the application terminates only that domain; unrelated apps and the desktop continue. A fault the kernel takes inside a Linux syscall handler still halts the machine, because the layer runs in ring 0 (see the ADR-017 deviation). |
 
 ## Compatibility boundary
 
@@ -184,8 +191,9 @@ exact AppImage digest, and the runtime version.
   protection bits. Initial writable+executable mappings are allowed only for
   an AppImage whose signed import record declares `memory=jit` (JIT code such
   as LLVM in lavapipe); every other task gets `EACCES`. A protection change
-  that adds write to an executable mapping is always rejected. Anonymous private pages are faulted in on demand with bounded
-  allocation and zero-fill; mapped pages are reclaimed on unmap/task exit.
+  that adds write to an executable mapping is always rejected. Anonymous
+  private pages are faulted in on demand with bounded allocation and
+  zero-fill; mapped pages are reclaimed on unmap/task exit.
   Shared mappings have per-domain quotas of 16 shared VMA entries and 256
   shared physical pages. Exceeding either returns `ENOMEM`; page charges are
   released when the last reference goes away, and VMA charges disappear with
