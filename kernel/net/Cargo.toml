@@ -1,0 +1,11 @@
+[package]
+name = "aether-net"
+description = "Host-testable network policy: socket addresses, inbound firewall, and consent records"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

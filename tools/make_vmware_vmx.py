@@ -40,7 +40,13 @@ ide1:0.fileName = "{vmx_string(str(iso))}"
 ide1:0.startConnected = "TRUE"
 ide1:0.autodetect = "FALSE"
 
-ethernet0.present = "FALSE"
+# Intel 82574L (e1000e) on NAT: the kernel drives it, takes a DHCP lease from
+# VMware's NAT service, and blocks all unsolicited inbound traffic.
+ethernet0.present = "TRUE"
+ethernet0.virtualDev = "e1000e"
+ethernet0.connectionType = "nat"
+ethernet0.addressType = "generated"
+ethernet0.startConnected = "TRUE"
 sound.present = "FALSE"
 usb.present = "FALSE"
 ehci.present = "FALSE"

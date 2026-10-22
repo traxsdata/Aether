@@ -368,7 +368,21 @@ pub fn post_app_exit() {
     {
         crate::scheduler::gate4_portal_post_exit();
     }
-    #[cfg(all(not(feature = "gate4-portal-test"), not(feature = "gate4-gui-test")))]
+    // The network fixture writes nothing; its socket checks print their own
+    // marker.
+    #[cfg(all(
+        feature = "net-consent-test",
+        not(feature = "gate4-portal-test"),
+        not(feature = "gate4-gui-test")
+    ))]
+    {
+        serial_line!("AETHER_LINUX_OVERLAY_SKIP_OK reason=net-fixture");
+    }
+    #[cfg(all(
+        not(feature = "gate4-portal-test"),
+        not(feature = "gate4-gui-test"),
+        not(feature = "net-consent-test")
+    ))]
     {
         // The static fixture writes three files to prove overlay persistence. A
         // real dynamically linked application is not required to write anything,

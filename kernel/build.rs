@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rustc-link-arg=--build-id=none");
     println!("cargo:rerun-if-changed=kernel.ld");
     println!("cargo:rerun-if-env-changed=AETHER_GIT_COMMIT");
+    println!("cargo:rerun-if-env-changed=AETHER_NET_TEST_PORT");
 
     // The native user program is embedded in the kernel so the boot image and
     // the user ABI cannot drift apart. The Makefile builds it first and passes

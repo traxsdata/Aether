@@ -3,8 +3,9 @@
 //!
 //! The dispatcher asks this module for a class before it executes any call.
 //! A number that is not in the table is unknown and returns `ENOSYS`. Network
-//! and device facilities are classified as denied and return `EACCES`; they
-//! have no implementation in this prototype. Every known call increments its
+//! device facilities are classified as denied and return `EACCES`. Network
+//! calls are routed to the socket layer, which applies the per-application
+//! network policy and records its own denials. Every known call increments its
 //! class counter, and every denial increments both the class and total denial
 //! counters. `/proc/aether/syscalls` exposes the bounded read-only view.
 
@@ -28,7 +29,8 @@ pub enum Class {
     Sync,
     /// Device and privileged kernel facilities, denied by policy.
     Device,
-    /// Network sockets, denied by policy.
+    /// Socket calls. Routed to the socket layer, which allows local sockets
+    /// and denies Internet sockets without the application's network policy.
     Network,
     /// Unknown call number.
     Unknown,
@@ -78,7 +80,7 @@ pub const fn classify(number: u64) -> Class {
         35 | 228 | 230 | 283 | 286 | 287 => Class::Time,
         // poll/yield/futex/epoll/eventfd/pipe.
         7 | 24 | 202 | 232 | 233 | 281 | 290 | 291 | 293 => Class::Sync,
-        // Network sockets and socket options: denied, never reach a stack.
+        // Socket calls: routed to the socket layer and its network policy.
         41..=55 | 288 | 299 | 307 => Class::Network,
         // Device, module, mount, tracing, and privileged kernel facilities.
         16
@@ -111,6 +113,12 @@ pub fn record(class: Class) {
 pub fn record_denied(class: Class) {
     let index = index_of(class);
     CALLS[index].fetch_add(1, Ordering::Relaxed);
+    DENIED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Records a socket call the socket layer refused by policy. The call itself
+/// was already counted in the network class when it was dispatched.
+pub fn record_network_denial() {
     DENIED.fetch_add(1, Ordering::Relaxed);
 }
 

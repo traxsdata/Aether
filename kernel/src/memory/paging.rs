@@ -646,6 +646,80 @@ fn clear_user_leaf(pml4: PhysFrame, address: u64) -> bool {
     true
 }
 
+/// Maps a device register window (a PCI BAR) identity, uncached and
+/// non-executable, into the kernel identity map.
+///
+/// The firmware map classifies BARs as MMIO, which [`init`] deliberately
+/// skips, so a driver maps exactly the window it owns. The window lies under
+/// PML4 entry 0, which every address space shares, so the mapping is visible
+/// from any CR3. A page already mapped to the same address is left alone; a
+/// window that overlaps a 2 MiB RAM mapping is refused.
+pub fn map_kernel_mmio(
+    allocator: &mut FrameAllocator<'_>,
+    base: u64,
+    length: u64,
+) -> Result<(), PagingError> {
+    let end = base
+        .checked_add(length)
+        .ok_or(PagingError::UnrepresentableAddress(base))?;
+    // Stay below the user window and inside PML4 entry 0.
+    if length == 0 || end > 1 << 39 {
+        return Err(PagingError::UnrepresentableAddress(base));
+    }
+    let kernel_pml4 = current_pml4().ok_or(PagingError::MissingKernelMapping)?;
+    let root = unsafe { (*table_ptr(kernel_pml4)).entry(0) };
+    if !root.is_present() {
+        return Err(PagingError::MissingKernelMapping);
+    }
+    let pdpt = PhysFrame::from_address(root.address()).ok_or(PagingError::MissingKernelMapping)?;
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::CACHE_DISABLE
+        | PageFlags::WRITE_THROUGH
+        | PageFlags::NO_EXECUTE;
+    let mut address = base & !(PAGE_SIZE - 1);
+    while address < end {
+        let [_, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+        let pd = ensure_kernel_table(pdpt, pdpt_index, allocator)?;
+        let pt = ensure_kernel_table(pd, pd_index, allocator)?;
+        // SAFETY: Kernel page tables are identity-mapped and only changed
+        // with interrupts masked on the single CPU.
+        unsafe {
+            let existing = (*table_ptr(pt)).entry(pt_index);
+            if !existing.is_present() {
+                let entry = PageTableEntry::new(address, flags)
+                    .ok_or(PagingError::UnrepresentableAddress(address))?;
+                (*table_ptr(pt)).set_entry(pt_index, entry);
+                flush_page(address);
+            } else if existing.address() != address {
+                return Err(PagingError::UnrepresentableAddress(address));
+            }
+        }
+        address = address.saturating_add(PAGE_SIZE);
+    }
+    Ok(())
+}
+
+/// Returns the kernel child table at `index`, allocating it if absent.
+fn ensure_kernel_table(
+    parent: PhysFrame,
+    index: usize,
+    allocator: &mut FrameAllocator<'_>,
+) -> Result<PhysFrame, PagingError> {
+    let entry = unsafe { (*table_ptr(parent)).entry(index) };
+    if entry.is_present() {
+        if entry.is_huge() {
+            return Err(PagingError::UnexpectedHugePage);
+        }
+        return PhysFrame::from_address(entry.address())
+            .ok_or(PagingError::UnrepresentableAddress(entry.address()));
+    }
+    let child = allocate_table(allocator)?;
+    // SAFETY: The parent is a live kernel table; the child was just zeroed.
+    unsafe { (*table_ptr(parent)).set_entry(index, link_entry(child)?) };
+    Ok(child)
+}
+
 fn flush_page(address: u64) {
     // SAFETY: INVLPG is valid at CPL0 for a mapped or unmapped user page. It
     // only invalidates a TLB entry and has no memory side effects.

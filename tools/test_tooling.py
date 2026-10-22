@@ -110,7 +110,7 @@ class ToolingTests(unittest.TestCase):
     def test_vmx_escapes_paths_and_keeps_required_hardware(self):
         text = render(Path('/a folder/quote"and|pipe.iso'), Path("/build"))
         self.assertIn('fileName = "/a folder/quote|22and|7Cpipe.iso"', text)
-        for setting in ('firmware = "efi"', 'uefi.secureBoot.enabled = "FALSE"', 'mouse.vusb.enable = "FALSE"', 'keyboard.vusb.enable = "FALSE"', 'serial0.present = "TRUE"', 'mks.enable3d = "FALSE"'):
+        for setting in ('firmware = "efi"', 'uefi.secureBoot.enabled = "FALSE"', 'mouse.vusb.enable = "FALSE"', 'keyboard.vusb.enable = "FALSE"', 'serial0.present = "TRUE"', 'mks.enable3d = "FALSE"', 'ethernet0.virtualDev = "e1000e"', 'ethernet0.connectionType = "nat"'):
             self.assertIn(setting, text)
         for path in ('bad\npath', 'bad\rpath', 'bad\x00path'):
             with self.assertRaises(ValueError):

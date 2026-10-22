@@ -17,6 +17,7 @@ aether-boot-common = { path = "../boot/common" }
 aether-fs = { path = "fs" }
 aether-memory = { path = "memory" }
 aether-ipc = { path = "ipc" }
+aether-net = { path = "net" }
 aether-input = { path = "input" }
 aether-services = { path = "services" }
 aether-wm = { path = "wm" }
@@ -24,8 +25,13 @@ aether-term = { path = "term" }
 aether-crypto = { path = "../crypto" }
 aether-packaging = { path = "../packaging" }
 aether-update = { path = "../updates" }
+smoltcp = { version = "0.14", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-icmp"] }
 
 [features]
+# Boot with a network self-test: DHCP, then fetch a page from the QEMU
+# user-network host (10.0.2.2) over TCP.
+net-selftest = []
+net-consent-test = []
 # Boot with a deliberate breakpoint to exercise the exception path.
 fault-selftest = []
 # Boot with a user-copy fault on a kernel address, which must still halt.
