@@ -2,7 +2,8 @@
 //! Linear framebuffer graphics service.
 //!
 //! The loader hands over a linear, 32-bit GOP framebuffer. The kernel maps it
-//! cache-disabled during paging setup and this module owns all pixel writes.
+//! write-combining (cache-disabled without PAT) during paging setup and this
+//! module owns all pixel writes.
 //! There is no GPU command stream: the first desktop paints a software
 //! compositor into a bounded back buffer when the mode fits.
 
@@ -1171,6 +1172,10 @@ pub fn present_region(x: i32, y: i32, width: i32, height: i32) {
             let target_row = target.add(row * front.stride as usize + rect.x as usize);
             core::ptr::copy_nonoverlapping(source_row, target_row, rect.width as usize);
         }
+        // Drain the write-combining buffers so the frame reaches the display
+        // now rather than whenever later stores evict them.
+        #[cfg(target_arch = "x86_64")]
+        core::arch::x86_64::_mm_sfence();
     }
 }
 

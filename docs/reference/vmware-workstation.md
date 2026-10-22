@@ -63,7 +63,7 @@ ISO again.
 | Guest OS | Other 64-bit |
 | Firmware | UEFI, Secure Boot off |
 | Memory | 8192 MiB for the GridCraft demo; 2048 MiB for the standard ISO |
-| CPUs | 2 (the kernel is currently single-core; extra CPUs are ignored) |
+| CPUs | 2 (the kernel is currently single-core; it parks extra CPUs with an INIT IPI at boot) |
 | Disk | None; attach the ISO as a CD/DVD image |
 | CD/DVD | SATA or IDE, start connected |
 | Video | 128 MiB, 3D acceleration off |

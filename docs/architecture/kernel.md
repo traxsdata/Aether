@@ -35,7 +35,7 @@ The kernel implements the Phase 1 through Phase 4 prototype slices:
 - a 16 GiB bitmap frame allocator over validated RAM;
 - kernel-owned four-level page tables with a 4 KiB W^X kernel mapping,
   2 MiB/4 KiB identity mappings for kernel-accessible RAM, and an explicit
-  cache-disabled framebuffer mapping;
+  write-combining framebuffer mapping (cache-disabled without PAT);
 - user PML4s with only the user window marked user-accessible, and a TSS-backed
   privilege transition;
 - structured exception reports; ring-3 faults retire the task and reschedule;
