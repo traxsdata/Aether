@@ -13,8 +13,9 @@ generated VMX uses 8192 MiB. A 2048 MiB guest is too small for the demo and can
 fail during import. The standard fixture ISO remains usable with 2048 MiB.
 
 The kernel is embedded in the loader, so the ISO does not need a disk. Storage,
-networking, audio, USB HID, and GPU acceleration are not used by this prototype;
-do not add virtual hardware the kernel does not drive.
+audio, USB HID, and GPU acceleration are not used by this prototype; do not add
+virtual hardware the kernel does not drive. Networking uses one Intel e1000e
+adapter on NAT (see [Networking](#networking)).
 
 ## Build
 
@@ -67,7 +68,7 @@ ISO again.
 | Disk | None; attach the ISO as a CD/DVD image |
 | CD/DVD | SATA or IDE, start connected |
 | Video | 128 MiB, 3D acceleration off |
-| Network | Disconnected or not present |
+| Network | One adapter, NAT, type e1000e (`ethernet0.virtualDev = "e1000e"`) |
 | Audio | Not present |
 | USB | Not present |
 | Pointer | PS/2 |
@@ -141,3 +142,23 @@ VMX settings, GOP mode/stride/format, and the COM1 transcript. Confirm:
 If a machine stops in firmware, check UEFI, Secure Boot, connected CD/DVD, and
 the ISO path first. If it reaches the desktop but is sluggish, keep 3D off,
 use at most 1920×1200, and inspect `desktop`/`input` counters and the serial log.
+
+## Networking
+
+The generated VMX gives the VM one Intel 82574L (`e1000e`) adapter on VMware's
+NAT network. At boot the serial log shows the adapter, the link, and the DHCP
+lease:
+
+```text
+net: 82574L 8086:10d3 at 03:00.0 mac=00:0c:29:..
+AETHER_NET_LINK_OK model=82574L
+AETHER_NET_DHCP_OK address=192.168.x.y/24 gateway=192.168.x.2 dns=192.168.x.2
+```
+
+The older `e1000` (82545EM) type also works. `vmxnet3` is not supported yet;
+with it, or with no adapter, the system runs offline. The `net` command on the
+serial console prints the address and each app's network answer.
+
+Nothing can connect in: the kernel drops unsolicited inbound traffic and does
+not answer pings. An app gets the network only if its signed record declares
+`network=client` and you choose **Allow** when Security Center asks.

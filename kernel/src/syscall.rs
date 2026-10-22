@@ -212,8 +212,8 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     };
 
     // Default deny: classify before executing. Unknown numbers never reach a
-    // helper, and network/device groups fail with EACCES instead of falling
-    // through to an implementation that may not exist.
+    // helper, device calls fail with EACCES, and socket calls go to the
+    // socket layer, which enforces the per-application network policy.
     let class = linux_policy::classify(number);
     match class {
         linux_policy::Class::Unknown => {
@@ -229,7 +229,11 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             unsafe { (*frame).rax = LINUX_ENOSYS as u64 };
             return frame;
         }
-        linux_policy::Class::Network | linux_policy::Class::Device => {
+        linux_policy::Class::Network => {
+            linux_policy::record(class);
+            return crate::socket::dispatch(frame, pml4, number);
+        }
+        linux_policy::Class::Device => {
             linux_policy::record_denied(class);
             // SAFETY: Same live-frame invariant as above.
             unsafe { (*frame).rax = LINUX_EACCES as u64 };
@@ -404,7 +408,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     frame
 }
 
-fn linux_result(frame: *mut InterruptFrame, result: i64) -> *mut InterruptFrame {
+pub fn linux_result(frame: *mut InterruptFrame, result: i64) -> *mut InterruptFrame {
     unsafe { (*frame).rax = result as u64 };
     scheduler::linux_deliver_signal(frame);
     if scheduler::linux_signal_pending_exit() {
@@ -603,6 +607,14 @@ fn linux_read(
             }
             if scheduler::linux_inotify_blocks(descriptor) {
                 return scheduler::linux_inotify_block(frame, pointer, length as usize);
+            }
+            if let Ok(index) = scheduler::linux_socket_index(descriptor)
+                && !crate::socket::nonblocking(index)
+            {
+                if scheduler::linux_signal_pending() {
+                    return linux_result(frame, LINUX_EINTR);
+                }
+                return scheduler::linux_park(frame, 0, scheduler::LinuxWait::Poll, None);
             }
             linux_result(frame, LINUX_EAGAIN)
         }
@@ -1571,9 +1583,32 @@ fn linux_getdents(
     )
 }
 
-fn linux_fcntl(fd: u64, command: u64, _argument: u64) -> i64 {
+fn linux_fcntl(fd: u64, command: u64, argument: u64) -> i64 {
+    const F_GETFL: u64 = 3;
+    const F_SETFL: u64 = 4;
+    const O_RDWR: i64 = 2;
+    const O_NONBLOCK: u64 = 0x800;
     if scheduler::linux_stat_fd(fd).is_err() {
         return LINUX_EBADF;
+    }
+    // Sockets keep a real O_NONBLOCK flag; it decides whether a socket call
+    // parks or returns EAGAIN.
+    if let Ok(index) = scheduler::linux_socket_index(fd) {
+        match command {
+            F_GETFL => {
+                let nonblock = if crate::socket::nonblocking(index) {
+                    O_NONBLOCK as i64
+                } else {
+                    0
+                };
+                return O_RDWR | nonblock;
+            }
+            F_SETFL => {
+                crate::socket::set_nonblocking(index, argument & O_NONBLOCK != 0);
+                return 0;
+            }
+            _ => {}
+        }
     }
     match command {
         0 | 1030 => scheduler::linux_dup(fd).map_or_else(|error| error, |new| new as i64),
@@ -2878,6 +2913,15 @@ fn linux_write(
     match scheduler::linux_write_file(descriptor, bytes) {
         Ok(count) => linux_result(frame, count as i64),
         Err(LINUX_EAGAIN) => {
+            if let Ok(index) = scheduler::linux_socket_index(descriptor) {
+                if crate::socket::nonblocking(index) {
+                    return linux_result(frame, LINUX_EAGAIN);
+                }
+                if scheduler::linux_signal_pending() {
+                    return linux_result(frame, LINUX_EINTR);
+                }
+                return scheduler::linux_park(frame, 1, scheduler::LinuxWait::Poll, None);
+            }
             let Some((index, true)) = scheduler::linux_pipe_end(descriptor) else {
                 return linux_result(frame, LINUX_EAGAIN);
             };

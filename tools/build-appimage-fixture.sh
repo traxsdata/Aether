@@ -8,20 +8,22 @@
 # runtime stub with a zstd SquashFS image appended; the signed linux-appimage
 # record pins its digest, identity, version, and publisher.
 #
-# Pass memory=jit as the fifth argument to declare writable+executable
-# memory in the signed record.
+# Pass memory=jit and/or network=client after the app ELF to declare
+# writable+executable memory or outbound network use in the signed record.
 #
-# Usage: build-appimage-fixture.sh <out.AppImage> <out.record> <seed> <app-elf> [memory=jit]
+# Usage: build-appimage-fixture.sh <out.AppImage> <out.record> <seed> <app-elf> [memory=jit] [network=client]
 set -eu
-if [ "$#" -ne 4 ] && [ "$#" -ne 5 ]; then
-    echo "usage: build-appimage-fixture.sh <out.AppImage> <out.record> <seed> <app-elf> [memory=jit]" >&2
+if [ "$#" -lt 4 ] || [ "$#" -gt 6 ]; then
+    echo "usage: build-appimage-fixture.sh <out.AppImage> <out.record> <seed> <app-elf> [memory=jit] [network=client]" >&2
     exit 2
 fi
 OUT=$1
 RECORD=$2
 SEED=$3
 APP=$4
-MEMORY=${5:-}
+shift 4
+# Remaining arguments are the optional signed policy fields.
+POLICY="$*"
 
 if [ ! -f "$APP" ]; then
     echo "error: app ELF not found: $APP" >&2
@@ -65,6 +67,6 @@ PY
 
 cargo run -q -p aether-appimage --bin appimage-manifest -- \
     sign "$SEED" "$OUT" org.example.aether-appimage-demo 1.0.0 \
-    "Aether Test Publisher" "$RECORD" linux-appimage $MEMORY >/dev/null
+    "Aether Test Publisher" "$RECORD" linux-appimage $POLICY >/dev/null
 
 echo "built signed AppImage fixture: $OUT"

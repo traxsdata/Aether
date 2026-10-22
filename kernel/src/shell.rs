@@ -105,6 +105,7 @@ fn execute_line() {
         "apps" => apps::print_table(),
         "services" => supervisor::print_security(),
         "portal" => portal_command(argument),
+        "net" => net_command(argument),
         "security" => security(),
         "input" => {
             let mouse = crate::input::mouse();
@@ -163,6 +164,9 @@ fn print_help() {
     serial_line!("  portal revoke N  revoke grant N (open handles stay valid)");
     serial_line!("  portal approve N approve pending consent request N");
     serial_line!("  portal deny N    deny pending consent request N");
+    serial_line!("  net              network status and per-app consent");
+    serial_line!("  net allow|deny APP  answer or change an app's network consent");
+    serial_line!("  net forget APP   ask APP again on its next connection");
     serial_line!("  security         permission and sandbox status");
     serial_line!("  input            keyboard and pointer queue status");
     serial_line!("  mem              memory pressure (MiB free/total)");
@@ -255,6 +259,52 @@ fn copy_move(arguments: &str, move_file: bool) {
             if move_file { "mv" } else { "cp" }
         ),
         Err(error) => serial_line!("{}: {error:?}", if move_file { "mv" } else { "cp" }),
+    }
+}
+
+fn net_command(arguments: &str) {
+    use crate::net::consent;
+    let mut parts = arguments.split_whitespace();
+    let action = parts.next();
+    let app = parts.next();
+    if parts.next().is_some() {
+        serial_line!("net: usage: net [allow|deny|forget <app>]");
+        return;
+    }
+    match (action, app) {
+        (None, _) => {
+            let mut line = [0u8; 160];
+            let length = crate::net::status(&mut line);
+            if length == 0 {
+                serial_line!("net: offline (no supported adapter)");
+            } else {
+                serial_line!(
+                    "net: {}",
+                    core::str::from_utf8(&line[..length]).unwrap_or("")
+                );
+            }
+            consent::for_each(|app, allowed| {
+                serial_line!(
+                    "net: app={app} {}",
+                    if allowed { "allowed" } else { "denied" }
+                );
+            });
+            let mut pending = [0u8; aether_net::consent::MAX_ID];
+            if let Some(length) = consent::pending(&mut pending) {
+                serial_line!(
+                    "net: app={} waiting for an answer",
+                    core::str::from_utf8(&pending[..length]).unwrap_or("?")
+                );
+            }
+        }
+        (Some(choice @ ("allow" | "deny")), Some(app)) if aether_net::consent::valid_id(app) => {
+            consent::decide(app, choice == "allow");
+        }
+        (Some("forget"), Some(app)) => {
+            consent::forget(app);
+            serial_line!("net: app={app} will be asked again");
+        }
+        _ => serial_line!("net: usage: net [allow|deny|forget <app>]"),
     }
 }
 

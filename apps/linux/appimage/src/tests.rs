@@ -268,6 +268,53 @@ fn memory_jit_is_a_signed_opt_in() {
 }
 
 #[test]
+fn network_client_is_a_signed_opt_in() {
+    let image = image();
+    let key = aether_crypto::ed25519::public_key_from_seed(&test_seed());
+    let publishers = [TrustedPublisher {
+        name: TEST_PUBLISHER,
+        key,
+    }];
+    let trust = TrustStore::new(&publishers);
+    let plain = signed_record(&image, "linux-appimage", |_| {});
+    assert!(
+        !manifest::verify_image(&plain, &trust, &image)
+            .expect("verified")
+            .network_client
+    );
+
+    let client = signed_record_with(
+        &image,
+        "linux-appimage",
+        "memory=jit\nnetwork=client\n",
+        |_| {},
+    );
+    let verified = manifest::verify_image(&client, &trust, &image).expect("verified");
+    assert!(verified.network_client);
+    assert!(verified.jit);
+
+    // There is no listening or unrestricted network policy.
+    for value in ["network=server\n", "network=listen\n", "network=\n"] {
+        let record = signed_record_with(&image, "linux-appimage", value, |_| {});
+        assert_eq!(
+            manifest::verify(&record, &trust).unwrap_err(),
+            ManifestError::Field,
+            "{value}"
+        );
+    }
+    let duplicate = signed_record_with(
+        &image,
+        "linux-appimage",
+        "network=client\nnetwork=client\n",
+        |_| {},
+    );
+    assert_eq!(
+        manifest::verify(&duplicate, &trust).unwrap_err(),
+        ManifestError::Field
+    );
+}
+
+#[test]
 fn signed_runtime_rootfs_record_verifies() {
     let image = image();
     let key = aether_crypto::ed25519::public_key_from_seed(&test_seed());
