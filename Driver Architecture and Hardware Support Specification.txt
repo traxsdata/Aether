@@ -1,0 +1,968 @@
+# Aether OS
+## Driver Architecture and Hardware Support Specification
+
+**Document ID:** AETHER-TS-002  
+**Version:** 0.1.0-draft  
+**Status:** Proposed architecture baseline  
+**Date:** October 22, 2026  
+**Applies to:** Aether's independent Rust microkernel and desktop operating system  
+**Target platform:** x86-64 desktop PCs, initially under UEFI  
+**Related document:** AETHER-TS-001 — Technical Specification and Initial Development Backlog
+
+---
+
+# 1. Executive Summary
+
+Aether shall use a **capability-based, user-space-first driver architecture**. The kernel will provide only the privileged mechanisms required for safe hardware access, interrupt delivery, memory mapping, DMA isolation, and resource ownership. Device-specific functionality will reside in isolated driver processes wherever technically feasible.
+
+The architecture has six core components:
+
+1. **Hardware Discovery Service (`hwdiscd`)** — discovers hardware, constructs a device inventory, and tracks hardware changes.
+2. **Driver Manager (`devd`)** — matches devices to drivers, starts and supervises drivers, and manages device ownership.
+3. **Driver Host Runtime (`driverhost`)** — supplies standardized interfaces for driver initialization, requests, resource access, and lifecycle management.
+4. **Hardware Abstraction Interfaces (HAIs)** — define stable interfaces between hardware drivers and operating-system services.
+5. **Device Services** — expose storage, networking, graphics, audio, input, USB, and other capabilities through consistent system APIs.
+6. **Hardware Compatibility Program** — establishes a tested hardware baseline, maintains supported-device records, and expands support incrementally.
+
+Aether must not attempt to support every PC component at launch. It will establish a predictable hardware baseline, beginning with virtualized devices, then adding carefully selected physical hardware.
+
+The goal is to make hardware support extensible without compromising the kernel's isolation model.
+
+# 2. Goals and Non-Goals
+
+## 2.1 Goals
+
+- Keep device-specific code outside the kernel by default.
+- Require explicit capabilities for access to hardware resources.
+- Prevent applications from directly accessing arbitrary hardware.
+- Permit driver failures to be contained and, where safe, recovered.
+- Support device discovery, hot-plug, removal, suspend, and resume.
+- Establish stable, versioned driver and device-service interfaces.
+- Support native Rust drivers and carefully controlled exceptions.
+- Make hardware compatibility measurable and publicly documented.
+- Allow new drivers to be installed and updated independently of kernel releases.
+- Establish a path to broader x86-64 PC support without promising universal compatibility.
+
+## 2.2 Non-goals
+
+The initial implementation will not:
+
+- Support every GPU, Wi-Fi adapter, laptop, or motherboard.
+- Provide unrestricted Linux kernel driver compatibility.
+- Load arbitrary Windows drivers into Aether.
+- Require all drivers to be implemented in Rust when a device vendor supplies only another language's implementation.
+- Promise that restarting a driver can recover hardware left in an unknown state.
+- Guarantee that user-space isolation alone prevents every hardware or firmware attack.
+- Require a fully functional IOMMU on every machine before basic development can begin.
+- Place all hardware management inside a single privileged service.
+
+# 3. Architectural Decisions
+
+## ADR-DR-001 — User-space-first drivers
+
+**Decision:** All new device drivers must run in isolated user space by default.
+
+Drivers shall run as independently supervised processes with their own address spaces and narrowly scoped capabilities.
+
+Exceptions may be approved when a device requires extremely early initialization, when user-space execution is technically impractical, or when a demonstrated performance or reliability requirement justifies privileged implementation.
+
+Exceptions require an architecture decision record, security review, and documented removal criteria.
+
+**Rationale:** A memory-safety defect or protocol-parsing error in an ordinary driver should not automatically grant control over the kernel or unrelated devices.
+
+## ADR-DR-002 — Small privileged hardware interface
+
+**Decision:** The kernel exposes a minimal Hardware Access Interface (HAI-K).
+
+It provides controlled mechanisms for:
+
+- Device resource ownership.
+- Device register mapping.
+- Interrupt registration and notification.
+- DMA buffer allocation and mapping.
+- IOMMU domain management when available.
+- Device reset and revocation where hardware permits.
+- Timers, synchronization, and shared-memory primitives.
+- Controlled access to platform resources.
+
+The kernel will not expose arbitrary physical-memory mapping or unrestricted port I/O to drivers.
+
+## ADR-DR-003 — Stable device-service interfaces
+
+**Decision:** Drivers implement device-specific functionality while system services expose higher-level, versioned interfaces.
+
+For example, an Ethernet driver implements a specific network controller's hardware protocol, while the networking service provides packet transmission and reception through a common network interface.
+
+Applications must not need to know which chipset implements the requested capability.
+
+## ADR-DR-004 — Native-first, compatibility-assisted
+
+**Decision:** Aether develops native drivers for its initial supported hardware baseline. Compatibility layers and adapted upstream code may be investigated for later expansion.
+
+Driver reuse is permitted only after license, provenance, dependency, security, and architecture reviews. Aether's clean-room kernel requirement remains in force.
+
+## ADR-DR-005 — Capability-based device access
+
+**Decision:** A process cannot access a device merely because it knows the device identifier or its physical address.
+
+Access must be granted through explicit capabilities that bind the recipient to an authorized device, resource, and set of operations.
+
+## ADR-DR-006 — No assumed universal binary driver ABI
+
+**Decision:** Aether will maintain a stable logical driver contract but will not promise that one compiled driver binary will work across every future kernel release or processor architecture.
+
+Source-level portability and versioned interface compatibility take precedence initially. A stable binary driver ABI may be considered after the core architecture matures.
+
+# 4. System Architecture
+
+## 4.1 Component diagram
+
+```text
+                    Applications
+                          |
+                  System Device APIs
+                          |
+             +------------+-------------+
+             |            |             |
+         Network       Storage       Graphics
+         Service       Service        Service
+             |            |             |
+             +------------+-------------+
+                          |
+                Device Driver Processes
+                          |
+              Driver Host / HAI Libraries
+                          |
+               Capability-Controlled IPC
+                          |
+             +------------+-------------+
+             |                          |
+        Device Manager             Aether Kernel
+             |                          |
+       Hardware Discovery      MMIO / IRQ / DMA /
+             |                 Memory / IOMMU
+             |
+       Firmware + Bus Topology
+         ACPI / PCIe / USB
+```
+
+This diagram shows the logical responsibilities, not a requirement that every component communicate through one central bottleneck.
+
+The implementation should support direct, capability-authorized IPC and shared-memory data paths where appropriate. The device manager coordinates ownership and policy; it must not relay every packet, audio sample, or graphics buffer.
+
+## 4.2 Component responsibilities
+
+### A. Hardware Discovery Service (`hwdiscd`)
+
+Responsibilities:
+
+- Parse the hardware description supplied by the boot environment.
+- Enumerate supported buses and their child devices.
+- Discover PCI and PCIe functions, USB devices, and platform devices.
+- Record hardware identifiers, topology, resource requirements, and available capabilities.
+- Detect device addition and removal.
+- Publish device events to the device manager.
+- Maintain an inventory of known and unknown devices.
+
+It must treat firmware tables and device-provided descriptors as untrusted input. All parsing must be bounds-checked and fuzz-tested.
+
+Discovery does not authorize device access. Finding a device and granting a process permission to operate it are separate operations.
+
+### B. Driver Manager (`devd`)
+
+Responsibilities:
+
+- Match discovered devices against signed driver manifests.
+- Apply driver compatibility and trust policies.
+- Request the minimum resources required by a driver.
+- Start and supervise driver processes.
+- Bind one active driver to each exclusively owned device function.
+- Coordinate dependency ordering.
+- Handle driver crashes and timeouts.
+- Track device state and health.
+- Initiate safe shutdown, reset, and recovery procedures.
+- Prevent unauthorized driver replacement or device takeover.
+
+The manager must not have unrestricted access to every device. Kernel-enforced capabilities must remain the final authority.
+
+### C. Driver Host Runtime (`driverhost`)
+
+Responsibilities:
+
+- Load and initialize approved driver packages.
+- Provide stable Rust libraries for common driver operations.
+- Establish request queues and event channels.
+- Translate standard driver lifecycle events into driver callbacks.
+- Track allocated resources and outstanding operations.
+- Support cancellation and orderly shutdown.
+- Record diagnostics and fault information.
+- Enforce process-level resource limits.
+
+The runtime is not a substitute for kernel isolation. A compromised driver host must not automatically receive global hardware access.
+
+### D. Device Services
+
+Device services convert hardware-specific behavior into stable OS functionality.
+
+Examples:
+
+- `storaged` — block devices and storage queues.
+- `netd` — network interfaces and packet paths.
+- `displayd` — displays, modesetting, and graphics-device coordination.
+- `audiod` — audio endpoints, mixing, and audio routing.
+- `inputd` — keyboards, mice, touchpads, and other input devices.
+- `usbd` — USB topology, enumeration, and device coordination.
+- `powerd` — system power policy and coordination with device drivers.
+
+These are logical service boundaries. Early releases may combine some services into fewer processes, provided their security boundaries remain explicit.
+
+# 5. Hardware Discovery and Device Identity
+
+## 5.1 Supported discovery sources
+
+Aether should implement hardware discovery incrementally:
+
+1. Boot-provided memory maps and firmware information.
+2. ACPI tables and platform device descriptions.
+3. PCI and PCIe enumeration.
+4. Virtio devices for virtual-machine development.
+5. USB enumeration.
+6. Additional buses and device classes as the platform expands.
+
+ACPI and PCIe support should precede advanced laptop power management and broad physical-device support.
+
+## 5.2 Canonical device record
+
+Every discovered device receives an Aether-generated identifier that remains stable for the lifetime of that device instance. It must not rely solely on a physical address, bus number, or enumeration order.
+
+The device inventory should contain:
+
+- Aether device-instance ID.
+- Parent and bus-topology identifiers.
+- Bus type.
+- Vendor, product, subsystem, and revision identifiers when available.
+- Device class and compatible-function identifiers.
+- Assigned resource descriptions.
+- Supported power states and capabilities, when known.
+- Current driver binding.
+- Device lifecycle state.
+- Trust and signature status of the bound driver.
+- Diagnostic information and last failure reason.
+
+Serial numbers and other potentially identifying hardware data should not be exposed to ordinary applications unless specifically needed and authorized.
+
+## 5.3 Device matching
+
+Driver matching must use structured identifiers and explicit compatibility rules rather than display names.
+
+Matching priority:
+
+1. Exact device and subsystem match.
+2. Explicitly declared compatible device revision.
+3. Approved device-class match.
+4. Generic fallback driver, if safe and supported.
+5. Unbound-device state.
+
+A generic driver must not claim a device solely because it recognizes a broad class if doing so could damage hardware or conflict with another driver.
+
+Unknown devices remain visible in system diagnostics without being automatically given an untrusted driver.
+
+# 6. Driver Process Model and Security
+
+## 6.1 Default isolation profile
+
+Each driver process should have:
+
+- A separate virtual address space.
+- No direct access to unrelated devices.
+- No unrestricted physical-memory access.
+- No direct access to arbitrary I/O ports.
+- Explicit MMIO mappings for approved device resources.
+- Explicit interrupt capabilities.
+- Explicit DMA buffer and mapping capabilities.
+- Bounded IPC messages and validated shared-memory descriptors.
+- Resource limits for memory, CPU time, queues, and outstanding operations.
+- Restricted filesystem and network access.
+- A controlled logging and diagnostics interface.
+
+Drivers should not receive general network access, user-file access, or application-data access unless their function genuinely requires it and policy explicitly permits it.
+
+## 6.2 DMA security
+
+Direct Memory Access (DMA) is a major security boundary because a device can read or write memory without ordinary CPU-mediated access checks.
+
+The preferred design is:
+
+- Use an IOMMU when available and correctly configured.
+- Assign device-specific DMA address spaces.
+- Map only the memory regions needed for a particular operation.
+- Unmap DMA memory when operations finish.
+- Validate descriptor lengths, offsets, and queue indices.
+- Prevent devices from accessing kernel memory or unrelated processes' memory.
+- Reject unsafe device assignment when the required isolation cannot be provided.
+
+Where IOMMU isolation is unavailable, Aether must use conservative DMA policies and may disable devices or features that cannot be operated safely. The lack of an IOMMU should not silently convert a restricted driver into a fully trusted kernel component.
+
+## 6.3 MMIO and interrupt handling
+
+A driver receives access to only the register ranges assigned to its device.
+
+The kernel validates resource ownership and mapping permissions. It also controls interrupt registration, masking where supported, and delivery to the designated driver process.
+
+Interrupt handlers should perform minimal privileged work. Lengthy processing belongs in the driver process, triggered by an interrupt event.
+
+The architecture must support interrupt moderation, queue-based processing, and shared-memory data paths for high-throughput devices.
+
+## 6.4 Trust levels
+
+Aether should distinguish at least these driver trust states:
+
+- **Built-in trusted:** included in an authenticated Aether system image.
+- **Verified third-party:** signed by an accepted publisher and permitted by system policy.
+- **Development:** explicitly enabled for development or debugging.
+- **Blocked:** rejected due to signature, compatibility, security, or policy failure.
+
+A valid signature establishes package integrity and publisher identity; it does not prove that a driver is safe.
+
+The operating system must support revoking a driver publisher or a specific driver version.
+
+# 7. Driver Lifecycle
+
+Every driver-managed device follows a defined lifecycle.
+
+```text
+Discovered
+    |
+    v
+Identified
+    |
+    v
+Driver Matched
+    |
+    v
+Policy and Signature Verified
+    |
+    v
+Resources Granted
+    |
+    v
+Driver Started
+    |
+    v
+Device Initialized
+    |
+    v
+Operational
+    |
+    +----> Degraded
+    |
+    +----> Quiescing
+    |          |
+    |          v
+    |       Stopped
+    |
+    +----> Failed
+               |
+               v
+         Recovery Assessment
+```
+
+## 7.1 Initialization
+
+The manager shall:
+
+1. Verify the package and manifest.
+2. Confirm the driver supports the device and required HAI versions.
+3. Establish the driver's isolation profile.
+4. Grant only the required resource capabilities.
+5. Start the driver and apply startup timeouts.
+6. Request device initialization.
+7. Verify that the driver reports readiness.
+8. Run applicable health checks.
+9. Publish the resulting device capability to authorized services.
+
+A driver that fails initialization must not leave its device partially claimed without a controlled cleanup or recovery attempt.
+
+## 7.2 Removal and shutdown
+
+Before removing or replacing a driver, Aether should:
+
+1. Stop new operations from being submitted.
+2. Notify dependent services.
+3. Cancel or drain outstanding requests.
+4. Stop device DMA and mask interrupts where possible.
+5. Revoke device resource capabilities.
+6. Unmap DMA buffers and MMIO regions when safe.
+7. Release allocated resources.
+8. Stop the driver process.
+9. Update device inventory and service state.
+
+Hot-unplug and surprise removal require special handling. Cleanup code must not assume that the physical device remains accessible.
+
+## 7.3 Crash recovery
+
+A driver crash should be isolated from unrelated services.
+
+Recovery policy depends on the device:
+
+- Restart immediately if the device is known to tolerate it and can be safely reset.
+- Reset and reinitialize when the hardware supports a documented recovery procedure.
+- Leave the device disabled if its state is unknown or unsafe.
+- Escalate to a controlled system recovery if a critical device cannot be restored.
+
+Storage drivers must not blindly restart write operations when completion status is ambiguous. The system must preserve data integrity over automatic recovery.
+
+Aether must distinguish a successful driver-process restart from successful restoration of hardware functionality.
+
+# 8. Hardware Abstraction Interfaces
+
+## 8.1 Interface layers
+
+Aether should separate three types of interfaces:
+
+**Layer 1 — Kernel Hardware Access Interface (HAI-K)**
+
+Privileged operations for MMIO, interrupts, DMA, resource ownership, and controlled hardware access.
+
+**Layer 2 — Device Driver Interface (DDI)**
+
+The versioned contract used by a driver to initialize a device, submit hardware operations, receive events, and report state.
+
+**Layer 3 — Device Service API (DSA)**
+
+The application- and service-facing API for networking, storage, audio, graphics, input, and other capabilities.
+
+A hardware driver should rarely expose a raw vendor-specific register interface to applications. Applications should consume higher-level capabilities.
+
+## 8.2 Interface stability
+
+Every interface must have:
+
+- A version identifier.
+- Explicit request and response formats.
+- Defined error codes.
+- Maximum message and buffer sizes.
+- Cancellation and timeout behavior.
+- Resource ownership rules.
+- Concurrency requirements.
+- Device removal semantics.
+- Compatibility and deprecation policies.
+
+Breaking interface changes require a documented migration plan and automated compatibility tests.
+
+## 8.3 Rust safety boundaries
+
+The public driver SDK should expose safe Rust abstractions wherever possible.
+
+Examples include:
+
+- Typed resource handles.
+- Bounds-checked device descriptors.
+- Validated DMA buffer objects.
+- RAII-managed resource ownership.
+- Explicit device state transitions.
+- Typed request and response structures.
+
+`unsafe` Rust is permitted when hardware access requires it, but it must be localized, documented, and reviewed. Safety comments must explain the invariant being upheld, not merely state that the operation is unsafe.
+
+The kernel must independently enforce access control. Rust's type system and ownership model do not replace capability checks, hardware isolation, or input validation.
+
+# 9. Device-Service Contracts
+
+## 9.1 Storage
+
+Storage drivers provide block-level operations to `storaged`.
+
+Requirements:
+
+- Bounded request queues.
+- Validated logical block addresses and lengths.
+- Explicit flush and durability semantics.
+- Error reporting for timeouts, resets, and failed writes.
+- Safe handling of device removal.
+- Protection against duplicate completion and invalid DMA descriptors.
+
+Filesystems remain above the block-device layer and must not depend on a particular storage-controller implementation.
+
+Initial support should favor virtual block devices and a limited set of physical storage controllers.
+
+## 9.2 Networking
+
+Network drivers provide transmit and receive queues to `netd`.
+
+Requirements:
+
+- Explicit packet-buffer ownership.
+- Validated queue descriptors.
+- Bounded receive and transmit queues.
+- Link-state and device-reset notifications.
+- Isolation of network-device control from ordinary application network permissions.
+- No automatic assumption that every device supports hardware offloads.
+
+Aether should bring up networking with a known virtual NIC before attempting broad Wi-Fi support.
+
+## 9.3 Graphics
+
+Graphics support should be split into:
+
+- Boot framebuffer support.
+- Basic display and mode-setting support.
+- Native GPU drivers.
+- User-space graphics runtime and rendering APIs.
+
+The earliest desktop prototype should use a boot-provided framebuffer or another simple, well-defined display path. This is not equivalent to a complete GPU driver.
+
+Accelerated graphics must be treated as a major compatibility milestone. Modern GPUs have complex firmware, memory-management, scheduling, and command-submission requirements; Aether should not promise modern GPU support until a specific driver and hardware combination passes qualification.
+
+## 9.4 Audio
+
+Audio drivers expose device capabilities to `audiod`, which owns mixing, routing, and application-facing audio endpoints.
+
+The initial milestone should target a virtual audio device or one selected physical audio controller. Advanced DSP, vendor effects, and specialized audio features can follow later.
+
+## 9.5 Input and USB
+
+Input drivers normalize hardware events into a common input interface. USB support should begin with a small set of essential device classes, particularly keyboards, mice, and storage devices.
+
+USB devices are untrusted and may be hot-plugged at any time. Descriptor parsing, endpoint configuration, and transfer validation must be carefully bounded.
+
+## 9.6 Power management
+
+Power management is a cross-cutting subsystem. Devices should expose supported transitions through a common contract while preserving hardware-specific requirements.
+
+Aether must not suspend or power off a device until dependent services and active I/O have reached a safe state.
+
+# 10. Hardware Compatibility Strategy
+
+Aether should use an explicit support matrix rather than advertising compatibility based on successful boot alone.
+
+## Tier 0 — Development and continuous integration
+
+Required for early kernel work:
+
+- QEMU x86-64 machine.
+- Serial console.
+- Virtual block storage.
+- Virtual networking.
+- Boot framebuffer.
+- Virtual input devices.
+
+Where feasible, use Virtio devices to exercise real driver lifecycle and I/O paths without requiring physical hardware.
+
+## Tier 1 — Initial physical PC baseline
+
+Select and document a small set of real machines that cover:
+
+- UEFI boot.
+- ACPI and PCIe enumeration.
+- Wired networking.
+- Basic storage.
+- Keyboard and mouse input.
+- Display output.
+- Power and reboot behavior.
+
+Specific device models must be selected from hardware that maintainers can access and test. Do not claim a device is supported merely because its vendor ID is recognized.
+
+## Tier 2 — Broader desktop support
+
+Expand to additional:
+
+- NVMe and SATA controllers.
+- Ethernet adapters.
+- USB controllers and peripherals.
+- Audio controllers.
+- Wi-Fi adapters.
+- Display controllers.
+- Common laptop platform devices.
+
+Each new driver should have a documented test matrix and known limitations.
+
+## Tier 3 — Advanced hardware
+
+Consider later:
+
+- GPU acceleration for selected modern GPUs.
+- Advanced Wi-Fi features.
+- Bluetooth.
+- Thunderbolt and USB4.
+- Laptop-specific power management.
+- Specialized input devices.
+- High-performance storage and networking.
+
+This tier is intentionally not a launch requirement.
+
+# 11. Driver Packaging, Updates, and Distribution
+
+## 11.1 Driver package manifest
+
+Every distributable driver package should include:
+
+- Unique package and driver identifiers.
+- Driver version.
+- Supported device identifiers.
+- Required DDI and HAI versions.
+- Target architecture.
+- Dependency list.
+- Required capability declarations.
+- Requested memory, CPU, and queue limits.
+- Signing identity and package signature.
+- License and provenance metadata.
+- Test and compatibility metadata.
+
+Capability declarations are requests for policy evaluation, not automatic grants of privilege.
+
+## 11.2 Installation and updates
+
+Driver packages must be authenticated before installation. The package manager must not grant elevated permissions merely because a package was downloaded from a recognized repository.
+
+Updates should support:
+
+- Version pinning and rollback.
+- Revocation of vulnerable versions.
+- Dependency validation.
+- Atomic activation where practical.
+- Recovery when a driver update prevents boot or network access.
+
+Critical boot-path drivers should have a known-good recovery alternative. Updates to the only usable storage or display driver require particular care.
+
+## 11.3 External driver code
+
+Before incorporating external code, maintainers must review:
+
+- License compatibility.
+- Copyright and provenance.
+- Required firmware and its redistribution terms.
+- Dependencies on Linux or Windows kernel APIs.
+- Assumptions about kernel memory and execution context.
+- Security boundaries and privilege requirements.
+- Whether porting can preserve the code's license obligations.
+
+Aether must not copy proprietary driver binaries or vendor code without appropriate rights.
+
+# 12. Diagnostics and Observability
+
+The system should provide a unified device inventory accessible through system tools and the desktop Settings application.
+
+For every device, the user or administrator should be able to inspect:
+
+- Device identity and connection path.
+- Current driver and version.
+- Support status.
+- Device operational state.
+- Driver trust status.
+- Resource allocation summary.
+- Recent initialization and failure events.
+- Whether restart or recovery is available.
+- Relevant error codes and diagnostic logs.
+
+Logs must not expose arbitrary memory contents, cryptographic secrets, or unnecessary device serial numbers.
+
+Diagnostic collection must be bounded to prevent a malfunctioning device from flooding logs or exhausting storage.
+
+# 13. Testing and Release Qualification
+
+Every driver must pass tests appropriate to its device class.
+
+## 13.1 Required test categories
+
+- Unit tests for parsing and state transitions.
+- Interface conformance tests.
+- Device-emulation integration tests.
+- Fault injection and timeout tests.
+- Invalid-message and malformed-descriptor tests.
+- Resource-exhaustion tests.
+- Driver crash and restart tests.
+- Device removal and reappearance tests.
+- DMA isolation tests where supported.
+- Suspend and resume tests where supported.
+- Regression tests for known hardware failures.
+- License and package-signature validation.
+
+## 13.2 Continuous integration
+
+CI should run virtual-device tests on every relevant change. Hardware-in-the-loop testing should be added for physical devices that cannot be adequately modeled in QEMU.
+
+A change that weakens a mandatory security boundary must block release until the required tests pass or a formally approved exception is recorded.
+
+## 13.3 Supported-device qualification
+
+A device may be marked **Supported** only when its defined core functionality passes the relevant test suite on the documented hardware configuration.
+
+Use these public statuses:
+
+- **Supported:** qualified for documented functionality.
+- **Experimental:** works in limited testing; regressions are possible.
+- **Detected:** hardware is identified, but functional support is incomplete.
+- **Unsupported:** no usable driver or required feature is available.
+- **Blocked:** disabled due to a security, stability, or compatibility concern.
+
+# 14. Implementation Roadmap
+
+## Phase 0 — Architecture and contracts
+
+Deliverables:
+
+- Driver architecture ADRs.
+- HAI-K and DDI initial specifications.
+- Device inventory schema.
+- Driver manifest schema.
+- Trust and capability policies.
+- Initial QEMU device selection.
+- Driver test strategy.
+
+Exit criteria: The interfaces and security responsibilities are documented well enough to implement without relying on arbitrary hardware access.
+
+## Phase 1 — Boot and virtual hardware
+
+Deliverables:
+
+- Boot framebuffer or serial output.
+- Basic platform and PCI discovery.
+- Virtual device inventory.
+- Virtio block driver.
+- Basic virtual input and networking as feasible.
+- Minimal driver host and manager.
+
+Exit criteria: Aether can discover, bind, and communicate with a virtual block device without placing its device-specific implementation in the kernel.
+
+## Phase 2 — Process isolation and lifecycle
+
+Deliverables:
+
+- Driver process isolation.
+- Capability grants and revocation.
+- Bounded IPC.
+- Driver startup and shutdown.
+- Driver crash detection.
+- Basic device reset and recovery policy.
+
+Exit criteria: A deliberately faulty test driver cannot access unauthorized resources or directly compromise unrelated user processes through ordinary driver interfaces.
+
+## Phase 3 — Minimal usable system
+
+Deliverables:
+
+- Storage service and basic filesystem integration.
+- Input service.
+- Virtual network service.
+- Driver diagnostics.
+- Package signature verification.
+- Automated device-service integration tests.
+
+Exit criteria: The system can boot, use storage, accept input, and communicate over a virtual network using isolated driver processes.
+
+## Phase 4 — Physical hardware baseline
+
+Deliverables:
+
+- Documented test PCs.
+- Physical PCIe and USB enumeration.
+- Selected wired networking and storage drivers.
+- Basic physical display output.
+- Hardware-in-the-loop CI procedures.
+- Public compatibility matrix.
+
+Exit criteria: The documented physical configurations pass repeatable boot and core-device tests.
+
+## Phase 5 — Desktop hardware expansion
+
+Deliverables:
+
+- Improved display and graphics support.
+- Audio.
+- Additional storage and network controllers.
+- Wi-Fi and Bluetooth research.
+- Laptop power management.
+- Driver update and recovery workflows.
+
+Exit criteria: Aether has a clearly documented, tested desktop hardware profile, with unsupported devices identified rather than silently treated as functional.
+
+## Phase 6 — Ecosystem maturity
+
+Deliverables:
+
+- Public driver SDK.
+- Third-party driver signing and review process.
+- Stable interface compatibility policy.
+- Broader hardware test lab.
+- Vulnerability disclosure and revocation process.
+- Advanced graphics and peripheral support as feasible.
+
+Exit criteria: External contributors can develop, test, distribute, and maintain drivers without routinely changing the kernel.
+
+# 15. Initial Development Backlog
+
+Priority definitions: P0 blocks the first driver prototype; P1 establishes core security and lifecycle functionality; P2 advances usability; P3 supports later ecosystem growth.
+
+| ID | Priority | Task | Acceptance criterion |
+|---|---|---|---|
+| AET-DRV-001 | P0 | Define device identity and inventory schema | Virtual and physical device records use a documented schema |
+| AET-DRV-002 | P0 | Define HAI-K resource operations | MMIO, interrupts, and DMA have explicit permission and error semantics |
+| AET-DRV-003 | P0 | Add PCI discovery baseline | QEMU PCI devices are enumerated without out-of-bounds parsing |
+| AET-DRV-004 | P0 | Define driver manifest format | Device matches, versions, capabilities, and signatures can be validated |
+| AET-DRV-005 | P0 | Implement basic driver matching | A known virtual device selects the expected driver |
+| AET-DRV-006 | P1 | Implement isolated driver process | Driver runs outside kernel address space |
+| AET-DRV-007 | P1 | Implement capability-controlled resource grants | Driver cannot map or control unrelated devices |
+| AET-DRV-008 | P1 | Implement bounded driver IPC | Invalid messages are rejected without kernel failure |
+| AET-DRV-009 | P1 | Implement driver lifecycle state machine | Initialization, shutdown, and failures produce deterministic state transitions |
+| AET-DRV-010 | P1 | Implement virtual block driver | Reads, writes, errors, and completion semantics pass tests |
+| AET-DRV-011 | P1 | Implement driver crash supervision | A test driver crash is detected and does not crash unrelated services |
+| AET-DRV-012 | P1 | Add DMA isolation design and prototype | DMA access is restricted where supported; unsafe fallback behavior is documented |
+| AET-DRV-013 | P1 | Add malformed-input fuzz tests | Discovery and manifest parsers withstand the defined fuzz suite |
+| AET-DRV-014 | P2 | Add physical hardware inventory | Supported test PC devices appear in diagnostics |
+| AET-DRV-015 | P2 | Add wired network driver | A qualified NIC can transmit and receive through `netd` |
+| AET-DRV-016 | P2 | Add driver diagnostics UI | Device state, driver version, and failure reason are visible |
+| AET-DRV-017 | P2 | Add signed driver package verification | Modified or untrusted packages are rejected by policy |
+| AET-DRV-018 | P2 | Add rollback and recovery workflow | A failed driver update can return to a known-good version |
+| AET-DRV-019 | P3 | Publish third-party driver SDK | An external contributor can build and test a sample driver |
+| AET-DRV-020 | P3 | Establish hardware compatibility database | Public support status is tied to tested configurations |
+
+Effort estimates should be assigned after the kernel's process, IPC, and capability primitives are sufficiently implemented.
+
+# 16. Mandatory Acceptance Tests
+
+### AT-DRV-001 — Unknown device
+
+**Given:** Aether discovers a device without a matching approved driver.
+
+**When:** The device manager processes the discovery event.
+
+**Then:** The device is recorded as detected but unbound, and no untrusted process receives device access.
+
+### AT-DRV-002 — Unauthorized register access
+
+**Given:** A driver has access to one assigned device.
+
+**When:** It requests a mapping for an unrelated device's register range.
+
+**Then:** The kernel rejects the request and records an appropriate diagnostic event.
+
+### AT-DRV-003 — Driver process crash
+
+**Given:** An operational non-critical virtual device.
+
+**When:** Its driver process crashes.
+
+**Then:** The failure is contained, the device becomes unavailable or degraded, and unrelated processes and the kernel continue operating.
+
+### AT-DRV-004 — Malformed request
+
+**Given:** An isolated driver receives malformed or oversized IPC messages.
+
+**When:** The driver or manager processes those messages.
+
+**Then:** The messages are rejected safely, with no unbounded allocation or kernel memory corruption.
+
+### AT-DRV-005 — DMA isolation
+
+**Given:** An IOMMU-capable test environment and a driver with restricted DMA mappings.
+
+**When:** A test device attempts to DMA into an unauthorized memory region.
+
+**Then:** The attempted access is blocked or otherwise safely contained, and the test records the result.
+
+### AT-DRV-006 — Invalid package signature
+
+**Given:** A driver package whose signature or signed content has been modified.
+
+**When:** The package is installed or activated.
+
+**Then:** Verification fails and the driver is not activated.
+
+### AT-DRV-007 — Device removal
+
+**Given:** An operational hot-pluggable test device.
+
+**When:** The device is removed during I/O.
+
+**Then:** New requests are rejected or redirected appropriately, outstanding operations terminate safely, and stale device capabilities cannot be used to access a replacement device.
+
+### AT-DRV-008 — Driver update rollback
+
+**Given:** A previously working driver and a newer driver that fails initialization.
+
+**When:** The update is activated.
+
+**Then:** Aether follows its recovery policy, restores a usable configuration when safe, and preserves system and user data.
+
+### AT-DRV-009 — Capability revocation
+
+**Given:** A driver holds access to a device.
+
+**When:** The manager revokes the driver's device capability.
+
+**Then:** Further authorized-interface operations fail, and outstanding hardware activity is quiesced or contained according to the device's recovery contract.
+
+### AT-DRV-010 — Reproducible virtual hardware test
+
+**Given:** A clean checkout and the documented QEMU configuration.
+
+**When:** CI builds and boots Aether.
+
+**Then:** The expected virtual devices are discovered, the virtual storage driver binds, and the automated device tests complete with reproducible results.
+
+# 17. Repository Structure
+
+The following directories extend the Aether repository proposed in AETHER-TS-001.
+
+```text
+docs/
+└── architecture/
+    ├── driver-model.md
+    ├── device-lifecycle.md
+    ├── device-security.md
+    ├── hardware-compatibility.md
+    └── decisions/
+        ├── ADR-DRV-001-userspace-drivers.md
+        ├── ADR-DRV-002-hardware-access.md
+        └── ADR-DRV-003-driver-packaging.md
+
+abi/
+├── hai-k/
+├── ddi/
+└── device-services/
+
+services/
+├── hwdiscd/
+├── devd/
+├── driverhost/
+├── storaged/
+├── netd/
+├── displayd/
+├── audiod/
+└── inputd/
+
+drivers/
+├── virtual/
+│   ├── virtio-block/
+│   ├── virtio-net/
+│   └── test-devices/
+├── bus/
+│   ├── pci/
+│   └── usb/
+└── hardware/
+    ├── storage/
+    ├── network/
+    ├── graphics/
+    ├── audio/
+    └── input/
+
+tests/
+├── drivers/
+├── device-emulation/
+├── hardware-in-loop/
+├── driver-security/
+└── fuzz/
+```
+
+These directories should be introduced when their implementation begins. A directory's existence must not be interpreted as evidence that the corresponding subsystem is operational.
+
+# 18. Final Architectural Rule
+
+**Aether should own the policy and safety mechanisms, while individual drivers own device-specific behavior.**
+
+The kernel determines what a process is permitted to access. The device manager determines which approved driver should control a device. The driver communicates with its assigned hardware. Device services turn the result into stable capabilities for the rest of the operating system.
+
+This separation is the foundation for expanding hardware support without turning the kernel into a collection of tightly coupled device-specific implementations.
+
+Aether's success should be measured by the number of documented hardware configurations that work reliably, the proportion of driver failures that remain isolated, and the ability to expand support without compromising the kernel's security model.
