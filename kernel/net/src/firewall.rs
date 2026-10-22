@@ -4,9 +4,18 @@
 //! Every received Ethernet frame passes through [`inbound`] before the stack
 //! sees it. A frame is accepted only when it is ARP, answers a flow a local
 //! socket opened, is the DHCP reply the interface is waiting for, or is an
-//! ICMP error or echo reply. Everything else is dropped silently: no TCP
-//! reset, no ICMP port-unreachable, and no answer to ping, so a closed port
-//! looks the same as an absent host.
+//! ICMP error about a flow a local socket opened. Everything else is dropped
+//! silently: no TCP reset, no ICMP port-unreachable, and no answer to ping,
+//! so a closed port looks the same as an absent host.
+//!
+//! A flow is exact: protocol, local port, remote address, and remote port.
+//! For UDP the remote is a destination the socket has sent to, so a reply
+//! from anyone else is dropped.
+//!
+//! ARP is accepted unfiltered. Address resolution trusts the local segment,
+//! as every IPv4 host does; an attacker on the segment can redirect traffic
+//! (ARP spoofing) but cannot open a flow through this filter, and TLS is what
+//! protects the contents.
 
 /// Transport protocol of a flow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,15 +105,54 @@ fn ipv4(
         return Verdict::Drop;
     }
     match protocol {
-        // ICMP: echo reply (0), destination unreachable (3), time exceeded
-        // (11). Echo requests and everything else are dropped.
+        // ICMP: destination unreachable (3) and time exceeded (11), only
+        // about a packet one of our flows sent. Nothing local sends echo
+        // requests, so echo replies are dropped with everything else.
         1 => match payload.first() {
-            Some(0 | 3 | 11) => Verdict::Accept,
+            Some(3 | 11) => icmp_error(payload, destination, &open),
             _ => Verdict::Drop,
         },
         6 => flow(payload, 20, Protocol::Tcp, source, &open),
         17 => flow(payload, 8, Protocol::Udp, source, &open),
         _ => Verdict::Drop,
+    }
+}
+
+/// Accepts an ICMP error only when the packet it quotes left through an open
+/// flow, so a forged "unreachable" cannot tear down another connection.
+fn icmp_error(payload: &[u8], local_ip: [u8; 4], open: &impl Fn(&Flow) -> bool) -> Verdict {
+    // Type, code, checksum, and 4 unused bytes precede the quoted packet.
+    let Some(quoted) = payload.get(8..) else {
+        return Verdict::Drop;
+    };
+    if quoted.len() < 20 || quoted[0] >> 4 != 4 {
+        return Verdict::Drop;
+    }
+    let header_len = usize::from(quoted[0] & 0x0f) * 4;
+    if header_len < 20 || quoted[12..16] != local_ip {
+        return Verdict::Drop;
+    }
+    let protocol = match quoted[9] {
+        6 => Protocol::Tcp,
+        17 => Protocol::Udp,
+        _ => return Verdict::Drop,
+    };
+    let Some((local_port, remote_port)) = quoted
+        .get(header_len..)
+        .and_then(|transport| ports(transport, 4))
+    else {
+        return Verdict::Drop;
+    };
+    let flow = Flow {
+        protocol,
+        local_port,
+        remote_ip: [quoted[16], quoted[17], quoted[18], quoted[19]],
+        remote_port,
+    };
+    if open(&flow) {
+        Verdict::Accept
+    } else {
+        Verdict::Drop
     }
 }
 

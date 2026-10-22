@@ -456,7 +456,9 @@ impl InetSocket {
             }
             socket
                 .send_slice(message.data, to_smoltcp(destination))
-                .map_err(|_| EAGAIN)
+                .map_err(|_| EAGAIN)?;
+            net.note_udp_peer(handle, destination.ip, destination.port);
+            Ok(())
         })
         .ok_or(ENETUNREACH)??;
         net::poll();
@@ -730,7 +732,7 @@ impl InetSocket {
                 if stream {
                     net.retire_tcp(handle);
                 } else {
-                    net.sockets.remove(handle);
+                    net.remove_udp(handle);
                 }
             });
         }

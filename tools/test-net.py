@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import http.server
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -39,9 +40,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         sys.stderr.write("net-test http: " + (format % args) + "\n")
 
 
+def echo_udp(sock: socket.socket) -> None:
+    while True:
+        try:
+            data, peer = sock.recvfrom(2048)
+        except OSError:
+            return
+        sock.sendto(data, peer)
+
+
 def main() -> int:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    # The Linux fixture's UDP round trip uses the same port number.
+    echo = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    echo.bind(("127.0.0.1", PORT))
+    threading.Thread(target=echo_udp, args=(echo,), daemon=True).start()
     failures = []
     try:
         for model in MODELS:
@@ -75,10 +89,11 @@ def main() -> int:
                 failures.append(model)
     finally:
         server.shutdown()
+        echo.close()
     if failures:
         print(f"FAIL: network self-test failed on {', '.join(failures)}", file=sys.stderr)
         return 1
-    print(f"PASS: DHCP, kernel and Linux-app TCP fetch on {', '.join(MODELS)}")
+    print(f"PASS: DHCP, kernel TCP fetch, and Linux-app TCP and UDP on {', '.join(MODELS)}")
     return 0
 
 

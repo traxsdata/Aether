@@ -160,16 +160,54 @@ fn firewall_icmp_and_dhcp() {
         firewall::inbound(&echo_request, Some(LOCAL), false, opened),
         Verdict::Drop
     );
+    // Nothing local pings, so an echo reply is unsolicited.
     let echo_reply = frame(1, REMOTE, LOCAL, &[0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(
         firewall::inbound(&echo_reply, Some(LOCAL), false, opened),
-        Verdict::Accept
+        Verdict::Drop
     );
-    let unreachable = frame(1, REMOTE, LOCAL, &[3, 1, 0, 0, 0, 0, 0, 0]);
+    // An ICMP error must quote a packet one of our flows sent.
+    let quote = |destination: [u8; 4], source_port: u16, destination_port: u16| {
+        let mut icmp = std::vec![3u8, 1, 0, 0, 0, 0, 0, 0];
+        let original = frame(
+            6,
+            LOCAL,
+            destination,
+            &transport(source_port, destination_port, 8),
+        );
+        icmp.extend_from_slice(&original[14..]);
+        icmp
+    };
+    let router = [10, 0, 2, 1];
+    let unreachable = frame(1, router, LOCAL, &quote(REMOTE, 49152, 80));
     assert_eq!(
         firewall::inbound(&unreachable, Some(LOCAL), false, opened),
         Verdict::Accept
     );
+    let forged = frame(1, router, LOCAL, &quote(REMOTE, 49153, 80));
+    assert_eq!(
+        firewall::inbound(&forged, Some(LOCAL), false, opened),
+        Verdict::Drop
+    );
+    let elsewhere = frame(1, router, LOCAL, &quote([10, 0, 2, 9], 49152, 80));
+    assert_eq!(
+        firewall::inbound(&elsewhere, Some(LOCAL), false, opened),
+        Verdict::Drop
+    );
+    let bare = frame(1, router, LOCAL, &[3, 1, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        firewall::inbound(&bare, Some(LOCAL), false, opened),
+        Verdict::Drop
+    );
+    let full = quote(REMOTE, 49152, 80);
+    for len in 0..full.len() {
+        let _ = firewall::inbound(
+            &frame(1, router, LOCAL, &full[..len]),
+            Some(LOCAL),
+            false,
+            opened,
+        );
+    }
 
     let offer = frame(17, REMOTE, [255; 4], &transport(67, 68, 8));
     assert_eq!(

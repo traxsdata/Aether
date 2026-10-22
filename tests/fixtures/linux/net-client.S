@@ -11,7 +11,9 @@
  *   - connect to loopback is refused (ENETUNREACH);
  *   - a blocking TCP connect to the QEMU host alias reaches the page
  *     tools/test-net.py serves, and the response carries its payload;
- *   - /etc/resolv.conf names the DHCP name server.
+ *   - /etc/resolv.conf names the DHCP name server;
+ *   - a UDP datagram to the host echo port comes back through the inbound
+ *     filter, which only lets in replies from destinations the socket used.
  *
  * Assemble with --defsym AETHER_NET_PORT=<port> (the host test port).
  */
@@ -156,6 +158,47 @@ _start:
     test %rax, %rax
     jz fail
 
+    /* --- UDP round trip through the host echo server. --- */
+    mov $41, %rax               /* socket(AF_INET, SOCK_DGRAM, 0) */
+    mov $2, %rdi
+    mov $2, %rsi
+    xor %rdx, %rdx
+    syscall
+    test %rax, %rax
+    js fail
+    mov %rax, %r12
+    mov $42, %rax               /* connect(fd, host, 16) */
+    mov %r12, %rdi
+    lea host_address(%rip), %rsi
+    mov $16, %rdx
+    syscall
+    test %rax, %rax
+    jnz fail
+    mov $1, %rax
+    mov %r12, %rdi
+    lea udp_ping(%rip), %rsi
+    mov $udp_ping_len, %rdx
+    syscall
+    cmp $udp_ping_len, %rax
+    jne fail
+    mov $0, %rax                /* read blocks until the echo arrives */
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    mov $64, %rdx
+    syscall
+    cmp $udp_ping_len, %rax
+    jne fail
+    mov %rsp, %rdi
+    mov %rax, %rsi
+    lea udp_ping(%rip), %rdx
+    mov $udp_ping_len, %rcx
+    call contains
+    test %rax, %rax
+    jz fail
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+
     mov $1, %rax
     mov $1, %rdi
     lea success(%rip), %rsi
@@ -238,8 +281,11 @@ resolv_path:
 nameserver:
     .ascii "nameserver 10.0.2.3\n"
     .set nameserver_len, . - nameserver
+udp_ping:
+    .ascii "AETHER_UDP_PING"
+    .set udp_ping_len, . - udp_ping
 success:
-    .ascii "AETHER_LINUX_NET_OK tcp=ok resolv=ok listen=denied loopback=denied\n"
+    .ascii "AETHER_LINUX_NET_OK tcp=ok udp=ok resolv=ok listen=denied loopback=denied\n"
     .set success_len, . - success
 failure:
     .ascii "AETHER_LINUX_NET_FAIL\n"

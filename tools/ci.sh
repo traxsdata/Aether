@@ -15,6 +15,7 @@ make appimage-test
 make squashfs-test
 make update-test
 make test
+make net-test
 make large-apps-test
 make iso-test
 make vmware-vmx
