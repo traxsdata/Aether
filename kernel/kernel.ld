@@ -22,6 +22,11 @@ SECTIONS
     .rodata : ALIGN(4096) {
         __rodata_start = .;
         *(.rodata .rodata.*)
+        /* User-copy fixups, read by the exception handler. */
+        . = ALIGN(8);
+        __ex_table_start = .;
+        KEEP(*(.ex_table))
+        __ex_table_end = .;
         __rodata_end = .;
     }
 

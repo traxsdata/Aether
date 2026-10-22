@@ -4,8 +4,9 @@
 //! The kernel installs all 32 architectural exception vectors, the PIC timer
 //! IRQ, and a ring-3 `int 0x80` system call gate. Every path saves a complete
 //! [`InterruptFrame`]; the timer and syscall paths may return a different frame
-//! so the scheduler can switch address spaces. A kernel fault is fatal, while
-//! a user fault terminates only the faulting task.
+//! so the scheduler can switch address spaces. A kernel fault is fatal, except
+//! a page fault in the user-copy routine (see [`super::usercopy`]), while a
+//! user fault terminates only the faulting task.
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -537,10 +538,9 @@ pub fn init() {
 /// returns the next runnable frame, so a misbehaving application cannot take
 /// the kernel down.
 extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
-    // Read fields individually. A ring-0 exception frame does not contain the
-    // hardware `RSP`/`SS` slots that exist for a ring-3 transition, so copying
-    // the whole `InterruptFrame` would read past the initialized part of the
-    // stack.
+    // Read the fields the handler needs individually rather than copying the
+    // whole frame. (In 64-bit mode the CPU pushes `SS:RSP` on every
+    // interrupt, so the frame is complete for ring-0 faults too.)
     let saved_vector = unsafe { (*frame).vector };
     let saved_error = unsafe { (*frame).error };
     let saved_rip = unsafe { (*frame).rip };
@@ -556,6 +556,25 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
             cr2 = out(reg) cr2,
             options(nomem, nostack, preserves_flags)
         );
+    }
+
+    // A page fault inside the user-copy routine on a user address becomes a
+    // short copy (and `EFAULT` for the syscall) instead of a halt.
+    if !is_user
+        && let Some(fixup) = crate::arch::x86_64::usercopy::fixup_for(saved_vector, saved_rip, cr2)
+    {
+        static FIXUP_LOGS: AtomicUsize = AtomicUsize::new(0);
+        if FIXUP_LOGS.fetch_add(1, Ordering::Relaxed) < 32 {
+            serial_line!(
+                "kernel: user copy fault recovered rip={:#018x} cr2={:#018x}",
+                saved_rip,
+                cr2
+            );
+        }
+        // SAFETY: The stub passed a complete frame; resuming at the fixup
+        // label of the same routine keeps its stack and registers valid.
+        unsafe { (*frame).rip = fixup };
+        return frame;
     }
 
     static DEMAND_LOGS: AtomicUsize = AtomicUsize::new(0);

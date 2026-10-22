@@ -7,6 +7,7 @@ pub mod idt;
 pub mod rtc;
 pub mod serial;
 pub mod timer;
+pub mod usercopy;
 
 /// Installs the kernel's own descriptor and interrupt tables.
 pub fn init() {

@@ -10,6 +10,7 @@
 use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::serial;
 use crate::arch::x86_64::timer;
+use crate::arch::x86_64::usercopy;
 use crate::linux_policy;
 use crate::memory::paging;
 use crate::memory::shared;
@@ -1319,7 +1320,7 @@ fn linux_epoll_ctl(
     target_fd: u64,
     event_pointer: u64,
 ) -> i64 {
-    let Some(raw) = user_bytes(pml4, event_pointer, 12, false) else {
+    let Some(raw) = read_user_array::<12>(pml4, event_pointer) else {
         return LINUX_EFAULT;
     };
     let events = u32::from_ne_bytes(raw[..4].try_into().unwrap_or([0; 4]));
@@ -1511,7 +1512,7 @@ fn linux_prlimit(pml4: PhysFrame, pid: u64, resource: u64, new_limit: u64, old_l
     if new_limit != 0 {
         // Limits are fixed, so only a request that keeps them succeeds. A
         // different value is refused instead of being reported as applied.
-        let Some(raw) = user_bytes(pml4, new_limit, 16, false) else {
+        let Some(raw) = read_user_array::<16>(pml4, new_limit) else {
             return LINUX_EFAULT;
         };
         let soft = u64::from_ne_bytes(raw[..8].try_into().unwrap_or([0; 8]));
@@ -1629,7 +1630,7 @@ fn linux_rt_sigaction(pml4: PhysFrame, signum: u64, action_pointer: u64, old_poi
     }
     let old = scheduler::linux_get_sigaction(signum as usize);
     if action_pointer != 0 {
-        let Some(raw) = user_bytes(pml4, action_pointer, 32, false) else {
+        let Some(raw) = read_user_array::<32>(pml4, action_pointer) else {
             return LINUX_EFAULT;
         };
         let action = scheduler::SigAction {
@@ -1669,10 +1670,10 @@ fn linux_rt_sigaction(pml4: PhysFrame, signum: u64, action_pointer: u64, old_poi
 fn linux_rt_sigprocmask(pml4: PhysFrame, how: u64, set_pointer: u64, old_pointer: u64) -> i64 {
     let old = scheduler::linux_sigmask();
     if set_pointer != 0 {
-        let Some(raw) = user_bytes(pml4, set_pointer, 8, false) else {
+        let Some(raw) = read_user_array::<8>(pml4, set_pointer) else {
             return LINUX_EFAULT;
         };
-        let set = u64::from_ne_bytes(raw.try_into().unwrap_or([0; 8]));
+        let set = u64::from_ne_bytes(raw);
         let updated = match how {
             0 => old | set,
             1 => old & !set,
@@ -1692,7 +1693,7 @@ fn linux_sigaltstack(pml4: PhysFrame, stack_pointer: u64, old_pointer: u64) -> i
     const SS_DISABLE: u32 = 2;
     const SS_AUTODISARM: u32 = 1 << 31;
     if stack_pointer != 0 {
-        let Some(raw) = user_bytes(pml4, stack_pointer, 24, false) else {
+        let Some(raw) = read_user_array::<24>(pml4, stack_pointer) else {
             return LINUX_EFAULT;
         };
         let pointer = u64::from_ne_bytes(raw[0..8].try_into().unwrap_or([0; 8]));
@@ -2040,8 +2041,8 @@ fn read_exec_vector(
     }
     for index in 0..output.len() {
         let slot = pointer.checked_add((index as u64).checked_mul(8)?)?;
-        let bytes = user_bytes(pml4, slot, 8, false)?;
-        let value = u64::from_ne_bytes(bytes.try_into().ok()?);
+        let bytes = read_user_array::<8>(pml4, slot)?;
+        let value = u64::from_ne_bytes(bytes);
         if value == 0 {
             return Some(index);
         }
@@ -2493,7 +2494,7 @@ fn realtime_offset_ticks() -> Option<u64> {
 /// Reads and validates a `timespec`. Negative values and out-of-range
 /// nanoseconds are rejected rather than normalized.
 fn read_timespec(pml4: PhysFrame, pointer: u64) -> Option<(u64, u64)> {
-    let raw = user_bytes(pml4, pointer, 16, false)?;
+    let raw = read_user_array::<16>(pml4, pointer)?;
     let seconds = i64::from_ne_bytes(raw[..8].try_into().ok()?);
     let nanoseconds = i64::from_ne_bytes(raw[8..].try_into().ok()?);
     if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
@@ -2631,7 +2632,7 @@ fn linux_timerfd_settime(
     if flags & !1 != 0 {
         return LINUX_EINVAL;
     }
-    let Some(raw) = user_bytes(pml4, new_pointer, 32, false) else {
+    let Some(raw) = read_user_array::<32>(pml4, new_pointer) else {
         return LINUX_EFAULT;
     };
     let read = |offset: usize| -> Option<(u64, u64)> {
@@ -2723,11 +2724,7 @@ fn linux_uname(pml4: PhysFrame, pointer: u64) -> i64 {
 }
 
 fn write_user_bytes(pml4: PhysFrame, pointer: u64, bytes: &[u8]) -> Option<()> {
-    // SAFETY: `user_bytes_mut` validates the range and the syscall path runs
-    // with interrupts masked, so no concurrent user access can alias it.
-    let destination = unsafe { user_bytes_mut(pml4, pointer, bytes.len() as u64)? };
-    destination.copy_from_slice(bytes);
-    Some(())
+    copy_to_user(pml4, pointer, bytes)
 }
 
 fn write_user_u64(pml4: PhysFrame, pointer: u64) -> Option<()> {
@@ -3055,6 +3052,52 @@ pub unsafe fn user_bytes_mut<'a>(
     // SAFETY: The range is inside the user window and every page is present
     // and writable. The caller supplies the aliasing guarantee.
     Some(unsafe { core::slice::from_raw_parts_mut(pointer as *mut u8, length as usize) })
+}
+
+/// Copies `buffer.len()` bytes from the current task's user memory.
+///
+/// The range is validated as for [`user_bytes`]; the copy itself goes through
+/// the fixup-protected routine, so a page that disappears after validation
+/// returns `None` (`EFAULT`) instead of halting the kernel. Unlike
+/// [`user_bytes`], no reference into user memory escapes.
+fn copy_from_user(pml4: PhysFrame, pointer: u64, buffer: &mut [u8]) -> Option<()> {
+    let length = buffer.len() as u64;
+    if buffer.len() > MAX_SYSCALL_IO || pointer >= USER_LIMIT {
+        return None;
+    }
+    if !linux_user_range_valid(pml4, pointer, length, false) {
+        return None;
+    }
+    // SAFETY: The source range was validated to lie in the user window of
+    // the active address space, and `buffer` is a kernel buffer of `length`
+    // bytes. A user-side fault is recovered by the exception table.
+    let left =
+        unsafe { usercopy::copy_raw(buffer.as_mut_ptr(), pointer as *const u8, buffer.len()) };
+    (left == 0).then_some(())
+}
+
+/// Copies `bytes` into the current task's user memory with the same checks
+/// and fault behaviour as [`copy_from_user`].
+fn copy_to_user(pml4: PhysFrame, pointer: u64, bytes: &[u8]) -> Option<()> {
+    let length = bytes.len() as u64;
+    if bytes.len() > MAX_SYSCALL_IO || pointer >= USER_LIMIT {
+        return None;
+    }
+    if !linux_user_range_valid(pml4, pointer, length, true) {
+        return None;
+    }
+    // SAFETY: The destination range was validated as writable user memory in
+    // the active address space, and `bytes` is a kernel buffer. A user-side
+    // fault is recovered by the exception table.
+    let left = unsafe { usercopy::copy_raw(pointer as *mut u8, bytes.as_ptr(), bytes.len()) };
+    (left == 0).then_some(())
+}
+
+/// Reads a fixed-size user record, such as a `timespec` or `sigaction`.
+fn read_user_array<const N: usize>(pml4: PhysFrame, pointer: u64) -> Option<[u8; N]> {
+    let mut buffer = [0u8; N];
+    copy_from_user(pml4, pointer, &mut buffer)?;
+    Some(buffer)
 }
 
 fn linux_user_range_valid(pml4: PhysFrame, pointer: u64, length: u64, write: bool) -> bool {
