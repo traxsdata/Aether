@@ -81,13 +81,19 @@ grants, and the desktop is not a security authority.
   PML4, with TSS/RSP0 kernel stacks, an `int 0x80` syscall gate, user-pointer
   validation, and fault containment.
 - A bounded virtual block device and filesystem with directories, files, open
-  handles, path traversal rejection, quotas, and per-process roots.
+  handles, path traversal rejection, quotas, and per-process roots. The user
+  workspace seeds the specification's personal folders, and each installed
+  application receives category-separated private storage.
 - Generation-checked file capabilities; `open`, `read`, `write`, `close`,
   `list`, and `stat` syscalls; scoped copy/rename/delete with open-handle
   protection (`AETHER_FILES_MUTATE_OK`); a kernel-mediated file portal with an
   interactive consent UI, exact-path revocation (`AETHER_REVOCATION_OK`), and
   persisted grant records; and enforcement of the verified package's declared
   open-file limit (`ENOSPC` on excess opens).
+- A host-tested unified-filesystem policy for stable resource identity,
+  ownership domains, file/folder capability scope, one-time and persistent
+  grants, revocation, search isolation, storage accounting, and uninstall
+  preservation (`kernel/services/src/ux.rs`).
 - Endpoint close/destroy with per-table alias revocation and task-exit cleanup,
   plus blocking endpoint receive with tick deadlines and `ETIMEDOUT`
   (`AETHER_IPC_USER_OK` reports block/timeout/close counters).
@@ -106,12 +112,13 @@ grants, and the desktop is not a security authority.
   atomic page flips and do not guarantee tear-free scanout.
 - Original vector artwork, a procedural wallpaper, an original 5×7 typeface,
   and a host-testable `aether-wm` state/layout and Files-browser model.
-- Files navigation with sidebar locations, folder selection and
-  double-click/Enter, parent navigation, keyboard scrolling, refresh, and bounded
-  text previews. Scoped copy (`F3`), rename (`F2`), and delete (`Delete`) use
-  service-enforced paths; private application vaults are denied by the adapter.
-  Tabs/split panes, a durable block store, and a general application opener are
-  not implemented.
+- Files navigation with the thirteen specification sidebar locations, folder
+  selection and double-click/Enter, parent navigation, keyboard scrolling,
+  refresh, and bounded text previews. Scoped copy (`F3`), rename (`F2`), and
+  recoverable delete to Trash (`Delete`) use service-enforced paths; private
+  application vaults are denied by the adapter. Tabs/split panes, Trash
+  restoration, a durable block store, and a general application opener are not
+  implemented.
 - PS/2 keyboard and mouse input: IRQ1 and IRQ12, modifier capture, bounded
   queues, E0 dedicated arrows, independent left/right modifiers, packet
   validation, retained pointer press/release events, and deterministic self-tests.

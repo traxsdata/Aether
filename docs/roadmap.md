@@ -79,6 +79,15 @@ It is a planning model, not a delivery promise.
 - [x] Desktop shell, file manager, settings, and Security Center views.
 - [x] Read-only Files folder navigation, selection, keyboard scrolling, refresh,
   and bounded text previews; no implicit application-vault access.
+- [x] Unified user workspace and Explorer navigation from AETHER-UX-002: the
+  Home, Recent, Favorites, Documents, Downloads, Pictures, Music, Videos,
+  Projects, Shared, Applications, Devices, and Trash destinations; recoverable
+  user delete through Trash; category-separated application-private storage.
+- [x] Host-tested unified-filesystem policy for stable resource identity,
+  ownership domains, file/folder grant scope, one-time and persistent grants,
+  revocation, search isolation, storage accounting, and uninstall preservation
+  (`kernel/services/src/ux.rs`). Live kernel portal integration for folders is
+  still pending.
 - [x] Cached wallpaper, damage-tracked scene rendering/presentation, cursor-only
   updates, elapsed-tick animation, and real-input ISO regression tests.
 - [x] File portal with per-process, per-file grant records; revocation blocks

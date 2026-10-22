@@ -94,6 +94,8 @@ pub fn init() -> Result<(), FsError> {
         "apps/other",
         "apps/other/private",
         "system",
+        "system/applications",
+        "system/devices",
         "system/images",
         "system/updates",
         "system/portal",
@@ -117,6 +119,30 @@ pub fn init() -> Result<(), FsError> {
         b"version=0.1.0\ncounter=1\nchannel=developer\n",
     )?;
     filesystem.write_file("/", "/home/welcome.txt", b"welcome to aether\n")?;
+    // The user workspace is a logical namespace: these folders are ordinary
+    // user-owned storage, never a route to application-private data. They are
+    // created after welcome.txt so existing UI selection and smoke tests keep
+    // the welcome document as the first Home entry.
+    for directory in [
+        "home/Recent",
+        "home/Favorites",
+        "home/Documents",
+        "home/Downloads",
+        "home/Pictures",
+        "home/Music",
+        "home/Videos",
+        "home/Projects",
+        "home/Shared",
+        "home/Trash",
+    ] {
+        filesystem.mkdir("/", directory)?;
+    }
+    filesystem.write_file(
+        "/",
+        "/system/applications/README.txt",
+        b"installed applications\n",
+    )?;
+    filesystem.write_file("/", "/system/devices/README.txt", b"no devices attached\n")?;
     filesystem.write_file("/", "/portal/README.txt", b"file portal grants\n")?;
     #[cfg(feature = "gate4-portal-test")]
     filesystem.write_file("/", GATE4_WORKBOOK, GATE4_WORKBOOK_FIXTURE)?;
@@ -143,7 +169,25 @@ pub fn seed_application_roots() -> Result<(), FsError> {
     let end = root.len() + SUFFIX.len();
     path[root.len()..end].copy_from_slice(SUFFIX.as_bytes());
     let path = core::str::from_utf8(&path[..end]).map_err(|_| FsError::Corrupt)?;
-    with_fs(|filesystem| filesystem.mkdir("/", path))
+    with_fs(|filesystem| filesystem.mkdir("/", path))?;
+    // Every application receives category-separated private storage. The
+    // service, not the application, owns the physical tree; application code
+    // reaches these categories only through capability-checked handles.
+    for category in ["Data", "Cache", "Settings", "Temporary"] {
+        let mut category_path = [0u8; 96];
+        let prefix = path.as_bytes();
+        let end = prefix.len() + 1 + category.len();
+        if end > category_path.len() {
+            return Err(FsError::PathTooLong);
+        }
+        category_path[..prefix.len()].copy_from_slice(prefix);
+        category_path[prefix.len()] = b'/';
+        category_path[prefix.len() + 1..end].copy_from_slice(category.as_bytes());
+        let category_path =
+            core::str::from_utf8(&category_path[..end]).map_err(|_| FsError::Corrupt)?;
+        with_fs(|filesystem| filesystem.mkdir("/", category_path))?;
+    }
+    Ok(())
 }
 
 /// Returns the number of paths rejected for escaping a process root.
@@ -576,6 +620,52 @@ fn browser_scope(path: &str) -> Result<(&'static str, &str), FsError> {
     Err(FsError::Access)
 }
 
+const TRASH_ROOT: &str = "/home/Trash";
+
+fn trash_name(name: &str, attempt: u8) -> [u8; aether_fs::MAX_NAME] {
+    let mut target = [0u8; aether_fs::MAX_NAME];
+    let (prefix, source) = if attempt == 0 {
+        ("", name)
+    } else {
+        // Keep the original name when possible; otherwise use a bounded
+        // `tN-` prefix so a collision in Trash never overwrites an item.
+        let prefix = match attempt {
+            1 => "t1-",
+            2 => "t2-",
+            3 => "t3-",
+            4 => "t4-",
+            5 => "t5-",
+            _ => "t9-",
+        };
+        (prefix, name)
+    };
+    let prefix = prefix.as_bytes();
+    let length = prefix.len() + source.len().min(target.len() - prefix.len());
+    target[..prefix.len()].copy_from_slice(prefix);
+    target[prefix.len()..length].copy_from_slice(&source.as_bytes()[..length - prefix.len()]);
+    target
+}
+
+fn trash_path<'a>(
+    name: &str,
+    attempt: u8,
+    out: &'a mut [u8; aether_fs::MAX_PATH],
+) -> Option<&'a str> {
+    let name = trash_name(name, attempt);
+    let name_len = name
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(name.len());
+    let end = TRASH_ROOT.len() + 1 + name_len;
+    if end > out.len() {
+        return None;
+    }
+    out[..TRASH_ROOT.len()].copy_from_slice(TRASH_ROOT.as_bytes());
+    out[TRASH_ROOT.len()] = b'/';
+    out[TRASH_ROOT.len() + 1..end].copy_from_slice(&name[..name_len]);
+    core::str::from_utf8(&out[..end]).ok()
+}
+
 impl aether_wm::browser::BrowserSource for BrowserFiles {
     fn list(
         &mut self,
@@ -605,8 +695,29 @@ impl aether_wm::browser::BrowserSource for BrowserFiles {
     }
 
     fn remove(&mut self, path: &str) -> Result<(), aether_wm::browser::BrowserError> {
-        let (root, relative) = browser_scope(path).map_err(browser_error)?;
-        with_fs(|filesystem| filesystem.remove(root, relative)).map_err(browser_error)
+        // User-facing delete is recoverable. Deleting from Trash is the
+        // explicit permanent action, and application-private cleanup never
+        // enters this path.
+        if path == TRASH_ROOT || path.starts_with("/home/Trash/") {
+            let (root, relative) = browser_scope(path).map_err(browser_error)?;
+            return with_fs(|filesystem| filesystem.remove(root, relative)).map_err(browser_error);
+        }
+        let name = path.rsplit('/').next().unwrap_or("");
+        if name.is_empty() {
+            return Err(aether_wm::browser::BrowserError::InvalidData);
+        }
+        for attempt in 0..=5u8 {
+            let mut destination = [0u8; aether_fs::MAX_PATH];
+            let Some(destination) = trash_path(name, attempt, &mut destination) else {
+                return Err(aether_wm::browser::BrowserError::InvalidData);
+            };
+            match with_fs(|filesystem| filesystem.rename("/", path, destination)) {
+                Ok(()) => return Ok(()),
+                Err(aether_fs::FsError::Exists) => continue,
+                Err(error) => return Err(browser_error(error)),
+            }
+        }
+        Err(aether_wm::browser::BrowserError::Unavailable)
     }
 
     fn rename(

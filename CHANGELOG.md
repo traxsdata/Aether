@@ -7,6 +7,19 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Unified filesystem user experience from AETHER-UX-002. A new host-tested
+  `aether_services::ux` policy defines stable resource identities, ownership
+  domains, the full file/folder right set, selected-file versus selected-folder
+  grants, one-time and persistent lifetimes, revocation, search isolation,
+  application storage categories and quotas, uninstall preservation, and a
+  bounded Recent list. The user workspace now seeds the specification's
+  Documents, Downloads, Pictures, Music, Videos, Projects, Shared, Recent,
+  Favorites, and Trash folders, and installed applications receive
+  category-separated private storage. Files shows the thirteen specified
+  navigation destinations, and user deletion moves items to Trash instead of
+  destroying them. The RAM filesystem grows to 64 inodes. Live kernel folder
+  grants, Trash restoration metadata, and application-contributed collections
+  remain future work; see `docs/specifications/ui-filesystem.md`.
 - Craft app suite: `tools/test-craft-apps.py` downloads and verifies every
   published Craft AppImage, runs a headless smoke test, and runs the windowed
   Gate 4 path. All 13 headless runs pass; 9 present a window. The suite found

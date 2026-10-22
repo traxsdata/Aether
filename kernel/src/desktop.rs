@@ -918,6 +918,10 @@ pub fn self_test() {
         let deleted_copy = reselected && files.delete_selected(&mut fs::BrowserFiles);
         let original = deleted_copy && files.select_name("mutate.txt");
         let deleted_original = original && files.delete_selected(&mut fs::BrowserFiles);
+        let mut trashed = [0u8; 16];
+        let trashed = deleted_original
+            && fs::read_path("/home/Trash/mutate.txt", &mut trashed).is_ok()
+            && fs::read_path("/home/Trash/renamed.txt", &mut trashed).is_ok();
         mutate_ok = navigated
             && selected
             && duplicated
@@ -926,19 +930,22 @@ pub fn self_test() {
             && reselected
             && deleted_copy
             && original
-            && deleted_original;
+            && deleted_original
+            && trashed;
         if !mutate_ok {
             serial_line!(
                 "desktop: mutation steps nav={navigated} select={selected} copy={duplicated} \
                  copy_select={copied} rename={renamed} select2={reselected} delete_copy={deleted_copy} \
-                 select3={original} delete={deleted_original} error={:?}",
+                 select3={original} delete={deleted_original} trash={trashed} error={:?}",
                 files.error()
             );
         }
+        let _ = fs::remove_path("/home/Trash/mutate.txt");
+        let _ = fs::remove_path("/home/Trash/renamed.txt");
         let _ = fs::remove_path(MUTATE_PATH);
     }
     if mutate_ok {
-        serial_line!("AETHER_FILES_MUTATE_OK copy=1 rename=1 delete=1");
+        serial_line!("AETHER_FILES_MUTATE_OK copy=1 rename=1 delete=1 trash=1");
     } else {
         serial_line!("AETHER_FILES_FAILED reason=mutation");
         failures += 1;

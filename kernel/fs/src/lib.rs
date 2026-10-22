@@ -19,7 +19,11 @@ pub const BLOCK_COUNT: usize = 256;
 /// Total device size in bytes.
 pub const DISK_BYTES: usize = BLOCK_SIZE * BLOCK_COUNT;
 /// Maximum inode number.
-pub const MAX_INODES: usize = 32;
+///
+/// The user workspace and per-application private categories need more than
+/// the original bring-up table of 32 entries, while still fitting in the
+/// reserved inode blocks before the first data block.
+pub const MAX_INODES: usize = 64;
 /// Blocks a file may occupy.
 pub const MAX_FILE_BLOCKS: usize = 8;
 /// Maximum file size.
@@ -36,11 +40,11 @@ pub const MAX_ENTRIES: usize = BLOCK_SIZE / ENTRY_BYTES;
 pub const MAX_OPEN: usize = 8;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"AFS1");
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const ROOT_INODE: u16 = 1;
 const INODE_TABLE_BLOCK: u16 = 1;
 const INODE_BYTES: usize = 32;
-const DATA_START_BLOCK: u16 = 3;
+const DATA_START_BLOCK: u16 = 5;
 const FREE_BITMAP_OFFSET: usize = 16;
 const MODE_FREE: u8 = 0;
 const MODE_FILE: u8 = 1;

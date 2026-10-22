@@ -13,6 +13,7 @@ extern crate std;
 
 pub mod portal_store;
 pub mod runtime;
+pub mod ux;
 
 /// Maximum registered services.
 pub const MAX_SERVICES: usize = 12;

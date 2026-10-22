@@ -158,11 +158,24 @@ impl BrowserLayout {
 }
 
 /// Sidebar labels and service paths; no hidden destinations or mock buttons.
-pub const LOCATIONS: [(&str, &str); 4] = [
-    ("Volume", "/"),
+///
+/// The order matches AETHER-UX-002 §2.1 and is shared by ordinary browsing,
+/// Open, Save, and file-selection portals. `/system/applications` exposes
+/// package metadata and user-visible documents, never private vault contents.
+pub const LOCATIONS: [(&str, &str); 13] = [
     ("Home", "/home"),
-    ("System", "/system"),
-    ("Portal", "/portal"),
+    ("Recent", "/home/Recent"),
+    ("Favorites", "/home/Favorites"),
+    ("Documents", "/home/Documents"),
+    ("Downloads", "/home/Downloads"),
+    ("Pictures", "/home/Pictures"),
+    ("Music", "/home/Music"),
+    ("Videos", "/home/Videos"),
+    ("Projects", "/home/Projects"),
+    ("Shared", "/home/Shared"),
+    ("Applications", "/system/applications"),
+    ("Devices", "/system/devices"),
+    ("Trash", "/home/Trash"),
 ];
 
 /// Read-only folder navigation, selection, scrolling, and bounded text previews.
