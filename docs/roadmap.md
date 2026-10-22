@@ -479,6 +479,11 @@ gesture, and there is no GPU service.
   the limits to 512 Linux tasks, 1,024 descriptors per process, and larger
   pipe, eventfd, epoll, and timerfd tables without growing the kernel image
   (`make large-apps-test`).
+- [x] Local sockets: `socketpair(AF_UNIX)` stream, seqpacket, and datagram
+  pairs with `SCM_RIGHTS`, poll and epoll readiness, and `EPIPE` instead of
+  `SIGPIPE`. There is no named or abstract namespace, and descriptors whose
+  state lives in the sending task (eventfd, epoll, timerfd, inotify, display)
+  cannot be passed (`AETHER_LINUX_UNIX_OK`).
 - [ ] On-demand AppImage import. Every imported file still stays resident in
   the fixed heap arena; large applications need a selective import of the
   files they open.

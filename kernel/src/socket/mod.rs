@@ -306,6 +306,34 @@ pub fn poll(index: usize, events: i16) -> i16 {
     }
 }
 
+/// Whether the socket in slot `index` may travel in an `SCM_RIGHTS` message
+/// sent through local pair `channel`. A local endpoint may not ride its own
+/// pair, or any pair while its own pair holds queued sockets; either would
+/// let a reference cycle keep both pairs alive after every descriptor
+/// closes.
+pub fn passable_socket(index: usize, channel: u64) -> bool {
+    match slots().get(index).and_then(Option::as_ref) {
+        Some(SocketSlot {
+            kind: SocketKind::Unix(socket),
+            ..
+        }) => socket.channel_id() != channel && !socket.carries_sockets(),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Pipe ends queued in local socket messages, as (readers, writers).
+pub fn in_flight_pipe_users(index: usize) -> (usize, usize) {
+    slots()
+        .iter()
+        .flatten()
+        .filter_map(|slot| match &slot.kind {
+            SocketKind::Unix(socket) => Some(socket.queued_pipe_ends(index)),
+            SocketKind::Inet(_) => None,
+        })
+        .fold((0, 0), |total, ends| (total.0 + ends.0, total.1 + ends.1))
+}
+
 /// `fstat` inode number for a socket descriptor.
 #[must_use]
 pub const fn inode(index: usize) -> u64 {

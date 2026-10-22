@@ -5387,7 +5387,9 @@ fn pipe_users(index: usize) -> (usize, usize) {
             }
         }
     }
-    (readers, writers)
+    // Ends queued in `SCM_RIGHTS` messages still count as open.
+    let (queued_readers, queued_writers) = crate::socket::in_flight_pipe_users(index);
+    (readers + queued_readers, writers + queued_writers)
 }
 
 /// Returns the pipe slot and direction for a descriptor.
@@ -5513,6 +5515,96 @@ pub fn linux_socket_index(fd: u64) -> Result<usize, i64> {
         Some(_) => Err(crate::socket::ENOTSOCK),
         None => Err(LINUX_EBADF),
     }
+}
+
+/// A descriptor in flight in an `SCM_RIGHTS` message.
+///
+/// It holds the object reference a descriptor would hold, so the memfd,
+/// socket, or pipe behind it stays alive while no task has it installed.
+/// Dropping it drops that reference.
+pub struct LinuxPassedFile(LinuxFile);
+
+impl LinuxPassedFile {
+    /// The pipe slot and direction, for pipe-user counting.
+    #[must_use]
+    pub fn pipe_end(&self) -> Option<(usize, bool)> {
+        match self.0.source {
+            LinuxFileSource::Pipe { index, write } => Some((index, write)),
+            _ => None,
+        }
+    }
+
+    /// The socket slot, for the in-flight cycle check.
+    #[must_use]
+    pub fn socket_index(&self) -> Option<usize> {
+        match self.0.source {
+            LinuxFileSource::Socket { index } => Some(index),
+            _ => None,
+        }
+    }
+}
+
+impl Drop for LinuxPassedFile {
+    fn drop(&mut self) {
+        match self.0.source {
+            LinuxFileSource::Pipe { index, .. } => {
+                // `pipe_users` no longer sees this end once it is dropped.
+                linux_release_pipe(index);
+                linux_wake_pipe(index);
+                linux_wake_pollers();
+            }
+            source => release_shared_object(source),
+        }
+    }
+}
+
+/// Takes a reference to the object behind `fd` for `SCM_RIGHTS`.
+///
+/// Descriptors whose state lives in the sending task (eventfd, epoll,
+/// timerfd, inotify, the display endpoint) cannot be passed and fail with
+/// `EINVAL`, so a receiver never indexes another task's tables.
+pub fn linux_pass_file(fd: u64) -> Result<LinuxPassedFile, i64> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    let file = task
+        .linux_fds
+        .get(fd as usize)
+        .copied()
+        .flatten()
+        .ok_or(LINUX_EBADF)?;
+    if matches!(
+        file.source,
+        LinuxFileSource::EventFd { .. }
+            | LinuxFileSource::Epoll { .. }
+            | LinuxFileSource::TimerFd { .. }
+            | LinuxFileSource::Inotify
+            | LinuxFileSource::Display
+    ) {
+        return Err(LINUX_EINVAL);
+    }
+    retain_shared_object(file.source);
+    Ok(LinuxPassedFile(file))
+}
+
+/// Installs a passed descriptor in the lowest free slot above stdio. The
+/// passed reference becomes the descriptor's; with no free slot the file is
+/// dropped and `None` returned.
+pub fn linux_receive_file(file: LinuxPassedFile) -> Option<u64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let Some(descriptor) = task
+        .linux_fds
+        .iter()
+        .enumerate()
+        .skip(3)
+        .find_map(|(descriptor, slot)| slot.is_none().then_some(descriptor))
+    else {
+        drop(file);
+        return None;
+    };
+    let file = core::mem::ManuallyDrop::new(file);
+    task.linux_fds[descriptor] = Some(file.0);
+    Some(descriptor as u64)
 }
 
 /// Creates an eventfd with the given initial counter.
@@ -7094,6 +7186,11 @@ pub fn linux_vma_insert(
         return Err(VmaError::InvalidRange);
     }
     if shared && shared_vma_usage(task.overlay_app) >= MAX_DOMAIN_SHARED_VMAS {
+        return Err(VmaError::OutOfSpace);
+    }
+    // A table insert may allocate tree nodes, and an allocation failure
+    // there would panic the kernel; refuse with ENOMEM while there is room.
+    if !crate::memory::heap_has_headroom() {
         return Err(VmaError::OutOfSpace);
     }
     // The tables belong to the process, so this one update is visible to

@@ -5,7 +5,7 @@ mod heap;
 pub mod paging;
 pub mod shared;
 
-pub use heap::stats as heap_stats;
+pub use heap::{has_headroom as heap_has_headroom, stats as heap_stats};
 
 /// Reserves the kernel heap arena from the frame allocator.
 ///

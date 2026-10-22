@@ -76,6 +76,19 @@ pub fn stats() -> HeapStats {
     with_heap(|heap| heap.stats())
 }
 
+/// Free heap a syscall keeps in reserve before it grows a kernel table or
+/// queue for user space: two slabs, so one more size class can refill.
+const HEADROOM: usize = 2 * aether_memory::heap::SLAB_BYTES;
+
+/// Whether the heap can take a syscall-sized allocation without running
+/// dry. Paths whose collections cannot report failure (`BTreeMap`, `Rc`)
+/// check this first and return `ENOMEM`, because an exhausted kernel heap
+/// panics instead.
+#[must_use]
+pub fn has_headroom() -> bool {
+    stats().free_large >= HEADROOM
+}
+
 /// Global allocator backed by the kernel heap.
 pub struct KernelAllocator;
 
