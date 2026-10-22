@@ -356,6 +356,61 @@ runtime pin is host-derived, the overlay is RAM-backed, and the AppImage is
 staged at build time rather than selected by a user. These do not block the
 headless gate but do block a production compatibility claim.
 
+### Headless PhotoCraft — the next Craft app
+
+Run the bundled `photocraft-cli` from a second, independently pinned Craft
+AppImage through the same Gate 3 runtime.
+
+**Status: headless pass at QEMU prototype scope** on 2026-10-22.
+`make photocraft-test` stages PhotoCraft 0.12.0
+(`da821339afce93b72991c7900a28f589eb06a885e0ab59ea702ddec9a280ac66`,
+80,026,104 bytes, source `github.com/storytold/photocraft@4d4de45`), verifies
+its signed record and digest, and runs:
+
+```text
+photocraft-cli run /usr/share/photocraft/photo-in.png \
+  --cmd image.imageSize --params '{"width":4,"height":4}' \
+  --out /tmp/photocraft-out.png --format png
+```
+
+The boot transcript contains the engine result
+`{"command":"image.imageSize","result":{"height":4,"width":4}}`, a zero exit,
+`AETHER_GATE3_APP_OK`, and the kernel-owned
+`AETHER_GATE3_DENIAL_OK portal=none native=denied root=readonly
+overlay=private`. The fixture input is an 8×8 RGB PNG; the output is written
+only to the application's RAM-backed `/tmp` overlay. The compatibility record
+is `limited` with `linux.appimage.import`, `linux.photocraft.open`,
+`linux.photocraft.resize`, `linux.overlay.write`, and `linux.denial.portal`.
+
+This run exposed and fixed three prototype limits:
+
+- The interpreter base was 120 MiB while PhotoCraft's main image ends near
+  148 MiB, so ld.so was mapped over the application. The interpreter now sits
+  at 512 MiB and the loader rejects any main/interpreter overlap.
+- The staged-AppImage bound was 32 MiB; it is now 128 MiB, enough for the
+  current Craft suite while remaining a fail-closed bound.
+- `/tmp` creation and `fsync` returned `ENOSYS`. Both `mkdir`/`mkdirat` in the
+  writable overlay namespace and `fsync`/`fdatasync` are implemented. The
+  overlay creates virtual directories; it does not list them in `getdents64`
+  until a file exists beneath them. Exited task slots are not reclaimed, so
+  the task table was widened to keep a large application's threads from
+  starving the later boot fixtures.
+
+The GUI is not tested. Wayland presentation, Vulkan, image codecs beyond the
+PNG path, and the Craft App Store package format remain follow-ups.
+
+### Craft app suite
+
+All thirteen published Craft AppImages were exercised with the generic
+`craft-smoke-test` and `craft-gui-test` targets. All thirteen completed the
+headless smoke path; nine presented a window. The per-app matrix, pinned
+versions, and failure reasons are in
+[the Craft app suite review](../reviews/craft-apps.md). Run the suite with:
+
+```sh
+python3 tools/test-craft-apps.py
+```
+
 ### Gate 4 — Windowed GridCraft
 
 Run `usr/bin/gridcraft` with the Wayland bridge and software renderer, present

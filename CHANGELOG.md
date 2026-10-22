@@ -25,6 +25,69 @@ versioning scheme until the kernel ABI stabilises.
   or console input is pending, so a busy program cannot freeze the screen.
   `make terminal-test` drives the whole path over the serial console.
 
+### Security
+
+- Transparent pre-image retention for file replacement. `AetherFs` now keeps
+  the previous block chain when a file is overwritten and reclaims it only
+  before a legitimate write or directory allocation fails, so a permitted
+  overwrite no longer destroys the only copy. The new `restore <path>` console
+  command swaps the file with its retained version, and the swap invalidates
+  stale writable handles. Retention is one generation, held in memory on the
+  volatile ramdisk; authenticated persistent snapshots and a normal recovery
+  UI remain future work.
+
+- Filesystem stress hardening: filenames with ASCII control bytes are rejected
+  before they can inject records into the service listing format, corrupted
+  directory entries with zero/out-of-range inodes, unknown kinds, or duplicate
+  names now fail closed, and file/directory data pointers into reserved
+  metadata blocks are rejected. Corrupt entries must also agree with the kind
+  of inode they name, and names must be safe UTF-8 path components. Whole-file
+  replacement now invalidates stale writable handles, a failed rename rollback
+  releases a newly allocated directory block, and post-commit cleanup cannot
+  report a committed write as failed. Added randomized operation and
+  corrupted-image stress tests; remaining cross-link and durability issues are
+  recorded in `docs/reviews/filesystem-stress.md`.
+
+- Unified filesystem user experience from AETHER-UX-002. A new host-tested
+  `aether_services::ux` policy defines stable resource identities, ownership
+  domains, the full file/folder right set, selected-file versus selected-folder
+  grants, one-time and persistent lifetimes, revocation, search isolation,
+  application storage categories and quotas, uninstall preservation, and a
+  bounded Recent list. The user workspace now seeds the specification's
+  Documents, Downloads, Pictures, Music, Videos, Projects, Shared, Recent,
+  Favorites, and Trash folders, and installed applications receive
+  category-separated private storage. Files shows the thirteen specified
+  navigation destinations, and user deletion moves items to Trash instead of
+  destroying them. The RAM filesystem grows to 96 inodes. Live kernel folder
+  grants, Trash restoration metadata, and application-contributed collections
+  remain future work; see `docs/specifications/ui-filesystem.md`.
+- Recoverable Trash restoration. The filesystem service records the Trash
+  component and original absolute path for every user-facing delete in a
+  bounded, fail-closed `/system/trash/index` store. Activating an item in Trash
+  restores it to that exact path and refuses to overwrite an existing file;
+  permanent deletion removes the metadata. A Trash-name collision preserves
+  the record of the item already in Trash, names that collide are truncated on
+  a UTF-8 boundary, and the store is sized for every bounded record. System
+  locations delete permanently rather than entering Trash, and Trash items
+  cannot be renamed or duplicated out from under the restoration index. The
+  boot mutation test now proves delete, Trash placement, and restoration
+  (`AETHER_FILES_MUTATE_OK ... restore=1`).
+- Craft app suite: `tools/test-craft-apps.py` downloads and verifies every
+  published Craft AppImage, runs a headless smoke test, and runs the windowed
+  Gate 4 path. All 13 headless runs pass; 9 present a window. The suite found
+  and fixed a multi-header SquashFS directory bug (VectorCraft) and a missing
+  `libasound.so.2` in the Gate 4 runtime (FilmCraft). Six apps still fail the
+  windowed handshake with winit `NoCompositor`; the matrix is in
+  `docs/reviews/craft-apps.md`.
+- Headless PhotoCraft: `make photocraft-test` signs, imports, and runs the
+  pinned PhotoCraft 0.12.0 AppImage's `photocraft-cli` under the Gate 3
+  host-glibc runtime. It opens and resizes an 8x8 PNG and writes the result to
+  its private overlay. Testing found and fixed an ld.so/main-image overlap
+  (the interpreter base moved to 512 MiB with an explicit overlap check), a
+  32 MiB staged-AppImage cap that excluded the larger Craft apps (now
+  128 MiB), missing `mkdir`/`mkdirat` and `fsync`/`fdatasync` syscalls, and a
+  task table too small for the application's threads. The PhotoCraft
+  compatibility record remains `limited`, and the GUI was not tested.
 - Crash screen: every fatal kernel path (a panic, an unhandled kernel
   exception including a double fault, and every `AETHER_BOOT_FAILED` halt)
   now replaces the display with a full-screen blue report instead of leaving

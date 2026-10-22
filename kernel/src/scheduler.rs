@@ -55,10 +55,11 @@ pub const LINUXD_TASK: usize = APPIMAGE_TASK + 1;
 const MAX_TASKS: usize = WORKER_COUNT + 512;
 #[cfg(all(feature = "gate4-gui-test", not(feature = "large-apps")))]
 const MAX_TASKS: usize = WORKER_COUNT + 96;
-// Room for the boot tasks plus a terminal session: the shell, a pipeline, and
-// a full-screen program. Feature builds keep their larger budgets.
+// Room for the boot tasks, a terminal session (the shell, a pipeline, and a
+// full-screen program), and the application thread tables. Feature builds keep
+// their larger budgets.
 #[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
-const MAX_TASKS: usize = WORKER_COUNT + 16;
+const MAX_TASKS: usize = WORKER_COUNT + 64;
 
 /// Maximum number of `MAP_SHARED` VMA entries per Linux application domain.
 #[cfg(feature = "gate4-gui-test")]
@@ -1671,6 +1672,7 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             "HOME=/tmp",
             "TMPDIR=/tmp",
             "XDG_RUNTIME_DIR=/run/user/1000",
+            "WAYLAND_DISPLAY=wayland-0",
             "WAYLAND_SOCKET=3",
             "WGPU_BACKEND=vulkan",
             "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json",
@@ -1761,10 +1763,17 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             writable: false,
         });
     }
-    // Narrow display grant tied to the verified GridCraft identity. The guest
+    // Narrow display grant tied to the verified import identity. The guest
     // cannot choose this: `app_identity` comes from the signed import record.
-    app_task.display =
+    // The GridCraft-only production policy stays in normal builds; the Gate 4
+    // test build grants the endpoint to any signed AppImage so the same
+    // display path can be exercised for other Craft apps.
+    #[cfg(feature = "gate4-gui-test")]
+    let display_granted = crate::linux::app_identity().is_some();
+    #[cfg(not(feature = "gate4-gui-test"))]
+    let display_granted =
         crate::linux::app_identity().is_some_and(|(id, _, _)| id == "ai.storyteller.gridcraft");
+    app_task.display = display_granted;
     app_task.jit = crate::linux::app_jit();
     app_task.network_client = crate::linux::app_network_client();
     if let Some((_, main_image, interpreter_image)) = dynamic {
@@ -2200,9 +2209,11 @@ pub fn current_is_service() -> bool {
 
 /// Returns `true` when the running task may own the display endpoint.
 ///
-/// This is a narrow kernel policy, not a general device grant: only a Linux
-/// task explicitly marked at creation (the boot display fixture) or the
-/// verified GridCraft AppImage identity is allowed.
+/// This is a narrow kernel policy, not a general device grant. Normal builds
+/// allow only a Linux task explicitly marked at creation (the boot display
+/// fixture) or the verified GridCraft AppImage identity. The Gate 4 test build
+/// allows any signed AppImage so other Craft apps can be exercised through the
+/// same endpoint.
 #[must_use]
 pub fn current_display_granted() -> bool {
     let tasks = unsafe { &*TASKS.0.get() };
@@ -2302,6 +2313,11 @@ pub fn linux_clone(
     thread.handles = parent_handles;
     thread.jit = tasks[current].jit;
     thread.network_client = tasks[current].network_client;
+    // A thread belongs to the same application domain, so it may use the
+    // display endpoint when the process was granted it. Some Craft apps create
+    // their Wayland connection on a worker thread; without this the shim fell
+    // back to a non-compositor fd and winit reported NoCompositor.
+    thread.display = tasks[current].display;
 
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
     let frame_end = (kernel_top - 16) & !15;
@@ -2385,6 +2401,10 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.overlay_app = overlay_app;
     child.jit = tasks[current].jit;
     child.network_client = tasks[current].network_client;
+    // The fork belongs to the same signed application domain and inherits its
+    // display grant. A child that opens the endpoint first owns it; a second
+    // opener still gets EBUSY from the display service.
+    child.display = tasks[current].display;
     // fork gets a process-private snapshot of the descriptor table; threads
     // continue to address the parent's table via their shared tgid.
     child.bind_file_state(slot);
@@ -4906,6 +4926,26 @@ pub fn linux_ftruncate(fd: u64, length: i64) -> i64 {
     crate::memfd::ftruncate(index, length as usize).map_or_else(|error| error, |()| 0)
 }
 
+/// Accepts `fsync`/`fdatasync` for an open descriptor.
+///
+/// Every writable byte lives in RAM-backed storage in this prototype, so there
+/// is no medium to flush. An invalid descriptor still fails closed with
+/// `EBADF` rather than silently succeeding.
+pub fn linux_fsync(fd: u64) -> i64 {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    if task
+        .linux_fds
+        .get(fd as usize)
+        .and_then(Option::as_ref)
+        .is_some()
+    {
+        0
+    } else {
+        LINUX_EBADF
+    }
+}
+
 /// Returns `true` for a path mapped to the per-application writable store.
 #[must_use]
 pub fn is_overlay_path(path: &str) -> bool {
@@ -5189,6 +5229,33 @@ pub fn linux_overlay_open(
         linux_inotify_emit(path, IN_MODIFY, false);
     }
     Ok(fd)
+}
+
+/// Creates a virtual directory in the writable overlay namespace.
+///
+/// The bounded overlay stores files, not directory inodes. A directory under
+/// `/tmp`, `/settings`, or `/logs` is therefore accepted and later file opens
+/// beneath it work; `getdents64` does not list it until a file is created
+/// there. The root namespace is read-only, so any other path fails with
+/// `EROFS` after existing directories report `EEXIST`.
+pub fn linux_overlay_mkdir(path: &str) -> Result<(), i64> {
+    if !crate::linux::valid_path(path) {
+        return Err(LINUX_EINVAL);
+    }
+    let app = overlay_task_app()?;
+    if crate::linux::is_dir(path)
+        || pseudo_dir(path).is_some()
+        || overlay_index(app, path).is_some()
+    {
+        return Err(LINUX_EEXIST);
+    }
+    if !is_overlay_path(path) && !matches!(path, "/tmp" | "/settings" | "/logs") {
+        return Err(LINUX_EROFS);
+    }
+    if path.len() > OVERLAY_PATH {
+        return Err(LINUX_ENAMETOOLONG);
+    }
+    Ok(())
 }
 
 /// Validates a path that a mutating overlay operation may touch.

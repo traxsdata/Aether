@@ -71,7 +71,8 @@ find_library() {
 # lavapipe software driver. The driver's ldd output supplies LLVM and the rest
 # of the closure.
 SEEDS="libc.so.6 libm.so.6 libgcc_s.so.1 libwayland-client.so.0 \
-libwayland-cursor.so.0 libxkbcommon.so.0 libvulkan.so.1 libvulkan_lvp.so"
+libwayland-cursor.so.0 libxkbcommon.so.0 libvulkan.so.1 libvulkan_lvp.so \
+libasound.so.2"
 for library in $SEEDS; do
     if ! find_library "$library" >/dev/null; then
         echo "error: required Gate 4 host library not found: $library" >&2

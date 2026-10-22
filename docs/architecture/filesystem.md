@@ -14,13 +14,16 @@ production on-disk format.
 | Capability layer | `kernel/ipc` + kernel `CapTable` | generation-checked `File` capabilities |
 | Portal | `kernel/src/portal.rs` | exact-path grants outside a process root |
 
-The format is intentionally bounded: 96 inodes, at most 8 blocks (4 KiB) per
-file, 25 entries per directory block, and a 16-slot open table. Exhaustion is
+The format is intentionally bounded: 512 blocks (256 KiB), 96 inodes, at most
+8 blocks (4 KiB) per file, 25 entries per directory block, and a 16-slot open
+table. The inode table is reserved before the first data block. Exhaustion is
 reported as `ENOSPC`; no metadata allocation can grow without bound.
 
 The current user rights are `READ`, `WRITE`, and `CREATE`. Separate delete,
 rename, execute, and directory-listing rights from the specification are not
 exposed yet; the kernel console performs deletion with its own root authority.
+The host-tested `aether_services::ux` policy models the full right set and the
+file/folder grant scopes that the eventual service ABI will expose.
 
 Every metadata operation validates the superblock magic, version, inode count,
 and root inode before trusting an inode. Unformatted media and unknown versions
@@ -70,6 +73,37 @@ of an open file is refused until the last handle closes. The Files application
 exposes duplicate (`F3`), rename (`F2`, with a bounded prompt), and delete
 (`Delete`) on the same service methods; the console exposes `cp`, `mv`, and
 `rm`. `AETHER_FILES_MUTATE_OK` proves the copy/rename/delete path at boot.
+
+## User workspace and private application storage
+
+`/home` is the current user's logical workspace. The seeded folders are
+`Recent`, `Favorites`, `Documents`, `Downloads`, `Pictures`, `Music`, `Videos`,
+`Projects`, `Shared`, and `Trash`. These are resource-provider locations, not a
+promise that every future backend is a conventional physical directory. The
+same thirteen destinations, including service-backed `Applications` and
+`Devices` under `/system`, appear in the Files sidebar and in the specification
+order used by Open, Save, and file-selection portals.
+
+`/system/applications` exposes package metadata and user-visible documents; it
+does not expose `/apps`. Installed applications receive
+`/apps/<package-id>/private` with `Data`, `Cache`, `Settings`, and `Temporary`
+subdirectories. The package identity owns the storage, and the Files adapter
+denies vault enumeration regardless of the path displayed by the UI.
+
+User-facing delete moves a file or empty directory into `/home/Trash` through a
+service rename. Before the move, the service records the Trash component and
+the original absolute path in a bounded `/system/trash/index` store. Activating
+an item in Trash restores it only to that recorded path and refuses to
+overwrite an existing item. Deleting from Trash is the explicit permanent
+action and removes the metadata. The index uses the same fail-closed parser as
+the portal store: malformed, duplicated, traversal-bearing, or oversized
+records are rejected instead of restoring an item to a guessed location.
+
+The host-tested `aether_services::ux` module owns the policy that is not yet in
+the syscall ABI: stable resource identities, ownership domains, the complete
+right set, folder-scoped grants, one-time and persistent lifetimes, search
+isolation, application storage accounting, and uninstall preservation. See
+[the unified filesystem note](../specifications/ui-filesystem.md).
 
 ## Portal grants
 

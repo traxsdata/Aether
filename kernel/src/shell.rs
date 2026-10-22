@@ -98,6 +98,7 @@ fn execute_line() {
         "ls" => list(if argument.is_empty() { "/" } else { argument }),
         "cat" => cat(argument),
         "write" => write(argument),
+        "restore" => restore(argument),
         "rm" => remove(argument),
         "cp" => copy_move(argument, false),
         "mv" => copy_move(argument, true),
@@ -154,6 +155,7 @@ fn print_help() {
     serial_line!("  ls [path]        list a directory");
     serial_line!("  cat <path>       print a file");
     serial_line!("  write <path> <text>  replace a file");
+    serial_line!("  restore <path>   restore the file's previous version");
     serial_line!("  rm <path>        delete a file");
     serial_line!("  cp <src> <dst>   copy a file");
     serial_line!("  mv <src> <dst>   move or rename a file");
@@ -214,6 +216,21 @@ fn write(arguments: &str) {
     match fs::write_path(path, text.as_bytes()) {
         Ok(()) => serial_line!("write: ok path={path} bytes={}", text.len()),
         Err(error) => serial_line!("write: {error:?}"),
+    }
+}
+
+fn restore(path: &str) {
+    if path.is_empty() {
+        serial_line!("restore: usage: restore <path>");
+        return;
+    }
+    match fs::has_previous_path(path) {
+        Ok(true) => match fs::restore_previous_path(path) {
+            Ok(bytes) => serial_line!("restore: ok path={path} bytes={bytes}"),
+            Err(error) => serial_line!("restore: {error:?}"),
+        },
+        Ok(false) => serial_line!("restore: no previous version path={path}"),
+        Err(error) => serial_line!("restore: {error:?}"),
     }
 }
 
@@ -340,11 +357,12 @@ fn portal_command(arguments: &str) {
 
 fn security() {
     serial_line!(
-        "security: open_files={} escapes_denied={} access_denied={} quota_denied={}",
+        "security: open_files={} escapes_denied={} access_denied={} quota_denied={} version_restores={}",
         fs::open_count(),
         fs::escape_denials(),
         fs::access_denials(),
-        fs::quota_denials()
+        fs::quota_denials(),
+        fs::version_restores()
     );
     serial_line!(
         "security: demo_root={} other_root={}",

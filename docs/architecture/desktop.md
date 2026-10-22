@@ -135,13 +135,17 @@ Files is a working **scoped RAM-filesystem browser and mutator**, not a
 decorative listing or a complete Explorer implementation. Open it from the dock
 or `Ctrl+N`:
 
-- Click a sidebar location (Volume, Home, System, Portal).
+- Click a sidebar location: Home, Recent, Favorites, Documents, Downloads,
+  Pictures, Music, Videos, Projects, Shared, Applications, Devices, or Trash.
+  The order is shared with the Open, Save, and file-selection portal model.
 - Select a row and double-click it, or use `Up`/`Down` and `Enter`, to open a
   folder or a bounded text preview. Selection scrolls into view.
 - `Backspace` or the `<` button closes a preview or opens the parent folder.
 - `F5` or the `R` button refreshes the folder after a diagnostic shell change.
 - `F3` duplicates the selected file under a service-chosen `copyN` name, `F2`
-  opens a bounded rename prompt, and `Delete` removes a file or empty folder.
+  opens a bounded rename prompt, and `Delete` moves a file or empty folder to
+  `Trash`. Activating an item in Trash restores it to the location recorded by
+  the service; deleting inside Trash is the explicit permanent action.
 - Previews show at most 512 bytes, do not execute programs, sanitize unsupported
   glyphs/control bytes, and mark truncation. Errors are shown, not disguised as
   empty folders. Failed navigation preserves the previous valid view.
@@ -151,8 +155,12 @@ The filesystem-service adapter permits scoped browsing and mutation of `/home`,
 contents are denied. A UI path is not a grant and previewing does not authorize
 another app. Deletion is refused while a file capability is open, and rename
 refuses an existing destination. This adapter is still trusted ring-0 code, not
-a separately isolated service. Tabs/split panes, safe portal import/export, and
-durable storage are future work.
+a separately isolated service. The host-tested
+`aether-services/src/ux.rs` policy defines stable resource identities, file and
+folder scopes, one-time and persistent grants, search isolation, application
+storage categories, and uninstall preservation for the next service boundary.
+Tabs/split panes, safe portal import/export, and durable storage are future
+work.
 
 The Portal window shows one pending consent request at a time with `APPROVE`
 and `DENY` controls. A request grants nothing; approval installs an exact-file
