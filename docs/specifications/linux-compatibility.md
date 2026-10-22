@@ -399,6 +399,18 @@ This run exposed and fixed three prototype limits:
 The GUI is not tested. Wayland presentation, Vulkan, image codecs beyond the
 PNG path, and the Craft App Store package format remain follow-ups.
 
+### Craft app suite
+
+All thirteen published Craft AppImages were exercised with the generic
+`craft-smoke-test` and `craft-gui-test` targets. All thirteen completed the
+headless smoke path; nine presented a window. The per-app matrix, pinned
+versions, and failure reasons are in
+[the Craft app suite review](../reviews/craft-apps.md). Run the suite with:
+
+```sh
+python3 tools/test-craft-apps.py
+```
+
 ### Gate 4 — Windowed GridCraft
 
 Run `usr/bin/gridcraft` with the Wayland bridge and software renderer, present

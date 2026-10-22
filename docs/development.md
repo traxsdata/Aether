@@ -29,6 +29,12 @@ make test          # build the image and boot it under QEMU/OVMF
 make glibc-test    # opt-in: package host glibc + hello and boot through ld.so
 make gate3-test    # stage the pinned GridCraft AppImage and run its headless CLI
 make photocraft-test # stage the pinned PhotoCraft AppImage and run its headless CLI
+python3 tools/test-craft-apps.py            # download, verify, and smoke-test every Craft app
+python3 tools/test-craft-apps.py --no-gui pdfcraft  # one app, headless only
+make craft-smoke-test CRAFT_ID=... CRAFT_VERSION=... CRAFT_APPIMAGE=... \
+    CRAFT_PIN=... CRAFT_PROGRAM=/usr/bin/app CRAFT_ARGS=--version
+make craft-gui-test CRAFT_ID=... CRAFT_VERSION=... CRAFT_APPIMAGE=... \
+    CRAFT_PIN=... CRAFT_PROGRAM=/usr/bin/app
 make iso-test      # UEFI ISO, VGA/SVGA, actual PS/2 windows and Files workflows
 make shell-test    # drive the console shell over a QEMU serial socket
 make fault-test    # boot a kernel that executes int3 after paging is enabled

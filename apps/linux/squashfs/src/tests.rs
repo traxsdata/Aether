@@ -27,6 +27,44 @@ fn find(image: &Image, path: &str) -> Option<crate::Inode> {
 }
 
 #[test]
+fn reads_a_directory_listing_with_multiple_headers() {
+    fn header(count: u32, start_block: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&start_block.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out
+    }
+    fn entry(offset: u16, kind: u16, name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&((name.len() - 1) as u16).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out
+    }
+    let mut data = header(1, 0x1000);
+    data.extend(entry(1, 1, "abc"));
+    data.extend(entry(2, 1, "def"));
+    data.extend(header(0, 0x2000));
+    data.extend(entry(3, 2, "ghi"));
+
+    let entries = crate::parse_directory(&data).expect("two headers");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.inode, entry.kind))
+            .collect::<Vec<_>>(),
+        [
+            ("abc", (0x1000 << 16) | 1, 1),
+            ("def", (0x1000 << 16) | 2, 1),
+            ("ghi", (0x2000 << 16) | 3, 2),
+        ]
+    );
+}
+
+#[test]
 fn reads_the_root_directory() {
     let image = Image::from_squashfs(IMAGE).expect("parse");
     let mut names = entry_names(&image, "");

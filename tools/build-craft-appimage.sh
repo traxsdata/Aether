@@ -8,10 +8,10 @@
 # identity, version, exact digest, and test publisher, and the record is
 # verified against the image before the script succeeds.
 #
-# Usage: build-craft-appimage.sh <appimage> <out.record> <seed> <id> <version> <pinned-sha256>
+# Usage: build-craft-appimage.sh <appimage> <out.record> <seed> <id> <version> <pinned-sha256> [memory=jit]
 set -eu
-if [ "$#" -ne 6 ]; then
-    echo "usage: build-craft-appimage.sh <appimage> <out.record> <seed> <id> <version> <pinned-sha256>" >&2
+if [ "$#" -ne 6 ] && [ "$#" -ne 7 ]; then
+    echo "usage: build-craft-appimage.sh <appimage> <out.record> <seed> <id> <version> <pinned-sha256> [memory=jit]" >&2
     exit 2
 fi
 APP=$1
@@ -20,6 +20,11 @@ SEED=$3
 ID=$4
 VERSION=$5
 PINNED=$6
+MEMORY=${7:-}
+if [ -n "$MEMORY" ] && [ "$MEMORY" != "memory=jit" ]; then
+    echo "error: the only memory policy is memory=jit" >&2
+    exit 2
+fi
 
 if [ ! -f "$APP" ]; then
     echo "error: AppImage not found: $APP" >&2
@@ -52,9 +57,15 @@ if [ "$ACTUAL" != "$PINNED" ]; then
     exit 1
 fi
 
-cargo run -q -p aether-appimage --bin appimage-manifest -- \
-    sign "$SEED" "$APP" "$ID" "$VERSION" \
-    "Aether Test Publisher" "$RECORD" linux-appimage >/dev/null
+if [ -n "$MEMORY" ]; then
+    cargo run -q -p aether-appimage --bin appimage-manifest -- \
+        sign "$SEED" "$APP" "$ID" "$VERSION" \
+        "Aether Test Publisher" "$RECORD" linux-appimage "$MEMORY" >/dev/null
+else
+    cargo run -q -p aether-appimage --bin appimage-manifest -- \
+        sign "$SEED" "$APP" "$ID" "$VERSION" \
+        "Aether Test Publisher" "$RECORD" linux-appimage >/dev/null
+fi
 
 PUBLIC_LINE=$(cargo run -q -p aether-admin -- key public --seed "$SEED")
 case $PUBLIC_LINE in

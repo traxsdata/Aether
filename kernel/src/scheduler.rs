@@ -1506,6 +1506,7 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             "HOME=/tmp",
             "TMPDIR=/tmp",
             "XDG_RUNTIME_DIR=/run/user/1000",
+            "WAYLAND_DISPLAY=wayland-0",
             "WAYLAND_SOCKET=3",
             "WGPU_BACKEND=vulkan",
             "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json",
@@ -1593,10 +1594,17 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
             writable: false,
         });
     }
-    // Narrow display grant tied to the verified GridCraft identity. The guest
+    // Narrow display grant tied to the verified import identity. The guest
     // cannot choose this: `app_identity` comes from the signed import record.
-    app_task.display =
+    // The GridCraft-only production policy stays in normal builds; the Gate 4
+    // test build grants the endpoint to any signed AppImage so the same
+    // display path can be exercised for other Craft apps.
+    #[cfg(feature = "gate4-gui-test")]
+    let display_granted = crate::linux::app_identity().is_some();
+    #[cfg(not(feature = "gate4-gui-test"))]
+    let display_granted =
         crate::linux::app_identity().is_some_and(|(id, _, _)| id == "ai.storyteller.gridcraft");
+    app_task.display = display_granted;
     app_task.jit = crate::linux::app_jit();
     if let Some((_, main_image, interpreter_image)) = dynamic {
         seed_linux_vmas(&mut app_task, &main_image, crate::linux_loader::MAIN_BASE);
@@ -2011,9 +2019,11 @@ pub fn current_is_service() -> bool {
 
 /// Returns `true` when the running task may own the display endpoint.
 ///
-/// This is a narrow kernel policy, not a general device grant: only a Linux
-/// task explicitly marked at creation (the boot display fixture) or the
-/// verified GridCraft AppImage identity is allowed.
+/// This is a narrow kernel policy, not a general device grant. Normal builds
+/// allow only a Linux task explicitly marked at creation (the boot display
+/// fixture) or the verified GridCraft AppImage identity. The Gate 4 test build
+/// allows any signed AppImage so other Craft apps can be exercised through the
+/// same endpoint.
 #[must_use]
 pub fn current_display_granted() -> bool {
     let tasks = unsafe { &*TASKS.0.get() };
@@ -2121,6 +2131,11 @@ pub fn linux_clone(
     thread.overlay_app = parent_overlay_app;
     thread.handles = parent_handles;
     thread.jit = tasks[current].jit;
+    // A thread belongs to the same application domain, so it may use the
+    // display endpoint when the process was granted it. Some Craft apps create
+    // their Wayland connection on a worker thread; without this the shim fell
+    // back to a non-compositor fd and winit reported NoCompositor.
+    thread.display = tasks[current].display;
 
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
     let frame_end = (kernel_top - 16) & !15;
@@ -2222,6 +2237,10 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.parent = current;
     child.overlay_app = overlay_app;
     child.jit = tasks[current].jit;
+    // The fork belongs to the same signed application domain and inherits its
+    // display grant. A child that opens the endpoint first owns it; a second
+    // opener still gets EBUSY from the display service.
+    child.display = tasks[current].display;
     // fork gets a process-private snapshot of the descriptor table; threads
     // continue to address the parent's table via their shared tgid.
     child.bind_file_state(slot);

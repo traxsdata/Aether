@@ -40,9 +40,12 @@ grants, and the desktop is not a security authority.
 > Craft app, PhotoCraft 0.12.0, now runs its headless `photocraft-cli` through
 > `make photocraft-test`: it opens a PNG, resizes it, writes the result to its
 > private overlay, and exits zero under the same verified-AppImage boundary.
-> This is still not general Linux application compatibility, and both Craft
-> records remain `limited` because the Gate 2 production follow-up is open. Do
-> not use this tree for real data.
+> All 13 published Craft AppImages now pass a headless smoke test, and nine
+> present a window through the Gate 4 path; the per-app matrix is in
+> [`docs/reviews/craft-apps.md`](docs/reviews/craft-apps.md). This is still
+> not general Linux application compatibility, and both Craft records remain
+> `limited` because the Gate 2 production follow-up is open. Do not use this
+> tree for real data.
 
 ## What works today
 

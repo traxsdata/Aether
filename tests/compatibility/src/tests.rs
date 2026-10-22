@@ -11,7 +11,7 @@ fn shipped_database_is_consistent() {
     assert!(database.len() >= 3);
     assert_eq!(database.count(Classification::Verified), 3);
     assert_eq!(database.count(Classification::Unsupported), 1);
-    assert_eq!(database.count(Classification::Limited), 3);
+    assert_eq!(database.count(Classification::Limited), 14);
     assert_eq!(
         database
             .get("org.artcraft.gridcraft")

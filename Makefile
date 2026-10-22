@@ -55,6 +55,21 @@ PHOTOCRAFT_APPIMAGE ?= /tmp/opencode/photocraft-0.12.0-linux-x86_64.AppImage
 PHOTOCRAFT_PIN := da821339afce93b72991c7900a28f589eb06a885e0ab59ea702ddec9a280ac66
 PHOTOCRAFT_APP_PROGRAM ?= /usr/bin/photocraft-cli
 PHOTOCRAFT_APP_ARGS ?= run|/usr/share/photocraft/photo-in.png|--cmd|image.imageSize|--params|{"width":4,"height":4}|--out|/tmp/photocraft-out.png|--format|png
+# Generic Craft-app smoke/GUI tests. The caller supplies the pinned artifact
+# and the identity from its signed import record.
+CRAFT_ID ?=
+CRAFT_VERSION ?=
+CRAFT_APPIMAGE ?=
+CRAFT_PIN ?=
+CRAFT_PROGRAM ?= /usr/bin/app
+CRAFT_ARGS ?=
+CRAFT_REQUIRE_TEXT ?=
+CRAFT_IMAGE_SIZE ?= 192M
+CRAFT_MEMORY ?= 3G
+CRAFT_TIMEOUT ?= 300
+CRAFT_GUI_TIMEOUT ?= 600
+CRAFT_OUT ?= $(BUILD)/craft-app
+CRAFT_GUI_SCREENSHOT ?= $(CRAFT_OUT)/gui.ppm
 LINUX_RUNTIME_SEED := tests/fixtures/keys/test.seed
 LINUX_DYN_PATH ?= /usr/bin/dynamic
 LINUX_RUNTIME_PREBUILT ?= 0
@@ -91,7 +106,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test photocraft-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -289,6 +304,74 @@ photocraft-test:
 	AETHER_MEMORY=2G \
 	AETHER_REQUIRE_TEXT='AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=80026104|AETHER_GATE3_APP_OK|AETHER_GATE3_DENIAL_OK|{"command":"image.imageSize","result":{"height":4,"width":4}}' \
 	$(PYTHON) tools/test-boot.py
+
+# Generic headless smoke test for a Craft app: stage a pinned AppImage, run its
+# selected program in the Gate 3 glibc runtime, and require the kernel-owned
+# import, exit, and denial markers. Use `--version` (or the app's headless
+# command) through CRAFT_ARGS.
+craft-smoke-test:
+	@test -n "$(CRAFT_ID)" || { echo "error: CRAFT_ID is required" >&2; exit 2; }
+	@test -n "$(CRAFT_VERSION)" || { echo "error: CRAFT_VERSION is required" >&2; exit 2; }
+	@test -f "$(CRAFT_APPIMAGE)" || { echo "error: CRAFT_APPIMAGE not found: $(CRAFT_APPIMAGE)" >&2; exit 2; }
+	@test -n "$(CRAFT_PIN)" || { echo "error: CRAFT_PIN is required" >&2; exit 2; }
+	@mkdir -p $(CRAFT_OUT)
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 linux-fixture
+	sh tools/build-gate3-runtime.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
+		$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED)
+	@mkdir -p $(BUILD)/gate3-runtime-root/usr/bin
+	printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\nAETHER_GATE3_ROOT_OK source=/etc/motd\n' \
+		> $(BUILD)/gate3-runtime-root/etc/motd
+	cp $(LINUX_INTERP_ELF) $(BUILD)/gate3-runtime-root/lib/ld-aether.so
+	cp $(LINUX_DYN_ELF) $(BUILD)/gate3-runtime-root/usr/bin/dynamic
+	cp $(LINUX_EXEC_ELF) $(BUILD)/gate3-runtime-root/usr/bin/exec
+	cp $(LINUX_DYN_EXEC_ELF) $(BUILD)/gate3-runtime-root/usr/bin/dynamic-exec
+	sh tools/build-runtime-rootfs.sh $(BUILD)/gate3-runtime-root \
+		$(LINUX_ROOTFS) $(LINUX_RUNTIME_SEED) org.aether.linux-runtime \
+		"$(GATE3_RUNTIME_VERSION)" "Aether Test Publisher" \
+		$(LINUX_ROOTFS_RECORD)
+	sh tools/build-craft-appimage.sh $(CRAFT_APPIMAGE) \
+		$(CRAFT_OUT)/app.import $(LINUX_RUNTIME_SEED) \
+		"$(CRAFT_ID)" "$(CRAFT_VERSION)" $(CRAFT_PIN)
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		LINUX_APPIMAGE_PROGRAM=$(CRAFT_PROGRAM) \
+		LINUX_APPIMAGE_ARGS='$(CRAFT_ARGS)' \
+		STAGED_APPIMAGE=$(CRAFT_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(CRAFT_OUT)/app.import \
+		IMAGE_SIZE=$(CRAFT_IMAGE_SIZE) image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK,AETHER_GATE3_DENIAL_OK \
+	AETHER_MEMORY=$(CRAFT_MEMORY) \
+	AETHER_BOOT_TIMEOUT=$(CRAFT_TIMEOUT) \
+	AETHER_REQUIRE_TEXT="AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=$$(stat -c %s '$(CRAFT_APPIMAGE)')|AETHER_GATE3_APP_OK|AETHER_GATE3_DENIAL_OK$(if $(CRAFT_REQUIRE_TEXT),|$(CRAFT_REQUIRE_TEXT))" \
+	$(PYTHON) tools/test-boot.py
+
+# Generic windowed GUI smoke test for a Craft app. Uses the Gate 4 Mesa/lavapipe
+# runtime and Wayland bridge, signs the AppImage with memory=jit, waits for the
+# kernel-owned present marker, and requires a non-black QEMU screenshot. It
+# deliberately does not require the GridCraft portal save/revoke markers.
+craft-gui-test: gate4-runtime
+	@test -n "$(CRAFT_ID)" || { echo "error: CRAFT_ID is required" >&2; exit 2; }
+	@test -n "$(CRAFT_VERSION)" || { echo "error: CRAFT_VERSION is required" >&2; exit 2; }
+	@test -f "$(CRAFT_APPIMAGE)" || { echo "error: CRAFT_APPIMAGE not found: $(CRAFT_APPIMAGE)" >&2; exit 2; }
+	@test -n "$(CRAFT_PIN)" || { echo "error: CRAFT_PIN is required" >&2; exit 2; }
+	@mkdir -p $(CRAFT_OUT)
+	sh tools/build-craft-appimage.sh $(CRAFT_APPIMAGE) \
+		$(CRAFT_OUT)/app.import $(LINUX_RUNTIME_SEED) \
+		"$(CRAFT_ID)" "$(CRAFT_VERSION)" $(CRAFT_PIN) memory=jit
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		KERNEL_FEATURES="gate4-runtime gate4-gui-test" \
+		LINUX_RUNTIME_PIN=$(GATE4_RUNTIME_PIN) \
+		STAGED_RUNTIME_ROOTFS=$(GATE4_RUNTIME_ROOTFS) \
+		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
+		LINUX_APPIMAGE_PROGRAM=$(CRAFT_PROGRAM) \
+		LINUX_APPIMAGE_ARGS='$(CRAFT_ARGS)' \
+		STAGED_APPIMAGE=$(CRAFT_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(CRAFT_OUT)/app.import \
+		IMAGE_SIZE=$(CRAFT_IMAGE_SIZE) image
+	AETHER_GATE4_WAIT_SAVE=0 \
+	AETHER_GATE4_TIMEOUT=$(CRAFT_GUI_TIMEOUT) \
+	AETHER_GATE4_SCREENSHOT=$(abspath $(CRAFT_GUI_SCREENSHOT)) \
+	$(PYTHON) tools/gate4_smoke.py
 
 # Gate 4 portal slice: run a small static Linux AppImage fixture that opens a
 # seeded workbook through the exact-file portal namespace, saves new bytes,

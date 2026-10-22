@@ -7,6 +7,13 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- Craft app suite: `tools/test-craft-apps.py` downloads and verifies every
+  published Craft AppImage, runs a headless smoke test, and runs the windowed
+  Gate 4 path. All 13 headless runs pass; 9 present a window. The suite found
+  and fixed a multi-header SquashFS directory bug (VectorCraft) and a missing
+  `libasound.so.2` in the Gate 4 runtime (FilmCraft). Six apps still fail the
+  windowed handshake with winit `NoCompositor`; the matrix is in
+  `docs/reviews/craft-apps.md`.
 - Headless PhotoCraft: `make photocraft-test` signs, imports, and runs the
   pinned PhotoCraft 0.12.0 AppImage's `photocraft-cli` under the Gate 3
   host-glibc runtime. It opens and resizes an 8x8 PNG and writes the result to
