@@ -594,27 +594,39 @@ impl Shell {
         };
         out.flush();
 
+        // Every pipe the command line needs is created up front. Running out
+        // fails the whole command: a redirection must never fall back to the
+        // terminal, or `cmd > file` would print instead of writing the file.
         let mut pipes = [0u64; MAX_STAGES];
-        for slot in pipes.iter_mut().take(stage_count - 1) {
+        let mut input_pipe = None;
+        let mut output_pipe = None;
+        let wanted =
+            (stage_count - 1) + usize::from(input.is_some()) + usize::from(output.is_some());
+        let mut created = [0u64; MAX_STAGES + 2];
+        for index in 0..wanted {
             match sdk::pipe_create() {
-                Ok(pipe) => *slot = pipe,
+                Ok(pipe) => created[index] = pipe,
                 Err(error) => {
+                    for &pipe in &created[..index] {
+                        let _ = sdk::pipe_close(pipe, PIPE_READ);
+                        let _ = sdk::pipe_close(pipe, PIPE_WRITE);
+                    }
                     rt::report(&mut out, "sh", "pipe", error);
                     self.status = 1;
                     return;
                 }
             }
         }
-        let input_pipe = if input.is_some() {
-            sdk::pipe_create().ok()
-        } else {
-            None
-        };
-        let output_pipe = if output.is_some() {
-            sdk::pipe_create().ok()
-        } else {
-            None
-        };
+        let mut next = created[..wanted].iter().copied();
+        for slot in pipes.iter_mut().take(stage_count - 1) {
+            *slot = next.next().unwrap_or(0);
+        }
+        if input.is_some() {
+            input_pipe = next.next();
+        }
+        if output.is_some() {
+            output_pipe = next.next();
+        }
 
         let mut pids = [0u64; MAX_STAGES];
         let mut statuses = [None::<i64>; MAX_STAGES];

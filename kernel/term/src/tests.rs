@@ -221,3 +221,21 @@ fn random_streams_never_panic() {
         assert!(x < COLS && y < ROWS);
     }
 }
+
+#[test]
+fn unterminated_osc_gives_the_screen_back() {
+    // A program that opens a command and never ends it must not swallow all
+    // later output.
+    let mut bytes = b"\x1b]0;".to_vec();
+    bytes.extend(core::iter::repeat_n(b'x', 600));
+    bytes.extend_from_slice(b"\rvisible");
+    let terminal = feed(&bytes);
+    assert!((0..ROWS).any(|row| text(&terminal, row).starts_with("visible")));
+}
+
+#[test]
+fn cancel_and_escape_end_an_osc() {
+    let terminal = feed(b"\x1b]0;abc\x18one\r\n\x1b]0;def\x1b[1mtwo");
+    assert_eq!(text(&terminal, 0), "one");
+    assert_eq!(text(&terminal, 1), "two");
+}

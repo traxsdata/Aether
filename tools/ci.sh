@@ -19,6 +19,7 @@ make large-apps-test
 make iso-test
 make vmware-vmx
 make shell-test
+make terminal-test
 make fault-test
 make crash-screen-test
 make rollback-test

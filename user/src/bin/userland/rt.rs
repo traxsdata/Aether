@@ -426,14 +426,74 @@ pub fn read_file(path: &Path, out: &mut [u8]) -> Result<usize, i64> {
 }
 
 /// Replaces a file's contents with `data`, creating it when missing.
+///
+/// The new contents are written to a temporary file beside the target first,
+/// and only a complete write replaces the original, so a full volume or a
+/// failed write leaves the old file untouched. The volume's rename refuses to
+/// overwrite, so the swap moves the original aside, renames the new file into
+/// place, and then deletes the old one; if the second rename fails the
+/// original is moved back.
 pub fn write_file(path: &Path, data: &[u8]) -> Result<(), i64> {
     if data.len() > MAX_FILE {
         return Err(errno::ENOSPC);
     }
-    match sdk::remove(path.as_str()) {
-        Ok(()) | Err(errno::ENOENT) => {}
-        Err(error) => return Err(error),
+    let staged = sibling(path, b".~new")?;
+    create_with(&staged, data)?;
+    let backup = match kind(path) {
+        Ok(Kind::File(_)) => {
+            let backup = sibling(path, b".~old")?;
+            if let Err(error) = sdk::rename(path.as_str(), backup.as_str()) {
+                let _ = sdk::remove(staged.as_str());
+                return Err(error);
+            }
+            Some(backup)
+        }
+        Ok(Kind::Directory) => {
+            let _ = sdk::remove(staged.as_str());
+            return Err(errno::EISDIR);
+        }
+        Err(errno::ENOENT) => None,
+        Err(error) => {
+            let _ = sdk::remove(staged.as_str());
+            return Err(error);
+        }
+    };
+    if let Err(error) = sdk::rename(staged.as_str(), path.as_str()) {
+        if let Some(backup) = &backup {
+            let _ = sdk::rename(backup.as_str(), path.as_str());
+        }
+        let _ = sdk::remove(staged.as_str());
+        return Err(error);
     }
+    if let Some(backup) = backup {
+        let _ = sdk::remove(backup.as_str());
+    }
+    Ok(())
+}
+
+/// A scratch name in `path`'s directory: `tag` plus a digit that is free.
+fn sibling(path: &Path, tag: &[u8]) -> Result<Path, i64> {
+    let mut parent = *path;
+    parent.pop();
+    let mut name = [0u8; 8];
+    name[..tag.len()].copy_from_slice(tag);
+    for digit in b'0'..=b'9' {
+        name[tag.len()] = digit;
+        let text = core::str::from_utf8(&name[..=tag.len()]).map_err(|_| errno::EINVAL)?;
+        let mut candidate = parent;
+        candidate.push(text).ok_or(errno::EINVAL)?;
+        match kind(&candidate) {
+            Err(errno::ENOENT) => return Ok(candidate),
+            // A scratch file left by an interrupted save is reused.
+            Ok(Kind::File(_)) if sdk::remove(candidate.as_str()).is_ok() => return Ok(candidate),
+            _ => {}
+        }
+    }
+    Err(errno::EEXIST)
+}
+
+/// Creates a new file holding exactly `data`; a partial write is removed.
+fn create_with(path: &Path, data: &[u8]) -> Result<(), i64> {
     let handle = sdk::open(path.as_str(), sdk::WRITE | sdk::CREATE)?;
     let mut written = 0;
     let result = loop {
@@ -447,6 +507,9 @@ pub fn write_file(path: &Path, data: &[u8]) -> Result<(), i64> {
         }
     };
     let _ = sdk::close(handle);
+    if result.is_err() {
+        let _ = sdk::remove(path.as_str());
+    }
     result
 }
 

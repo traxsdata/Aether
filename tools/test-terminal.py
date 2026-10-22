@@ -138,6 +138,16 @@ def main() -> int:
         expect("seq 1 5 | sort -r | head -n 2", lambda o, _t: o == ["5", "4"], "a three-stage pipe")
         expect("grep -c e < demo/a.txt", lambda o, _t: o == ["2"], "input redirection")
         expect("ls demo", lambda _o, t: "a.txt" in t and "inner" in t, "the new entries")
+        expect(
+            "echo replaced > demo/a.txt; cat demo/a.txt; ls demo",
+            lambda o, _t: o == ["replaced", "a.txt  inner"],
+            "an overwrite that leaves no scratch files",
+        )
+        expect(
+            "echo kept > demo/a.txt; echo more >> demo/a.txt",
+            lambda o, _t: o == [],
+            "the file restored for the next step",
+        )
         expect("cp demo/a.txt b.txt && mv b.txt c.txt && cat c.txt", lambda o, _t: o == ["kept", "more"], "copy and move")
         expect("rm -r demo c.txt && ls demo", lambda _o, t: "No such file" in t, "the folder removed")
         expect("cat /system/policy.txt", lambda _o, t: "No such file" in t, "files outside home hidden")

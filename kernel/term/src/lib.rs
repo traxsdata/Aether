@@ -176,6 +176,9 @@ enum State {
 }
 
 const MAX_PARAMS: usize = 8;
+/// Longest operating-system command kept open. Titles and hyperlinks fit;
+/// a program that never terminates one cannot swallow the screen.
+const MAX_OSC_BYTES: u16 = 512;
 /// Bytes of pending replies (cursor-position reports).
 const REPLY_BYTES: usize = 32;
 
@@ -212,6 +215,8 @@ pub struct Terminal {
     private: bool,
     utf8_scalar: u32,
     utf8_remaining: u8,
+    /// Bytes consumed by the current operating-system command.
+    osc_len: u16,
     reply: [u8; REPLY_BYTES],
     reply_len: usize,
     generation: u64,
@@ -255,6 +260,7 @@ impl Terminal {
             private: false,
             utf8_scalar: 0,
             utf8_remaining: 0,
+            osc_len: 0,
             reply: [0; REPLY_BYTES],
             reply_len: 0,
             generation: 0,
@@ -363,14 +369,23 @@ impl Terminal {
             State::Osc => match byte {
                 0x07 => self.state = State::Ground,
                 0x1b => self.state = State::OscEscape,
-                _ => {}
+                // CAN and SUB cancel any sequence, as on a VT100.
+                0x18 | 0x1a => self.state = State::Ground,
+                _ => {
+                    self.osc_len += 1;
+                    if self.osc_len > MAX_OSC_BYTES {
+                        self.state = State::Ground;
+                    }
+                }
             },
             State::OscEscape => {
-                self.state = if byte == b'\\' {
-                    State::Ground
+                if byte == b'\\' {
+                    self.state = State::Ground;
                 } else {
-                    State::Osc
-                };
+                    // ESC ends the command and begins a new sequence.
+                    self.state = State::Escape;
+                    self.escape(byte);
+                }
             }
         }
     }
@@ -515,7 +530,10 @@ impl Terminal {
                 self.param_count = 0;
                 self.private = false;
             }
-            b']' => self.state = State::Osc,
+            b']' => {
+                self.state = State::Osc;
+                self.osc_len = 0;
+            }
             b'(' | b')' => self.state = State::Charset,
             b'7' => self.save_cursor(),
             b'8' => self.restore_cursor(),
