@@ -18,6 +18,9 @@ from pathlib import Path
 
 from boot_support import BASE_MARKERS, find_firmware, has_failure
 
+# Pixels per PS/2 count; mirrors MOUSE_GAIN in kernel/src/input.rs.
+MOUSE_GAIN = 2
+
 
 def connect(path: Path, process: subprocess.Popen, timeout: float = 15) -> socket.socket:
     deadline = time.monotonic() + timeout
@@ -198,12 +201,16 @@ class DesktopVM:
         return int(cursor[1]), int(cursor[2])
 
     def move_to(self, x: int, y: int):
+        # The kernel multiplies PS/2 counts by MOUSE_GAIN, so only every
+        # second pixel is reachable from a given start. Rounding the counts
+        # down lands one pixel short in that case, consistently, so relative
+        # moves such as the title-bar drag stay exact.
         for _ in range(40):
             old_x, old_y = self.pointer()
-            if (old_x, old_y) == (x, y):
+            if 0 <= x - old_x < MOUSE_GAIN and 0 <= y - old_y < MOUSE_GAIN:
                 return
-            dx = max(-80, min(80, x - old_x))
-            dy = max(-80, min(80, y - old_y))
+            dx = max(-40, min(40, (x - old_x) // MOUSE_GAIN))
+            dy = max(-40, min(40, (y - old_y) // MOUSE_GAIN))
             self.hmp(f"mouse_move {dx} {dy}")
         raise RuntimeError(f"PS/2 pointer did not reach {x},{y}")
 

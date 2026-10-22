@@ -1,0 +1,1183 @@
+# Aether OS — User Interface & Unified Filesystem Specification
+
+**Document ID:** AETHER-UX-002  
+**Version:** 0.1.0-draft  
+**Status:** Proposed design specification  
+**Scope:** Desktop shell, file manager, application storage, file access, sharing, and permission experience  
+**Parent specification:** AETHER-TS-001 — Technical Specification and Initial Development Backlog
+
+---
+
+## 1. Product Philosophy
+
+Aether must provide the simplicity of a traditional desktop operating system without inheriting its assumption that every application should be able to browse a user's entire filesystem.
+
+The operating system will distinguish between three concepts:
+
+1. **Personal files:** Files the user intentionally owns and organizes.
+2. **Application-private data:** Files an application uses internally and manages within its own security boundary.
+3. **Shared resources:** Files or folders the user has explicitly made available to one or more applications.
+
+These are distinct security domains but should feel like parts of one coherent desktop environment.
+
+### 1.1 Fundamental rules
+
+- The user should never need to understand sandbox internals to open or save a document.
+- Every application receives private storage automatically.
+- Applications cannot browse another application's private storage.
+- User-owned files remain accessible to the user regardless of which application created them.
+- Opening a file in an application does not automatically grant access to its parent directory.
+- A user's explicit sharing decision must be enforced by the operating system, not merely by the desktop interface.
+- Uninstalling an application must not silently destroy user-owned documents.
+- System updates must preserve user files and application data.
+- The file manager presents a unified logical view without granting itself unrestricted system authority.
+
+### 1.2 The user experience in one sentence
+
+**Applications own their private working environments; users own their files; Aether connects the two through a unified interface and explicit, enforceable permissions.**
+
+---
+
+## 2. Desktop Information Architecture
+
+Aether will use a persistent desktop shell with a launcher, taskbar or dock, application windows, notifications, and a unified file manager.
+
+The file manager is named **Aether Explorer**.
+
+### 2.1 Primary navigation
+
+Aether Explorer will organize navigation into the following sections:
+
+- **Home:** Overview of the user's workspace.
+- **Recent:** Recently opened or modified files the user is authorized to see.
+- **Favorites:** User-pinned files and folders.
+- **Documents:** User-owned documents.
+- **Downloads:** Downloaded files.
+- **Pictures:** Photos and images.
+- **Music:** Music and audio files.
+- **Videos:** Video files.
+- **Projects:** User-managed working directories.
+- **Shared:** Files and folders the user has chosen to share with applications or other supported sharing destinations.
+- **Applications:** Installed applications and their user-visible documents, when available.
+- **Devices:** External drives, removable media, and mounted network locations.
+- **Trash:** Recoverable deleted user files, subject to storage and retention policy.
+
+The navigation sidebar must remain consistent across normal browsing, Open dialogs, Save dialogs, and file selection portals.
+
+### 2.2 Home view
+
+Home is a workspace dashboard, not a raw directory listing.
+
+It may contain:
+
+- Recent documents.
+- Pinned folders.
+- Frequently used locations.
+- Recently imported files.
+- Active projects.
+- Storage usage summaries.
+- Shortcuts to installed applications.
+
+Home must not expose private application files by default.
+
+Applications can contribute user-visible documents or project shortcuts through a documented registration interface. Contributions must be authenticated, clearly attributed, and subject to user-controlled visibility settings.
+
+An application cannot use this mechanism to reveal arbitrary contents of its private storage.
+
+### 2.3 Navigation behavior
+
+- Double-click opens a folder or file.
+- Single-click selects an item.
+- Context menus expose available actions.
+- Tabs allow multiple locations to remain open.
+- Split-pane mode supports file transfers and comparison.
+- Breadcrumbs provide direct navigation through the current location.
+- Back and Forward navigate browsing history.
+- Search operates only across locations the user is authorized to inspect.
+- Hidden system resources do not appear in normal browsing.
+
+Aether Explorer must not fabricate a conventional filesystem path for resources that do not have a meaningful physical path. User-visible locations should use stable resource identifiers or logical URLs internally where appropriate.
+
+---
+
+## 3. Unified Filesystem Model
+
+### 3.1 Logical organization
+
+The user sees a conventional personal workspace, while Aether maintains separate system, application, and user storage domains.
+
+Conceptual system organization:
+
+```text
+Aether
+├── System
+│   ├── Core
+│   ├── Boot
+│   └── Recovery
+├── Applications
+│   └── Installed application packages
+├── Application Data
+│   └── Private application storage
+├── Users
+│   └── Current User
+│       ├── Documents
+│       ├── Downloads
+│       ├── Pictures
+│       ├── Music
+│       ├── Videos
+│       ├── Projects
+│       ├── Shared
+│       └── Trash
+├── Packages
+└── Logs
+```
+
+This is a conceptual organization, not a requirement that every item correspond to a directly browsable directory on disk.
+
+### 3.2 Separate logical namespace from physical storage
+
+Aether must implement a unified logical namespace above the underlying storage services.
+
+The namespace maps user-visible locations to resources stored in different protected domains.
+
+For example:
+
+- `Documents/Report.odt` may map to user-owned storage.
+- A browser's private download staging file may map to the browser's private vault.
+- An application's internal database may exist only within its private vault.
+- A selected document may be exposed to another application through a scoped file capability.
+- A network-mounted folder may be represented by a remote resource provider.
+
+The namespace must not weaken security boundaries merely because two resources appear beside one another in the user interface.
+
+The file manager can display a unified view while the storage service enforces separate ownership, capabilities, and access rights.
+
+### 3.3 Resource identity
+
+Every managed file or directory must have a stable resource identity independent of its displayed name.
+
+The identity must support:
+
+- Renaming without losing identity.
+- Moving between supported storage locations.
+- Tracking persistent file references.
+- Granting and revoking access.
+- Distinguishing different files with identical names.
+- Detecting deletion and replacement.
+- Identifying the owning storage domain.
+- Maintaining safe behavior when files are moved or restored.
+
+Pathnames are useful for navigation but must not serve as the sole authorization mechanism.
+
+### 3.4 Ownership
+
+Each resource must have an explicit ownership classification:
+
+- System-owned.
+- Application-private.
+- User-owned.
+- Shared or delegated.
+- Externally owned, such as removable or remote storage.
+
+Ownership determines lifecycle and default access policy.
+
+Applications cannot change a resource's ownership classification simply by moving it or renaming it.
+
+---
+
+## 4. Application-Private Filesystems
+
+### 4.1 Application storage allocation
+
+Every installed application receives a private storage area automatically.
+
+For example:
+
+```text
+Private Storage
+├── org.aether.notes
+│   ├── Data
+│   ├── Cache
+│   ├── Settings
+│   └── Temporary
+├── org.aether.browser
+│   ├── Data
+│   ├── Cache
+│   ├── Settings
+│   └── Temporary
+└── org.aether.editor
+    ├── Data
+    ├── Cache
+    ├── Settings
+    └── Temporary
+```
+
+These names are conceptual. Applications do not receive unrestricted access to the physical storage tree.
+
+Each application is identified by its stable package identity, not its display name or installation directory.
+
+### 4.2 Private storage categories
+
+**Data**
+
+Persistent application-owned state, such as databases, user-created internal records, and application-specific project metadata.
+
+**Cache**
+
+Regenerable data that can be removed under storage pressure. Applications must not use cache as their only copy of user-created content.
+
+**Settings**
+
+Application preferences and configuration.
+
+**Temporary**
+
+Short-lived working data, including intermediate files and incomplete downloads.
+
+Applications receive different rights for each category. For example, a cache-cleanup service may be authorized to remove cache data without being able to read private documents.
+
+### 4.3 Enforcement
+
+The application storage boundary must be enforced by the Aether security model.
+
+- Every application runs in its own security domain.
+- Private storage handles are issued only to authorized applications and services.
+- Access checks apply to file reads, writes, enumeration, deletion, renaming, and metadata queries.
+- Guessing an application identifier or storage location must not grant access.
+- File descriptors and open handles must not bypass authorization.
+- Shared storage access must be mediated through capabilities.
+- A compromised application must not gain access to other applications' data.
+
+The file manager must not rely on hidden folders, obscure filenames, or UI filtering as security mechanisms.
+
+### 4.4 Applications may create internal files freely
+
+Applications should not have to ask the user for permission every time they save internal state.
+
+An application can freely create, update, and delete files inside its own private storage, subject to storage quotas and policy.
+
+Examples include:
+
+- A notes application storing its internal index.
+- A browser maintaining its cache and session data.
+- A game storing local settings and save data.
+- An editor maintaining undo history and recovery snapshots.
+- A development environment maintaining indexes and build artifacts.
+
+The user should not encounter repetitive security dialogs for ordinary private application operations.
+
+### 4.5 Storage quotas and visibility
+
+Aether should provide per-application storage accounting.
+
+In Settings → Applications → Storage, users can see:
+
+- Total application storage.
+- Persistent data usage.
+- Cache usage.
+- Temporary storage usage.
+- User-visible documents associated with the application.
+- Available cleanup actions.
+
+Deleting cache must not delete persistent user data.
+
+Removing private data must have a clear explanation and, where practical, an explicit confirmation.
+
+---
+
+## 5. The Seamless Application Experience
+
+The operating system must make private application filesystems nearly invisible during ordinary use.
+
+### 5.1 Example: A document created in a word processor
+
+1. The user opens the word processor.
+2. The application creates a new document in its private working area.
+3. The user selects **Save**.
+4. Aether presents the standard Save dialog.
+5. The user chooses `Documents` and enters a filename.
+6. Aether saves the document into user-owned storage.
+7. The document now appears in Explorer, Recent, Search, and supported file-open dialogs.
+8. Another application can open the document after the user selects it.
+
+The user never needs to know where the word processor's private storage resides.
+
+The application must use a supported document-creation or file-portal interface rather than bypassing the security model.
+
+### 5.2 Example: An application that does not need a visible file
+
+A calculator, messaging client, or game may use private storage exclusively.
+
+- Its internal files do not appear in Documents.
+- Its settings remain associated with the application.
+- Its caches are managed by the system.
+- Its private records are unavailable to unrelated applications.
+- Uninstalling the application does not expose its private files to other applications.
+
+The user sees a normal application, not a sandbox management interface.
+
+### 5.3 Example: A browser download
+
+1. The browser receives a downloaded file.
+2. It writes the download into private staging storage or a designated download destination.
+3. The user sees download progress and completion.
+4. On completion, Aether places the file in the user's Downloads folder if that is the selected destination.
+5. The file becomes visible in Explorer.
+6. Other applications can access it through the normal Open dialog.
+
+An application must not silently place user-facing downloads in inaccessible storage and claim that they are ordinary Downloads.
+
+If the user chooses a private destination within the browser, the interface must make that choice clear.
+
+### 5.4 Example: A project in an application-specific format
+
+An application may need a directory containing multiple files, databases, and internal resources.
+
+Aether should support two models:
+
+**Private project**
+
+The project remains in application-private storage. It appears in the application's Recent Projects list but is not generally browsable by other applications.
+
+**User-owned project**
+
+The project is stored in the user's Projects folder. The owning application accesses it through an authorized directory capability. Other applications can access selected files or the directory only when authorized.
+
+The application must communicate clearly which model is in use.
+
+---
+
+## 6. The Universal Open Dialog
+
+Opening a file is one of the most important interfaces in Aether. It must behave consistently across native applications and supported compatibility environments.
+
+### 6.1 Interface requirements
+
+The standard Open dialog includes:
+
+- Location sidebar.
+- Breadcrumb navigation.
+- Search.
+- File and folder listing.
+- Type filters.
+- Preview where supported.
+- Filename selection.
+- Open and Cancel actions.
+
+It should look and behave like part of Aether, regardless of which application requested it.
+
+### 6.2 Permission flow
+
+When an application requests a file, Aether displays its trusted file-selection interface.
+
+The application does not receive general access to the location being browsed.
+
+After the user selects a file, Aether issues a capability for that specific resource.
+
+By default:
+
+- Read-only access is granted for ordinary opening.
+- Write access is granted only when the requested workflow requires it.
+- The application cannot enumerate sibling files.
+- The application cannot navigate to parent directories through the selected-file grant.
+- The application cannot use the grant to access unrelated resources.
+- The grant is bound to the intended application identity and resource.
+
+The system must verify that the actual operation remains within the grant's rights.
+
+### 6.3 Multiple-file selection
+
+Applications may request multiple files when their declared workflow supports it.
+
+Aether issues individual resource capabilities or an equivalent explicitly scoped grant for each selected file.
+
+Selecting several files must not implicitly grant access to the directory containing them.
+
+### 6.4 Folder selection
+
+Folder selection is a distinct permission operation.
+
+When the user selects a folder, the dialog must explain whether the application is receiving:
+
+- Access to the folder's contents.
+- Read-only access.
+- Read/write access.
+- Access to the folder for the current operation only.
+- Persistent access for future sessions.
+
+The application must not silently convert a folder grant into unrestricted access to the entire user's filesystem.
+
+---
+
+## 7. The Universal Save Dialog
+
+### 7.1 Save behavior
+
+The Save dialog must provide a consistent experience for every application.
+
+It supports:
+
+- Choosing a destination.
+- Creating a folder.
+- Entering a filename.
+- Selecting an available file format.
+- Replacing an existing file with confirmation.
+- Saving a new document.
+- Saving an edited document.
+- Saving a copy under a new name.
+
+The default destination should reflect the user's established workflow, such as the last user-selected folder or a designated application default.
+
+An application's private working directory must never silently masquerade as a user-selected destination.
+
+### 7.2 Safe saving
+
+Aether must protect against incomplete or corrupted writes.
+
+Where supported, the system should use transactional or atomic replacement semantics:
+
+1. Write the new content to a temporary resource.
+2. Verify that the write completed successfully.
+3. Commit the new version or replace the target atomically.
+4. Preserve the original if the operation fails before commit.
+
+The application must receive a clear error if saving fails.
+
+### 7.3 Existing files
+
+When the selected destination already contains a file with the same name, the interface offers:
+
+- Replace.
+- Save with a different name.
+- Cancel.
+
+For important data, Aether should support recoverable previous versions or Trash-based restoration when the storage provider permits it.
+
+### 7.4 Saving versus exporting
+
+Aether distinguishes between **Save** and **Export**.
+
+Save writes or updates the application's working document.
+
+Export creates a user-selected deliverable, such as a PDF, image, archive, or interoperable document.
+
+The distinction should be reflected in application UI conventions and the SDK.
+
+---
+
+## 8. Sharing Between Applications
+
+### 8.1 Principle
+
+Applications should exchange files through explicit, narrow grants rather than unrestricted access to one another's storage.
+
+The user should experience this as a normal file-sharing workflow.
+
+### 8.2 Open with
+
+When the user right-clicks a document and selects **Open With**, Aether displays compatible applications.
+
+Selecting an application launches it and grants access to the selected file with the minimum necessary rights.
+
+The user may optionally choose a default application for that file type.
+
+Setting a default application does not grant the application access to every file on the system.
+
+### 8.3 Share action
+
+The Share action allows a user to send a file to another application.
+
+Example destinations include:
+
+- An email client.
+- A messaging application.
+- An image editor.
+- An archive utility.
+- A document converter.
+
+The receiving application receives access only to the shared resource or an explicitly created copy.
+
+The system must indicate whether the operation passes a reference to the original file or creates a separate copy.
+
+### 8.4 Drag and drop
+
+Dragging a file from Explorer into an application window is a user-authorized sharing operation.
+
+The receiving application obtains only the rights permitted by the drag-and-drop protocol and the source resource.
+
+Dropping a file into an application must not automatically grant access to its containing folder.
+
+Dropping a folder must be treated as a folder grant, not a collection of unrestricted grants.
+
+### 8.5 Copy and paste
+
+Copying a file in Explorer and pasting it into another application must follow the same access rules as other sharing operations.
+
+Aether must distinguish between:
+
+- Pasting a file reference.
+- Pasting file contents.
+- Pasting text or other derived data.
+- Copying a file into a user-owned destination.
+
+Clipboard access itself is a separately controlled capability. A receiving application must not gain indefinite access to unrelated clipboard history merely because a user pasted a file.
+
+### 8.6 Cross-application editing
+
+If Application A creates a file and Application B edits it, Aether must preserve a coherent user-visible identity for the document.
+
+The operating system should support:
+
+- Detecting modifications.
+- Preventing silent overwrites.
+- Reporting concurrent-edit conflicts.
+- Updating Recent and Search indexes.
+- Preserving the file's ownership.
+- Requiring an appropriate write grant.
+
+An application must not obtain write access merely because it was allowed to read the file earlier.
+
+---
+
+## 9. Application Data and User Documents
+
+Aether must clearly distinguish private application state from user-owned content.
+
+### 9.1 Data classification
+
+| Data type | Default location | Owner |
+|---|---|---|
+| Application preferences | Private storage | Application |
+| Browser cache | Private storage | Application |
+| Application database | Private storage | Application |
+| Temporary working files | Private storage | Application |
+| New user document | User-selected location | User |
+| Downloaded file | Downloads or selected location | User |
+| Exported image or PDF | User-selected location | User |
+| User-created project | Projects or selected location | User |
+| Application recovery snapshot | Private storage or user-owned version history | Depends on policy |
+| Shared resource | Original resource's storage domain | Original owner |
+
+### 9.2 Avoiding accidental lock-in
+
+An application must not force a user to export every document simply to recover their own data.
+
+If a format is intended to represent a user-owned document, the application should create it in user-owned storage or offer a clear, persistent user-owned project workflow.
+
+Private storage is appropriate for internal state, caches, indexes, and application-specific records. It should not become a hidden repository of irreplaceable user content.
+
+### 9.3 Application-managed document collections
+
+Applications may register user-visible document collections, such as a photo library or note collection.
+
+The registration provides a discoverable interface, not unrestricted filesystem access.
+
+Aether should allow users to:
+
+- Open a collection.
+- Browse its user-facing items.
+- Export selected items.
+- Share selected items with another application.
+- Remove the collection's shortcut.
+- Uninstall the application without automatically deleting exported documents.
+
+The collection provider controls access to its private records, while Aether mediates operations against its security domain.
+
+---
+
+## 10. File Manager Integration with Private Storage
+
+### 10.1 Default behavior
+
+Aether Explorer does not display private application storage in the ordinary filesystem view.
+
+Instead, it presents an **Applications** section with application-specific information where useful.
+
+Each application entry may expose:
+
+- Launch.
+- Open recent documents.
+- View user-visible documents.
+- View storage usage.
+- Manage permissions.
+- Open application settings.
+- Uninstall.
+
+It must not expose internal application files simply because the user opened the application's management page.
+
+### 10.2 Advanced inspection mode
+
+Aether may provide an advanced diagnostic mode for developers and technically experienced users.
+
+This mode can show:
+
+- Application storage usage.
+- Private-storage category sizes.
+- Application identity.
+- Storage-provider details.
+- Active file grants.
+- Recent permission denials.
+- Cache cleanup controls.
+
+It must not disable sandbox enforcement or grant access merely because the user enabled advanced inspection.
+
+Access to private application contents must remain a separate, explicitly authorized administrative or export operation.
+
+### 10.3 Developer tools
+
+Developers need a way to inspect their own application's private storage.
+
+The development SDK should provide a debug interface that grants access only to the developer's designated application and test environment.
+
+Production applications must not be able to activate this interface for themselves.
+
+---
+
+## 11. File Search and Recent Items
+
+### 11.1 Unified search
+
+Search should span all user-accessible locations through a unified interface.
+
+The search engine may index:
+
+- User-owned files.
+- Authorized mounted locations.
+- Metadata of registered user-visible documents.
+- Application-provided document metadata where the provider permits it.
+
+It must not index arbitrary private application content by default.
+
+### 11.2 Search isolation
+
+Search results must be filtered according to the current user's authority.
+
+An application cannot learn the existence, name, location, or metadata of an inaccessible file through a search query.
+
+Search suggestions, autocomplete, thumbnails, and file previews must obey the same security rules.
+
+The indexing service should receive only the capabilities and data needed for its task.
+
+### 11.3 Recent items
+
+Recent is a user-facing activity view.
+
+It may display documents opened through supported portals and user-selected workflows.
+
+Applications can contribute entries only through a controlled, authenticated interface.
+
+The system should allow users to:
+
+- Remove individual items from Recent.
+- Clear Recent history.
+- Pin frequently used items.
+- Open the original document if it remains accessible.
+
+Removing an item from Recent does not delete the underlying file.
+
+Recent-item records must not expose private filenames or document contents to unrelated applications.
+
+---
+
+## 12. Permissions and Security Center
+
+### 12.1 Permission categories
+
+Aether Settings → Privacy & Security → Application Permissions must show:
+
+- Files and folders.
+- Network access.
+- Clipboard.
+- Camera and microphone.
+- Audio devices.
+- Removable storage.
+- Notifications.
+- Inter-application communication.
+- Other sensitive capabilities as supported.
+
+Each permission entry identifies the application, the resource scope, the granted rights, and whether the grant is temporary or persistent.
+
+### 12.2 File permission levels
+
+The user-facing permission model should remain simple.
+
+**Selected files**
+
+The application can access only specific selected resources.
+
+**Selected folders**
+
+The application can access the contents of explicitly selected folders within the granted scope.
+
+**Persistent access**
+
+The grant survives application restarts and is retained until revoked or otherwise invalidated by policy.
+
+**One-time access**
+
+The grant is limited to a specific operation or session, according to documented lifecycle rules.
+
+Aether must not provide a broad "access everything" option to ordinary applications merely for convenience.
+
+### 12.3 Permission prompts
+
+Prompts should explain the reason for the request in context.
+
+Example:
+
+> **Allow Document Editor to modify this file?**
+>
+> `Documents/Project Plan.odt`
+>
+> This application needs write access to save your changes.
+>
+> Allow for this operation, remember this choice where supported, or cancel.
+
+The interface should avoid vague messages such as "This application wants access to your files."
+
+### 12.4 Revocation
+
+Users can revoke persistent grants in Settings.
+
+After revocation:
+
+- Future access must be denied according to the defined revocation semantics.
+- Existing handles and memory mappings must follow the documented policy.
+- The application must receive an appropriate error.
+- The user may be notified if the application can no longer save changes.
+- The system must not claim that previously read information has been erased.
+
+Aether must test revocation across direct handles, delegated capabilities, child processes, and supported shared-memory mappings.
+
+### 12.5 Actual security state
+
+The Security Center must report enforced permissions, not just the permissions requested by a package.
+
+A compromised desktop application must not be able to falsify the system's permission display or authorize itself.
+
+---
+
+## 13. Installation, Updates, and Uninstallation
+
+### 13.1 Installation
+
+Installing an application creates its private storage domain and registers its package identity.
+
+Installation must not grant unrestricted access to user files.
+
+Requested capabilities are disclosed through the application manager, and sensitive access is granted according to Aether's permission policy.
+
+### 13.2 Updates
+
+Updating an application preserves compatible private data.
+
+Updates must not silently widen an application's privileges. Newly requested sensitive capabilities require appropriate disclosure and authorization.
+
+Application updates must be separate from system-image updates.
+
+### 13.3 Uninstallation
+
+When uninstalling an application, Aether must distinguish between:
+
+- Application executable and package files.
+- Private persistent data.
+- Cache and temporary files.
+- User-owned documents.
+- Shared grants and registrations.
+
+The default uninstall operation removes the executable and package registration while retaining private persistent data for a defined recovery period or until the user chooses to delete it, subject to available storage and documented retention policy.
+
+The confirmation screen must clearly distinguish **Uninstall** from **Uninstall and Delete Application Data**.
+
+User-owned documents must not be deleted merely because the application that created or last edited them is removed.
+
+Revoking grants and removing application registrations must be handled as part of the uninstall lifecycle.
+
+### 13.4 Reinstallation
+
+When the same application identity is reinstalled, Aether may offer to restore retained private data.
+
+Restoration must verify application identity and follow version and security policy.
+
+An unrelated application using the same display name must never inherit another application's private data.
+
+---
+
+## 14. Windows Compatibility Integration
+
+Windows applications must participate in the same user-visible file model without receiving unrestricted access to Aether's storage.
+
+### 14.1 Per-application compatibility environment
+
+Each Windows application receives an isolated compatibility environment by default.
+
+Its Windows prefix, registry, configuration, and internal files remain private to that environment.
+
+The compatibility runtime must not treat a Wine prefix as a sufficient security boundary; Aether's own security domain enforces isolation.
+
+### 14.2 Familiar Windows file workflows
+
+Windows applications should see familiar Open and Save dialogs where feasible, but those dialogs must connect to Aether's trusted file portal.
+
+A Windows application opening a file from Documents receives a grant to the selected resource, not automatic access to the entire Documents directory.
+
+The compatibility layer must translate file operations into authorized Aether resource operations.
+
+### 14.3 Windows application storage
+
+The compatibility environment may expose conventional Windows locations, such as Documents and Downloads, as mappings to authorized Aether user locations.
+
+These mappings must not provide a hidden route around capability checks.
+
+Windows applications must not be able to enumerate another Windows application's prefix or native application's private storage.
+
+### 14.4 Compatibility limitations
+
+Some Windows applications assume broad filesystem access or depend on specific Windows filesystem semantics.
+
+Aether must document incompatibilities rather than silently weaken its security model.
+
+An optional isolated Windows VM may provide a separate compatibility path, with explicitly granted host file sharing.
+
+---
+
+## 15. Storage Providers and Removable Media
+
+The unified namespace must support multiple storage backends without assuming that all resources reside on one physical disk.
+
+Potential providers include:
+
+- Internal storage.
+- Removable drives.
+- External SSDs.
+- Network shares.
+- Read-only media.
+- Future user-authorized remote storage providers.
+
+### 15.1 Unified presentation
+
+Explorer should display these locations in a consistent interface.
+
+However, each provider retains its own operational characteristics, permissions, and failure modes.
+
+A network file may require connectivity. Removable media may disappear. A remote provider may not support atomic replacement or version history.
+
+The UI must communicate these limitations accurately.
+
+### 15.2 Mounting and access
+
+Mounting a drive does not automatically grant every application access to it.
+
+Applications receive capabilities to specific files or folders through the normal portal mechanism.
+
+Raw device access remains prohibited for ordinary applications.
+
+### 15.3 Disconnect safety
+
+When a provider becomes unavailable, Aether must preserve resource identity where possible and report which operations are no longer available.
+
+Incomplete copies, failed saves, and partially completed moves must be detected and reported.
+
+---
+
+## 16. File Operations and Data Integrity
+
+### 16.1 Copy and move
+
+Copying creates a separate resource in the destination.
+
+Moving changes the resource's logical location while preserving identity where the storage provider supports it.
+
+Cross-provider moves should be implemented as a safe copy-and-verify operation followed by deletion of the original only after successful completion.
+
+### 16.2 Delete and Trash
+
+User-facing delete operations should use recoverable deletion where supported.
+
+Trash must preserve enough metadata to restore an item to its original location when possible.
+
+Permanent deletion must be a distinct action.
+
+Private application cleanup is managed separately from the user's Trash.
+
+### 16.3 Concurrent operations
+
+Aether must detect conflicting operations when practical, including:
+
+- A file changing during a copy.
+- Two applications writing to the same document.
+- A file being deleted while an application is editing it.
+- A destination being replaced during a save.
+- A storage provider disconnecting during a write.
+
+The system should prefer explicit conflict handling over silent data loss.
+
+### 16.4 Failure recovery
+
+Long-running file operations should report progress and provide meaningful error messages.
+
+Interrupted operations must not leave ambiguous states in which the interface reports success while data is missing or corrupted.
+
+The storage service must define durability guarantees for successful writes.
+
+---
+
+## 17. Accessibility and Customization
+
+Aether Explorer and all system portals must support:
+
+- Keyboard-only operation.
+- Screen readers.
+- High-contrast themes.
+- Text scaling.
+- Reduced animation.
+- Clear focus indicators.
+- Consistent shortcuts.
+- Accessible permission dialogs.
+- Non-color indicators for security status.
+
+The user may customize layout, density, themes, icon size, sidebar visibility, and sorting preferences.
+
+Customization must not alter security policy or bypass permission enforcement.
+
+---
+
+## 18. Required System Interfaces
+
+The following user-space services are proposed to implement the experience.
+
+### `fsd` — Filesystem service
+
+Provides resource identity, filesystem operations, storage-provider integration, metadata, and access validation.
+
+### `securityd` — Security policy service
+
+Manages application identities, policy decisions, capability grants, and revocation coordination.
+
+### `portald` — Trusted file portal
+
+Provides the authenticated Open, Save, Import, Export, folder-selection, and sharing interfaces.
+
+### `sessiond` — Application lifecycle service
+
+Tracks application instances, startup, termination, and session state.
+
+### `composerd` — Desktop compositor
+
+Provides window management, display composition, and trusted integration points for system dialogs.
+
+### `indexd` — Search and metadata indexing service
+
+Indexes authorized resources without gaining unrestricted access to all private application storage.
+
+### `updated` — Update service
+
+Maintains authenticated system updates and ensures system rollback does not silently destroy user data.
+
+### Interface requirements
+
+All services must operate under explicit capability profiles.
+
+The desktop and file manager are presentation clients, not security authorities.
+
+A compromised Explorer process must not automatically acquire unrestricted storage access. A compromised indexer must not automatically read every application vault. Portal requests must be authenticated and validated independently of the requesting application's claims.
+
+---
+
+## 19. Implementation Phases
+
+### Phase 1 — Filesystem and security foundations
+
+- Define resource identities and storage ownership.
+- Define application-private storage domains.
+- Implement capability-checked file handles.
+- Define read, write, enumerate, delete, rename, and execute rights.
+- Specify grant revocation and object lifetime.
+- Add cross-application isolation tests.
+
+**Exit criterion:** Two test applications cannot inspect or modify each other's private files.
+
+### Phase 2 — File portal
+
+- Define the portal protocol.
+- Implement authenticated Open and Save requests.
+- Implement selected-file capabilities.
+- Implement scoped folder grants.
+- Add temporary and persistent grants.
+- Test revocation and malformed requests.
+
+**Exit criterion:** An application can open a user-selected file without gaining access to its parent directory.
+
+### Phase 3 — Basic Explorer
+
+- Implement location navigation.
+- Add copy, move, rename, and delete.
+- Add user-owned folders.
+- Add basic search.
+- Add removable-storage support where available.
+- Integrate portal-based file selection.
+
+**Exit criterion:** A user can manage personal files and open them in an isolated test application.
+
+### Phase 4 — Unified desktop experience
+
+- Implement Recent, Favorites, and Home.
+- Add application registration and user-visible collections.
+- Implement Open With and sharing.
+- Add drag-and-drop capability transfer.
+- Add application storage accounting.
+- Implement permission management in Settings.
+
+**Exit criterion:** Applications can share selected user files through ordinary desktop workflows without unrestricted filesystem access.
+
+### Phase 5 — Lifecycle and recovery
+
+- Implement application uninstall policies.
+- Preserve private data according to retention policy.
+- Implement recoverable file operations.
+- Add storage-provider failure handling.
+- Implement system rollback without destroying user data.
+- Add application-data restoration.
+
+**Exit criterion:** Application removal, system updates, and interrupted operations do not silently destroy unrelated user files.
+
+### Phase 6 — Compatibility and refinement
+
+- Integrate Windows compatibility portals.
+- Validate Windows filesystem mappings.
+- Add advanced storage diagnostics.
+- Improve search and indexing.
+- Conduct accessibility and usability testing.
+- Perform independent security review of portal and filesystem boundaries.
+
+**Exit criterion:** Native and supported Windows applications use consistent user-facing file workflows with demonstrable isolation.
+
+---
+
+## 20. Acceptance Tests
+
+### UX-001 — Private storage creation
+
+**Given:** A newly installed application.
+
+**When:** It starts and creates internal data.
+
+**Then:** A private storage domain exists, and unrelated applications cannot enumerate or access its contents.
+
+### UX-002 — Selected-file access
+
+**Given:** An application without general access to Documents.
+
+**When:** The user selects a file through Open.
+
+**Then:** The application can read that file but cannot enumerate its parent directory or open unrelated files without additional authorization.
+
+### UX-003 — Save to user-owned storage
+
+**Given:** An application with private storage only.
+
+**When:** The user saves a document to Documents.
+
+**Then:** The file appears in Explorer and is available to other applications through authorized file-selection workflows.
+
+### UX-004 — Cross-application sharing
+
+**Given:** A document owned by the user.
+
+**When:** The user opens it in another application.
+
+**Then:** The receiving application obtains only the rights required for the operation.
+
+### UX-005 — Folder-scope enforcement
+
+**Given:** An application with access to one selected folder.
+
+**When:** It attempts to access a sibling directory or an unrelated application vault.
+
+**Then:** The operation is denied.
+
+### UX-006 — Search isolation
+
+**Given:** An application-private file containing a unique filename.
+
+**When:** An unauthorized application attempts to discover that filename through system search.
+
+**Then:** The filename and associated private metadata are not disclosed.
+
+### UX-007 — Grant revocation
+
+**Given:** An application with a persistent file grant.
+
+**When:** The user revokes it.
+
+**Then:** Subsequent access is denied according to documented revocation semantics.
+
+### UX-008 — Uninstall preservation
+
+**Given:** An application with private data and separate user-owned documents.
+
+**When:** The user uninstalls the application.
+
+**Then:** User-owned documents remain intact, and private-data retention follows the user's selected uninstall policy.
+
+### UX-009 — Safe cross-provider move
+
+**Given:** A file on removable storage and a destination on internal storage.
+
+**When:** The user moves the file and the operation is interrupted.
+
+**Then:** The system does not report an unverified successful move or silently destroy the only intact copy.
+
+### UX-010 — Permission display integrity
+
+**Given:** An application requests additional access.
+
+**When:** The permission interface displays the request.
+
+**Then:** The interface reflects the actual enforced grant and does not allow the requesting application to impersonate a trusted system dialog.
+
+### UX-011 — Compatibility isolation
+
+**Given:** Two separately isolated Windows applications.
+
+**When:** One attempts to access the other's private compatibility prefix.
+
+**Then:** Aether's security boundary blocks the unauthorized operation.
+
+### UX-012 — System rollback
+
+**Given:** A valid system image and user-owned files.
+
+**When:** A failed system update triggers rollback.
+
+**Then:** The previous valid system image can be restored without silently deleting user-owned data.
+
+---
+
+## 21. Non-Goals and Deferred Decisions
+
+This specification does not finalize:
+
+- The physical filesystem format.
+- The exact on-disk layout.
+- Whether the logical namespace uses a VFS-like abstraction, resource identifiers, or a combination.
+- A complete cloud synchronization architecture.
+- Universal support for every filesystem semantic.
+- A universal document version-history implementation.
+- Guaranteed recovery from physical media failure.
+- A mechanism to undo information an application has already read.
+- Full compatibility with applications that require unrestricted filesystem access.
+
+These require separate technical specifications and architecture decision records.
+
+---
+
+## 22. Final Design Position
+
+Aether should not force users to choose between security and convenience.
+
+The filesystem should feel familiar: documents are saved in familiar locations, applications share files through standard dialogs, search works across the user's workspace, and removing an application does not erase unrelated personal work.
+
+Behind that interface, Aether enforces strict boundaries. Each application receives its own private storage, and the operating system grants access to user-owned files through authenticated, scoped capabilities.
+
+**The guiding rule is simple: private by default, seamless by design, and shareable by user choice.**
