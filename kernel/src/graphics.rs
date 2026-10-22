@@ -329,19 +329,66 @@ impl Framebuffer {
         let packed = self.pack(rgb);
         for row in rect.y..rect.y + rect.height {
             let (left, width) = self.row_span(rect, row);
-            if width == 0 {
+            self.fill_span(row, left, width, packed);
+        }
+    }
+
+    /// Writes `width` packed pixels of one row. The caller has clipped the
+    /// span to the surface and every active clip.
+    #[inline]
+    fn fill_span(&mut self, row: i32, left: i32, width: i32, packed: u32) {
+        if width <= 0 {
+            return;
+        }
+        // SAFETY: Callers bound the span with `clipped` and `row_span`.
+        unsafe {
+            let pointer =
+                (self.base as *mut u32).add(row as usize * self.stride as usize + left as usize);
+            if self.volatile {
+                for column in 0..width as usize {
+                    pointer.add(column).write_volatile(packed);
+                }
+            } else {
+                core::slice::from_raw_parts_mut(pointer, width as usize).fill(packed);
+            }
+        }
+    }
+
+    /// Draws a 5x7 bitmap glyph scaled by `scale`.
+    ///
+    /// Text is most of a window's content. Clipping each lit cell as its own
+    /// rectangle repeated the clip intersection dozens of times per glyph, and
+    /// glyphs outside the damage region still paid for it. This clips the
+    /// glyph once and writes each horizontal run of lit cells as one span,
+    /// producing exactly the pixels of the per-cell path.
+    fn glyph(&mut self, x: i32, y: i32, rows: &[u8; 7], scale: i32, rgb: u32) {
+        let Some(bounds) = self.clipped(x, y, 5 * scale, 7 * scale) else {
+            return;
+        };
+        let packed = self.pack(rgb);
+        let bottom = bounds.y + bounds.height;
+        for (index, bits) in rows.iter().enumerate() {
+            let bits = *bits & 0x1f;
+            if bits == 0 {
                 continue;
             }
-            // SAFETY: `clipped` bounds each row to the validated surface.
-            unsafe {
-                let pointer = (self.base as *mut u32)
-                    .add(row as usize * self.stride as usize + left as usize);
-                if self.volatile {
-                    for column in 0..width as usize {
-                        pointer.add(column).write_volatile(packed);
+            let top = y + index as i32 * scale;
+            for row in top.max(bounds.y)..(top + scale).min(bottom) {
+                let (span_left, span_width) = self.row_span(bounds, row);
+                let span_right = span_left + span_width;
+                let mut column = 0;
+                while column < 5 {
+                    if bits & (0x10 >> column) == 0 {
+                        column += 1;
+                        continue;
                     }
-                } else {
-                    core::slice::from_raw_parts_mut(pointer, width as usize).fill(packed);
+                    let start = column;
+                    while column < 5 && bits & (0x10 >> column) != 0 {
+                        column += 1;
+                    }
+                    let left = (x + start * scale).max(span_left);
+                    let right = (x + column * scale).min(span_right);
+                    self.fill_span(row, left, right - left, packed);
                 }
             }
         }
@@ -968,7 +1015,7 @@ pub fn blend_glow(center_x: i32, center_y: i32, radius: i32, rgb: u32, alpha: u8
 
 /// Returns the 5x7 glyph rows for `character`. Lowercase input is folded to
 /// uppercase by [`draw_text`].
-fn glyph(character: char) -> [u8; 7] {
+pub(crate) fn glyph(character: char) -> [u8; 7] {
     match character {
         'A' => [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
         'B' => [0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e],
@@ -1109,21 +1156,7 @@ pub fn draw_char(x: i32, y: i32, character: char, rgb: u32, scale: i32) -> i32 {
     let uppercase = character.to_ascii_uppercase();
     let rows = glyph(uppercase);
     let scale = scale.max(1);
-    let _ = with_framebuffer(|fb| {
-        for (row, bits) in rows.iter().enumerate() {
-            for column in 0..5 {
-                if bits & (1 << (4 - column)) != 0 {
-                    fb.rect(
-                        x + column * scale,
-                        y + row as i32 * scale,
-                        scale,
-                        scale,
-                        rgb,
-                    );
-                }
-            }
-        }
-    });
+    let _ = with_framebuffer(|fb| fb.glyph(x, y, &rows, scale, rgb));
     6 * scale
 }
 

@@ -67,6 +67,17 @@ pub const fn menu_bar(screen: Rect) -> Rect {
     Rect::new(screen.x, screen.y, screen.width, MENU_BAR_HEIGHT)
 }
 
+/// Returns the Space name pill shown while a workspace slide runs.
+#[must_use]
+pub const fn space_pill(screen: Rect) -> Rect {
+    Rect::new(
+        screen.x + screen.width / 2 - 50,
+        screen.y + screen.height - 110,
+        100,
+        24,
+    )
+}
+
 /// Returns the usable area between the menu bar and dock.
 #[must_use]
 pub fn work_area(screen: Rect) -> Rect {

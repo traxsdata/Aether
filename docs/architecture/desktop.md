@@ -39,9 +39,13 @@ Spotlight filtering, settings, responsive layout, and animation completion.
 The compositor uses a static 1920×1200 32-bit back buffer and an equally bounded
 wallpaper cache: 18,432,000 bytes total (about 17.6 MiB). It recomputes the
 procedural wallpaper only when its palette changes. Geometry/state changes
-damage both old and new window extents, including shadows. All layers are
-repainted back-to-front inside that region, then only damaged pixels are copied
-to the display. Inner content clips cannot widen the damage clip; a rounded
+damage both old and new window extents, including shadows. Damage is kept as
+up to four rectangles, merged only when that paints no extra pixels, so a menu
+bar, a window, and the dock changing together do not repaint the whole screen
+between them. All layers are repainted back-to-front inside each rectangle,
+then only damaged pixels are copied to the display. A Spaces slide damages
+only the moving windows and the Space pill, and like a drag it omits window
+shadows until the motion ends. Inner content clips cannot widen the damage clip; a rounded
 silhouette clip prevents content from squaring off the lower window corners.
 
 A 15×22 backing store restores the pixels under the cursor, so ordinary pointer
@@ -50,7 +54,9 @@ events are batched before rendering, scene frames are paced start-to-start at
 up to roughly 33 Hz (without adding a delay after painting), and animations
 advance by actual elapsed 100 Hz timer ticks. Files reads
 are event-driven, not repeated during every paint. `desktop` reports scene/cursor
-paint counts and coarse last/max render times; `desktop redraw` explicitly
+paint counts, coarse last/max render times in 10 ms ticks, and TSC-timed
+`last_us`/`max_us`/`total_us` (calibrated against the PIT, so zero during the
+first second); `desktop reset` clears them and `desktop redraw` explicitly
 requests a full repaint for diagnostics.
 
 This prevents intermediate drawing operations from going directly to scanout,

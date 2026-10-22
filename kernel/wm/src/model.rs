@@ -7,7 +7,7 @@
 //! remain the authorities for their resources.
 
 use crate::anim::Anim;
-use crate::geometry::{Point, Rect};
+use crate::geometry::{Damage, Point, Rect};
 use crate::layout::{self, DOCK_ITEMS, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 use crate::theme::{GlassLevel, Palette, ThemeKind};
 pub use aether_input::{Key, Modifiers};
@@ -1410,13 +1410,22 @@ impl Wm {
     /// Bounds of scene changes, excluding the cursor. Shadows are included.
     ///
     /// Repaint all intersecting layers inside these bounds, not just the window
-    /// that moved. Overlays/workspace transitions conservatively damage all.
+    /// that moved. Overlays conservatively damage all. A workspace slide moves
+    /// only the two Spaces' windows over a static wallpaper, menu bar, and
+    /// dock, so it damages their old and new frames and the Space pill.
     #[must_use]
     pub fn damage_since(&self, before: &Self) -> Option<Rect> {
+        self.damage_region_since(before).bounds()
+    }
+
+    /// Scene changes since `before` as a few rectangles, clipped to the screen.
+    ///
+    /// The same changes as [`Self::damage_since`], without forcing the menu
+    /// bar, a window, and the dock into one bounding box.
+    #[must_use]
+    pub fn damage_region_since(&self, before: &Self) -> Damage {
         if self.screen != before.screen
             || self.settings != before.settings
-            || self.transition.active
-            || before.transition.active
             || self.overview_progress() != before.overview_progress()
             || self.overview_open != before.overview_open
             || self.overview_selected != before.overview_selected
@@ -1424,12 +1433,10 @@ impl Wm {
                 && (self.windows != before.windows || self.order != before.order))
             || self.spotlight_open != before.spotlight_open
         {
-            return Some(self.screen);
+            return Damage::from_rect(self.screen);
         }
-        let mut damage: Option<Rect> = None;
-        let mut include = |rect: Rect| {
-            damage = Some(damage.map_or(rect, |old| old.union(rect)));
-        };
+        let mut damage = Damage::new();
+        let mut include = |rect: Rect| damage.include(rect);
         // Opening or closing search dims or undims the whole screen. Typing or
         // moving the selection while it is open only changes the panel; the
         // dimming overlay is uniform, so repainting the panel and its offset
@@ -1445,6 +1452,7 @@ impl Wm {
                 || (self.focus != before.focus
                     && (self.focus == Some(*id) || before.focus == Some(*id)))
                 || self.workspace != before.workspace
+                || self.transition != before.transition
             {
                 if let Some(frame) = before.window_frame(*id) {
                     include(frame.inset(-24));
@@ -1459,6 +1467,11 @@ impl Wm {
             || self.menu != before.menu
         {
             include(layout::menu_bar(self.screen));
+        }
+        if self.transition.active != before.transition.active
+            || (self.transition.active && self.workspace != before.workspace)
+        {
+            include(layout::space_pill(self.screen));
         }
         if self.menu != before.menu {
             if let Some(panel) = before.menu_panel() {
@@ -1515,7 +1528,7 @@ impl Wm {
                 }
             }
         }
-        damage.and_then(|rect| rect.intersection(self.screen))
+        damage.clipped(self.screen)
     }
 
     /// Switches to a workspace, sliding the window layers.
