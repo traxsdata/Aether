@@ -34,9 +34,9 @@ when a move fails.
 
 ## Kernel and desktop integration
 
-- The RAM filesystem now has 64 inodes, with four reserved inode blocks, so the
-  user workspace and private application categories fit without reusing the
-  data area.
+- The RAM filesystem now has 96 inodes, with the inode table reserved ahead of
+  the data area, so the user workspace and private application categories fit
+  without reusing data blocks.
 - The `home` volume seeds `Recent`, `Favorites`, `Documents`, `Downloads`,
   `Pictures`, `Music`, `Videos`, `Projects`, `Shared`, and `Trash`.
 - `Applications` and `Devices` are service-backed locations under `/system`;

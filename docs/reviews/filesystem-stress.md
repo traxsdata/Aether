@@ -50,10 +50,10 @@ verifies:
 
 ### 2. Resource bounds are intentionally small (Informational)
 
-- 128 KiB device, 256 blocks.
-- 64 inodes, 8 data blocks (4 KiB) per file.
+- 256 KiB device, 512 blocks.
+- 96 inodes, 8 data blocks (4 KiB) per file.
 - 25 entries per directory, 16-byte names, 128-byte paths.
-- 8 open files globally.
+- 16 open files globally.
 - 2 concurrent portal staging files, 2 MiB each.
 
 Operations fail closed at these bounds. The 4 KiB per-file limit is much

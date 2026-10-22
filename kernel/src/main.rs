@@ -37,6 +37,7 @@ mod shell;
 mod socket;
 mod supervisor;
 mod syscall;
+mod terminal;
 mod updates;
 
 extern crate alloc;
@@ -149,6 +150,7 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     // SAFETY: Same invariant as above.
     let usable = unsafe { info.usable_bytes() };
+    memory::USABLE_BYTES.store(usable, core::sync::atomic::Ordering::Relaxed);
     // SAFETY: Same invariant as above.
     let regions = unsafe { info.regions() };
     serial_line!(

@@ -186,8 +186,10 @@ branch with its own `AETHER_RECOVERY_ROLLBACK_OK` marker.
 
 ## Known limitations
 
-- Static task set; no process creation, wait, or per-process resource
-  accounting beyond the counters above.
+- Applications still come from a static boot-time task set. Only the desktop
+  Terminal creates processes at run time (`spawn`/`wait` for its own
+  programs, in reusable slots); per-process accounting is limited to CPU
+  ticks and resident memory.
 - Endpoint objects created by a task are not destroyed when the task exits;
   the fixed eight-object pool is not reclaimed.
 - Single CPU; no SMP startup or per-CPU scheduler state.
@@ -201,8 +203,8 @@ branch with its own `AETHER_RECOVERY_ROLLBACK_OK` marker.
 
 ## Next steps
 
-1. Dynamic user-process creation and wait (retired tasks already release their
-   open file slots through `close_task_files`).
+1. Dynamic process creation and wait for applications, building on the
+   terminal's `spawn`/`wait` slot reuse.
 2. Guard pages and IST entries for stack overflow and double faults.
 3. Blocking send/receive with wakeup queues and timeouts.
 4. A user-space loader and `initd` supervision for real services.

@@ -47,6 +47,7 @@ pub fn app_icon(kind: WindowKind, rect: aether_wm::Rect, palette: Palette) {
             WindowKind::Log => (0x3d4775, 0xe2e6ff),
             WindowKind::Welcome => (0x7a5b2b, 0xfff0c9),
             WindowKind::Linux => (0x333d54, 0xdce7ff),
+            WindowKind::Terminal => (0x22272e, 0x9df5b4),
         }
     };
     let radius = (rect.width / 5).max(6);
@@ -134,6 +135,35 @@ fn draw_glyph(kind: WindowKind, rect: aether_wm::Rect, color: u32) {
             );
             graphics::fill_rect(rect.x + size / 4, rect.y + size / 2 - 1, size / 2, 2, color);
             graphics::fill_circle(rect.x + size / 2, rect.y + size / 2, size / 10, color);
+        }
+        WindowKind::Terminal => {
+            // A shell prompt: a chevron and a cursor bar.
+            let left = rect.x + size / 8;
+            let top = rect.y + size / 4;
+            let reach = size / 4;
+            for offset in 0..2 {
+                graphics::draw_line(
+                    left,
+                    top + offset,
+                    left + reach,
+                    top + reach + offset,
+                    color,
+                );
+                graphics::draw_line(
+                    left + reach,
+                    top + reach + offset,
+                    left,
+                    top + reach * 2 + offset,
+                    color,
+                );
+            }
+            graphics::fill_rect(
+                left + reach + size / 8,
+                top + reach * 2 - 1,
+                size / 3,
+                3,
+                color,
+            );
         }
     }
 }

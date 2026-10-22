@@ -1169,6 +1169,28 @@ pub fn draw_char(x: i32, y: i32, character: char, rgb: u32, scale: i32) -> i32 {
     6 * scale
 }
 
+/// Draws one 8-pixel-wide bitmap glyph cell over a solid background.
+///
+/// `rows` holds one byte per pixel row, most significant bit leftmost. The
+/// terminal uses this for its 8x16 cells; `underline` sets the last row.
+pub fn draw_glyph_cell(x: i32, y: i32, rows: &[u8], fg: u32, bg: u32, underline: bool) {
+    let _ = with_framebuffer(|fb| {
+        fb.rect(x, y, 8, rows.len() as i32, bg);
+        let last = rows.len().saturating_sub(1);
+        for (row, &bits) in rows.iter().enumerate() {
+            let bits = if underline && row == last { 0xff } else { bits };
+            if bits == 0 {
+                continue;
+            }
+            for column in 0..8 {
+                if bits & (0x80 >> column) != 0 {
+                    fb.pixel(x + column, y + row as i32, fg);
+                }
+            }
+        }
+    });
+}
+
 /// Draws a single-line string and returns the horizontal advance.
 pub fn draw_text(x: i32, y: i32, text: &str, rgb: u32, scale: i32) -> i32 {
     let mut cursor = x;

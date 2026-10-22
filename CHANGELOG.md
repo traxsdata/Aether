@@ -7,6 +7,24 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Added
 
+- A desktop Terminal with a Rust userland. `aether-term` emulates the xterm
+  subset (SGR colour, alternate screen, scroll regions, cursor reports) on an
+  80x24 Spleen 8x16 grid, and the window opens a session running `sh`. The
+  shell supports pipes, `<`/`>`/`>>`, `;`/`&&`/`||`, quoting, `$?`, history,
+  line editing, and Tab completion. Commands are Rust reimplementations of the
+  common Linux tools: `ls cat cp mv rm mkdir rmdir touch stat tree find du
+  pwd echo head tail wc grep sort uniq tee seq yes basename dirname ps kill
+  uptime free df uname whoami id hostname sleep env clear help`, plus
+  interactive `htop`/`top` and `nano`. Each runs as its own ring-3 process,
+  as the ordinary user, rooted at `/home`, with no capabilities. New system
+  calls 21-36 (`spawn`, `wait`, `kill`, `process_list`, `system_info`,
+  `read_input`, `terminal_size`, pipes, `remove`, `rename`, `make_dir`,
+  `arguments`, `terminal_mode`) and errnos `EPIPE` to `ENOTEMPTY` serve the
+  terminal session only. The RAM filesystem grows to 256 KiB, 96 inodes, and
+  16 open files. The scheduler gives the desktop a turn while terminal output
+  or console input is pending, so a busy program cannot freeze the screen.
+  `make terminal-test` drives the whole path over the serial console.
+
 ### Security
 
 - Transparent pre-image retention for file replacement. `AetherFs` now keeps
@@ -40,7 +58,7 @@ versioning scheme until the kernel ABI stabilises.
   Favorites, and Trash folders, and installed applications receive
   category-separated private storage. Files shows the thirteen specified
   navigation destinations, and user deletion moves items to Trash instead of
-  destroying them. The RAM filesystem grows to 64 inodes. Live kernel folder
+  destroying them. The RAM filesystem grows to 96 inodes. Live kernel folder
   grants, Trash restoration metadata, and application-contributed collections
   remain future work; see `docs/specifications/ui-filesystem.md`.
 - Recoverable Trash restoration. The filesystem service records the Trash

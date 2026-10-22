@@ -24,6 +24,19 @@ fn main() {
             .into_owned()
     });
     println!("cargo:rustc-env=AETHER_USER_ELF={user_elf}");
+    let userland_elf = env::var("AETHER_USERLAND_ELF").unwrap_or_else(|_| {
+        std::path::Path::new(&manifest)
+            .parent()
+            .expect("kernel manifest parent")
+            .join("build/aether-userland.elf")
+            .to_string_lossy()
+            .into_owned()
+    });
+    println!("cargo:rustc-env=AETHER_USERLAND_ELF={userland_elf}");
+    println!("cargo:rerun-if-env-changed=AETHER_USERLAND_ELF");
+    if std::path::Path::new(&userland_elf).exists() {
+        println!("cargo:rerun-if-changed={userland_elf}");
+    }
     println!("cargo:rerun-if-env-changed=AETHER_USER_ELF");
     if std::path::Path::new(&user_elf).exists() {
         println!("cargo:rerun-if-changed={user_elf}");
