@@ -7099,6 +7099,10 @@ pub fn resolve_linux_demand_fault(_frame: *mut InterruptFrame, address: u64, err
     let Some(prot) = task.anonymous_vmas.get(address).map(|vma| vma.prot) else {
         return false;
     };
+    // A PROT_NONE range is a guard: any access is a fault, never a page-in.
+    if prot & 7 == 0 {
+        return false;
+    }
     if error & WRITE != 0 && prot & aether_memory::vma::PROT_WRITE == 0
         || error & INSTRUCTION != 0 && prot & aether_memory::vma::PROT_EXEC == 0
     {
@@ -7107,6 +7111,11 @@ pub fn resolve_linux_demand_fault(_frame: *mut InterruptFrame, address: u64, err
     let Some(pml4) = PhysFrame::from_address(task.pml4) else {
         return false;
     };
+    // Never map over an existing leaf (a guard page, or a page another path
+    // already installed): that would orphan its frame.
+    if paging::user_leaf_present(pml4, page) {
+        return false;
+    }
     let mut flags =
         aether_memory::paging::PageFlags::PRESENT | aether_memory::paging::PageFlags::USER;
     if prot & aether_memory::vma::PROT_WRITE != 0 {

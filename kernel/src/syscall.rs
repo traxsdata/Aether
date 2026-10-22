@@ -1537,6 +1537,13 @@ fn vma_errno(error: aether_memory::vma::VmaError) -> i64 {
 }
 
 fn page_flags_from_protections(protections: u64) -> aether_memory::paging::PageFlags {
+    // PROT_NONE keeps the frame mapped but supervisor-only, so a guard page
+    // traps on user access and fails user-pointer validation.
+    if protections & 7 == 0 {
+        return aether_memory::paging::PageFlags::PRESENT
+            | aether_memory::paging::PageFlags::GUARD
+            | aether_memory::paging::PageFlags::NO_EXECUTE;
+    }
     let mut flags =
         aether_memory::paging::PageFlags::PRESENT | aether_memory::paging::PageFlags::USER;
     if protections & 2 != 0 {

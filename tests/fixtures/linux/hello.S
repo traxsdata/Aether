@@ -1126,6 +1126,81 @@ after_thread:
     mov $futex_timeout_message_len, %rdx
     syscall
 
+    /* ================= PROT_NONE guard pages ================= */
+    /* A page made PROT_NONE keeps its contents but rejects every access:
+     * the kernel refuses it as a syscall buffer, a forked child that touches
+     * its copy faults, and PROT_READ|PROT_WRITE brings the data back. */
+    mov $9, %rax                /* mmap one read/write anonymous page */
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_guard
+    mov %rax, %r12
+    movb $0x5a, (%r12)
+    mov $10, %rax               /* mprotect(page, 4096, PROT_NONE) */
+    mov %r12, %rdi
+    mov $4096, %rsi
+    xor %rdx, %rdx
+    syscall
+    test %rax, %rax
+    jne fail_guard
+    mov $1, %rax                /* write(1, guard, 1) must be EFAULT */
+    mov $1, %rdi
+    mov %r12, %rsi
+    mov $1, %rdx
+    syscall
+    cmp $-14, %rax
+    jne fail_guard
+    mov $57, %rax               /* fork: the child inherits the guard page */
+    syscall
+    test %rax, %rax
+    js fail_guard
+    jz guard_child
+    mov %rax, %r13
+    sub $16, %rsp
+    movl $0, (%rsp)
+    mov $61, %rax               /* wait4(child, &status, 0, NULL) */
+    mov %r13, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    js fail_guard
+    cmpl $0, (%rsp)             /* status 0 means the child read the page */
+    je fail_guard
+    add $16, %rsp
+    mov $10, %rax               /* mprotect(page, 4096, PROT_READ|PROT_WRITE) */
+    mov %r12, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    syscall
+    test %rax, %rax
+    jne fail_guard
+    cmpb $0x5a, (%r12)          /* the frame survived the guard period */
+    jne fail_guard
+    mov $11, %rax
+    mov %r12, %rdi
+    mov $4096, %rsi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea guard_message(%rip), %rsi
+    mov $guard_message_len, %rdx
+    syscall
+    jmp guard_done
+guard_child:
+    movzbl (%r12), %eax         /* must fault; reaching exit(0) is the bug */
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+guard_done:
+
     /* ================= blocking multiplexing and time ================= */
     sub $1024, %rsp
     /* Scratch page: signal flag at 0, thread tid at 8, thread data at 16. */
@@ -4068,6 +4143,10 @@ fail_thread:
     lea thread_failure(%rip), %rsi
     mov $thread_failure_len, %rdx
     jmp report_failure
+fail_guard:
+    lea guard_failure(%rip), %rsi
+    mov $guard_failure_len, %rdx
+    jmp report_failure
 fail_shared_fork:
     lea shared_fork_failure(%rip), %rsi
     mov $shared_fork_failure_len, %rdx
@@ -4633,6 +4712,12 @@ thread_message:
 shared_mmap_message:
     .ascii "AETHER_LINUX_SHARED_MMAP_OK thread=visible\n"
     .set shared_mmap_message_len, . - shared_mmap_message
+guard_message:
+    .ascii "AETHER_LINUX_GUARD_OK efault=ok fork_fault=ok restore=ok\n"
+    .set guard_message_len, . - guard_message
+guard_failure:
+    .ascii "AETHER_LINUX_GUARD_FAIL\n"
+    .set guard_failure_len, . - guard_failure
 shared_fork_message:
     .ascii "AETHER_LINUX_SHARED_FORK_OK anon=shared private=private visible=both\n"
     .set shared_fork_message_len, . - shared_fork_message
