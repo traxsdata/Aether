@@ -126,6 +126,8 @@ pub struct ImportedApp {
     program: Vec<u8>,
     /// Whether the program requests a `PT_INTERP` interpreter.
     dynamic: bool,
+    /// Whether the signed record declares `memory=jit`.
+    jit: bool,
 }
 
 static RUNTIME: Global<Option<RuntimeProfile>> = Global(UnsafeCell::new(None));
@@ -405,6 +407,7 @@ pub fn import_appimage() -> Result<(), ()> {
             path: String::from(APPIMAGE_PROGRAM),
             program,
             dynamic,
+            jit: record.jit,
         })
     };
     Ok(())
@@ -431,6 +434,14 @@ pub fn app_identity() -> Option<(&'static str, &'static str, &'static str)> {
     // SAFETY: APP is written once during boot and immutable afterwards.
     let app = unsafe { (*APP.0.get()).as_ref() }?;
     Some((app.id.as_str(), app.version.as_str(), app.path.as_str()))
+}
+
+/// Returns `true` if the imported AppImage's signed record declares
+/// `memory=jit`, which allows writable+executable mappings.
+#[must_use]
+pub fn app_jit() -> bool {
+    // SAFETY: APP is written once during boot and immutable afterwards.
+    unsafe { (*APP.0.get()).as_ref() }.is_some_and(|app| app.jit)
 }
 
 /// Returns the program bytes selected from the imported AppImage.

@@ -43,7 +43,7 @@ fi
 
 cargo run -q -p aether-appimage --bin appimage-manifest -- \
     sign "$SEED" "$APP" ai.storyteller.gridcraft 0.8.0 \
-    "Aether Test Publisher" "$RECORD" linux-appimage >/dev/null
+    "Aether Test Publisher" "$RECORD" linux-appimage memory=jit >/dev/null
 
 PUBLIC_LINE=$(cargo run -q -p aether-admin -- key public --seed "$SEED")
 case $PUBLIC_LINE in

@@ -600,6 +600,10 @@ struct Task {
     /// Narrow display-endpoint grant. Set only for the boot display fixture and
     /// a verified GridCraft AppImage; never inherited through `fork`.
     display: bool,
+    /// Writable+executable mappings allowed. Set only from a verified
+    /// AppImage record that declares `memory=jit`; threads, `fork` and
+    /// `execve` keep it, since they stay inside the same application.
+    jit: bool,
 }
 
 impl Task {
@@ -673,6 +677,7 @@ impl Task {
             wait_status_pointer: 0,
             reserved: false,
             display: false,
+            jit: false,
         }
     }
 }
@@ -1561,6 +1566,7 @@ pub fn launch_appimage() -> Result<(), SchedulerError> {
     // cannot choose this: `app_identity` comes from the signed import record.
     app_task.display =
         crate::linux::app_identity().is_some_and(|(id, _, _)| id == "ai.storyteller.gridcraft");
+    app_task.jit = crate::linux::app_jit();
     if let Some((_, main_image, interpreter_image)) = dynamic {
         seed_linux_vmas(&mut app_task, &main_image, crate::linux_loader::MAIN_BASE);
         seed_linux_vmas(
@@ -2083,6 +2089,7 @@ pub fn linux_clone(
     thread.bind_file_state(parent_tgid);
     thread.overlay_app = parent_overlay_app;
     thread.handles = parent_handles;
+    thread.jit = tasks[current].jit;
 
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
     let frame_end = (kernel_top - 16) & !15;
@@ -2183,6 +2190,7 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.sid = tasks[current].sid;
     child.parent = current;
     child.overlay_app = overlay_app;
+    child.jit = tasks[current].jit;
     // fork gets a process-private snapshot of the descriptor table; threads
     // continue to address the parent's table via their shared tgid.
     child.bind_file_state(slot);
@@ -2771,6 +2779,14 @@ pub fn linux_set_robust_list(head: u64, length: u64) -> i64 {
     task.robust_list = head;
     task.robust_list_len = length;
     0
+}
+
+/// Returns `true` if the current task may create writable+executable
+/// mappings (its signed AppImage record declares `memory=jit`).
+#[must_use]
+pub fn linux_jit_allowed() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].jit
 }
 
 /// Returns the registered robust-list head and length for `pid` (0 = caller).

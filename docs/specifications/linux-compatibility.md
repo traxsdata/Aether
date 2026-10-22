@@ -156,7 +156,9 @@ bounds, report compression and offsets, and fail closed on malformed input.
 Signed import records (`apps/linux/appimage/src/manifest.rs`) bind identity,
 version, runtime, digest, and publisher to an Ed25519 signature checked against
 a trust store; `appimage-manifest` signs and verifies both `linux-appimage` and
-`linux-rootfs` artifacts. `tools/build-runtime-rootfs.sh` packages a root
+`linux-rootfs` artifacts. An AppImage record may also carry the signed
+`memory=jit` field, which is the only way a Linux task is allowed
+writable+executable memory. `tools/build-runtime-rootfs.sh` packages a root
 directory as zstd SquashFS and signs it.
 
 **Evidence:** `apps/linux/appimage` validates the container and verifies pinned
@@ -290,8 +292,12 @@ file-backed `mmap`, `munmap` and fixed-address reuse, `mprotect`, growing
 root, create/write/read through the `/tmp` overlay, `write`, and `exit`. It
 produces `AETHER_LINUX_ROOT_OK`, `AETHER_LINUX_OVERLAY_OK`,
 `AETHER_LINUX_VMA_OK`, plus `AETHER_LINUX_OK`; a writable+executable
-mapping is permitted because the LLVM section allocator used by lavapipe
-requests it, while a W+X `mprotect` is denied. Private anonymous pages are allocated on demand
+mapping is refused with `EACCES` because this program has no import record
+declaring `memory=jit` (the AppImage fixture declares it and its W+X mapping
+succeeds, as the LLVM section allocator used by lavapipe requires), and a W+X
+`mprotect` is always denied. `PROT_NONE` pages are guard pages: a forked
+child that touches one faults, and the kernel refuses them as syscall
+buffers (`AETHER_LINUX_GUARD_OK`). Private anonymous pages are allocated on demand
 and reclaimed on `munmap` and task exit. A parent and child share one
 `MAP_SHARED|MAP_ANONYMOUS` page and observe writes in both directions while a
 neighbouring private page keeps its pre-fork contents

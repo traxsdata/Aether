@@ -154,7 +154,7 @@ linux-fixture:
 			$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED); \
 	fi
 	sh tools/build-appimage-fixture.sh $(LINUX_APPIMAGE) $(LINUX_APPIMAGE_RECORD) \
-		$(LINUX_RUNTIME_SEED) $(LINUX_APP_ELF)
+		$(LINUX_RUNTIME_SEED) $(LINUX_APP_ELF) memory=jit
 
 kernel: user linux-fixture
 	@mkdir -p $(BUILD)
