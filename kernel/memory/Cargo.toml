@@ -13,3 +13,5 @@ aether-abi = { path = "../../abi" }
 [features]
 # Larger Gate 4 GUI bounds; the standard kernel keeps the prototype limits.
 gate4 = []
+# Linux-sized bounds for large applications such as Firefox.
+large-apps = []

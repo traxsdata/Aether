@@ -27,9 +27,11 @@ use core::cell::UnsafeCell;
 /// Maximum path bytes the Linux root accepts.
 pub const MAX_PATH: usize = 256;
 /// Maximum open files per Linux task.
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(feature = "large-apps")]
+pub const MAX_FDS: usize = 1024;
+#[cfg(all(feature = "gate4-gui-test", not(feature = "large-apps")))]
 pub const MAX_FDS: usize = 256;
-#[cfg(not(feature = "gate4-gui-test"))]
+#[cfg(not(any(feature = "gate4-gui-test", feature = "large-apps")))]
 pub const MAX_FDS: usize = 8;
 
 const ROOTFS: &[u8] = include_bytes!(env!("AETHER_LINUX_ROOTFS"));

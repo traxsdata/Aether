@@ -343,6 +343,26 @@ fn title_bar_drag_moves_a_window() {
 }
 
 #[test]
+fn ending_a_drag_damages_the_window_and_its_shadow() {
+    let mut wm = sample();
+    let welcome = wm.focused_window().unwrap();
+    let id = welcome.id;
+    let start = Point::new(
+        welcome.frame.x + welcome.frame.width / 2,
+        welcome.frame.y + 12,
+    );
+    wm.pointer_down(start, 0);
+    wm.pointer_moved(start.offset(24, 18));
+    assert_eq!(wm.dragging_id(), Some(id));
+    let before = wm;
+    wm.pointer_up();
+    assert_eq!(wm.dragging_id(), None);
+    let shadow = wm.window(id).unwrap().frame.inset(-24);
+    let damage = wm.damage_since(&before).unwrap();
+    assert_eq!(damage.union(shadow), damage);
+}
+
+#[test]
 fn resize_grip_enforces_minimum_size() {
     let mut wm = sample();
     let welcome = wm.focused_window().unwrap();

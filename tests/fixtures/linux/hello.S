@@ -5,6 +5,19 @@
  * two calls a freestanding program needs to report and terminate. Any failed
  * step writes a failure marker and exits nonzero, which fails the boot gate.
  */
+/* Upper bounds for the quota loops. The large-apps kernel raises the
+ * descriptor and mapping limits to Linux sizes, so the loops must run past
+ * them (1,024 descriptors, 65,530 areas) to still prove EMFILE and ENOMEM.
+ * Descriptors are stored from offset 512 of the frame, four bytes each. */
+.ifdef AETHER_LARGE_APPS
+    .set QUOTA_FRAME, 8192
+    .set QUOTA_FDS, 1100
+    .set QUOTA_VMAS, 70000
+.else
+    .set QUOTA_FRAME, 1024
+    .set QUOTA_FDS, 24
+    .set QUOTA_VMAS, 64
+.endif
     .section .text
     .global _start
     .type _start, @function
@@ -1296,7 +1309,13 @@ guard_done:
     test %rax, %rax
     jne fail_sleep_abs
 
-    /* --- A deliverable signal interrupts nanosleep with EINTR. --- */
+    /* --- A deliverable signal interrupts nanosleep with EINTR. The child
+     * signals after 50 ms. If the parent is preempted for that long before
+     * it reaches nanosleep, the handler runs first and the sleep completes;
+     * that attempt says nothing about EINTR, so it is retried. */
+    movq $3, 112(%rsp)          /* attempts */
+.Lintr_attempt:
+    movl $0, (%r12)
     mov $57, %rax               /* fork */
     syscall
     test %rax, %rax
@@ -1315,10 +1334,18 @@ guard_done:
     lea 0(%rsp), %rdi
     xor %rsi, %rsi
     syscall
-    cmp $-4, %rax               /* -EINTR */
-    jne fail_sleep_intr_ret
+    mov %rax, 104(%rsp)
     cmpl $1, (%r12)             /* the SIGUSR1 handler ran */
-    jne fail_sleep_intr_handler
+    je .Lintr_handled
+    cmp $-4, %rax               /* -EINTR */
+    je fail_sleep_intr_handler
+    jmp fail_sleep_intr_ret
+.Lintr_handled:
+    cmp $-4, %rax
+    je .Lintr_reap
+    test %rax, %rax             /* only a completed sleep may be retried */
+    jne fail_sleep_intr_ret
+.Lintr_reap:
     sub $16, %rsp
     mov $61, %rax
     mov %r15, %rdi
@@ -1339,6 +1366,12 @@ guard_done:
     je fail_sleep_intr_einval
     jmp fail_sleep_intr
 .Lintr_reaped:
+    cmpq $-4, 104(%rsp)
+    je .Lintr_passed
+    decq 112(%rsp)
+    jnz .Lintr_attempt
+    jmp fail_sleep_intr_ret
+.Lintr_passed:
     mov $1, %rax
     mov $1, %rdi
     lea nanosleep_message(%rip), %rsi
@@ -3609,7 +3642,7 @@ g2_block_joined:
 
 .ifndef AETHER_GATE4_GUI
     /* Quotas: overlay bytes, descriptor count, then VMA count. */
-    sub $1024, %rsp
+    sub $QUOTA_FRAME, %rsp
     mov $257, %rax
     mov $-100, %rdi
     lea g2_q2_path(%rip), %rsi
@@ -3649,7 +3682,7 @@ g2_fd_loop:
     js g2_fd_done
     mov %eax, 512(%rsp,%r14,4)
     inc %r14
-    cmp $24, %r14
+    cmp $QUOTA_FDS, %r14
     jb g2_fd_loop
     jmp g2_fail_quota
 g2_fd_done:
@@ -3736,7 +3769,7 @@ g2_vma_prot_ready:
     test %rax, %rax
     js g2_vma_done
     inc %r13
-    cmp $64, %r13
+    cmp $QUOTA_VMAS, %r13
     jb g2_vma_loop
     jmp g2_fail_quota
 g2_vma_done:
@@ -3747,7 +3780,7 @@ g2_vma_done:
     lea g2_quota_message(%rip), %rsi
     mov $g2_quota_message_len, %rdx
     syscall
-    add $1024, %rsp
+    add $QUOTA_FRAME, %rsp
     jmp g2_extras_done
 .endif
     jmp g2_extras_done
