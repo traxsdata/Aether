@@ -1878,6 +1878,10 @@ fn linux_execve(
         &arguments[..argument_count],
         &environment[..environment_count],
     ) else {
+        let _ = crate::memory::with_frame_allocator(|allocator| {
+            // SAFETY: The new space was never activated or given to a task.
+            unsafe { paging::destroy_user_address_space(allocator, new_pml4) };
+        });
         unsafe { (*frame).rax = LINUX_E2BIG as u64 };
         return frame;
     };

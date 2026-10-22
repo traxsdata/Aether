@@ -515,6 +515,69 @@ pub fn unmap_user_range(
     Ok(released)
 }
 
+/// Releases every user frame and page-table frame of an address space,
+/// including the PML4 itself.
+///
+/// Shared frames lose one reference; private frames return to the allocator.
+/// Only the PML4 slots that cover [`USER_BASE`]..[`USER_LIMIT`] are walked, so
+/// the shared kernel entries are never touched.
+///
+/// # Safety
+///
+/// `pml4` must be a user address space created by this module that is not
+/// active in CR3 and is not referenced by any runnable task.
+pub unsafe fn destroy_user_address_space(allocator: &mut FrameAllocator<'_>, pml4: PhysFrame) {
+    let first = aether_memory::paging::indices(USER_BASE)[0];
+    let last = aether_memory::paging::indices(USER_LIMIT - 1)[0];
+    for pml4_index in first..=last {
+        // SAFETY: The caller guarantees the tables are owned by this address
+        // space and identity-mapped; nothing else walks them any more.
+        unsafe {
+            let pml4_entry = (*table_ptr(pml4)).entry(pml4_index);
+            if !pml4_entry.is_present() || pml4_entry.is_huge() {
+                continue;
+            }
+            let Some(pdpt) = PhysFrame::from_address(pml4_entry.address()) else {
+                continue;
+            };
+            for pdpt_index in 0..512 {
+                let pdpt_entry = (*table_ptr(pdpt)).entry(pdpt_index);
+                if !pdpt_entry.is_present() || pdpt_entry.is_huge() {
+                    continue;
+                }
+                let Some(pd) = PhysFrame::from_address(pdpt_entry.address()) else {
+                    continue;
+                };
+                for pd_index in 0..512 {
+                    let pd_entry = (*table_ptr(pd)).entry(pd_index);
+                    if !pd_entry.is_present() || pd_entry.is_huge() {
+                        continue;
+                    }
+                    let Some(pt) = PhysFrame::from_address(pd_entry.address()) else {
+                        continue;
+                    };
+                    for pt_index in 0..512 {
+                        let leaf = (*table_ptr(pt)).entry(pt_index);
+                        if !leaf.is_present() || !leaf.flags().contains(PageFlags::USER) {
+                            continue;
+                        }
+                        if let Some(frame) = PhysFrame::from_address(leaf.address())
+                            && !shared::release(allocator, frame)
+                        {
+                            let _ = allocator.deallocate(frame);
+                        }
+                    }
+                    let _ = allocator.deallocate(pt);
+                }
+                let _ = allocator.deallocate(pd);
+            }
+            let _ = allocator.deallocate(pdpt);
+            (*table_ptr(pml4)).set_entry(pml4_index, PageTableEntry::EMPTY);
+        }
+    }
+    let _ = allocator.deallocate(pml4);
+}
+
 fn validate_user_range(start: u64, length: u64) -> Result<u64, PagingError> {
     if length == 0
         || !start.is_multiple_of(PAGE_SIZE)

@@ -1003,9 +1003,11 @@ pub fn run() -> ! {
                 }
             }
             serial_line!(
-                "AETHER_LINUX_OK abi=linux exits={} faults={}",
+                "AETHER_LINUX_OK abi=linux exits={} faults={} spaces_released={} frames_released={}",
                 linux_exits(),
-                LINUX_FAULTS.load(Ordering::Acquire)
+                LINUX_FAULTS.load(Ordering::Acquire),
+                RELEASED_SPACES.load(Ordering::Relaxed),
+                RELEASED_FRAMES.load(Ordering::Relaxed)
             );
             if let Some((id, version, path)) = crate::linux::app_identity() {
                 serial_line!(
@@ -2210,9 +2212,14 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
 
 /// Replaces the current task's address space after `execve`.
 pub fn linux_replace_image(pml4: PhysFrame) {
+    let current = CURRENT.load(Ordering::Relaxed);
+    // execve replaces the whole process: other threads of the group would
+    // otherwise keep running in the address space released below.
+    stop_sibling_threads(current);
     let tasks = unsafe { &mut *TASKS.0.get() };
-    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let task = &mut tasks[current];
     let old_pml4 = PhysFrame::from_address(task.pml4);
+    let old_address = task.pml4;
     if let Some(old_pml4) = old_pml4.filter(|old| *old != pml4) {
         // The replacement is already active when this is called. Release all
         // user leaf frames from the obsolete image, including ELF/stack pages
@@ -2228,6 +2235,9 @@ pub fn linux_replace_image(pml4: PhysFrame) {
     task.shared_vmas.reset();
     task.brk = paging::LINUX_ARENA_BASE;
     task.fs_base = 0;
+    if old_address != pml4.start_address() {
+        retire_address_space(old_address);
+    }
 }
 
 /// Reaps an exited child of the current process.
@@ -6925,6 +6935,7 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         tasks[current].kind
     };
     if kind == TaskKind::Process {
+        stop_sibling_threads(current);
         robust_futex_cleanup(current);
         release_linux_mappings(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
@@ -6941,8 +6952,10 @@ pub fn linux_exit(status: u64) -> *mut InterruptFrame {
         clear_file_state(tasks[current].tgid);
         serial_line!("linux: process exit pid={current} status={status}");
         linux_release_task_pipes();
+        let pml4 = tasks[current].pml4;
         wake_waiting_parent(current);
         queue_child_signal(current);
+        retire_address_space(pml4);
         return schedule_next(current);
     }
     if kind == TaskKind::Thread {
@@ -7085,6 +7098,7 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
         return schedule_next(current);
     }
     if process {
+        stop_sibling_threads(current);
         robust_futex_cleanup(current);
         release_linux_mappings(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
@@ -7094,18 +7108,33 @@ pub fn on_user_fault(frame: *mut InterruptFrame, vector: u64, address: u64) -> *
         clear_file_state(tasks[current].tgid);
         serial_line!("linux: process fault pid={current} vector={vector}");
         linux_release_task_pipes();
+        let pml4 = tasks[current].pml4;
         wake_waiting_parent(current);
         queue_child_signal(current);
+        retire_address_space(pml4);
         return schedule_next(current);
     }
     if thread {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        let tgid = tasks[current].tgid;
+        if tgid < MAX_TASKS && tasks[tgid].kind == TaskKind::Process {
+            // An unhandled fault kills the whole process, as a fatal signal
+            // does on Linux; the siblings must not keep running against the
+            // descriptors and mappings the group shares.
+            serial_line!("linux: thread fault tid={current} vector={vector}");
+            let signum = if vector == 17 { 7 } else { 11 };
+            let pml4 = tasks[current].pml4;
+            terminate_thread_group(current, signum);
+            retire_address_space(pml4);
+            return schedule_next(current);
+        }
         robust_futex_cleanup(current);
         clear_child_tid(current);
         let tasks = unsafe { &mut *TASKS.0.get() };
         tasks[current].state = TaskState::Faulted;
         tasks[current].saved_rsp = frame as u64;
-        release_linux_task_resources(&tasks[current].linux_fds);
-        clear_file_state(tasks[current].tgid);
+        // The descriptor table belongs to the thread group, which keeps
+        // running; only the faulting thread retires (as on thread exit).
         serial_line!("linux: thread fault tid={current} vector={vector}");
         linux_release_task_pipes();
         return schedule_next(current);
@@ -7263,6 +7292,110 @@ unsafe fn fpu_restore(task: usize) {
     }
 }
 
+/// Address spaces whose last task has retired, waiting for a CR3 switch.
+struct PendingSpaces(UnsafeCell<[u64; MAX_PENDING_SPACES]>);
+
+// SAFETY: Accessed only from scheduler paths at CPL0 with interrupts masked.
+unsafe impl Sync for PendingSpaces {}
+
+const MAX_PENDING_SPACES: usize = 16;
+/// Address spaces and frames returned by retired Linux processes.
+static RELEASED_SPACES: AtomicUsize = AtomicUsize::new(0);
+static RELEASED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static PENDING_SPACES: PendingSpaces = PendingSpaces(UnsafeCell::new([0; MAX_PENDING_SPACES]));
+
+/// Queues a Linux address space for teardown once no live task uses it.
+///
+/// The space may still be active in CR3 (the exiting task is running on it),
+/// so the frames are released by [`schedule_next`] after the switch. Retired
+/// tasks that still name the space have it cleared so nothing can reach the
+/// recycled frames through them.
+fn retire_address_space(pml4: u64) {
+    if pml4 == 0 {
+        return;
+    }
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    if tasks.iter().any(|task| {
+        task.pml4 == pml4
+            && !matches!(
+                task.state,
+                TaskState::Empty | TaskState::Done | TaskState::Faulted
+            )
+    }) {
+        return;
+    }
+    for task in tasks.iter_mut().filter(|task| task.pml4 == pml4) {
+        task.pml4 = 0;
+    }
+    // SAFETY: Scheduler paths run with interrupts masked on the single CPU.
+    let pending = unsafe { &mut *PENDING_SPACES.0.get() };
+    if pending.contains(&pml4) {
+        return;
+    }
+    if let Some(slot) = pending.iter_mut().find(|slot| **slot == 0) {
+        *slot = pml4;
+    } else {
+        serial_line!("linux: address-space teardown queue full; leaking {pml4:#x}");
+    }
+}
+
+/// Frees queued address spaces that are no longer active in CR3.
+fn drain_retired_address_spaces() {
+    let active = paging::current_pml4().map_or(0, |frame| frame.start_address());
+    // SAFETY: Scheduler paths run with interrupts masked on the single CPU.
+    let pending = unsafe { &mut *PENDING_SPACES.0.get() };
+    for slot in pending.iter_mut() {
+        if *slot == 0 || *slot == active {
+            continue;
+        }
+        if let Some(pml4) = PhysFrame::from_address(*slot) {
+            let _ = crate::memory::with_frame_allocator(|allocator| {
+                let before = allocator.stats().free_frames;
+                // SAFETY: `retire_address_space` admitted the space only after
+                // its last live task retired, and it is not the active CR3.
+                unsafe { paging::destroy_user_address_space(allocator, pml4) };
+                let freed = allocator.stats().free_frames.saturating_sub(before);
+                RELEASED_SPACES.fetch_add(1, Ordering::Relaxed);
+                RELEASED_FRAMES.fetch_add(freed as usize, Ordering::Relaxed);
+            });
+        }
+        *slot = 0;
+    }
+}
+
+/// Retires every other thread of the caller's thread group.
+///
+/// Called before a process tears down its mappings and descriptors, so no
+/// sibling keeps running against released state (Linux `exit_group`).
+fn stop_sibling_threads(current: usize) {
+    let (tgid, pml4) = {
+        let tasks = unsafe { &*TASKS.0.get() };
+        (tasks[current].tgid, tasks[current].pml4)
+    };
+    for slot in 0..MAX_TASKS {
+        let sibling = {
+            let tasks = unsafe { &*TASKS.0.get() };
+            let task = &tasks[slot];
+            slot != current
+                && task.kind == TaskKind::Thread
+                && task.tgid == tgid
+                && task.pml4 == pml4
+                && !matches!(
+                    task.state,
+                    TaskState::Empty | TaskState::Done | TaskState::Faulted
+                )
+        };
+        if !sibling {
+            continue;
+        }
+        robust_futex_cleanup(slot);
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[slot].futex_address = 0;
+        tasks[slot].futex_deadline = 0;
+        tasks[slot].state = TaskState::Done;
+    }
+}
+
 fn schedule_next(current: usize) -> *mut InterruptFrame {
     // SAFETY: Context switches run at CPL0 with interrupts masked.
     unsafe { fpu_save(current) };
@@ -7289,6 +7422,7 @@ fn schedule_next(current: usize) -> *mut InterruptFrame {
     if let Some(pml4) = PhysFrame::from_address(tasks[next].pml4) {
         paging::activate(pml4);
     }
+    drain_retired_address_spaces();
     // SAFETY: The selected task is about to resume on this CPU.
     unsafe { fpu_restore(next) };
     tasks[next].saved_rsp as *mut InterruptFrame
