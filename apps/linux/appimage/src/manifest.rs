@@ -18,6 +18,11 @@
 //! without it are refused W+X memory. It is part of the signed body, so only
 //! the publisher can grant it.
 //!
+//! The optional `network=client` field declares that the application may ask
+//! for outbound network connections. It grants nothing by itself: the user is
+//! asked on first use, and listening sockets are never allowed. A record
+//! without it is refused every Internet socket.
+//!
 //! Verification order is strict: framing, field policy, trusted publisher key,
 //! publisher-name match, signature, then the image digest. A valid signature
 //! says who vouched for an artifact; it does not make the application safe.
@@ -80,6 +85,9 @@ pub struct ImportManifest<'a> {
     pub publisher_key: [u8; 32],
     /// Whether the record declares `memory=jit` (writable+executable memory).
     pub jit: bool,
+    /// Whether the record declares `network=client` (outbound connections,
+    /// subject to the user's consent).
+    pub network_client: bool,
     /// Signed canonical body.
     pub body: &'a [u8],
     /// Ed25519 signature over `body`.
@@ -123,6 +131,7 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
     let mut publisher = None;
     let mut publisher_key = None;
     let mut memory = None;
+    let mut network = None;
     for line in body_text.split('\n') {
         if line.is_empty() {
             continue;
@@ -136,6 +145,7 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
             "publisher" => &mut publisher,
             "publisher-key" => &mut publisher_key,
             "memory" => &mut memory,
+            "network" => &mut network,
             _ => return Err(ManifestError::Field),
         };
         if slot.replace(value).is_some() {
@@ -159,6 +169,13 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
         Some("jit") => true,
         Some(_) => return Err(ManifestError::Field),
     };
+    // `client` is the only network policy. There is deliberately no value
+    // that allows listening sockets.
+    let network_client = match network {
+        None => false,
+        Some("client") => true,
+        Some(_) => return Err(ManifestError::Field),
+    };
     if version.is_empty() || version.len() > 32 || publisher.is_empty() || publisher.len() > 64 {
         return Err(ManifestError::Field);
     }
@@ -179,6 +196,7 @@ pub fn parse(bytes: &[u8]) -> Result<ImportManifest<'_>, ManifestError> {
         publisher,
         publisher_key: key,
         jit,
+        network_client,
         body,
         signature,
     })

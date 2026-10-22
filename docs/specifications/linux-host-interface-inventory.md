@@ -179,7 +179,7 @@ a compatibility shortcut would otherwise reintroduce.
 | D-05 | **Fixed path namespace.** User files are reachable only through portal paths or handles; `/home/user` is the per-app overlay, never the host home directory. | File authority must come from portal grants, not from a path string the application chooses. | HI-09, HI-T09 |
 | D-06 | **Fixed environment and locale.** `C.UTF-8`, UTC, a bundled zoneinfo subset, and the environment in the table below; no host environment inheritance. | Host locale, timezone, and environment are ambient inputs that can change behaviour and leak host state. | HI-06, HI-T06 |
 | D-07 | **Software Vulkan only.** Pin lavapipe with `VK_ICD_FILENAMES`; no `/dev/dri`, GPU passthrough, or host GL driver. | The first GUI milestone needs a reviewable renderer, not device ownership. Software rendering keeps the GPU outside the trusted path. | HI-23, HI-24, HI-T23, HI-T24 |
-| D-08 | **Network denied.** AF_INET/AF_INET6 and DNS fail closed; AF_UNIX is allowed only to the Wayland and D-Bus brokers. | The application has no network permission in the first profile, and a local-socket bridge would recreate one. | HI-17, HI-18, HI-T17, HI-T18 |
+| D-08 | **Network denied by default** (amended by [ADR-018](../decisions/ADR-018-networking.md)). AF_INET/AF_INET6 fail closed unless the signed import record declares `network=client` and the user consents on first use; listening is never allowed. AF_UNIX is allowed only to the Wayland and D-Bus brokers and for socket pairs. | The application has no network permission in the first profile, and a local-socket bridge would recreate one. | HI-17, HI-18, HI-T17, HI-T18 |
 
 ### Path namespace
 

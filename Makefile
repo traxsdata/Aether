@@ -21,6 +21,10 @@ LINUX_APP_ELF := $(BUILD)/linux-appimage-app.elf
 GATE4_APP_ELF := $(BUILD)/linux-gate4-portal.elf
 GATE4_APPIMAGE := $(BUILD)/linux-gate4-portal.AppImage
 GATE4_APPIMAGE_RECORD := $(BUILD)/linux-gate4-portal.import
+NET_TEST_PORT ?= 18080
+NET_APP_ELF := $(BUILD)/linux-net-client.elf
+NET_APPIMAGE := $(BUILD)/linux-net-client.AppImage
+NET_APPIMAGE_RECORD := $(BUILD)/linux-net-client.import
 GATE4_GUI_APP_ELF := $(BUILD)/linux-gate4-gui-portal.elf
 GATE4_GUI_APPIMAGE := $(BUILD)/linux-gate4-gui-portal.AppImage
 GATE4_GUI_APPIMAGE_RECORD := $(BUILD)/linux-gate4-gui-portal.import
@@ -106,7 +110,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -170,6 +174,10 @@ linux-fixture:
 	$(AS) --64 tests/fixtures/linux/gate4-gui-portal.S -o $(BUILD)/linux-gate4-gui-portal.o
 	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
 		$(BUILD)/linux-gate4-gui-portal.o -o $(GATE4_GUI_APP_ELF)
+	$(AS) --64 --defsym AETHER_NET_PORT=$(NET_TEST_PORT) tests/fixtures/linux/net-client.S \
+		-o $(BUILD)/linux-net-client.o
+	$(LD) -m elf_x86_64 -static -no-pie -T tests/fixtures/linux/linker.ld \
+		$(BUILD)/linux-net-client.o -o $(NET_APP_ELF)
 	if [ "$(LINUX_RUNTIME_PREBUILT)" = "0" ]; then \
 		sh tools/build-pinned-runtime.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
 			$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED); \
@@ -515,6 +523,21 @@ gate4-display-test: image
 
 shell-test: image
 	$(PYTHON) tools/test-shell.py
+
+# Network test, once per NIC model (e1000 and e1000e): DHCP, a kernel TCP
+# fetch from the QEMU host, and a Linux app with network=client that waits for
+# (test-answered) consent, fetches the same page through the socket API, and
+# reads /etc/resolv.conf. The port is compiled into the kernel and fixture.
+net-test:
+	AETHER_NET_TEST_PORT=$(NET_TEST_PORT) $(MAKE) linux-fixture
+	sh tools/build-appimage-fixture.sh $(NET_APPIMAGE) $(NET_APPIMAGE_RECORD) \
+		$(LINUX_RUNTIME_SEED) $(NET_APP_ELF) network=client
+	AETHER_NET_TEST_PORT=$(NET_TEST_PORT) $(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		KERNEL_FEATURES="net-selftest net-consent-test" \
+		STAGED_APPIMAGE=$(NET_APPIMAGE) \
+		STAGED_APPIMAGE_RECORD=$(NET_APPIMAGE_RECORD) image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_NET_TEST_PORT=$(NET_TEST_PORT) $(PYTHON) tools/test-net.py
 
 iso:
 	sh tools/make-iso.sh
