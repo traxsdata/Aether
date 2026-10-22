@@ -611,6 +611,8 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
         return crate::scheduler::on_user_fault(frame, saved_vector, cr2);
     }
 
+    // SAFETY: The stub passed a complete live frame.
+    crate::crash::record_exception(unsafe { &*frame }, cr2, exception_name(saved_vector));
     serial_line!(
         "AETHER_BOOT_FAILED reason=exception vector={}",
         saved_vector
@@ -634,7 +636,10 @@ extern "C" fn irq_handler(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             crate::input::on_mouse_irq();
             frame
         }
-        _ => crate::arch::x86_64::halt(),
+        _ => {
+            serial_line!("AETHER_BOOT_FAILED reason=unexpected interrupt vector={vector}");
+            crate::arch::x86_64::halt()
+        }
     }
 }
 

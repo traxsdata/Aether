@@ -9,8 +9,10 @@ the full serial log.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -61,6 +63,13 @@ EXPECT_BOOT_FAILURE = os.environ.get("AETHER_EXPECT_BOOT_FAILURE") == "1"
 # Optional substring that a deliberately failing boot must contain. This proves
 # the intended fail-closed branch ran instead of some unrelated failure.
 EXPECT_FAILURE_TEXT = os.environ.get("AETHER_EXPECT_FAILURE_TEXT", "")
+# Require the full-screen crash report after the expected failure and check
+# QEMU's displayed framebuffer: mostly report blue, with text drawn on it.
+EXPECT_CRASH_SCREEN = os.environ.get("AETHER_EXPECT_CRASH_SCREEN") == "1"
+CRASH_MARKER = "AETHER_CRASH_SCREEN shown=1"
+CRASH_BLUE = (0x0F, 0x3C, 0x8C)
+QMP = BUILD / "qmp.sock"
+SCREENSHOT = BUILD / "crash-screen.ppm"
 TIMEOUT = int(os.environ.get("AETHER_BOOT_TIMEOUT", "90"))
 # VNC display number for the headless q35 boot. Parallel worktrees can collide
 # on the default display, so callers may select another one explicitly.
@@ -87,6 +96,8 @@ def qemu_command(code: Path, variables: Path | None) -> list[str]:
         "-drive",
         f"file={IMAGE},format=raw,if=virtio",
     ]
+    if EXPECT_CRASH_SCREEN:
+        command += ["-qmp", f"unix:{QMP},server=on,wait=off"]
     if variables is None:
         command += ["-bios", str(code)]
     else:
@@ -104,6 +115,52 @@ def read_serial() -> str:
     if not SERIAL.exists():
         return ""
     return SERIAL.read_text(errors="replace")
+
+
+def screendump(path: Path) -> tuple[int, int, bytes]:
+    """Saves what QEMU's display shows and returns its RGB pixels."""
+    path.unlink(missing_ok=True)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(10)
+        client.connect(str(QMP))
+        stream = client.makefile("rwb", buffering=0)
+        json.loads(stream.readline())
+        for name, arguments in (
+            ("qmp_capabilities", {}),
+            ("screendump", {"filename": str(path)}),
+        ):
+            stream.write(json.dumps({"execute": name, "arguments": arguments}).encode() + b"\n")
+            while True:
+                reply = json.loads(stream.readline())
+                if "error" in reply:
+                    raise RuntimeError(f"QMP {name}: {reply['error']}")
+                if "return" in reply:
+                    break
+    # QEMU writes a binary P6 PPM with a fixed three-line header.
+    magic, dimensions, maximum, pixels = path.read_bytes().split(b"\n", 3)
+    width, height = map(int, dimensions.split())
+    if magic != b"P6" or maximum != b"255" or len(pixels) != width * height * 3:
+        raise RuntimeError(f"invalid QEMU screenshot: {path}")
+    return width, height, pixels
+
+
+def check_crash_screen() -> str | None:
+    """Returns an error, or None when the display shows the crash report."""
+    width, height, pixels = screendump(SCREENSHOT)
+    blue = white = 0
+    for offset in range(0, len(pixels), 3):
+        pixel = tuple(pixels[offset : offset + 3])
+        if pixel == CRASH_BLUE:
+            blue += 1
+        elif pixel == (0xFF, 0xFF, 0xFF):
+            white += 1
+    total = width * height
+    print(f"crash screen {width}x{height}: blue={blue / total:.1%} text={white / total:.2%}")
+    if blue < total * 0.6:
+        return "the display is not the blue crash report"
+    if white < total * 0.002:
+        return "the crash report has no text"
+    return None
 
 
 def main() -> int:
@@ -136,10 +193,18 @@ def main() -> int:
                     print("FAIL: fault self-test hit an unexpected failure", file=sys.stderr)
                     return 1
             elif EXPECT_BOOT_FAILURE:
-                if has_failure(log) and (
-                    not EXPECT_FAILURE_TEXT or EXPECT_FAILURE_TEXT in log
+                if (
+                    has_failure(log)
+                    and (not EXPECT_FAILURE_TEXT or EXPECT_FAILURE_TEXT in log)
+                    and (not EXPECT_CRASH_SCREEN or CRASH_MARKER in log)
                 ):
                     print(log)
+                    if EXPECT_CRASH_SCREEN:
+                        error = check_crash_screen()
+                        if error:
+                            print(f"FAIL: {error} (see {SCREENSHOT})", file=sys.stderr)
+                            return 1
+                        print(f"PASS: crash report on screen ({SCREENSHOT})")
                     print("PASS: harness detected the expected boot failure")
                     return 0
                 if all(marker in log for marker in SUCCESS_MARKERS):

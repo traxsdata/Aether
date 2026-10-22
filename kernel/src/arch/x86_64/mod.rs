@@ -15,13 +15,10 @@ pub fn init() {
     idt::init();
 }
 
-/// Stops the CPU until an interrupt arrives.
-#[inline]
+/// Stops the machine after a fatal error.
+///
+/// Every fatal path ends here, so the crash report is painted over whatever
+/// was on screen before the CPU halts for good.
 pub fn halt() -> ! {
-    loop {
-        // SAFETY: Halting is safe once the kernel has nothing left to run.
-        unsafe {
-            core::arch::asm!("cli", "hlt", options(nomem, nostack));
-        }
-    }
+    crate::crash::fatal()
 }
