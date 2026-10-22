@@ -217,6 +217,8 @@ struct LinuxTimerFd {
     next_expiry: u64,
     interval: u64,
     armed: bool,
+    /// Created on `CLOCK_REALTIME`: absolute deadlines are wall-clock time.
+    realtime: bool,
 }
 
 impl LinuxTimerFd {
@@ -224,6 +226,7 @@ impl LinuxTimerFd {
         next_expiry: 0,
         interval: 0,
         armed: false,
+        realtime: false,
     };
 }
 
@@ -4874,7 +4877,10 @@ pub fn linux_timerfd_create(clockid: u64, flags: u64) -> Result<u64, i64> {
     let Some(index) = task.linux_timerfds.iter().position(|timer| timer.is_none()) else {
         return Err(LINUX_EMFILE);
     };
-    task.linux_timerfds[index] = Some(LinuxTimerFd::EMPTY);
+    task.linux_timerfds[index] = Some(LinuxTimerFd {
+        realtime: clockid == 0,
+        ..LinuxTimerFd::EMPTY
+    });
     for (descriptor, slot) in task.linux_fds.iter_mut().enumerate().skip(3) {
         if slot.is_none() {
             *slot = Some(LinuxFile {
@@ -4904,6 +4910,13 @@ fn timerfd_slot(fd: u64) -> Result<(usize, usize), i64> {
         return Err(LINUX_EBADF);
     }
     Ok((current, index))
+}
+
+/// Returns `true` if a timer descriptor was created on `CLOCK_REALTIME`.
+pub fn linux_timerfd_is_realtime(fd: u64) -> Result<bool, i64> {
+    let (current, index) = timerfd_slot(fd)?;
+    let tasks = unsafe { &*TASKS.0.get() };
+    Ok(tasks[current].linux_timerfds[index].is_some_and(|timer| timer.realtime))
 }
 
 /// Arms or disarms a timer descriptor. `deadline` is an absolute tick count;

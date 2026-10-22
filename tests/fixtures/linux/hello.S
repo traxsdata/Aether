@@ -1113,6 +1113,16 @@ after_thread:
     mov $1577836800, %rax
     cmp %rax, 0(%rsp)
     jl fail_clock
+    /* An absolute CLOCK_REALTIME sleep until "now" returns at once; a
+     * deadline read as uptime would sleep for decades. */
+    mov $230, %rax              /* clock_nanosleep(CLOCK_REALTIME, ABSTIME) */
+    xor %rdi, %rdi
+    mov $1, %rsi
+    lea 0(%rsp), %rdx
+    xor %r10, %r10
+    syscall
+    test %rax, %rax
+    jne fail_clock
     mov $228, %rax              /* clock_gettime(99) */
     mov $99, %rdi
     lea 0(%rsp), %rsi

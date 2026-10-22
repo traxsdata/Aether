@@ -2476,6 +2476,11 @@ fn linux_clock_gettime(pml4: PhysFrame, clock: u64, pointer: u64) -> i64 {
 
 const NANOS_PER_TICK: u64 = 10_000_000;
 
+/// `CLOCK_REALTIME` at tick zero, in ticks, or `None` without an RTC.
+fn realtime_offset_ticks() -> Option<u64> {
+    crate::arch::x86_64::rtc::boot_epoch(scheduler::ticks() / 100)?.checked_mul(100)
+}
+
 /// Reads and validates a `timespec`. Negative values and out-of-range
 /// nanoseconds are rejected rather than normalized.
 fn read_timespec(pml4: PhysFrame, pointer: u64) -> Option<(u64, u64)> {
@@ -2522,7 +2527,15 @@ fn linux_nanosleep(
     request_pointer: u64,
     remaining_pointer: u64,
 ) -> *mut InterruptFrame {
-    linux_sleep_common(frame, pml4, 35, 0, request_pointer, remaining_pointer)
+    linux_sleep_common(
+        frame,
+        pml4,
+        35,
+        0,
+        false,
+        request_pointer,
+        remaining_pointer,
+    )
 }
 
 fn linux_clock_nanosleep(
@@ -2541,19 +2554,22 @@ fn linux_clock_nanosleep(
         pml4,
         230,
         flags & 1,
+        clockid == 0,
         request_pointer,
         remaining_pointer,
     )
 }
 
 /// Shared relative/absolute sleep. `TIMER_ABSTIME` selects an absolute
-/// monotonic deadline. A deliverable pending signal returns `EINTR`; the
-/// relative `nanosleep` form also reports the remaining time.
+/// deadline on the monotonic clock, or on the wall clock when `realtime` is
+/// set. A deliverable pending signal returns `EINTR`; the relative
+/// `nanosleep` form also reports the remaining time.
 fn linux_sleep_common(
     frame: *mut InterruptFrame,
     pml4: PhysFrame,
     syscall: u64,
     flags: u64,
+    realtime: bool,
     request_pointer: u64,
     remaining_pointer: u64,
 ) -> *mut InterruptFrame {
@@ -2568,7 +2584,12 @@ fn linux_sleep_common(
             let Some(ticks) = timespec_ticks(seconds, nanoseconds) else {
                 return linux_result(frame, LINUX_EINVAL);
             };
-            if absolute {
+            if absolute && realtime {
+                let Some(offset) = realtime_offset_ticks() else {
+                    return linux_result(frame, LINUX_EINVAL);
+                };
+                ticks.saturating_sub(offset)
+            } else if absolute {
                 ticks
             } else {
                 scheduler::ticks().saturating_add(ticks)
@@ -2630,7 +2651,15 @@ fn linux_timerfd_settime(
     let deadline = if value_seconds == 0 && value_nanos == 0 {
         None
     } else if flags & 1 != 0 {
-        Some(value)
+        match scheduler::linux_timerfd_is_realtime(fd) {
+            Ok(false) => Some(value),
+            // An absolute wall-clock deadline in the past fires at once.
+            Ok(true) => match realtime_offset_ticks() {
+                Some(offset) => Some(value.saturating_sub(offset).max(1)),
+                None => return LINUX_EINVAL,
+            },
+            Err(error) => return error,
+        }
     } else {
         Some(scheduler::ticks().saturating_add(value.max(1)))
     };
