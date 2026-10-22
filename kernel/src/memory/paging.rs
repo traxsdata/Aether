@@ -318,6 +318,29 @@ fn align_up_page(value: u64) -> Result<u64, PagingError> {
         .ok_or(PagingError::InvalidUserSegment)
 }
 
+/// Returns the leaf flags for a user page.
+///
+/// Ordinary pages are user-accessible. A [`PageFlags::GUARD`] (`PROT_NONE`)
+/// page stays present but supervisor-only, read-only and non-executable, so
+/// user code faults on it while the frame stays owned by the mapping.
+fn user_leaf_flags(flags: PageFlags) -> PageFlags {
+    if flags.contains(PageFlags::GUARD) {
+        flags.without(PageFlags::USER | PageFlags::WRITABLE)
+            | PageFlags::PRESENT
+            | PageFlags::NO_EXECUTE
+    } else {
+        flags | PageFlags::USER | PageFlags::PRESENT
+    }
+}
+
+/// Returns `true` for a leaf that belongs to the user mapping: an ordinary
+/// user page or a `PROT_NONE` guard page. Walkers that own frames (fork,
+/// unmap, teardown) use this; access checks require [`PageFlags::USER`].
+fn is_user_leaf(entry: PageTableEntry) -> bool {
+    entry.is_present()
+        && (entry.flags().contains(PageFlags::USER) || entry.flags().contains(PageFlags::GUARD))
+}
+
 /// Maps one 4 KiB page into a user address space, allocating intermediate
 /// tables and marking every level user-accessible.
 pub fn map_user_page(
@@ -338,7 +361,7 @@ pub fn map_user_page(
     let pdpt = ensure_user_table(pml4, pml4_index, allocator)?;
     let pd = ensure_user_table(pdpt, pdpt_index, allocator)?;
     let pt = ensure_user_table(pd, pd_index, allocator)?;
-    let entry = PageTableEntry::new(physical.start_address(), flags | PageFlags::USER).ok_or(
+    let entry = PageTableEntry::new(physical.start_address(), user_leaf_flags(flags)).ok_or(
         PagingError::UnrepresentableAddress(physical.start_address()),
     )?;
     // SAFETY: `pt` was validated or allocated above and is identity-mapped.
@@ -376,8 +399,7 @@ pub fn copy_user_address_space(
     let mut address = USER_BASE;
     while address < USER_LIMIT {
         if let Some(entry) = user_leaf_entry(source, address)
-            && entry.is_present()
-            && entry.flags().contains(PageFlags::USER)
+            && is_user_leaf(entry)
         {
             let Some(shared_frame) = PhysFrame::from_address(entry.address()) else {
                 return Err(PagingError::UnrepresentableAddress(entry.address()));
@@ -496,8 +518,7 @@ pub fn unmap_user_range(
     let mut address = start;
     while address < end {
         if let Some(entry) = user_leaf_entry(pml4, address)
-            && entry.is_present()
-            && entry.flags().contains(PageFlags::USER)
+            && is_user_leaf(entry)
         {
             if let Some(frame) = PhysFrame::from_address(entry.address())
                 && !shared::release(allocator, frame)
@@ -558,7 +579,7 @@ pub unsafe fn destroy_user_address_space(allocator: &mut FrameAllocator<'_>, pml
                     };
                     for pt_index in 0..512 {
                         let leaf = (*table_ptr(pt)).entry(pt_index);
-                        if !leaf.is_present() || !leaf.flags().contains(PageFlags::USER) {
+                        if !is_user_leaf(leaf) {
                             continue;
                         }
                         if let Some(frame) = PhysFrame::from_address(leaf.address())
@@ -712,9 +733,8 @@ pub fn protect_user_range(
             return Err(PagingError::MissingKernelMapping);
         }
         let address_phys = entry.address();
-        let updated =
-            PageTableEntry::new(address_phys, flags | PageFlags::USER | PageFlags::PRESENT)
-                .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
+        let updated = PageTableEntry::new(address_phys, user_leaf_flags(flags))
+            .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
         unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
         flush_page(address);
         address += PAGE_SIZE;
@@ -782,9 +802,8 @@ pub fn protect_user_range_if_present(
         let entry = unsafe { (*table_ptr(pt)).entry(pt_index) };
         if entry.is_present() {
             let address_phys = entry.address();
-            let updated =
-                PageTableEntry::new(address_phys, flags | PageFlags::USER | PageFlags::PRESENT)
-                    .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
+            let updated = PageTableEntry::new(address_phys, user_leaf_flags(flags))
+                .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
             unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
             flush_page(address);
         }
@@ -928,6 +947,14 @@ pub fn read_user_bytes(pml4: PhysFrame, address: u64, bytes: &mut [u8]) -> bool 
         copied += length;
     }
     true
+}
+
+/// Returns `true` if `address` has a leaf of the user mapping, including a
+/// `PROT_NONE` guard page.
+#[must_use]
+pub fn user_leaf_present(pml4: PhysFrame, address: u64) -> bool {
+    (USER_BASE..USER_LIMIT).contains(&address)
+        && user_leaf_entry(pml4, address).is_some_and(is_user_leaf)
 }
 
 /// Returns the physical address behind a present user mapping.

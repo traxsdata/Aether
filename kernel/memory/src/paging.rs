@@ -36,6 +36,12 @@ impl PageFlags {
     pub const HUGE: Self = Self(1 << 7);
     /// Do not flush this mapping from the TLB on address-space switches.
     pub const GLOBAL: Self = Self(1 << 8);
+    /// Software bit (ignored by the CPU): a user page mapped `PROT_NONE`.
+    ///
+    /// The entry stays present so the page keeps its frame across `fork`,
+    /// `mprotect` and `munmap`, but [`PageFlags::USER`] is clear, so every
+    /// user-mode access faults and user-pointer validation rejects it.
+    pub const GUARD: Self = Self(1 << 9);
     /// Instruction fetches are forbidden.
     pub const NO_EXECUTE: Self = Self(1 << 63);
 
@@ -67,6 +73,12 @@ impl PageFlags {
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+
+    /// Removes every flag in `other`.
+    #[must_use]
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 }
 
