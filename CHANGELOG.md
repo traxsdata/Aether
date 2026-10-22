@@ -511,6 +511,10 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Fixed
 
+- The Gate 3 and Gate 4 runtime builds no longer need squashfs-tools 4.7:
+  they pin image timestamps with `-mkfs-time 0 -all-time 0` instead of
+  `-repro-time 0`, which 4.6 (Ubuntu 24.04) rejects as an invalid option.
+
 - A signal sent to a task blocked in `nanosleep`, `poll`, `epoll_wait`, or a
   pipe wait could be lost as an `EINTR`: if the timer tick landed just as the
   woken task resumed at its rewound `syscall`, the tick ran the handler first
