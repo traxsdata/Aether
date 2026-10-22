@@ -22,14 +22,47 @@ const fn div255(value: u32) -> u32 {
     (value + (value >> 8)) >> 8
 }
 
+/// A source colour premultiplied for [`blend_premultiplied`].
+///
+/// Translucent fills blend one colour into many pixels, so the source half of
+/// each channel product is computed once per primitive instead of per pixel.
+#[derive(Clone, Copy)]
+struct Premultiplied {
+    /// Red and blue products in two 16-bit lanes.
+    red_blue: u32,
+    green: u32,
+    inverse: u32,
+}
+
+impl Premultiplied {
+    #[inline]
+    const fn new(rgb: u32, alpha: u32) -> Self {
+        Self {
+            red_blue: (rgb & 0x00ff_00ff) * alpha,
+            green: ((rgb >> 8) & 0xff) * alpha,
+            inverse: 255 - alpha,
+        }
+    }
+}
+
+/// Blends a premultiplied source over `existing`, bit-identical to applying
+/// [`div255`] to each channel separately.
+///
+/// Red and blue share one 32-bit word as two 16-bit lanes. Every lane sum is
+/// at most `255 * 255`, and the `div255` steps stay below `0x1_0000`, so no
+/// lane carries into its neighbour.
+#[inline]
+const fn blend_premultiplied(existing: u32, source: Premultiplied) -> u32 {
+    let red_blue = (existing & 0x00ff_00ff) * source.inverse + source.red_blue + 0x0001_0001;
+    let red_blue = ((red_blue + ((red_blue >> 8) & 0x00ff_00ff)) >> 8) & 0x00ff_00ff;
+    let green = div255(((existing >> 8) & 0xff) * source.inverse + source.green);
+    red_blue | (green << 8)
+}
+
 /// Blends `0x00RRGGBB` over `existing` with eight-bit alpha.
 #[inline]
 fn blend_rgb(existing: u32, rgb: u32, alpha: u32) -> u32 {
-    let inverse = 255 - alpha;
-    let channel = |shift: u32| -> u32 {
-        div255(((existing >> shift) & 0xff) * inverse + ((rgb >> shift) & 0xff) * alpha)
-    };
-    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    blend_premultiplied(existing, Premultiplied::new(rgb, alpha))
 }
 
 struct Global<T>(UnsafeCell<T>);
@@ -326,34 +359,24 @@ impl Framebuffer {
         };
         // Blend native words directly: channel permutation commutes with alpha
         // blending, so RGB/BGR conversion is needed only once per rectangle.
-        let rgb = self.pack(rgb);
-        let alpha = u32::from(alpha);
-        let inverse = 255 - alpha;
+        let source = Premultiplied::new(self.pack(rgb), u32::from(alpha));
         for row in rect.y..rect.y + rect.height {
             let (left, width) = self.row_span(rect, row);
-            for column in left..left + width {
-                // SAFETY: `clipped` bounds the read/write to the mapped surface.
-                unsafe {
-                    let pointer = (self.base as *mut u32)
-                        .add(row as usize * self.stride as usize + column as usize);
-                    let existing = if self.volatile {
-                        pointer.read_volatile()
-                    } else {
-                        pointer.read()
-                    };
-                    // Channel permutation commutes with alpha blending, so the
-                    // packed native word can be blended directly.
-                    let channel = |shift: u32| {
-                        div255(
-                            ((existing >> shift) & 0xff) * inverse
-                                + ((rgb >> shift) & 0xff) * alpha,
-                        )
-                    };
-                    let value = (channel(16) << 16) | (channel(8) << 8) | channel(0);
-                    if self.volatile {
-                        pointer.write_volatile(value);
-                    } else {
-                        pointer.write(value);
+            if width == 0 {
+                continue;
+            }
+            // SAFETY: `clipped` and `row_span` bound the row to the surface.
+            unsafe {
+                let pointer = (self.base as *mut u32)
+                    .add(row as usize * self.stride as usize + left as usize);
+                if self.volatile {
+                    for column in 0..width as usize {
+                        let target = pointer.add(column);
+                        target.write_volatile(blend_premultiplied(target.read_volatile(), source));
+                    }
+                } else {
+                    for pixel in core::slice::from_raw_parts_mut(pointer, width as usize) {
+                        *pixel = blend_premultiplied(*pixel, source);
                     }
                 }
             }
@@ -675,6 +698,60 @@ pub fn blend_round_rect(x: i32, y: i32, width: i32, height: i32, radius: i32, rg
         radius,
         |left, top, span, row_height| {
             blend_rect(left, top, span, row_height, rgb, alpha);
+        },
+    );
+}
+
+/// Fills a translucent rounded rectangle except inside `hole`.
+///
+/// Window shadows and translucent bodies lie mostly under opaque content that
+/// is painted over them in the same frame. Blending those pixels first is
+/// invisible work, and on a large window it dominates the frame. Pixels
+/// outside the hole are blended exactly as [`blend_round_rect`] would.
+#[allow(clippy::too_many_arguments)]
+pub fn blend_round_rect_around(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    rgb: u32,
+    alpha: u8,
+    hole: (i32, i32, i32, i32),
+) {
+    let (hole_x, hole_y, hole_width, hole_height) = hole;
+    if hole_width <= 0 || hole_height <= 0 {
+        blend_round_rect(x, y, width, height, radius, rgb, alpha);
+        return;
+    }
+    let hole_right = hole_x.saturating_add(hole_width);
+    let hole_bottom = hole_y.saturating_add(hole_height);
+    rounded_spans(
+        x,
+        y,
+        width,
+        height,
+        radius,
+        |left, top, span, row_height| {
+            if top < hole_y || top >= hole_bottom {
+                blend_rect(left, top, span, row_height, rgb, alpha);
+                return;
+            }
+            let right = left + span;
+            if left < hole_x {
+                blend_rect(
+                    left,
+                    top,
+                    (right.min(hole_x) - left).max(0),
+                    row_height,
+                    rgb,
+                    alpha,
+                );
+            }
+            if right > hole_right {
+                let start = left.max(hole_right);
+                blend_rect(start, top, right - start, row_height, rgb, alpha);
+            }
         },
     );
 }

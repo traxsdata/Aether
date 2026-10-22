@@ -1177,6 +1177,21 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
         glass.window_alpha()
     };
     let radius = layout::WINDOW_RADIUS;
+    let content = layout::content_rect(frame);
+    let linux_opaque = window.kind == WindowKind::Linux && crate::display::surface_opaque();
+    // Every pixel of the content rectangle is painted opaquely below (a solid
+    // fill or an opaque Linux surface), except in the bottom rows that the
+    // rounded silhouette trims. Shadow and body blends under that core are
+    // overwritten in the same frame, so they skip it.
+    let silhouette_radius = radius.min(frame.width / 2).min(frame.height / 2);
+    let core_bottom = content.bottom().min(frame.bottom() - silhouette_radius);
+    let core_top = content.y.max(frame.y + silhouette_radius);
+    let core = (
+        content.x,
+        core_top,
+        content.width,
+        (core_bottom - core_top).max(0),
+    );
 
     // Layered shadow: darker nearest the frame, softer further away. Omit it
     // during a drag/resize gesture: the two translucent layers cover several
@@ -1184,7 +1199,7 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
     // The gesture end damages the whole frame, so the shadow returns.
     if !wm.is_dragging() {
         for (offset, spread, strength) in [(0, 10, 78u8), (4, 20, 34)] {
-            graphics::blend_round_rect(
+            graphics::blend_round_rect_around(
                 frame.x - spread / 2,
                 frame.y + offset,
                 frame.width + spread,
@@ -1192,6 +1207,7 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
                 radius + spread / 2,
                 palette.shadow,
                 strength,
+                core,
             );
         }
     }
@@ -1205,7 +1221,7 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
         // An opaque base avoids a full-window alpha blend on every drag step.
         graphics::fill_round_rect(frame.x, frame.y, frame.width, frame.height, radius, body);
     } else {
-        graphics::blend_round_rect(
+        graphics::blend_round_rect_around(
             frame.x,
             frame.y,
             frame.width,
@@ -1213,6 +1229,7 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
             radius,
             body,
             alpha,
+            core,
         );
     }
 
@@ -1262,10 +1279,9 @@ fn paint_window(wm: &Wm, window: &Window, frame: Rect, focused: bool, palette: a
         55,
     );
 
-    let content = layout::content_rect(frame);
     graphics::set_round_clip(frame.x, frame.y, frame.width, frame.height, radius);
     // An opaque Linux surface is about to overwrite this rectangle completely.
-    if window.kind != WindowKind::Linux || !crate::display::surface_opaque() {
+    if !linux_opaque {
         graphics::fill_rect(
             content.x,
             content.y,
