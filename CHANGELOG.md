@@ -9,13 +9,26 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Security
 
+- Transparent pre-image retention for file replacement. `AetherFs` now keeps
+  the previous block chain when a file is overwritten and reclaims it only
+  before a legitimate write or directory allocation fails, so a permitted
+  overwrite no longer destroys the only copy. The new `restore <path>` console
+  command swaps the file with its retained version, and the swap invalidates
+  stale writable handles. Retention is one generation, held in memory on the
+  volatile ramdisk; authenticated persistent snapshots and a normal recovery
+  UI remain future work.
+
 - Filesystem stress hardening: filenames with ASCII control bytes are rejected
   before they can inject records into the service listing format, corrupted
   directory entries with zero/out-of-range inodes, unknown kinds, or duplicate
   names now fail closed, and file/directory data pointers into reserved
-  metadata blocks are rejected. Added randomized operation and corrupted-image
-  stress tests; remaining cross-link, open-handle replacement, and durability
-  issues are recorded in `docs/reviews/filesystem-stress.md`.
+  metadata blocks are rejected. Corrupt entries must also agree with the kind
+  of inode they name, and names must be safe UTF-8 path components. Whole-file
+  replacement now invalidates stale writable handles, a failed rename rollback
+  releases a newly allocated directory block, and post-commit cleanup cannot
+  report a committed write as failed. Added randomized operation and
+  corrupted-image stress tests; remaining cross-link and durability issues are
+  recorded in `docs/reviews/filesystem-stress.md`.
 
 - Unified filesystem user experience from AETHER-UX-002. A new host-tested
   `aether_services::ux` policy defines stable resource identities, ownership
@@ -34,9 +47,13 @@ versioning scheme until the kernel ABI stabilises.
   component and original absolute path for every user-facing delete in a
   bounded, fail-closed `/system/trash/index` store. Activating an item in Trash
   restores it to that exact path and refuses to overwrite an existing file;
-  permanent deletion removes the metadata. The boot mutation test now proves
-  delete, Trash placement, and restoration (`AETHER_FILES_MUTATE_OK ...
-  restore=1`).
+  permanent deletion removes the metadata. A Trash-name collision preserves
+  the record of the item already in Trash, names that collide are truncated on
+  a UTF-8 boundary, and the store is sized for every bounded record. System
+  locations delete permanently rather than entering Trash, and Trash items
+  cannot be renamed or duplicated out from under the restoration index. The
+  boot mutation test now proves delete, Trash placement, and restoration
+  (`AETHER_FILES_MUTATE_OK ... restore=1`).
 - Craft app suite: `tools/test-craft-apps.py` downloads and verifies every
   published Craft AppImage, runs a headless smoke test, and runs the windowed
   Gate 4 path. All 13 headless runs pass; 9 present a window. The suite found

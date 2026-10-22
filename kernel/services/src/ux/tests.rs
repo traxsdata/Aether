@@ -123,6 +123,69 @@ fn cycles_and_deleted_identity_fail_closed() {
 }
 
 #[test]
+fn deleting_an_entry_frees_its_name_for_a_later_move() {
+    let (mut resources, _, _, _) = fixture();
+    let users = by_name(&resources, "Users");
+    let report = by_name(&resources, "Report.odt");
+    let deleted = resources
+        .register(users, Owner::User, "Later.csv", ResourceKind::File)
+        .expect("old destination name");
+    resources.remove(deleted).expect("delete");
+
+    resources.rename(report, "Later.csv").expect("rename");
+    resources
+        .move_to(report, users)
+        .expect("a deleted entry must not block the same name in a new parent");
+    assert_eq!(resources.get(report).expect("resource").name(), "Later.csv");
+    assert_eq!(
+        resources
+            .slots
+            .iter()
+            .flatten()
+            .filter(|resource| {
+                resource.parent() == users
+                    && resource.name() == "Later.csv"
+                    && resource.kind() != ResourceKind::Deleted
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn ancestor_folder_grant_cannot_reach_another_private_vault() {
+    let (resources, mut grants, notes, _) = fixture();
+    let applications = by_name(&resources, "Applications");
+    let other_root = by_name(&resources, "org.aether.other");
+    let other_data = resources
+        .slots
+        .iter()
+        .flatten()
+        .find(|resource| resource.parent() == other_root && resource.name() == "Data")
+        .expect("other data")
+        .id();
+
+    grants
+        .grant(
+            &resources,
+            notes,
+            applications,
+            GrantScope::Folder,
+            Rights::READ | Rights::ENUMERATE,
+            GrantLifetime::Persistent,
+        )
+        .expect("grant on the public applications parent");
+    assert!(!grants.authorizes(&resources, notes, other_root, Rights::READ));
+    assert!(!grants.authorizes(&resources, notes, other_data, Rights::READ));
+    assert!(!can_see(
+        &resources,
+        &grants,
+        Requester::Application(notes),
+        other_root
+    ));
+}
+
+#[test]
 fn selected_file_grant_never_reaches_parent_or_siblings() {
     let (resources, mut grants, notes, _) = fixture();
     let report = by_name(&resources, "Report.odt");

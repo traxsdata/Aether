@@ -122,8 +122,9 @@ impl TrashIndex {
         }
     }
 
-    /// Records a deletion. Re-recording the same Trash name replaces its
-    /// original path only when the caller explicitly asks to update it.
+    /// Records a deletion. Re-recording an existing Trash name replaces its
+    /// original path; callers use a different Trash name when they must keep
+    /// an existing record.
     pub fn record(&mut self, name: &str, original: &str) -> Result<usize, TrashError> {
         let record = TrashRecord::new(name, original).ok_or(TrashError::Invalid)?;
         if let Some(index) = self.index_of(name) {
@@ -229,7 +230,9 @@ pub fn encode(index: &TrashIndex, out: &mut [u8]) -> Option<usize> {
 /// rejects the entire file before it can restore an item to the wrong place.
 pub fn parse(data: &[u8], index: &mut TrashIndex) -> Result<usize, TrashError> {
     let text = core::str::from_utf8(data).map_err(|_| TrashError::Invalid)?;
-    *index = TrashIndex::new();
+    // Parse into a scratch table so a malformed file leaves the caller's
+    // current index untouched.
+    let mut parsed = TrashIndex::new();
     let mut count = 0usize;
     for line in text.lines() {
         if line.is_empty() {
@@ -239,12 +242,13 @@ pub fn parse(data: &[u8], index: &mut TrashIndex) -> Result<usize, TrashError> {
         if count == MAX_TRASH_RECORDS {
             return Err(TrashError::Full);
         }
-        if index.original(record.name()).is_some() {
+        if parsed.original(record.name()).is_some() {
             return Err(TrashError::Invalid);
         }
-        index.put(record)?;
+        parsed.put(record)?;
         count += 1;
     }
+    *index = parsed;
     Ok(count)
 }
 
@@ -355,6 +359,18 @@ mod tests {
         assert_eq!(parse(b"\xff", &mut index), Err(TrashError::Invalid));
         assert_eq!(parse(b"", &mut index), Ok(0));
         assert!(index.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_store_does_not_modify_the_live_index() {
+        let mut index = TrashIndex::new();
+        index.record("keep", "/home/keep").expect("record");
+        assert_eq!(
+            parse(b"bad\t/home/bad\nbad\t/home/other\n", &mut index),
+            Err(TrashError::Invalid)
+        );
+        assert_eq!(index.original("keep"), Some("/home/keep"));
+        assert_eq!(index.original("bad"), None);
     }
 
     #[test]
