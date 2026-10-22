@@ -43,6 +43,14 @@ grants, and the desktop is not a security authority.
 
 ## What works today
 
+- A desktop **Terminal** (dock, `Open Terminal` in search) with an
+  xterm-compatible emulator and a Rust userland of familiar Linux tools: a
+  shell with pipes, redirection, history, and Tab completion; `ls`, `cat`,
+  `cp`, `mv`, `rm`, `mkdir`, `grep`, `find`, `sort`, `wc`, `head`, `tail`,
+  `ps`, `kill`, `df`, `free`, `uname`, and more; plus full-screen `htop` and
+  `nano`. Each command is its own ring-3 process running as the ordinary
+  user, confined to the home folder. See
+  [the desktop guide](docs/architecture/desktop.md#terminal).
 - A `no_std` Rust UEFI loader that validates an embedded ELF64 kernel before
   copying it.
 - A `no_std` x86-64 kernel linked at a fixed physical address with its own
@@ -376,6 +384,7 @@ make update-test   # package and update policy crates
 make test          # QEMU/OVMF boot test; prints the serial transcript and PASS
 make glibc-test    # opt-in host-glibc rootfs + dynamically linked hello boot
 make shell-test    # drive the console shell over a QEMU serial socket
+make terminal-test # drive the desktop Terminal: commands, pipes, htop, nano
 make fault-test    # exception-path test: int3 after paging must reach the IDT
 make crash-screen-test # fatal errors must paint the full-screen crash report
 make rollback-test # recovery rollback branch test with its own marker
@@ -425,6 +434,7 @@ kernel/ipc/          host-testable capability tables and IPC endpoints
 kernel/input/        host-testable PS/2 decoders, modifiers, and event queues
 kernel/services/     host-testable supervisor, lifecycle, and runtime profiles
 kernel/wm/           host-testable window-manager model, layout, and animation
+kernel/term/         host-testable terminal emulator and 8x16 font
 kernel/              Aether kernel (no_std, target x86_64-unknown-none)
   src/scheduler.rs   scheduler, ring-3 process, isolation and IPC tests
   src/syscall.rs     validated user syscall gate
@@ -446,7 +456,7 @@ tests/compatibility/ compatibility database and classification harness
 tests/rendering/     host harness for the actual kernel graphics module
 tools/               boot, shell, ISO, release, and qualification harnesses
 tools/admin/         package/update/release signing tool (host only)
-user/                ring-3 native init and sandbox test
+user/                ring-3 native init, sandbox test, and the terminal userland
 docs/                architecture, security, and decision records
 ```
 

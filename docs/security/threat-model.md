@@ -111,8 +111,11 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
   (a user-memory fault inside the copy routine is the one recovered case).
   See the
   [ADR-017 deviation](../decisions/ADR-017-linux-app-runtime.md#current-deviation-linux-abi-in-ring-0).
-- The native application is the only ring-3 component; there is no dynamic
-  process creation, waiting, or per-process resource accounting.
+- Ring-3 code is the native application, the Linux applications, and the
+  desktop Terminal's programs. Only the Terminal creates processes at run
+  time, and only from its fixed, kernel-embedded program list; its programs
+  run as the ordinary user with `/home` as their root, no capabilities, no
+  portal access, and `kill` limited to their own session.
 - The serial console shell runs at ring 0 with full kernel and filesystem
   authority. It is a development diagnostic surface, not the ordinary-user
   terminal or an administrative elevation boundary.

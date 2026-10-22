@@ -910,3 +910,19 @@ fn hit_testing_tracks_animated_not_logical_window_frames() {
     wm.finish_animations();
     assert_eq!(wm.window_frame(id), Some(wm.window(id).unwrap().frame));
 }
+
+#[test]
+fn terminal_frame_fits_its_character_grid() {
+    let screen = Rect::new(0, 0, 1280, 800);
+    let frame = default_window_frame(WindowKind::Terminal, screen, 0);
+    let content = layout::content_rect(frame);
+    assert_eq!(content.width, 80 * 8 + layout::TERMINAL_PADDING * 2);
+    assert_eq!(content.height, 24 * 16 + layout::TERMINAL_PADDING * 2);
+    assert!(work_area(screen).contains(Point::new(frame.x, frame.y)));
+    assert!(DOCK_SLOTS.contains(&DockSlot::App(WindowKind::Terminal)));
+
+    let mut wm = sample();
+    let id = wm.open(WindowKind::Terminal).unwrap();
+    assert_eq!(wm.focused_window().unwrap().kind, WindowKind::Terminal);
+    assert_eq!(wm.window_id(WindowKind::Terminal), Some(id));
+}

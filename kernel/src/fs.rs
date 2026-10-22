@@ -41,6 +41,12 @@ static QUOTA_DENIALS: AtomicUsize = AtomicUsize::new(0);
 pub const DEMO_ROOT: &str = "/apps/org.aether.demo";
 /// Root directory of the sibling application used by the sandbox test.
 pub const OTHER_ROOT: &str = "/apps/other";
+/// Root of the signed-in user's terminal session.
+///
+/// Terminal programs run as the ordinary user: their `/` is the user's home
+/// directory, so system images, policy, and other applications' private
+/// roots are unreachable without an explicit elevation path.
+pub const TERMINAL_ROOT: &str = "/home";
 
 /// Exact workbook backing file used by the Gate 4 portal test.
 #[cfg(feature = "gate4-portal-test")]
@@ -194,7 +200,9 @@ fn map_error(error: FsError) -> i64 {
         FsError::BadHandle => errno::EBADF,
         FsError::NameTooLong | FsError::PathTooLong => errno::EINVAL,
         FsError::Io | FsError::NotFormatted | FsError::Corrupt => errno::EIO,
-        FsError::NotDirectory | FsError::IsDirectory | FsError::Exists => errno::EINVAL,
+        FsError::NotDirectory => errno::ENOTDIR,
+        FsError::IsDirectory => errno::EISDIR,
+        FsError::Exists => errno::EEXIST,
     }
 }
 
@@ -544,6 +552,65 @@ pub fn sys_list(
             .map_err(map_error)
     });
     copy_out_result(pml4, buffer, output, result)
+}
+
+/// Deletes a file or an empty directory below the caller's root.
+pub fn sys_remove(pml4: PhysFrame, pointer: u64, length: u64) -> Option<i64> {
+    let path = user_str(pml4, pointer, length)?;
+    let path = path.as_str();
+    if names_root(path) {
+        return Some(errno::EACCES);
+    }
+    let result = scheduler::with_current_caps(|root, _caps| {
+        with_fs(|filesystem| filesystem.remove(root, path))
+    });
+    Some(match result {
+        Ok(()) => 0,
+        // `rmdir` reports a non-empty directory as an existing entry.
+        Err(FsError::Exists) => errno::ENOTEMPTY,
+        Err(error) => map_error(error),
+    })
+}
+
+/// Renames or moves a path below the caller's root.
+pub fn sys_rename(
+    pml4: PhysFrame,
+    from_pointer: u64,
+    from_length: u64,
+    to_pointer: u64,
+    to_length: u64,
+) -> Option<i64> {
+    let from = user_str(pml4, from_pointer, from_length)?;
+    let to = user_str(pml4, to_pointer, to_length)?;
+    if names_root(from.as_str()) || names_root(to.as_str()) {
+        return Some(errno::EACCES);
+    }
+    let result = scheduler::with_current_caps(|root, _caps| {
+        with_fs(|filesystem| filesystem.rename(root, from.as_str(), to.as_str()))
+    });
+    Some(result.map_or_else(map_error, |()| 0))
+}
+
+/// Creates a directory below the caller's root.
+pub fn sys_make_dir(pml4: PhysFrame, pointer: u64, length: u64) -> Option<i64> {
+    let path = user_str(pml4, pointer, length)?;
+    let path = path.as_str();
+    let result = scheduler::with_current_caps(|root, _caps| {
+        with_fs(|filesystem| filesystem.mkdir(root, path))
+    });
+    Some(result.map_or_else(map_error, |()| 0))
+}
+
+/// Returns `true` when `path` resolves to the caller's root itself, which a
+/// task may list but never delete or move.
+fn names_root(path: &str) -> bool {
+    path.split('/')
+        .all(|component| component.is_empty() || component == ".")
+}
+
+/// Returns the volume's space use for system summaries.
+pub fn usage() -> Option<aether_fs::FsUsage> {
+    with_fs(|filesystem| filesystem.usage()).ok()
 }
 
 /// Creates a directory for the kernel console (no user pointer involved).

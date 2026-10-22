@@ -5,7 +5,7 @@
 //! renderer and hit tester call the same functions, so a control cannot be
 //! painted somewhere it is not clickable.
 
-use crate::geometry::{Point, Rect};
+use crate::geometry::{Point, Rect, Size};
 use crate::model::{MenuKind, WindowKind};
 
 /// Height of the top menu bar.
@@ -19,7 +19,7 @@ pub const DOCK_ICON_BASE: i32 = 42;
 /// Horizontal slot reserved for each dock item.
 pub const DOCK_SLOT_WIDTH: i32 = 50;
 /// Number of dock items.
-pub const DOCK_ITEMS: usize = 8;
+pub const DOCK_ITEMS: usize = 9;
 /// Window title-bar height.
 pub const TITLE_BAR_HEIGHT: i32 = 31;
 /// Window corner radius.
@@ -52,6 +52,7 @@ impl DockSlot {
 /// Dock contents in left-to-right order.
 pub const DOCK_SLOTS: [DockSlot; DOCK_ITEMS] = [
     DockSlot::App(WindowKind::Files),
+    DockSlot::App(WindowKind::Terminal),
     DockSlot::App(WindowKind::Security),
     DockSlot::App(WindowKind::Portal),
     DockSlot::App(WindowKind::Settings),
@@ -181,6 +182,16 @@ pub const fn resize_grip(frame: Rect) -> Rect {
     Rect::new(frame.right() - 16, frame.bottom() - 16, 16, 16)
 }
 
+/// Padding between the terminal window's content edge and its character grid.
+pub const TERMINAL_PADDING: i32 = 8;
+
+/// Terminal frame size for an 80x24 grid of 8x16 cells: the grid, its
+/// padding, the title bar, and the one-pixel window border.
+pub const TERMINAL_FRAME: Size = Size {
+    width: 80 * 8 + TERMINAL_PADDING * 2 + 2,
+    height: 24 * 16 + TERMINAL_PADDING * 2 + TITLE_BAR_HEIGHT + 1,
+};
+
 /// Returns the default frame for a window kind.
 ///
 /// The layout adapts to the available screen rather than assuming the QEMU
@@ -197,13 +208,19 @@ pub fn default_window_frame(kind: WindowKind, screen: Rect, cascade: i32) -> Rec
         WindowKind::Log => (44, 44),
         WindowKind::Welcome => (36, 46),
         WindowKind::Linux => (52, 62),
+        WindowKind::Terminal => (0, 0),
     };
-    let width = (area.width * width_percent / 100)
-        .max(MIN_WINDOW_WIDTH)
-        .min(area.width);
-    let height = (area.height * height_percent / 100)
-        .max(MIN_WINDOW_HEIGHT)
-        .min(area.height);
+    let (width, height) = if kind == WindowKind::Terminal {
+        // The terminal's frame fits its fixed character grid exactly.
+        (TERMINAL_FRAME.width, TERMINAL_FRAME.height)
+    } else {
+        (
+            area.width * width_percent / 100,
+            area.height * height_percent / 100,
+        )
+    };
+    let width = width.max(MIN_WINDOW_WIDTH).min(area.width);
+    let height = height.max(MIN_WINDOW_HEIGHT).min(area.height);
     let cascade = cascade.clamp(0, 72);
     let (x, y) = match kind {
         WindowKind::Files => (area.x + 18 + cascade, area.y + 20 + cascade),
@@ -219,7 +236,7 @@ pub fn default_window_frame(kind: WindowKind, screen: Rect, cascade: i32) -> Rec
             area.x + (area.width - width) / 2 - cascade / 2,
             area.y + (area.height - height) / 2,
         ),
-        WindowKind::Linux => (
+        WindowKind::Linux | WindowKind::Terminal => (
             area.x + (area.width - width) / 2 + cascade / 2,
             area.y + (area.height - height) / 2 + cascade / 2,
         ),

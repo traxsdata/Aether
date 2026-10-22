@@ -146,6 +146,24 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         return scheduler::user_exit(unsafe { (*frame).rdi });
     }
 
+    // A terminal program may end itself through `kill`, which must not return
+    // to the retired frame either.
+    if call == Syscall::Kill {
+        if !scheduler::current_io().session {
+            unsafe { (*frame).rax = errno::EACCES as u64 };
+            return frame;
+        }
+        let result = match scheduler::kill_terminal_task(rdi) {
+            Ok(scheduler::KillOutcome::Caller) => {
+                return scheduler::exit_current_terminal_task(128 + 9);
+            }
+            Ok(scheduler::KillOutcome::Other) => 0,
+            Err(error) => error,
+        };
+        unsafe { (*frame).rax = result as u64 };
+        return frame;
+    }
+
     // Yield and sleep must actually give another ready task a chance to run.
     // The frame is saved by the scheduler and resumed after the next tick (or
     // immediately if another task is ready), with RAX set to zero.
@@ -180,6 +198,40 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             endpoint_receive(pml4, rdi, rsi, rdx, r10, Some(fifth & u64::from(u32::MAX)))
         }
         Syscall::EndpointClose => endpoint_close(rdi),
+        Syscall::Spawn => crate::terminal::sys_spawn(pml4, rdi, rsi, rdx, r10),
+        Syscall::Wait => {
+            if scheduler::current_io().session {
+                scheduler::wait_child(rdi)
+            } else {
+                errno::EACCES
+            }
+        }
+        // The process, system, and namespace calls below serve the terminal
+        // session only. Native and Linux applications keep their narrower
+        // ABI: an application cannot delete or rename files it merely holds
+        // a root for, or survey the tasks around it.
+        Syscall::ProcessList
+        | Syscall::SystemInfo
+        | Syscall::Remove
+        | Syscall::Rename
+        | Syscall::MakeDir
+            if !scheduler::current_io().session =>
+        {
+            errno::EACCES
+        }
+        Syscall::ProcessList => crate::terminal::sys_process_list(pml4, rdi, rsi),
+        Syscall::SystemInfo => crate::terminal::sys_system_info(pml4, rdi, rsi),
+        Syscall::ReadInput => crate::terminal::sys_read_input(pml4, rdi, rsi),
+        Syscall::TerminalSize => crate::terminal::sys_terminal_size(),
+        Syscall::PipeCreate => crate::terminal::sys_pipe_create(),
+        Syscall::PipeRead => crate::terminal::sys_pipe_read(pml4, rdi, rsi, rdx),
+        Syscall::PipeWrite => crate::terminal::sys_pipe_write(pml4, rdi, rsi, rdx),
+        Syscall::PipeClose => crate::terminal::sys_pipe_close(rdi, rsi),
+        Syscall::Remove => crate::fs::sys_remove(pml4, rdi, rsi).unwrap_or(errno::EINVAL),
+        Syscall::Rename => crate::fs::sys_rename(pml4, rdi, rsi, rdx, r10).unwrap_or(errno::EINVAL),
+        Syscall::MakeDir => crate::fs::sys_make_dir(pml4, rdi, rsi).unwrap_or(errno::EINVAL),
+        Syscall::Arguments => crate::terminal::sys_arguments(pml4, rdi, rsi),
+        Syscall::TerminalMode => crate::terminal::sys_terminal_mode(rdi, rsi),
         _ => errno::ENOSYS,
     };
 
@@ -2873,6 +2925,9 @@ fn write_console(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64) ->
     let bytes = &mut storage[..length as usize];
     if copy_from_user(pml4, pointer, bytes).is_none() {
         return errno::EINVAL;
+    }
+    if let Some(result) = crate::terminal::write_stdout(bytes) {
+        return result;
     }
     serial::write_bytes(bytes);
     length as i64

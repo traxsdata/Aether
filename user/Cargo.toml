@@ -1,6 +1,6 @@
 [package]
 name = "aether-init"
-description = "Aether native user-space init and sandbox self-test"
+description = "Aether native user space: init, linuxd, and the terminal userland"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,10 @@ path = "src/main.rs"
 [[bin]]
 name = "aether-linuxd"
 path = "src/bin/linuxd.rs"
+
+[[bin]]
+name = "aether-userland"
+path = "src/bin/userland/main.rs"
 
 [dependencies]
 aether-abi = { path = "../abi" }

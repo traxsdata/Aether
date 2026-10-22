@@ -22,7 +22,11 @@ use aether_memory::PAGE_SIZE;
 use aether_memory::frame::{FrameAllocator, FrameStats};
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Allocatable RAM the boot memory map reported, for `free` and `htop`. The
+/// frame bitmap's own size is the addressable range, not installed memory.
+pub static USABLE_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum physical address space represented by the frame bitmap.
 ///

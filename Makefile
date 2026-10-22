@@ -11,6 +11,7 @@ BUILD := build
 KERNEL_ELF := $(BUILD)/aether-kernel.elf
 USER_ELF := $(BUILD)/aether-init.elf
 LINUXD_ELF := $(BUILD)/aether-linuxd.elf
+USERLAND_ELF := $(BUILD)/aether-userland.elf
 LOADER_EFI := $(BUILD)/BOOTX64.EFI
 LINUX_ELF := $(BUILD)/linux-hello.elf
 LINUX_DYN_ELF := $(BUILD)/linux-dynamic.elf
@@ -86,7 +87,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft iso-test vmware-vmx test glibc-test gate3-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -121,6 +122,9 @@ user:
 		$(CARGO) build -p aether-init --release --target $(KERNEL_TARGET) --locked
 	cp target/$(KERNEL_TARGET)/release/aether-init $(USER_ELF)
 	cp target/$(KERNEL_TARGET)/release/aether-linuxd $(LINUXD_ELF)
+	# The kernel embeds the userland, so leave its debug info behind.
+	objcopy --strip-debug target/$(KERNEL_TARGET)/release/aether-userland $(USERLAND_ELF) 2>/dev/null \
+		|| cp target/$(KERNEL_TARGET)/release/aether-userland $(USERLAND_ELF)
 
 FIXTURE_GATE4_GUI := $(if $(findstring gate4-gui-test,$(KERNEL_FEATURES)),--defsym AETHER_GATE4_GUI=1)
 
@@ -160,6 +164,7 @@ kernel: user linux-fixture
 	@mkdir -p $(BUILD)
 	AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 	AETHER_LINUXD_ELF=$(abspath $(LINUXD_ELF)) \
+	AETHER_USERLAND_ELF=$(abspath $(USERLAND_ELF)) \
 	AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 	AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 	AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
@@ -387,6 +392,9 @@ gate4-display-test: image
 shell-test: image
 	$(PYTHON) tools/test-shell.py
 
+terminal-test: image
+	$(PYTHON) tools/test-terminal.py
+
 iso:
 	sh tools/make-iso.sh
 
@@ -495,6 +503,7 @@ lint: kernel
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		AETHER_LINUXD_ELF=$(abspath $(LINUXD_ELF)) \
+		AETHER_USERLAND_ELF=$(abspath $(USERLAND_ELF)) \
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \
@@ -506,6 +515,7 @@ lint: kernel
 	AETHER_KERNEL_ELF=$(abspath $(KERNEL_ELF)) \
 		AETHER_USER_ELF=$(abspath $(USER_ELF)) \
 		AETHER_LINUXD_ELF=$(abspath $(LINUXD_ELF)) \
+		AETHER_USERLAND_ELF=$(abspath $(USERLAND_ELF)) \
 		AETHER_LINUX_ELF=$(abspath $(LINUX_ELF)) \
 		AETHER_LINUX_ROOTFS=$(abspath $(LINUX_ROOTFS)) \
 		AETHER_LINUX_ROOTFS_RECORD=$(abspath $(LINUX_ROOTFS_RECORD)) \

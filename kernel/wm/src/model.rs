@@ -42,6 +42,8 @@ pub enum WindowKind {
     Log,
     /// Welcome, shortcuts, and clean-room notice.
     Welcome,
+    /// Command-line terminal for the signed-in user.
+    Terminal,
     /// A presented pixel surface owned by a Linux application.
     ///
     /// This is not a Wayland surface. It is the compositor window fed by the
@@ -52,8 +54,9 @@ pub enum WindowKind {
 
 impl WindowKind {
     /// All application kinds in dock order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Files,
+        Self::Terminal,
         Self::Security,
         Self::Portal,
         Self::Settings,
@@ -73,6 +76,7 @@ impl WindowKind {
             Self::Recovery => "RECOVERY",
             Self::Log => "SYSTEM LOG",
             Self::Welcome => "WELCOME",
+            Self::Terminal => "TERMINAL",
             Self::Linux => "LINUX APP",
         }
     }
@@ -88,6 +92,7 @@ impl WindowKind {
             Self::Recovery => "Recovery",
             Self::Log => "Log",
             Self::Welcome => "Welcome",
+            Self::Terminal => "Terminal",
             Self::Linux => "Linux",
         }
     }
@@ -103,6 +108,7 @@ impl WindowKind {
             Self::Recovery => "Current and previous image records",
             Self::Log => "Live kernel and input counters",
             Self::Welcome => "Desktop guide and keyboard shortcuts",
+            Self::Terminal => "Shell and command-line programs as the signed-in user",
             Self::Linux => "Pixel surface presented by a Linux application",
         }
     }
@@ -416,11 +422,16 @@ pub struct SearchItem {
     pub command: Command,
 }
 
-const SEARCH_ITEMS: [SearchItem; 15] = [
+const SEARCH_ITEMS: [SearchItem; 16] = [
     SearchItem {
         label: "Open Files",
         kind: "Application",
         command: Command::Open(WindowKind::Files),
+    },
+    SearchItem {
+        label: "Open Terminal",
+        kind: "Application",
+        command: Command::Open(WindowKind::Terminal),
     },
     SearchItem {
         label: "Open Security Center",

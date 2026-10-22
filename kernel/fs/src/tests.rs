@@ -376,3 +376,19 @@ fn corrupt_inode_metadata_is_rejected_without_panicking() {
     .expect("write raw inode");
     assert!(matches!(fs.read_inode(7), Err(FsError::Corrupt)));
 }
+
+#[test]
+fn usage_tracks_inodes_and_blocks() {
+    let mut fs = filesystem();
+    let before = fs.usage().expect("usage");
+    assert_eq!(before.inodes, MAX_INODES - 1);
+    // Root plus the six directories created by the fixture.
+    assert_eq!(before.used_inodes, 7);
+    fs.write_file("/", "/system/big.txt", &[7u8; 1500])
+        .expect("write");
+    let after = fs.usage().expect("usage");
+    assert_eq!(after.used_inodes, before.used_inodes + 1);
+    assert_eq!(after.used_blocks, before.used_blocks + 3);
+    fs.unlink("/", "/system/big.txt").expect("unlink");
+    assert_eq!(fs.usage().expect("usage"), before);
+}

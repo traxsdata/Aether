@@ -142,6 +142,7 @@ fn execute_line() {
             }
             desktop();
         }
+        "term" => crate::terminal::console_command(argument),
         "clear" => serial::write_str("\x1b[2J\x1b[H"),
         _ => serial_line!("shell: unknown command '{command}'"),
     }
@@ -172,6 +173,7 @@ fn print_help() {
     serial_line!("  linux-erase APP  erase an application's settings/logs overlay");
     serial_line!("  updates          signed update and rollback status");
     serial_line!("  desktop [redraw|reset] compositor state and rendering timings");
+    serial_line!("  term open|close|type T|enter|dump  drive the Terminal window");
     serial_line!("  clear            clear the terminal");
 }
 

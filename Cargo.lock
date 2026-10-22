@@ -91,6 +91,7 @@ dependencies = [
  "aether-packaging",
  "aether-services",
  "aether-squashfs",
+ "aether-term",
  "aether-update",
  "aether-wm",
 ]
@@ -144,6 +145,13 @@ dependencies = [
  "lzokay",
  "miniz_oxide",
  "ruzstd",
+]
+
+[[package]]
+name = "aether-term"
+version = "0.1.0"
+dependencies = [
+ "aether-input",
 ]
 
 [[package]]
