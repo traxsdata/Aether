@@ -261,6 +261,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         287 => linux_timerfd_gettime(pml4, first, second),
         5 => linux_fstat(pml4, first, second),
         77 => scheduler::linux_ftruncate(first, second as i64),
+        74 | 75 => scheduler::linux_fsync(first),
         13 => linux_rt_sigaction(pml4, first, second, third),
         14 => linux_rt_sigprocmask(pml4, first, second, third),
         15 => return linux_sigreturn(frame),
@@ -315,6 +316,8 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         234 => linux_tgkill(pml4, first, second, third),
         72 => linux_fcntl(first, second, third),
         79 => linux_getcwd(pml4, first, second),
+        83 => linux_mkdir(pml4, first, second),
+        258 => linux_mkdirat(pml4, first, second, third),
         82 => linux_rename(pml4, first, second),
         87 => linux_unlink(pml4, first),
         89 => linux_readlink(pml4, first, second, third, 0),
@@ -496,6 +499,34 @@ fn linux_getcwd(pml4: PhysFrame, pointer: u64, size: u64) -> i64 {
         return LINUX_ERANGE;
     }
     write_user_bytes(pml4, pointer, b"/\0").map_or(LINUX_EFAULT, |()| 2)
+}
+
+/// Creates a directory in the writable overlay namespace.
+///
+/// `mkdir` has no directory argument; `mkdirat` accepts only `AT_FDCWD`
+/// because this prototype has one absolute root and no cwd-relative lookups.
+fn linux_mkdir(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
+    linux_mkdir_common(pml4, pointer, mode)
+}
+
+fn linux_mkdirat(pml4: PhysFrame, directory: u64, pointer: u64, mode: u64) -> i64 {
+    const AT_FDCWD: u64 = -100i64 as u64;
+    if directory != AT_FDCWD {
+        return LINUX_ENOENT;
+    }
+    linux_mkdir_common(pml4, pointer, mode)
+}
+
+fn linux_mkdir_common(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
+    let _ = mode;
+    let Some(path) = user_cstr(pml4, pointer, 256) else {
+        return LINUX_EFAULT;
+    };
+    let path = path.as_str();
+    if path.as_bytes().first() != Some(&b'/') {
+        return LINUX_ENOENT;
+    }
+    scheduler::linux_overlay_mkdir(path).map_or_else(|error| error, |()| 0)
 }
 
 /// Renames one entry inside the current task's private overlay.

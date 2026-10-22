@@ -36,10 +36,16 @@ grants, and the desktop is not a security authority.
 > endpoint, Mesa lavapipe software Vulkan in the signed Gate 4 runtime rootfs,
 > and a passing `make gate4-test` windowed run with portal open/save at tested
 > commit `716dcb4` (2026-10-21). The run recorded the kernel-owned present,
-> input, save, portal, revoke, and boot markers and QEMU screenshots; this is
-> still not general Linux application compatibility, and the GridCraft record
-> remains `limited` because the Gate 2 production follow-up is open. Do not
-> use this tree for real data.
+> input, save, portal, revoke, and boot markers and QEMU screenshots. A second
+> Craft app, PhotoCraft 0.12.0, now runs its headless `photocraft-cli` through
+> `make photocraft-test`: it opens a PNG, resizes it, writes the result to its
+> private overlay, and exits zero under the same verified-AppImage boundary.
+> All 13 published Craft AppImages now pass a headless smoke test, and nine
+> present a window through the Gate 4 path; the per-app matrix is in
+> [`docs/reviews/craft-apps.md`](docs/reviews/craft-apps.md). This is still
+> not general Linux application compatibility, and both Craft records remain
+> `limited` because the Gate 2 production follow-up is open. Do not use this
+> tree for real data.
 
 ## What works today
 

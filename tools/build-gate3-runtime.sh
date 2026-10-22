@@ -53,9 +53,9 @@ mkdir -p "$ROOT/etc" "$ROOT/lib64" "$ROOT/lib/x86_64-linux-gnu" \
 printf 'AETHER_GATE3_ROOT_OK source=/etc/motd\n' > "$ROOT/etc/motd"
 cp -L "$LDSO" "$ROOT/lib64/ld-linux-x86-64.so.2"
 
-# `readelf -d` on gridcraft-cli lists exactly these three NEEDED libraries.
-# Do not add speculative libraries: the boot test hashes what is packaged.
-for library in libc.so.6 libm.so.6 libgcc_s.so.1; do
+# gridcraft-cli needs glibc, libm, and libgcc_s. FilmCraft's windowed binary
+# also needs libasound, so the generic Craft smoke test can launch it headless.
+for library in libc.so.6 libm.so.6 libgcc_s.so.1 libasound.so.2; do
     if [ ! -e "$LIBDIR/$library" ]; then
         echo "error: required host library not found: $LIBDIR/$library" >&2
         exit 1

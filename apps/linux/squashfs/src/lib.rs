@@ -637,8 +637,12 @@ impl<'a> Image<'a> {
     fn inode(&self, reference: u64) -> Result<Inode, Error> {
         let block = (reference >> 16) as usize;
         let offset = (reference & 0xffff) as usize;
-        let (data, _) = self.metadata_block(self.inode_table, block)?;
-        let start = data.get(offset..).ok_or(Error::InvalidInode)?;
+        // Read a bounded header across metadata-block boundaries. Large files
+        // store a block-size list after the inode header, and that list can
+        // itself cross a block boundary; reading only one metadata block made
+        // VectorCraft's 142 MiB executable fail with InvalidInode.
+        let header = self.metadata_stream(self.inode_table, block, offset, 64)?;
+        let start = &header;
         if start.len() < 16 {
             return Err(Error::InvalidInode);
         }
@@ -673,8 +677,9 @@ impl<'a> Image<'a> {
                 let fragment = read_u32(start, 20).ok_or(Error::InvalidInode)?;
                 let fragment_offset = read_u32(start, 24).ok_or(Error::InvalidInode)?;
                 let file_size = u64::from(read_u32(start, 28).ok_or(Error::InvalidInode)?);
+                let bytes = inode_with_blocks(self, block, offset, 32, file_size, self.block_size)?;
                 let block_sizes =
-                    parse_block_sizes(start, 32, file_size, fragment, self.block_size)?;
+                    parse_block_sizes(&bytes, 32, file_size, fragment, self.block_size)?;
                 Kind::File {
                     blocks_start,
                     file_size,
@@ -689,8 +694,9 @@ impl<'a> Image<'a> {
                 let fragment = read_u32(start, 44).ok_or(Error::InvalidInode)?;
                 let fragment_offset = read_u32(start, 48).ok_or(Error::InvalidInode)?;
                 xattr = read_u32(start, 52).ok_or(Error::InvalidInode)?;
+                let bytes = inode_with_blocks(self, block, offset, 56, file_size, self.block_size)?;
                 let block_sizes =
-                    parse_block_sizes(start, 56, file_size, fragment, self.block_size)?;
+                    parse_block_sizes(&bytes, 56, file_size, fragment, self.block_size)?;
                 Kind::File {
                     blocks_start,
                     file_size,
@@ -701,13 +707,18 @@ impl<'a> Image<'a> {
             }
             3 | 10 => {
                 let length = read_u32(start, 20).ok_or(Error::InvalidInode)? as usize;
-                let target = start
+                let total = 24usize
+                    .checked_add(length)
+                    .and_then(|end| end.checked_add(if kind == 10 { 4 } else { 0 }))
+                    .ok_or(Error::Truncated)?;
+                let bytes = self.metadata_stream(self.inode_table, block, offset, total)?;
+                let target = bytes
                     .get(24..24usize.checked_add(length).ok_or(Error::Truncated)?)
                     .ok_or(Error::InvalidInode)?;
                 let target = target.strip_suffix(&[0]).unwrap_or(target);
                 if kind == 10 {
                     let end = 24usize.checked_add(length).ok_or(Error::Truncated)?;
-                    xattr = read_u32(start, end).ok_or(Error::InvalidInode)?;
+                    xattr = read_u32(&bytes, end).ok_or(Error::InvalidInode)?;
                 }
                 Kind::Symlink(target.to_vec())
             }
@@ -991,37 +1002,70 @@ fn safe_symlink(target: &[u8]) -> bool {
 }
 
 fn parse_directory(data: &[u8]) -> Result<Vec<Entry>, Error> {
-    let count = read_u32(data, 0).ok_or(Error::InvalidInode)? as usize + 1;
-    let mut position = 12usize;
-    let mut entries = Vec::with_capacity(count.min(1024));
-    for _ in 0..count {
-        let offset = read_u16(data, position).ok_or(Error::InvalidInode)?;
-        let _inode_offset = read_u16(data, position + 2).ok_or(Error::InvalidInode)?;
-        let kind = read_u16(data, position + 4).ok_or(Error::InvalidInode)?;
-        let name_size = read_u16(data, position + 6).ok_or(Error::InvalidInode)? as usize + 1;
-        let name_start = position + 8;
-        let name = data
-            .get(name_start..name_start.checked_add(name_size).ok_or(Error::Truncated)?)
-            .ok_or(Error::InvalidInode)?;
-        if name.is_empty()
-            || name.len() > 256
-            || name.contains(&b'/')
-            || name.contains(&0)
-            || name == b"."
-            || name == b".."
-        {
-            return Err(Error::InvalidName);
+    let mut position = 0usize;
+    let mut entries = Vec::new();
+    // A directory listing is a sequence of headers. A new header starts when
+    // the inode-number delta or metadata block changes, so a large directory
+    // (including VectorCraft's root listing) can use more than one.
+    while data.len().saturating_sub(position) >= 12 {
+        let count = read_u32(data, position).ok_or(Error::InvalidInode)? as usize + 1;
+        let start_block = read_u32(data, position + 4).ok_or(Error::InvalidInode)? as u64;
+        position = position.checked_add(12).ok_or(Error::Truncated)?;
+        for _ in 0..count {
+            let offset = read_u16(data, position).ok_or(Error::InvalidInode)?;
+            let _inode_offset = read_u16(data, position + 2).ok_or(Error::InvalidInode)?;
+            let kind = read_u16(data, position + 4).ok_or(Error::InvalidInode)?;
+            let name_size = read_u16(data, position + 6).ok_or(Error::InvalidInode)? as usize + 1;
+            let name_start = position.checked_add(8).ok_or(Error::Truncated)?;
+            let name = data
+                .get(name_start..name_start.checked_add(name_size).ok_or(Error::Truncated)?)
+                .ok_or(Error::InvalidInode)?;
+            if name.is_empty()
+                || name.len() > 256
+                || name.contains(&b'/')
+                || name.contains(&0)
+                || name == b"."
+                || name == b".."
+            {
+                return Err(Error::InvalidName);
+            }
+            let name = core::str::from_utf8(name).map_err(|_| Error::InvalidName)?;
+            entries.push(Entry {
+                name: name.to_string(),
+                inode: (start_block << 16) | u64::from(offset),
+                kind,
+            });
+            position = name_start.checked_add(name_size).ok_or(Error::Truncated)?;
         }
-        let name = core::str::from_utf8(name).map_err(|_| Error::InvalidName)?;
-        entries.push(Entry {
-            name: name.to_string(),
-            inode: ((read_u32(data, 4).ok_or(Error::InvalidInode)? as u64) << 16)
-                | u64::from(offset),
-            kind,
-        });
-        position = name_start.checked_add(name_size).ok_or(Error::Truncated)?;
+    }
+    // Some mksquashfs versions pad the last metadata block by up to three
+    // bytes. Anything larger is an incomplete header, not padding.
+    if data.len().saturating_sub(position) > 3 {
+        return Err(Error::InvalidInode);
     }
     Ok(entries)
+}
+
+/// Reads an inode header plus the block-size list that follows it.
+///
+/// The list is part of the inode but may cross a metadata-block boundary.
+/// `header_len` is the offset of the first block size within the inode.
+fn inode_with_blocks(
+    image: &Image<'_>,
+    block: usize,
+    offset: usize,
+    header_len: usize,
+    file_size: u64,
+    block_size: usize,
+) -> Result<Vec<u8>, Error> {
+    if file_size > DEFAULT_MAX_BYTES as u64 {
+        return Err(Error::Limit);
+    }
+    let count = (file_size as usize).div_ceil(block_size);
+    let need = header_len
+        .checked_add(count.checked_mul(4).ok_or(Error::Truncated)?)
+        .ok_or(Error::Truncated)?;
+    image.metadata_stream(image.inode_table, block, offset, need)
 }
 
 fn parse_block_sizes(
