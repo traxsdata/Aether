@@ -2766,8 +2766,8 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
     let uaddr2 = unsafe { (*frame).r8 };
     let arg5 = unsafe { (*frame).r9 } as u32;
     // FUTEX_PRIVATE_FLAG (0x80) and FUTEX_CLOCK_REALTIME (0x100) are flags;
-    // the command is the low byte. Shared futexes behave like private ones in
-    // this single-CPU model: all waiters share one table keyed by address.
+    // the command is the low byte. Waiters are keyed by mapping, not by the
+    // private flag: see `scheduler::futex_key`.
     let command = operation & 0x7f;
     let realtime = operation & 0x100 != 0;
     match command {
@@ -2791,10 +2791,12 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
                 let Some((seconds, nanoseconds)) = read_timespec(pml4, arg4) else {
                     return linux_result(frame, LINUX_EINVAL);
                 };
-                let Some(ticks) = timespec_ticks(seconds, nanoseconds) else {
-                    return linux_result(frame, LINUX_EINVAL);
-                };
-                if command == 9 {
+                // A timeout beyond the tick range never expires: Linux clamps
+                // it to KTIME_MAX rather than rejecting it.
+                let ticks = timespec_ticks(seconds, nanoseconds);
+                if let Some(ticks) = ticks
+                    && command == 9
+                {
                     // WAIT_BITSET takes an absolute deadline: on
                     // CLOCK_MONOTONIC (the tick count), or on CLOCK_REALTIME
                     // with FUTEX_CLOCK_REALTIME, which glibc uses for
@@ -2815,12 +2817,12 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
                         return linux_result(frame, LINUX_ETIMEDOUT);
                     }
                     relative = Some(deadline - now);
-                } else if ticks == 0 {
+                } else if ticks == Some(0) {
                     // Linux reports ETIMEDOUT immediately for a relative
                     // zero-length wait.
                     return linux_result(frame, LINUX_ETIMEDOUT);
                 } else {
-                    relative = Some(ticks);
+                    relative = ticks;
                 }
             };
             scheduler::futex_trace(command, uaddr, value, arg4, 0, 1);
