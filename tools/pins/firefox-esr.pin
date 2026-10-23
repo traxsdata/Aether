@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Pinned Firefox ESR release for `make firefox-stage` (tools/stage-firefox.py).
+#
+# The tarball is Mozilla's official Linux x86_64 en-US build. The digest is the
+# line for this file in the release's SHA256SUMS:
+#   https://archive.mozilla.org/pub/firefox/releases/<version>/SHA256SUMS
+# Firefox is licensed under MPL-2.0; see docs/reference/firefox.md.
+# Change the version, file, URL, and digest together, in one commit.
+FIREFOX_VERSION=153.5.1esr
+FIREFOX_FILE=firefox-153.5.1esr.tar.xz
+FIREFOX_URL=https://archive.mozilla.org/pub/firefox/releases/153.5.1esr/linux-x86_64/en-US/firefox-153.5.1esr.tar.xz
+FIREFOX_SHA256=e289bdc532decf2b54dea9b5ac64cf6f84a62eeec4d4a9ec2f69590f61b0ff1c
+FIREFOX_APP_ID=org.mozilla.firefox
