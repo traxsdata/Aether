@@ -18,6 +18,33 @@
     .set QUOTA_FDS, 24
     .set QUOTA_VMAS, 64
 .endif
+
+/* Points the msghdr at 0(%rsp) at one iovec over 128(%rsp) and a control
+   buffer at 80(%rsp). */
+.macro UNIX_MSG data_len, control_len
+    movq $0, 0(%rsp)
+    movq $0, 8(%rsp)
+    lea 64(%rsp), %rax
+    mov %rax, 16(%rsp)
+    movq $1, 24(%rsp)
+    lea 80(%rsp), %rax
+    mov %rax, 32(%rsp)
+    movq $\control_len, 40(%rsp)
+    movq $0, 48(%rsp)
+    lea 128(%rsp), %rax
+    mov %rax, 64(%rsp)
+    movq $\data_len, 72(%rsp)
+.endm
+
+/* One SCM_RIGHTS control message carrying a single descriptor. */
+.macro UNIX_RIGHTS fd
+    movq $20, 80(%rsp)
+    movl $1, 88(%rsp)
+    movl $1, 92(%rsp)
+    movl \fd, 96(%rsp)
+    movl $0, 100(%rsp)
+.endm
+
     .section .text
     .global _start
     .type _start, @function
@@ -885,6 +912,226 @@ child_process:
     jmp child_process
 
 after_fork:
+    /* AF_UNIX pairs: SCM_RIGHTS across fork, seqpacket boundaries, EPIPE. */
+    push %rbx
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    sub $256, %rsp
+    /* Unpaired local sockets exist only to bind or connect to a name. */
+    mov $41, %rax               /* socket(AF_UNIX, SOCK_STREAM, 0) */
+    mov $1, %rdi
+    mov $1, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $-97, %rax              /* -EAFNOSUPPORT */
+    jne fail_unix
+    mov $53, %rax               /* socketpair(AF_UNIX, SOCK_STREAM, 0, sv) */
+    mov $1, %rdi
+    mov $1, %rsi
+    xor %rdx, %rdx
+    lea 112(%rsp), %r10
+    syscall
+    test %rax, %rax
+    jnz fail_unix
+    movslq 112(%rsp), %r12
+    movslq 116(%rsp), %r13
+    /* An endpoint may not travel through its own pair. */
+    movb $'S', 128(%rsp)
+    UNIX_MSG 1, 24
+    UNIX_RIGHTS %r12d
+    mov $46, %rax               /* sendmsg */
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $-109, %rax             /* -ETOOMANYREFS */
+    jne fail_unix
+    mov $57, %rax               /* fork */
+    syscall
+    test %rax, %rax
+    js fail_unix
+    jz unix_child
+    mov %rax, %r14
+    /* Only the child keeps the receiving end. */
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    /* The pipe exists after fork, so the child can only get it by message. */
+    mov $293, %rax              /* pipe2 */
+    lea 120(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jnz fail_unix
+    movslq 120(%rsp), %r15
+    movslq 124(%rsp), %rbx
+    movb $'P', 128(%rsp)
+    UNIX_MSG 1, 24
+    UNIX_RIGHTS %ebx
+    mov $46, %rax               /* sendmsg(sv[0], {"P", SCM_RIGHTS[write end]}) */
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_unix
+    /* From here the write end lives only in the message, then the child. */
+    mov $3, %rax
+    mov %rbx, %rdi
+    syscall
+    mov $0, %rax                /* blocking read: the child writes "Z" */
+    mov %r15, %rdi
+    lea 128(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_unix
+    cmpb $'Z', 128(%rsp)
+    jne fail_unix
+    mov $0, %rax                /* end-of-file once the child exits */
+    mov %r15, %rdi
+    lea 128(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    test %rax, %rax
+    jnz fail_unix
+    mov $61, %rax               /* wait4(child, &status, 0, 0) */
+    mov %r14, %rdi
+    lea 144(%rsp), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp %r14, %rax
+    jne fail_unix
+    cmpl $0, 144(%rsp)
+    jne fail_unix
+    mov $3, %rax
+    mov %r15, %rdi
+    syscall
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    jmp unix_seqpacket
+
+unix_child:
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    movq $0, 80(%rsp)
+    movq $0, 96(%rsp)
+    UNIX_MSG 1, 24
+    mov $47, %rax               /* blocking recvmsg(sv[1]) */
+    mov %r13, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $1, %rax
+    jne unix_child_fail
+    cmpb $'P', 128(%rsp)
+    jne unix_child_fail
+    cmpq $24, 40(%rsp)          /* msg_controllen: CMSG_SPACE(4) */
+    jne unix_child_fail
+    cmpq $20, 80(%rsp)          /* cmsg_len: CMSG_LEN(4) */
+    jne unix_child_fail
+    cmpl $1, 88(%rsp)           /* SOL_SOCKET */
+    jne unix_child_fail
+    cmpl $1, 92(%rsp)           /* SCM_RIGHTS */
+    jne unix_child_fail
+    movslq 96(%rsp), %rbx
+    movb $'Z', 128(%rsp)
+    mov $1, %rax
+    mov %rbx, %rdi
+    lea 128(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $1, %rax
+    jne unix_child_fail
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+unix_child_fail:
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+
+unix_seqpacket:
+    mov $53, %rax               /* socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) */
+    mov $1, %rdi
+    mov $5, %rsi
+    xor %rdx, %rdx
+    lea 112(%rsp), %r10
+    syscall
+    test %rax, %rax
+    jnz fail_unix
+    movslq 112(%rsp), %r12
+    movslq 116(%rsp), %r13
+    movl $0x64636261, 128(%rsp) /* "abcd" */
+    UNIX_MSG 4, 0
+    mov $46, %rax
+    mov %r12, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $4, %rax
+    jne fail_unix
+    /* A short buffer cuts the record and reports MSG_TRUNC. */
+    UNIX_MSG 2, 0
+    mov $47, %rax
+    mov %r13, %rdi
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $2, %rax
+    jne fail_unix
+    testl $0x20, 48(%rsp)
+    jz fail_unix
+    mov $3, %rax
+    mov %r12, %rdi
+    syscall
+    movl %r13d, 152(%rsp)       /* poll: the closed peer reads as POLLHUP */
+    movw $1, 156(%rsp)
+    movw $0, 158(%rsp)
+    mov $7, %rax
+    lea 152(%rsp), %rdi
+    mov $1, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $1, %rax
+    jne fail_unix
+    testw $0x10, 158(%rsp)
+    jz fail_unix
+    mov $1, %rax                /* writing to a closed peer is EPIPE, no SIGPIPE */
+    mov %r13, %rdi
+    lea 128(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    cmp $-32, %rax
+    jne fail_unix
+    mov $0, %rax                /* and reading is end-of-file */
+    mov %r13, %rdi
+    lea 128(%rsp), %rsi
+    mov $1, %rdx
+    syscall
+    test %rax, %rax
+    jnz fail_unix
+    mov $3, %rax
+    mov %r13, %rdi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea unix_message(%rip), %rsi
+    mov $unix_message_len, %rdx
+    syscall
+    add $256, %rsp
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
+
+after_unix:
     /* Thread + futex: map a shared page, clone, wait for the child. */
     sub $16, %rsp
     movq $0, 0(%rsp)
@@ -4155,6 +4402,10 @@ fail_dir:
     lea dir_failure(%rip), %rsi
     mov $dir_failure_len, %rdx
     jmp report_failure
+fail_unix:
+    lea unix_failure(%rip), %rsi
+    mov $unix_failure_len, %rdx
+    jmp report_failure
 fail_pipe:
     lea pipe_failure(%rip), %rsi
     mov $pipe_failure_len, %rdx
@@ -4780,6 +5031,12 @@ shared_fork_message:
 map_shared_file_message:
     .ascii "AETHER_LINUX_MAP_SHARED_FILE_OK file=rootfs read=ok msync=eopnotsupp\n"
     .set map_shared_file_message_len, . - map_shared_file_message
+unix_message:
+    .ascii "AETHER_LINUX_UNIX_OK socketpair=ok scm_rights=ok fork=ok seqpacket=ok epipe=ok\n"
+    .set unix_message_len, . - unix_message
+unix_failure:
+    .ascii "AETHER_LINUX_UNIX_FAIL\n"
+    .set unix_failure_len, . - unix_failure
 shared_fork_failure:
     .ascii "AETHER_LINUX_SHARED_FORK_FAIL\n"
     .set shared_fork_failure_len, . - shared_fork_failure

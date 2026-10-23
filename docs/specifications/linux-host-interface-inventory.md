@@ -97,7 +97,7 @@ user-space services. Test IDs are defined in the [test plan](#test-plan).
 | HI-14 | Random: `getrandom` | Kernel random source | `kernel/src/syscall.rs` | HI-T14 | partial |
 | HI-15 | Pseudo-files: `/proc/self/{exe,maps,status,fd}`, `/dev/{null,zero,random}`, bounded `/sys` | Bounded kernel synthesis for `/proc/self/{exe,maps,status,fd}`, `/proc/aether/syscalls`, and `/dev/{null,zero,random,urandom}`; `/sys` absent | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T15 | partial |
 | HI-16 | Multiplexing and notification: `poll`, `epoll`, `eventfd`, `inotify` | Timeout-zero `poll`, per-task `eventfd2`, basic epoll, and bounded inotify (blocking/nonblocking, four watches, directory and file events, overflow); blocking poll/epoll waits and cross-process watch sharing are missing | `kernel/src/scheduler.rs`, planned `user/linuxd` | HI-T16 | partial |
-| HI-17 | Unix sockets: `socketpair`, `connect`, `bind`, `listen`, `accept4`, `sendmsg`, `recvmsg`, `getsockopt`, `setsockopt` | Brokered local sockets with validated `SCM_RIGHTS` | planned `user/linuxd`, `kernel/src/ipc.rs` | HI-T17 | missing |
+| HI-17 | Unix sockets: `socketpair`, `sendmsg`, `recvmsg`, `getsockopt`, `setsockopt`, `shutdown` | Kernel socket pairs with validated `SCM_RIGHTS`; no named or abstract namespace, so `connect`, `bind`, `listen`, and `accept4` fail | `kernel/src/socket/unix.rs` | HI-T17 | partial |
 | HI-18 | Network: `socket`, `getaddrinfo`, `freeaddrinfo`, `gai_strerror`, `shutdown`; AF_INET/AF_INET6 | Network service with explicit capability | planned network service | HI-T18 | denied |
 
 ### Display, input, and graphics
@@ -147,7 +147,7 @@ planned test is not evidence until it runs in `make ci`.
 | HI-T14 | planned `make linux-random-test` | `getrandom` fills a bounded buffer and fails closed at the domain boundary | planned |
 | HI-T15 | `make test` | `AETHER_LINUX_PROC_OK` and `AETHER_LINUX_DEV_OK`: `/proc/self/{exe,maps,status,fd}` and `/dev/{null,zero,random,urandom}` through open/read/stat/readdir; no host process or device enumeration | partial |
 | HI-T16 | `make test` | Boot fixture polls a pipe and drives eventfd through epoll. `AETHER_LINUX_INOTIFY_BLOCK_OK` covers blocking/nonblocking inotify, multiple file and directory watches, `IN_CREATE`/`IN_MODIFY`/`IN_OPEN`/`IN_IGNORED`, overflow, and a blocking wakeup. Blocking poll/epoll waits and timeouts remain planned | partial |
-| HI-T17 | planned `make linux-socket-test` | Local socket pairing and `SCM_RIGHTS` validation; no network sockets | planned |
+| HI-T17 | `make test` | `AETHER_LINUX_UNIX_OK`: unpaired `socket(AF_UNIX)` refused, a pipe end passed by `SCM_RIGHTS` to a forked child, self-passing refused with `ETOOMANYREFS`, seqpacket `MSG_TRUNC`, closed-peer `POLLHUP`, `EPIPE`, and end-of-file | partial |
 | HI-T18 | planned `make linux-net-deny-test` | AF_INET/AF_INET6 and DNS fail closed without a capability | planned |
 | HI-T19 | planned `make wayland-test` | Registry, surfaces, commits, frame callbacks, xdg-shell toplevel, and teardown | planned |
 | HI-T20 | planned `make wayland-protocol-test` | Required protocol subset and clean rejection of unknown/oversized messages | planned |

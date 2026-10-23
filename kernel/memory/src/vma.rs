@@ -627,4 +627,33 @@ mod tests {
         map.reset();
         assert_eq!(map.insert(PAGE_SIZE, PROT_READ).unwrap(), BASE);
     }
+
+    #[test]
+    fn insert_corrects_for_fixed_mappings_at_the_cursor() {
+        let mut map = table();
+        map.insert(2 * PAGE_SIZE, PROT_READ).unwrap();
+        // A fixed mapping exactly at the cursor merges with the area below
+        // it, so the next search starts inside an area that began earlier.
+        map.insert_at(BASE + 2 * PAGE_SIZE, PAGE_SIZE, PROT_READ)
+            .unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.insert(PAGE_SIZE, PROT_EXEC).unwrap(),
+            BASE + 3 * PAGE_SIZE
+        );
+        // Below the cursor every address is mapped, so a fixed mapping there
+        // overlaps and leaves the cursor alone.
+        assert_eq!(
+            map.insert_at(BASE + PAGE_SIZE, PAGE_SIZE, PROT_EXEC),
+            Err(VmaError::Overlap)
+        );
+        // A fixed mapping that fills the hole the cursor points at after a
+        // removal is skipped by the next search.
+        map.remove(BASE, PAGE_SIZE).unwrap();
+        map.insert_at(BASE, PAGE_SIZE, PROT_EXEC).unwrap();
+        assert_eq!(
+            map.insert(PAGE_SIZE, PROT_READ).unwrap(),
+            BASE + 4 * PAGE_SIZE
+        );
+    }
 }
