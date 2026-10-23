@@ -429,8 +429,9 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         302 => linux_prlimit(pml4, first, second, third, unsafe { (*frame).r10 }),
         294 => scheduler::linux_inotify_init(first).map_or_else(|error| error, |fd| fd as i64),
         254 => {
-            let Some(path) = user_cstr(pml4, second, 256) else {
-                return linux_result(frame, LINUX_EFAULT);
+            let path = match user_cstr(pml4, second, USER_STRING_MAX as u64) {
+                Ok(path) => path,
+                Err(error) => return linux_result(frame, error.errno()),
             };
             let path = path.as_str();
             scheduler::linux_inotify_add(first, path, third as u32)
@@ -543,8 +544,9 @@ const LINUX_ENAMETOOLONG: i64 = -36;
 const LINUX_ERANGE: i64 = -34;
 
 fn linux_openat(pml4: PhysFrame, directory: u64, pointer: u64, flags: u64) -> i64 {
-    let Some(path) = user_cstr(pml4, pointer, 256) else {
-        return LINUX_EFAULT;
+    let path = match user_cstr(pml4, pointer, USER_STRING_MAX as u64) {
+        Ok(path) => path,
+        Err(error) => return error.errno(),
     };
     let path = path.as_str();
     if path.as_bytes().first() != Some(&b'/') {
@@ -625,8 +627,9 @@ fn linux_mkdirat(pml4: PhysFrame, directory: u64, pointer: u64, mode: u64) -> i6
 
 fn linux_mkdir_common(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
     let _ = mode;
-    let Some(path) = user_cstr(pml4, pointer, 256) else {
-        return LINUX_EFAULT;
+    let path = match user_cstr(pml4, pointer, USER_STRING_MAX as u64) {
+        Ok(path) => path,
+        Err(error) => return error.errno(),
     };
     let path = path.as_str();
     if path.as_bytes().first() != Some(&b'/') {
@@ -637,12 +640,14 @@ fn linux_mkdir_common(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
 
 /// Renames one entry inside the current task's private overlay.
 fn linux_rename(pml4: PhysFrame, old_pointer: u64, new_pointer: u64) -> i64 {
-    let Some(old) = user_cstr(pml4, old_pointer, 256) else {
-        return LINUX_EFAULT;
+    let old = match user_cstr(pml4, old_pointer, USER_STRING_MAX as u64) {
+        Ok(old) => old,
+        Err(error) => return error.errno(),
     };
     let old = old.as_str();
-    let Some(new) = user_cstr(pml4, new_pointer, 256) else {
-        return LINUX_EFAULT;
+    let new = match user_cstr(pml4, new_pointer, USER_STRING_MAX as u64) {
+        Ok(new) => new,
+        Err(error) => return error.errno(),
     };
     let new = new.as_str();
     if old.starts_with(aether_services::portal_store::PORTAL_PREFIX)
@@ -655,8 +660,9 @@ fn linux_rename(pml4: PhysFrame, old_pointer: u64, new_pointer: u64) -> i64 {
 
 /// Removes one entry from the current task's private overlay.
 fn linux_unlink(pml4: PhysFrame, pointer: u64) -> i64 {
-    let Some(path) = user_cstr(pml4, pointer, 256) else {
-        return LINUX_EFAULT;
+    let path = match user_cstr(pml4, pointer, USER_STRING_MAX as u64) {
+        Ok(path) => path,
+        Err(error) => return error.errno(),
     };
     let path = path.as_str();
     if path.starts_with(aether_services::portal_store::PORTAL_PREFIX) {
@@ -743,8 +749,9 @@ fn linux_pread(pml4: PhysFrame, descriptor: u64, pointer: u64, length: u64, offs
 }
 
 fn linux_access(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
-    let Some(path) = user_cstr(pml4, pointer, 256) else {
-        return LINUX_EFAULT;
+    let path = match user_cstr(pml4, pointer, USER_STRING_MAX as u64) {
+        Ok(path) => path,
+        Err(error) => return error.errno(),
     };
     let path = path.as_str();
     if !scheduler::linux_access(path) {
@@ -757,7 +764,29 @@ fn linux_access(pml4: PhysFrame, pointer: u64, mode: u64) -> i64 {
     0
 }
 
-fn user_cstr(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<UserString> {
+/// Why a user string could not be copied into the kernel.
+pub enum UserCStringError {
+    /// A user page was not readable (fault while copying).
+    Fault,
+    /// No NUL terminator was found within the maximum length.
+    TooLong,
+}
+
+impl UserCStringError {
+    /// The Linux errno the caller should return for this failure.
+    pub fn errno(self) -> i64 {
+        match self {
+            Self::Fault => LINUX_EFAULT,
+            Self::TooLong => LINUX_ENAMETOOLONG,
+        }
+    }
+}
+
+pub fn user_cstr(
+    pml4: PhysFrame,
+    pointer: u64,
+    maximum: u64,
+) -> Result<UserString, UserCStringError> {
     // A string may end near a page boundary while the caller's maximum scan
     // length crosses into the next, unmapped page. Copy one page at a time
     // and stop at the terminator instead of requiring the whole maximum range.
@@ -769,17 +798,25 @@ fn user_cstr(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<UserString> 
         let chunk = (0x1000 - page_offset).min(maximum - scanned);
         let start = scanned as usize;
         let end = start + chunk as usize;
-        copy_from_user(pml4, pointer + scanned, &mut string.bytes[start..end])?;
+        match copy_from_user(pml4, pointer + scanned, &mut string.bytes[start..end]) {
+            Some(()) => {}
+            None => return Err(UserCStringError::Fault),
+        };
         if let Some(position) = string.bytes[start..end].iter().position(|byte| *byte == 0) {
-            return string.finish(start + position);
+            // `finish` only fails on non-UTF-8 input; preserve the historical
+            // mapping of that case to the copy-fault errno.
+            return string
+                .finish(start + position)
+                .ok_or(UserCStringError::Fault);
         }
         scanned += chunk;
     }
-    None
+    Err(UserCStringError::TooLong)
 }
 
-// One path component (255) plus a directory prefix, rounded up.
-const USER_STRING_MAX: usize = 512;
+/// One path component (255) plus a directory prefix, rounded up; equal to the
+/// filesystem's maximum path length (`aether_fs::MAX_PATH`).
+pub(crate) const USER_STRING_MAX: usize = 512;
 
 /// A user string copied into a kernel buffer and checked as UTF-8.
 pub struct UserString {
@@ -833,9 +870,12 @@ fn gate4_trace_path_call(
     let interesting =
         |path: &str| path.contains(".xlsx") || path.contains("portal") || path.contains(".tmp");
     let (from, to) = match number {
-        257 => (user_cstr(pml4, second, 256), None),
-        82 => (user_cstr(pml4, first, 256), user_cstr(pml4, second, 256)),
-        87 => (user_cstr(pml4, first, 256), None),
+        257 => (user_cstr(pml4, second, USER_STRING_MAX as u64).ok(), None),
+        82 => (
+            user_cstr(pml4, first, USER_STRING_MAX as u64).ok(),
+            user_cstr(pml4, second, USER_STRING_MAX as u64).ok(),
+        ),
+        87 => (user_cstr(pml4, first, USER_STRING_MAX as u64).ok(), None),
         _ => (None, None),
     };
     let (from, to) = (from.as_deref(), to.as_deref());
@@ -1351,8 +1391,9 @@ fn linux_mprotect(pml4: PhysFrame, address: u64, length: u64, protections: u64) 
 }
 
 fn linux_stat(pml4: PhysFrame, path_pointer: u64, stat_pointer: u64) -> i64 {
-    let Some(path) = user_cstr(pml4, path_pointer, 256) else {
-        return LINUX_EFAULT;
+    let path = match user_cstr(pml4, path_pointer, USER_STRING_MAX as u64) {
+        Ok(path) => path,
+        Err(error) => return error.errno(),
     };
     let path = path.as_str();
     let Some((size, inode, mode)) = scheduler::linux_stat_path(path) else {
@@ -1426,8 +1467,9 @@ fn unsupported_dirfd(directory: u64, path: &str) -> Option<i64> {
 }
 
 fn linux_newfstatat(pml4: PhysFrame, directory: u64, path_pointer: u64, stat_pointer: u64) -> i64 {
-    let Some(path) = user_cstr(pml4, path_pointer, 256) else {
-        return LINUX_EFAULT;
+    let path = match user_cstr(pml4, path_pointer, USER_STRING_MAX as u64) {
+        Ok(path) => path,
+        Err(error) => return error.errno(),
     };
     let path = path.as_str();
     if path.is_empty() {
@@ -1468,8 +1510,9 @@ fn linux_statx(
     let user_path = if use_fd {
         None
     } else {
-        let Some(value) = user_cstr(pml4, path_pointer, 256) else {
-            return LINUX_EFAULT;
+        let value = match user_cstr(pml4, path_pointer, USER_STRING_MAX as u64) {
+            Ok(value) => value,
+            Err(error) => return error.errno(),
         };
         Some(value)
     };
@@ -1510,8 +1553,9 @@ fn linux_readlink(
     buffer_length: u64,
     _directory: u64,
 ) -> i64 {
-    let Some(path) = user_cstr(pml4, path_pointer, 256) else {
-        return LINUX_EFAULT;
+    let path = match user_cstr(pml4, path_pointer, USER_STRING_MAX as u64) {
+        Ok(path) => path,
+        Err(error) => return error.errno(),
     };
     let path = path.as_str();
     let target: &[u8] = match path {
@@ -2070,9 +2114,12 @@ fn linux_execve(
     argv_pointer: u64,
     envp_pointer: u64,
 ) -> *mut InterruptFrame {
-    let Some(user_path) = user_cstr(pml4, path_pointer, 256) else {
-        unsafe { (*frame).rax = LINUX_EFAULT as u64 };
-        return frame;
+    let user_path = match user_cstr(pml4, path_pointer, USER_STRING_MAX as u64) {
+        Ok(path) => path,
+        Err(error) => {
+            unsafe { (*frame).rax = error.errno() as u64 };
+            return frame;
+        }
     };
     let user_path = user_path.as_str();
     let mut path_storage = [0u8; 256];
@@ -2306,7 +2353,12 @@ fn read_exec_vector(
         if value == 0 {
             return Some(index);
         }
-        let string = user_cstr(pml4, value, 256)?;
+        // An unreadable or too-long element aborts the whole vector; keep the
+        // historical `None` (EFAULT) behaviour for both cases.
+        let string = match user_cstr(pml4, value, USER_STRING_MAX as u64) {
+            Ok(string) => string,
+            Err(_) => return None,
+        };
         if string.len() >= output[index].len() {
             return None;
         }
