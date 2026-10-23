@@ -308,6 +308,14 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             }
             None => boot_failure("frame allocator unavailable"),
         };
+    // SAFETY: Paging init above has installed, and activated, the kernel's own
+    // `GLOBAL` leaves (present but ignored while PGE=0). Enabling CR4.PGE now,
+    // after CR3 left the firmware's tables, is what makes them take effect, and
+    // the PGE 0→1 transition flushes the entire TLB, globals included, so no
+    // translation from the firmware's page tables — global or not — survives
+    // into the kernel.
+    unsafe { arch::x86_64::cpu::enable_global_pages() };
+    serial_line!("boot: cpu: CR4.PGE global pages on");
 
     match graphics::init(&info.framebuffer, framebuffer_mapped) {
         Ok(true) => {
@@ -353,6 +361,7 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         None => serial_line!("boot: copy-on-write fork unavailable; fork copies eagerly"),
     }
     serial_line!("AETHER_MM_OK");
+    cr3_skip_selftest();
     usercopy_selftest();
     net::init();
 
@@ -366,6 +375,33 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     serial_line!("boot: x86-64 execution environment ready");
     scheduler::run()
+}
+
+/// Proves same-address-space scheduling skips the CR3 write (issue #73).
+///
+/// Activating a PML4 that is already in CR3 must count as a skip, not a
+/// reload: the translation cache is still valid, and a redundant `mov cr3`
+/// would only flush non-global TLB entries and force re-walks of the shared
+/// identity map. A real (different) PML4 switch still reloads, so a broken
+/// comparison would show up here as a wrong counter delta.
+fn cr3_skip_selftest() {
+    let Some(active) = memory::paging::current_pml4() else {
+        boot_failure("cr3 self-test: no active page table");
+    };
+    let expected_skips = memory::paging::cr3_skips() + 1;
+    let reloads = memory::paging::cr3_reloads();
+    memory::paging::activate(active);
+    if memory::paging::cr3_skips() == expected_skips && memory::paging::cr3_reloads() == reloads {
+        serial_line!("AETHER_CR3_OK same-space switch skipped the CR3 write");
+    } else {
+        serial_line!(
+            "AETHER_BOOT_FAILED reason=cr3-skip: same-space activate \
+             reloaded (skips={} reloads={})",
+            memory::paging::cr3_skips(),
+            memory::paging::cr3_reloads()
+        );
+        arch::x86_64::halt();
+    }
 }
 
 /// Proves the user-copy fixup: a copy from an unmapped user-window page must

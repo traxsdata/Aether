@@ -28,6 +28,8 @@ const SYSCALL_FLAG_MASK: u64 = (1 << 8) | (1 << 9) | (1 << 10) | (3 << 12) | (1 
 const IA32_FS_BASE: u32 = 0xc000_0100;
 
 const CR0_WP: u64 = 1 << 16;
+/// CR4.PGE: enable global page support.
+const CR4_PGE: u64 = 1 << 7;
 const CR4_OSXSAVE: u64 = 1 << 18;
 const CR4_SMEP: u64 = 1 << 20;
 const CR4_SMAP: u64 = 1 << 21;
@@ -151,6 +153,33 @@ pub unsafe fn enable_supervisor_protection() -> SupervisorProtection {
     // that executes or accesses user pages outside the copy routine runs yet.
     unsafe { write_cr4(read_cr4() | bits) };
     protection
+}
+
+/// Enables global page support (`CR4.PGE`) for the kernel's shared identity
+/// map.
+///
+/// The kernel is identity-mapped to the same physical frames in every address
+/// space: each task's PML4 copies the kernel's PML4 slot 0 entry and thus
+/// points at the same kernel page tables, so those translations are identical
+/// everywhere and marking the leaves `GLOBAL` is safe.
+///
+/// This must run **after** the kernel's own page tables are active, not
+/// before them while the firmware's tables are still in CR3: enabling PGE
+/// early would make any firmware table entry with the G bit set a global
+/// TLB entry that the kernel's CR3 write cannot flush. Turning PGE on from 0
+/// to 1 flushes the entire TLB, globals included, so no firmware translation
+/// can survive, and the kernel's `GLOBAL` leaves (present but ignored while
+/// PGE=0) take effect only from this point on.
+///
+/// # Safety
+///
+/// Must run once during boot, at CPL0, with interrupts disabled, and after
+/// the kernel's own `GLOBAL` page tables have been activated.
+pub unsafe fn enable_global_pages() {
+    // SAFETY: CR4 is writable at CPL0, PGE is architectural on x86-64, and
+    // the caller activated the kernel's own global leaves first; the PGE 0→1
+    // transition's full TLB flush discards any stale or firmware translations.
+    unsafe { write_cr4(read_cr4() | CR4_PGE) };
 }
 
 /// Enables the extended processor state used by SSE and AVX.
@@ -300,6 +329,10 @@ pub unsafe fn enable_write_combining() -> bool {
         );
         // A PAT change does not invalidate cached translations of the firmware
         // tables still in CR3; reload it so no stale memory type survives.
+        // (The reload only flushes non-global entries: a CR3 write never
+        // invalidates global translations. Once the kernel's own tables are
+        // active, changing one of its global pages must go through INVLPG or
+        // a CR4.PGE toggle.)
         write_cr3(read_cr3());
     }
     WRITE_COMBINING.store(true, Ordering::Relaxed);

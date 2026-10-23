@@ -69,6 +69,7 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
 | Kernel task → object | Forged handle, stale slot, wrong endpoint, or insufficient rights | Generation-checked handles; per-task tables; endpoint identity checks; rights checks | Implemented, host- and QEMU-tested |
 | Kernel task → IPC | Oversized message, queue exhaustion, capability forgery, table exhaustion, sender impersonation | 64-byte bound, four-message queues, critical sections, `TRANSFER` check, atomic receive, kernel-supplied sender identity | Implemented, host- and QEMU-tested |
 | Kernel → user | User reads or writes kernel memory | CPL3, user-only PML4 window, supervisor-only identity map, syscall range validation | Implemented, QEMU-tested |
+| Kernel map across spaces | Stale or wrong TLB entry survives a kernel-mapping change | Kernel tables are shared and identical in every space (PML4 slot 0 copied onto them), so `GLOBAL` leaves cannot pin a different frame; post-boot leaf changes go through `INVLPG`, which invalidates global pages; `CR4.PGE` is enabled only after the kernel's own tables are active — the 0→1 toggle itself flushes the whole TLB including globals, so no stale firmware translation can survive into the kernel | Implemented, QEMU-tested |
 | User → kernel | Malformed syscall pointer, length, handle, or generation | Whole-range page validation, generation/type/right checks, bounded copy | Implemented, QEMU-tested |
 | User → user | App reads a sibling's private data | Kernel-owned root, `..` rejection, per-task file capabilities | Implemented, QEMU-tested |
 | App → files | App opens an ungranted outside file | Exact portal grant keyed by root, path, and rights | Implemented prototype |
@@ -138,6 +139,15 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
 - The kernel identity-maps physical memory and caps the map bitmap at 16 GiB;
   there is no higher-half mapping or guard page. The kernel heap is one
   identity-mapped arena with no per-block guards or poisoning.
+- The kernel page tables are **shared** by every address space (each PML4
+  copies the kernel's PML4 slot 0 entry onto the same frames), which is what
+  makes the `GLOBAL` kernel leaves and the same-space CR3-skip safe: a task
+  cannot pin a kernel translation to a frame that differs from the kernel's
+  own. A future KPTI-style design with per-space kernel mappings is a
+  conflict: those user-facing kernel mappings must not be global, and any
+  switch between different kernel trees would need per-address-space
+  invalidation (for example PCID) — record it in an ADR if that design is
+  adopted.
 - **No address-space layout randomization.** User images, the kernel image,
   and stacks load at fixed addresses, so the loss of a code-pointer leak
   cannot be made benign yet. This is documented as an exclusion and tracked

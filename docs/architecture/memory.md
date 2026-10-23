@@ -78,13 +78,37 @@ Page-table frames are allocated from the frame allocator and zeroed before
 use. They are reachable both before and after the switch because the new map
 is identity-based.
 
+Global pages: every kernel leaf entry (low RAM, kernel sections, large pages,
+the framebuffer, and runtime MMIO windows) is mapped `GLOBAL`, and `CR4.PGE`
+is enabled as soon as paging init has activated the kernel's own tables.
+That ordering is required: enabling PGE while the firmware's page tables are
+still in CR3 would make any firmware entry with the G bit set a global TLB
+entry the kernel's CR3 write cannot flush. The PGE 0→1 transition flushes
+the whole TLB, globals included, so nothing from the firmware survives, and
+the kernel's `GLOBAL` leaves (present but ignored while PGE=0) take effect
+only from that point on. The kernel's translation is byte-identical in every
+address space — each task's PML4 copies
+the kernel's PML4 slot 0 entry onto the shared kernel page tables — so keeping
+those translations across CR3 writes is safe and removes the cost of re-walking
+the identity map on every context switch. Any post-boot change to a global
+kernel mapping must be invalidated explicitly: the kernel adds MMIO leaves
+only through `map_kernel_mmio`, which issues `INVLPG` per page (INVLPG
+invalidates global entries, unlike a CR3 write). See the threat model for
+what this assumes of a future KPTI-style design.
+
 ## Per-task address spaces
 
 Phase 2 adds `create_address_space`, which allocates a new PML4, copies the
 kernel identity-map entry, and maps a private physical frame at
 `PRIVATE_BASE = 0x0000_0080_0000_0000` (PML4 slot 1). Every task sees the same
 virtual address backed by a different frame. The scheduler switches CR3 on
-context switches, so a write by one task is invisible to another.
+context switches, so a write by one task is invisible to another. Switching to
+a task that already shares its PML4 (e.g. two threads of the same process)
+skips the CR3 write entirely: it would only flush non-global TLB entries and
+force a re-walk of the shared identity map. The boot self-test verifies the
+skip (`AETHER_CR3_OK`), and the scheduler reports the running totals
+(`sched: cr3 reloads=… skips=…`). A different address space still performs the
+CR3 write, which keeps task-private translations out of the TLB.
 
 The kernel remains identity-mapped and supervisor-only in every address space.
 The ring-3 application additionally receives user mappings only inside

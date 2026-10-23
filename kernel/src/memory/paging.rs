@@ -18,6 +18,7 @@ use aether_memory::paging::{PAGE_TABLE_ENTRIES, PageFlags, PageTable, PageTableE
 use aether_memory::{LARGE_PAGE_SIZE, PAGE_SIZE};
 use core::arch::asm;
 use core::ptr;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{cow, shared};
 
@@ -107,17 +108,48 @@ pub fn current_pml4() -> Option<PhysFrame> {
     PhysFrame::from_address(value & aether_memory::paging::ADDRESS_MASK)
 }
 
+/// CR3 writes performed by [`activate`].
+static CR3_RELOADS: AtomicU64 = AtomicU64::new(0);
+/// Same-address-space activations that skipped the CR3 write.
+static CR3_SKIPS: AtomicU64 = AtomicU64::new(0);
+
+/// CR3 writes performed by [`activate`].
+#[must_use]
+pub fn cr3_reloads() -> u64 {
+    CR3_RELOADS.load(Ordering::Relaxed)
+}
+
+/// Same-address-space activations that skipped the CR3 write.
+#[must_use]
+pub fn cr3_skips() -> u64 {
+    CR3_SKIPS.load(Ordering::Relaxed)
+}
+
 /// Switches to `pml4`.
+///
+/// A `mov cr3` flushes every non-global TLB translation on this core even
+/// when the target PML4 is already active, so switching to a task in the same
+/// address space would re-walk the whole shared identity map before resuming.
+/// When the active PML4 is already `pml4`, the running translations are still
+/// valid; the write is pure cost and is skipped (counted by [`cr3_skips`]).
 pub fn activate(pml4: PhysFrame) {
-    // SAFETY: The address space shares the kernel identity mapping, so the
-    // running code, stack, and data remain mapped. Interrupts are disabled by
-    // the caller while switching scheduler state.
-    unsafe {
-        asm!(
-            "mov cr3, {pml4}",
-            pml4 = in(reg) pml4.start_address(),
-            options(nostack, preserves_flags)
-        );
+    match current_pml4() {
+        Some(active) if active.start_address() == pml4.start_address() => {
+            CR3_SKIPS.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            // SAFETY: The address space shares the kernel identity mapping, so
+            // the running code, stack, and data remain mapped. Interrupts are
+            // disabled by the caller while switching scheduler state.
+            unsafe {
+                asm!(
+                    "mov cr3, {pml4}",
+                    pml4 = in(reg) pml4.start_address(),
+                    options(nostack, preserves_flags)
+                );
+            }
+            CR3_RELOADS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -850,11 +882,17 @@ pub fn map_kernel_mmio(
         return Err(PagingError::MissingKernelMapping);
     }
     let pdpt = PhysFrame::from_address(root.address()).ok_or(PagingError::MissingKernelMapping)?;
+    // `GLOBAL` is valid because the leaf lands in the kernel tables shared by
+    // every address space. The `flush_page` INVLPG below still applies: INVLPG
+    // invalidates a translation regardless of the global bit, keeping the
+    // requirement that post-boot changes to a global kernel mapping are
+    // invalidated explicitly.
     let flags = PageFlags::PRESENT
         | PageFlags::WRITABLE
         | PageFlags::CACHE_DISABLE
         | PageFlags::WRITE_THROUGH
-        | PageFlags::NO_EXECUTE;
+        | PageFlags::NO_EXECUTE
+        | PageFlags::GLOBAL;
     let mut address = base & !(PAGE_SIZE - 1);
     while address < end {
         let [_, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
@@ -1413,7 +1451,12 @@ impl<'a, 'b> Tables<'a, 'b> {
         let pdpt = self.ensure(self.pml4, 0)?;
         let pd = self.ensure(pdpt, 0)?;
         let pt = self.ensure(pd, 0)?;
-        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+        // `GLOBAL`: these kernel leaves are identical in every address space
+        // (every space copies the kernel PML4 entry), so the CPU may keep their
+        // translations across CR3 writes. Only leaf entries receive the flag;
+        // table-pointer entries do not.
+        let flags =
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE | PageFlags::GLOBAL;
         for index in 0..PAGE_TABLE_ENTRIES {
             let address = index as u64 * PAGE_SIZE;
             let entry = PageTableEntry::new(address, flags)
@@ -1444,12 +1487,15 @@ impl<'a, 'b> Tables<'a, 'b> {
                 let address = window + index as u64 * PAGE_SIZE;
                 let flags = if address >= text_start && address < text_end {
                     // Kernel text: read + execute, no write.
-                    PageFlags::PRESENT
+                    PageFlags::PRESENT | PageFlags::GLOBAL
                 } else if address >= rodata_start && address < rodata_end {
-                    PageFlags::PRESENT | PageFlags::NO_EXECUTE
+                    PageFlags::PRESENT | PageFlags::NO_EXECUTE | PageFlags::GLOBAL
                 } else {
                     // Data, BSS, and gaps in the kernel window.
-                    PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE
+                    PageFlags::PRESENT
+                        | PageFlags::WRITABLE
+                        | PageFlags::NO_EXECUTE
+                        | PageFlags::GLOBAL
                 };
                 // `_data_start` is reserved for future per-section handling;
                 // every non-text, non-rodata page in the window is writable.
@@ -1467,7 +1513,10 @@ impl<'a, 'b> Tables<'a, 'b> {
             kernel_ranges();
         let kernel_window_start = text_start & !(LARGE_PAGE_SIZE - 1);
         let kernel_window_end = align_up_large(kernel_end);
-        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+        // `GLOBAL`: shared by every address space through the kernel PML4
+        // entry, safe to keep translated across CR3 writes.
+        let flags =
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE | PageFlags::GLOBAL;
 
         let mut base = LOW_REGION_BYTES;
         while base < end {
@@ -1563,7 +1612,13 @@ impl<'a, 'b> Tables<'a, 'b> {
         } else {
             PageFlags::CACHE_DISABLE
         };
-        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | memory_type | PageFlags::NO_EXECUTE;
+        // `GLOBAL`: the framebuffer mapping is part of the kernel tables that
+        // every address space shares through PML4 entry 0.
+        let flags = PageFlags::PRESENT
+            | PageFlags::WRITABLE
+            | memory_type
+            | PageFlags::NO_EXECUTE
+            | PageFlags::GLOBAL;
 
         let mut address = start;
         while address < end {
