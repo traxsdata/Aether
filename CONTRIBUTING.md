@@ -30,9 +30,10 @@ Rust host and Python tooling tests, the QEMU boot test, the UEFI ISO boot and
 real-input desktop/Files tests on VGA/SVGA emulation, the shell test, the
 fault-path test, the rollback-path test, a negative boot test that proves the
 harness rejects a deliberately failing kernel, and the signed-release tamper
-demonstration. A hosted GitHub Actions workflow that runs the same commands is a
-follow-up; until it is published, run `make ci` locally before opening the pull
-request so failures are not spread across reviewers.
+demonstration. The hosted GitHub Actions workflow
+(`.github/workflows/ci.yml`) runs the same `make ci` on every pull request and
+push to `main`, using software (TCG) QEMU emulation. Run `make ci` locally
+before opening the pull request so failures are not spread across reviewers.
 
 The gate also generates the Workstation VMX for the tested ISO; this verifies
 configuration generation, not a VMware Workstation boot. Actual Workstation

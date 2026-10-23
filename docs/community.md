@@ -40,7 +40,8 @@ duplicate work.
 - Parsing and policy logic has host tests. Hardware and boot paths have a
   marker-based test.
 - Public interfaces are documented; ABI changes are versioned.
-- Run `make ci` locally and include the result and the tested commit in the PR.
+- Run `make ci` locally and include the result and the tested commit in the PR;
+  the hosted `ci` workflow re-runs the same gate on every pull request.
   A boot claim includes the marker transcript.
 - Do not commit keys, tokens, personal data, build outputs, or generated
   binaries. Test fixtures are the exception and are reviewed.
