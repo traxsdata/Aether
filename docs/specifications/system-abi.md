@@ -220,6 +220,7 @@ Error numbers (two's-complement `i64` in `RAX`):
 | -14 | `ENOTDIR` | a path component is not a directory |
 | -15 | `EISDIR` | a file operation named a directory |
 | -16 | `ENOTEMPTY` | `remove` of a directory that still has entries |
+| -36 | `ENAMETOOLONG` | a name or path exceeds the filesystem's length limit (matches the POSIX value and the Linux-ABI surface) |
 
 Terminal session calls (21–36) add these rules:
 

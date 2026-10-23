@@ -631,6 +631,7 @@ pub fn error_message(error: i64) -> &'static str {
         errno::ENOTDIR => "Not a directory",
         errno::EISDIR => "Is a directory",
         errno::ENOTEMPTY => "Directory not empty",
+        errno::ENAMETOOLONG => "File name too long",
         _ => "Unknown error",
     }
 }
@@ -655,6 +656,18 @@ pub fn error_name(error: i64) -> &'static str {
         errno::ENOTDIR => "ENOTDIR",
         errno::EISDIR => "EISDIR",
         errno::ENOTEMPTY => "ENOTEMPTY",
+        errno::ENAMETOOLONG => "ENAMETOOLONG",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_too_long_renders_a_readable_diagnostic() {
+        assert_eq!(error_message(errno::ENAMETOOLONG), "File name too long");
+        assert_eq!(error_name(errno::ENAMETOOLONG), "ENAMETOOLONG");
     }
 }

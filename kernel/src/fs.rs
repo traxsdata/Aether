@@ -302,7 +302,7 @@ fn map_error(error: FsError) -> i64 {
         FsError::NotFound => errno::ENOENT,
         FsError::NoSpace | FsError::TooManyOpen | FsError::FileTooLarge => errno::ENOSPC,
         FsError::BadHandle => errno::EBADF,
-        FsError::NameTooLong | FsError::PathTooLong => errno::EINVAL,
+        FsError::NameTooLong | FsError::PathTooLong => errno::ENAMETOOLONG,
         FsError::Io | FsError::NotFormatted | FsError::Corrupt => errno::EIO,
         FsError::NotDirectory => errno::ENOTDIR,
         FsError::IsDirectory => errno::EISDIR,
