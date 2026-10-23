@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Hosted runners may or may not expose /dev/kvm; pin software emulation so
+  # boot timings and results are deterministic (see tools/qemu_accel.py).
+  AETHER_QEMU_ACCEL: tcg
+
+jobs:
+  make-ci:
+    name: make ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils curl git make python3 \
+            qemu-system-x86 ovmf mtools dosfstools xorriso squashfs-tools
+
+      - name: Install Rust (rust-toolchain.toml)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" show
+          "$HOME/.cargo/bin/rustc" --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Environment summary
+        run: |
+          qemu-system-x86_64 --version | head -1
+          ls /usr/share/OVMF || true
+          ls -l /dev/kvm || echo "no /dev/kvm (TCG)"
+
+      - name: make ci
+        run: make ci
+
+      - name: Upload boot logs and screenshots
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: boot-logs-${{ github.run_id }}
+          path: |
+            build/**/serial*.log
+            build/iso-test/**
+          if-no-files-found: warn
+          retention-days: 14
