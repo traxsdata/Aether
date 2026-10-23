@@ -610,7 +610,11 @@ struct Task {
     tgid: usize,
     pgid: usize,
     sid: usize,
+    /// Key of the futex word this task waits on: a physical address for a
+    /// `MAP_SHARED` frame (`futex_space == 0`), otherwise the virtual address
+    /// in the address space named by `futex_space`. Zero when not waiting.
     futex_address: u64,
+    futex_space: u64,
     futex_deadline: u64,
     clear_child_tid: u64,
     /// Descriptors of the owning process. The threads of one process share
@@ -738,6 +742,7 @@ impl Task {
             pgid: 0,
             sid: 0,
             futex_address: 0,
+            futex_space: 0,
             futex_deadline: 0,
             clear_child_tid: 0,
             linux_fds: FdSlots(0),
@@ -2836,24 +2841,29 @@ pub fn linux_set_tid_address(pointer: u64) -> i64 {
     current as i64
 }
 
-/// Returns the wait-queue key for a futex word in the current address space.
+/// Returns the wait-queue key `(space, address)` for a futex word in the
+/// current address space, following Linux's `get_futex_key`.
 ///
-/// Waiters are keyed by the word's physical address, not its virtual one. A
-/// virtual key would let one application wake or requeue another
-/// application's waiters that happen to use the same address. Threads share
-/// a page table and so a key; `MAP_SHARED` memory is the same frame in every
-/// process that maps it, so shared futexes still meet across `fork`.
-/// Private memory shared copy-on-write after `fork` is made private here, as
-/// on Linux, where a private futex never meets one in another process.
-fn futex_key(address: u64) -> Option<u64> {
+/// A word in a `MAP_SHARED` frame is keyed by its physical address (space
+/// zero): that frame is the same in every process that maps it, so shared
+/// futexes meet across `fork`. Any other word is private to the process and
+/// is keyed by its virtual address in this address space; threads share the
+/// page table, and so the key. A physical key is not stable for private
+/// memory: `fork` makes the page copy-on-write and the next write moves it
+/// to a new frame, which stranded waiters that blocked before the fork
+/// (issue #146). The private key also keeps one application from reaching
+/// another's waiters.
+fn futex_key(address: u64) -> Option<(u64, u64)> {
     let tasks = unsafe { &*TASKS.0.get() };
-    let pml4 = PhysFrame::from_address(tasks[CURRENT.load(Ordering::Relaxed)].pml4)?;
-    // A copy-on-write page changes frame on its first write, which would
-    // strand waiters keyed by the old one, so it gets its own frame first.
-    if !paging::settle_cow_page(pml4, address) {
-        return None;
-    }
-    paging::user_physical_address(pml4, address)
+    let space = tasks[CURRENT.load(Ordering::Relaxed)].pml4;
+    let pml4 = PhysFrame::from_address(space)?;
+    let shared = paging::user_physical_address(pml4, address).filter(|physical| {
+        PhysFrame::from_address(physical & !0xfff).is_some_and(crate::memory::shared::is_registered)
+    });
+    Some(match shared {
+        Some(physical) => (0, physical),
+        None => (space, address),
+    })
 }
 
 /// Blocks the current Linux task on a futex word.
@@ -2862,13 +2872,14 @@ pub fn linux_futex_wait(
     address: u64,
     timeout_ticks: Option<u64>,
 ) -> *mut InterruptFrame {
-    let Some(key) = futex_key(address) else {
+    let Some((space, key)) = futex_key(address) else {
         // SAFETY: `frame` is the live Linux syscall frame on this task's stack.
         unsafe { (*frame).rax = LINUX_EFAULT as u64 };
         return frame;
     };
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
+    tasks[current].futex_space = space;
     tasks[current].futex_address = key;
     tasks[current].futex_deadline = timeout_ticks
         .and_then(|ticks| TICKS.load(Ordering::Relaxed).checked_add(ticks))
@@ -2886,7 +2897,7 @@ pub fn linux_futex_wait(
 
 /// Wakes up to `count` tasks blocked on `address`.
 pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
-    let Some(address) = futex_key(address) else {
+    let Some((space, address)) = futex_key(address) else {
         return 0;
     };
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -2895,7 +2906,10 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
         if woken >= count {
             break;
         }
-        if task.state == TaskState::Blocked && task.futex_address == address {
+        if task.state == TaskState::Blocked
+            && task.futex_address == address
+            && task.futex_space == space
+        {
             task.state = TaskState::Ready;
             task.futex_address = 0;
             task.futex_deadline = 0;
@@ -2912,7 +2926,9 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
 /// word to `target`, so a later `FUTEX_WAKE(target)` reaches it. This mirrors
 /// the POSIX condition-variable hand-off glibc performs on broadcast.
 pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -> i64 {
-    let (Some(address), Some(target)) = (futex_key(address), futex_key(target)) else {
+    let (Some((space, address)), Some((target_space, target))) =
+        (futex_key(address), futex_key(target))
+    else {
         return LINUX_EFAULT;
     };
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -2922,7 +2938,10 @@ pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -
         if woken >= wake && moved >= requeue {
             break;
         }
-        if task.state != TaskState::Blocked || task.futex_address != address {
+        if task.state != TaskState::Blocked
+            || task.futex_address != address
+            || task.futex_space != space
+        {
             continue;
         }
         if woken < wake {
@@ -2931,6 +2950,7 @@ pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -
             task.futex_deadline = 0;
             woken += 1;
         } else {
+            task.futex_space = target_space;
             task.futex_address = target;
             task.futex_deadline = 0;
             moved += 1;

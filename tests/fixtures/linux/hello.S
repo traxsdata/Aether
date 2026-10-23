@@ -1825,6 +1825,135 @@ child_thread:
     jmp child_thread
 
 after_thread:
+    /* Futex wait across fork (issue #146): a thread parks on a private
+     * futex word, the process forks, and the parent's next write moves the
+     * page to a new frame (copy-on-write). The parent's FUTEX_WAKE_PRIVATE
+     * must still find the waiter, as glibc condition variables rely on. */
+    push %r12
+    push %r13
+    push %r14
+    mov $9, %rax
+    xor %rdi, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10             /* MAP_PRIVATE|MAP_ANONYMOUS */
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_futex_fork
+    mov %rax, %r12
+    movl $0, (%r12)             /* futex word */
+    movl $0, 8(%r12)            /* child tid */
+    movl $0, 16(%r12)           /* waiter woke */
+    mov $56, %rax               /* clone */
+    mov $0x1290100, %rdi        /* VM|THREAD|SETTLS|CLEARTID|CHILD_SETTID */
+    lea 0xf00(%r12), %rsi
+    xor %rdx, %rdx
+    lea 8(%r12), %r10
+    lea 0x200(%r12), %r8
+    syscall
+    test %rax, %rax
+    js fail_futex_fork
+    jz futex_fork_waiter
+    mov $20, %rdi               /* let the waiter park in FUTEX_WAIT */
+    call pause_ms
+    mov $293, %rax              /* pipe2: holds the forked child alive */
+    lea 24(%r12), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jnz fail_futex_fork
+    mov $57, %rax               /* fork */
+    syscall
+    test %rax, %rax
+    js fail_futex_fork
+    jz futex_fork_child
+    mov %rax, %r13
+    movl $1, (%r12)             /* first write after fork copies the page */
+    mov $202, %rax
+    mov %r12, %rdi
+    mov $129, %rsi              /* FUTEX_WAKE_PRIVATE */
+    mov $1, %rdx
+    syscall
+    mov %rax, %r14              /* waiters woken; must be 1 */
+    mov $1, %rax                /* release the child */
+    movslq 28(%r12), %rdi
+    mov %r12, %rsi
+    mov $1, %rdx
+    syscall
+    mov $61, %rax               /* wait4(child) */
+    mov %r13, %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp %r13, %rax
+    jne fail_futex_fork
+    cmp $1, %r14
+    jne fail_futex_fork
+futex_fork_join:
+    mov 8(%r12), %edx
+    test %edx, %edx
+    jz futex_fork_joined
+    mov $202, %rax              /* futex wait on child_tid */
+    lea 8(%r12), %rdi
+    xor %rsi, %rsi
+    syscall
+    jmp futex_fork_join
+futex_fork_joined:
+    cmpl $1, 16(%r12)
+    jne fail_futex_fork
+    mov $3, %rax
+    movslq 24(%r12), %rdi
+    syscall
+    mov $3, %rax
+    movslq 28(%r12), %rdi
+    syscall
+    mov $11, %rax
+    mov %r12, %rdi
+    mov $4096, %rsi
+    syscall
+    pop %r14
+    pop %r13
+    pop %r12
+    mov $1, %rax
+    mov $1, %rdi
+    lea futex_fork_message(%rip), %rsi
+    mov $futex_fork_message_len, %rdx
+    syscall
+    jmp futex_fork_done
+
+futex_fork_waiter:
+    cmpl $0, (%r12)
+    jne 1f
+    mov $202, %rax
+    mov %r12, %rdi
+    mov $128, %rsi              /* FUTEX_WAIT_PRIVATE */
+    xor %rdx, %rdx
+    syscall
+    jmp futex_fork_waiter
+1:
+    movl $1, 16(%r12)
+    mov $60, %rax               /* thread exit */
+    xor %rdi, %rdi
+    syscall
+    jmp futex_fork_waiter
+
+futex_fork_child:
+    /* Read-only use of the page: block until the parent has woken. */
+    sub $8, %rsp
+    xor %rax, %rax
+    movslq 24(%r12), %rdi
+    mov %rsp, %rsi
+    mov $1, %rdx
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+    jmp futex_fork_child
+
+futex_fork_done:
     /* A 30 ms relative FUTEX_WAIT timeout rounds up to three 100 Hz ticks. */
     mov $9, %rax
     xor %rdi, %rdi
@@ -1848,6 +1977,19 @@ after_thread:
     mov %rsp, %r10
     syscall
     add $16, %rsp
+    cmp $-110, %rax
+    jne fail_thread
+    /* FUTEX_WAIT_BITSET takes an absolute deadline on CLOCK_MONOTONIC, or on
+     * CLOCK_REALTIME with FUTEX_CLOCK_REALTIME, as pthread_cond_timedwait
+     * passes it (issue #146). A deadline 30 ms ahead must expire on both. */
+    mov $1, %rdi                /* CLOCK_MONOTONIC */
+    mov $0x89, %rsi             /* WAIT_BITSET|PRIVATE */
+    call futex_abs_wait
+    cmp $-110, %rax
+    jne fail_thread
+    xor %rdi, %rdi              /* CLOCK_REALTIME */
+    mov $0x189, %rsi            /* WAIT_BITSET|PRIVATE|CLOCK_REALTIME */
+    call futex_abs_wait
     cmp $-110, %rax
     jne fail_thread
     mov $11, %rax
@@ -4944,6 +5086,10 @@ fail_thread:
     lea thread_failure(%rip), %rsi
     mov $thread_failure_len, %rdx
     jmp report_failure
+fail_futex_fork:
+    lea futex_fork_failure(%rip), %rsi
+    mov $futex_fork_failure_len, %rdx
+    jmp report_failure
 fail_guard:
     lea guard_failure(%rip), %rsi
     mov $guard_failure_len, %rdx
@@ -5619,8 +5765,14 @@ thread_failure:
     .ascii "AETHER_LINUX_THREAD_FAIL\n"
     .set thread_failure_len, . - thread_failure
 futex_timeout_message:
-    .ascii "AETHER_LINUX_FUTEX_TIMEOUT_OK etimedout=ok\n"
+    .ascii "AETHER_LINUX_FUTEX_TIMEOUT_OK etimedout=ok abs_monotonic=ok abs_realtime=ok\n"
     .set futex_timeout_message_len, . - futex_timeout_message
+futex_fork_message:
+    .ascii "AETHER_LINUX_FUTEX_FORK_OK wake=ok join=ok\n"
+    .set futex_fork_message_len, . - futex_fork_message
+futex_fork_failure:
+    .ascii "AETHER_LINUX_FUTEX_FORK_FAIL\n"
+    .set futex_fork_failure_len, . - futex_fork_failure
 nanosleep_message:
     .ascii "AETHER_LINUX_NANOSLEEP_OK relative=ok absolute=ok eintr=ok\n"
     .set nanosleep_message_len, . - nanosleep_message
@@ -6001,6 +6153,35 @@ ready_signal:                   /* child: returns 1 once the byte is sent */
     lea 0x548(%r12), %rsi
     mov $1, %rdx
     syscall
+    ret
+
+futex_abs_wait:                 /* FUTEX op %rsi on (%r12)==0 until clock %rdi + 30 ms */
+    push %rsi
+    sub $16, %rsp
+    mov %rsp, %rsi
+    mov $228, %rax              /* clock_gettime */
+    syscall
+    test %rax, %rax
+    jnz 2f
+    mov 8(%rsp), %rax
+    add $30000000, %rax
+    cmp $1000000000, %rax
+    jb 1f
+    sub $1000000000, %rax
+    incq 0(%rsp)
+1:
+    mov %rax, 8(%rsp)
+    mov $202, %rax
+    mov %r12, %rdi
+    mov 16(%rsp), %rsi
+    xor %rdx, %rdx
+    mov %rsp, %r10
+    xor %r8, %r8
+    mov $0xffffffff, %r9d       /* FUTEX_BITSET_MATCH_ANY */
+    syscall
+2:
+    add $16, %rsp
+    pop %rsi
     ret
 
 pause_ms:                       /* nanosleep for %rdi (< 1000) milliseconds */

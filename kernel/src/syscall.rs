@@ -2772,7 +2772,8 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
     let realtime = operation & 0x100 != 0;
     match command {
         0 | 9 => {
-            // FUTEX_WAIT / FUTEX_WAIT_BITSET. Linux rejects a mismatched word
+            // FUTEX_WAIT / FUTEX_WAIT_BITSET. A FUTEX_WAIT timeout is
+            // relative whatever the clock flag. Linux rejects a mismatched word
             // with EAGAIN; bitsets are ignored because every wake here wakes
             // any waiter of the address.
             if !address_valid(pml4, uaddr) {
@@ -2790,19 +2791,30 @@ fn linux_futex(frame: *mut InterruptFrame, pml4: PhysFrame) -> *mut InterruptFra
                 let Some((seconds, nanoseconds)) = read_timespec(pml4, arg4) else {
                     return linux_result(frame, LINUX_EINVAL);
                 };
-                // CLOCK_REALTIME is served by the same single monotonic clock,
-                // a bounded simplification documented for this prototype.
-                let _ = realtime;
                 let Some(ticks) = timespec_ticks(seconds, nanoseconds) else {
                     return linux_result(frame, LINUX_EINVAL);
                 };
                 if command == 9 {
-                    // WAIT_BITSET takes an absolute monotonic deadline; the
-                    // shared futex bookkeeping stores a remaining duration.
-                    if scheduler::ticks() >= ticks {
+                    // WAIT_BITSET takes an absolute deadline: on
+                    // CLOCK_MONOTONIC (the tick count), or on CLOCK_REALTIME
+                    // with FUTEX_CLOCK_REALTIME, which glibc uses for
+                    // pthread_cond_timedwait. A realtime deadline is moved to
+                    // the tick clock; read as monotonic it lay decades ahead
+                    // and the wait never timed out (issue #146). The shared
+                    // futex bookkeeping stores a remaining duration.
+                    let deadline = if realtime {
+                        let Some(offset) = realtime_offset_ticks() else {
+                            return linux_result(frame, LINUX_EINVAL);
+                        };
+                        ticks.saturating_sub(offset)
+                    } else {
+                        ticks
+                    };
+                    let now = scheduler::ticks();
+                    if now >= deadline {
                         return linux_result(frame, LINUX_ETIMEDOUT);
                     }
-                    relative = Some(ticks - scheduler::ticks());
+                    relative = Some(deadline - now);
                 } else if ticks == 0 {
                     // Linux reports ETIMEDOUT immediately for a relative
                     // zero-length wait.
