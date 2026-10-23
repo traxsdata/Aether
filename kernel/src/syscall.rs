@@ -41,7 +41,10 @@ pub fn ipc_receives() -> usize {
     IPC_RECEIVES.load(Ordering::Acquire)
 }
 
-/// Returns the number of IPC syscall attempts that were denied.
+/// Returns the number of IPC calls that a rights, capability, or endpoint
+/// check rejected. Flow control — a full or empty queue reported to the
+/// caller as `EAGAIN` — is a retry, not a denial, and never increments the
+/// counter.
 #[must_use]
 pub fn ipc_denials() -> usize {
     IPC_DENIED.load(Ordering::Acquire)
@@ -66,7 +69,14 @@ pub fn ipc_closes() -> usize {
 }
 
 fn ipc_denied(error: IpcError) -> i64 {
-    IPC_DENIED.fetch_add(1, Ordering::Release);
+    // A full or empty queue answers `EAGAIN` and is flow control, not a
+    // denial: the launch service polls its request endpoint continuously,
+    // and counting each poll as a denial made the security card's number
+    // climb while the desktop was idle. Every other result was rejected by
+    // a kernel policy check and counts.
+    if !matches!(error, IpcError::Full | IpcError::Empty) {
+        IPC_DENIED.fetch_add(1, Ordering::Release);
+    }
     match error {
         IpcError::Full | IpcError::Empty => errno::EAGAIN,
         IpcError::MessageTooLong => errno::EINVAL,
