@@ -7,11 +7,9 @@ enables); TCG keeps `-cpu max`. Requesting `kvm` without a usable
 /dev/kvm is a hard error instead of a silent fallback, because tests
 then report timings no one can attribute.
 
-The default is TCG. KVM is deliberately not the default yet: delivery of
-a signal to a non-current task runs the handler with borrowed register
-state and the linux cross-process SIGUSR1 test faults in ~40% of KVM
-boots (issue #83, clean under TCG). Revert the default to KVM once that
-kernel bug is fixed.
+When AETHER_QEMU_ACCEL is unset the harnesses use KVM if /dev/kvm is
+usable by this user and fall back to TCG otherwise. `tcg` pins software
+emulation (useful to compare against historical TCG timings).
 """
 
 from __future__ import annotations
@@ -36,9 +34,9 @@ def choose_accelerator() -> tuple[str, str]:
         if not kvm_available():
             sys.exit(f"error: AETHER_QEMU_ACCEL=kvm but {KVM_DEVICE} is not usable by this user")
         return "kvm", "host"
-    # Unset or "tcg": software emulation. Deliberately the default until
-    # the kernel signal-delivery bug in #83 is fixed, where KVM boots fail
-    # the linux cross-process SIGUSR1 test (see module docstring).
+    if forced == "" and kvm_available():
+        return "kvm", "host"
+    # "tcg", or unset without a usable /dev/kvm: software emulation.
     return "tcg", "max"
 
 

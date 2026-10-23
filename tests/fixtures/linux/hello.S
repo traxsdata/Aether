@@ -771,6 +771,15 @@ _start:
     syscall
 
     /* Cross-process SIGUSR1: child installs a handler and waits; parent sends. */
+    /* The child inherits the parent's SIGUSR1 handler and registers, so a
+     * signal that lands before the child has set its own r12 would run the
+     * handler against the parent's unmapped flag page. Block SIGUSR1 across
+     * fork; the child unblocks it only once its handler state is ready, so
+     * an early signal stays pending instead of racing the child (#83). */
+    mov $0, %rdi                /* SIG_BLOCK */
+    call sigusr1_mask
+    test %rax, %rax
+    jne fail_signal
     push %r14
     push %r15
     mov $57, %rax               /* fork */
@@ -779,7 +788,13 @@ _start:
     js fail_signal
     jz cross_signal_child
     mov %rax, %r14              /* child PID */
-    /* Give the child a scheduling interval to install its handler. */
+    mov $1, %rdi                /* SIG_UNBLOCK in the parent */
+    call sigusr1_mask
+    test %rax, %rax
+    jne fail_signal
+    /* Usually let the child reach its wait loop first, so the signal
+     * exercises delivery to a running non-current task. Correctness does
+     * not depend on this delay. */
     mov $10000000, %r15d
 cross_signal_delay:
     dec %r15d
@@ -831,6 +846,10 @@ cross_signal_child:
     test %rax, %rax
     jne fail_signal
     add $64, %rsp
+    mov $1, %rdi                /* SIG_UNBLOCK: a pending SIGUSR1 runs now */
+    call sigusr1_mask
+    test %rax, %rax
+    jne fail_signal
 cross_signal_wait:
     cmpl $1, (%r12)
     jne cross_signal_wait
@@ -5899,6 +5918,17 @@ signal_restorer:
     mov $15, %rax
     syscall
     jmp signal_restorer
+
+sigusr1_mask:
+    /* rt_sigprocmask(rdi = how, {SIGUSR1}, NULL, 8); returns rax. */
+    push $0x200                 /* sigset_t: SIGUSR1 is bit 9 */
+    mov $14, %rax
+    mov %rsp, %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    add $8, %rsp
+    ret
 
 siginfo_handler:
     /* rdi=signo, rsi=&siginfo, rdx=&ucontext */
