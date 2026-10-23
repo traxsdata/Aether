@@ -29,18 +29,22 @@ pub const MAX_FILE_BLOCKS: usize = 8;
 /// Maximum file size.
 pub const MAX_FILE_BYTES: usize = MAX_FILE_BLOCKS * BLOCK_SIZE;
 /// Maximum bytes in one path.
-pub const MAX_PATH: usize = 128;
-/// Maximum file or directory name.
-pub const MAX_NAME: usize = 16;
-/// Directory entry size.
-pub const ENTRY_BYTES: usize = 20;
-/// Entries in one directory block.
-pub const MAX_ENTRIES: usize = BLOCK_SIZE / ENTRY_BYTES;
+pub const MAX_PATH: usize = 512;
+/// Maximum file or directory name bytes (bytes, not characters).
+pub const MAX_NAME: usize = 255;
+/// Directory entry header: name-length byte, inode, and kind, before the name.
+pub const ENTRY_HEADER_BYTES: usize = 4;
+/// Smallest possible directory entry: header plus a one-byte name.
+pub const MIN_ENTRY_BYTES: usize = ENTRY_HEADER_BYTES + 1;
+/// Entries in one directory block (all at their minimum size).
+pub const MAX_ENTRIES: usize = BLOCK_SIZE / MIN_ENTRY_BYTES;
 /// Open file slots.
 pub const MAX_OPEN: usize = 16;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"AFS1");
-const VERSION: u16 = 2;
+// Directory entries changed from fixed-width to variable-width records, so
+// version 2 volumes would be misparsed and are rejected as NotFormatted.
+const VERSION: u16 = 3;
 const ROOT_INODE: u16 = 1;
 const INODE_TABLE_BLOCK: u16 = 1;
 const INODE_BYTES: usize = 32;
@@ -277,8 +281,11 @@ impl Inode {
                 }
             }
             MODE_DIR => {
+                // `size` is the total bytes of variable-width entry records,
+                // so any value from one minimum entry up to one block is
+                // plausible; the entry walk rejects malformed layouts.
                 if self.size as usize > BLOCK_SIZE
-                    || !(self.size as usize).is_multiple_of(ENTRY_BYTES)
+                    || (self.size != 0 && self.size < MIN_ENTRY_BYTES as u16)
                 {
                     return Err(FsError::Corrupt);
                 }
@@ -358,17 +365,73 @@ pub struct OpenId {
     pub generation: u32,
 }
 
-/// Result of a directory listing entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DirEntry {
-    /// Entry name, NUL padded.
-    pub name: [u8; MAX_NAME],
-    /// Name length.
-    pub name_len: u8,
+/// A directory listing entry, viewed inside one parsed directory block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirEntry<'a> {
+    /// Entry name (validated UTF-8; no NUL, control characters, or slash).
+    pub name: &'a [u8],
     /// Inode number.
     pub inode: u16,
     /// Directory or file.
     pub is_dir: bool,
+}
+
+/// Directory entries parsed from one 512-byte block.
+///
+/// Entries are variable-width `[name_len][inode][kind][name]` records that
+/// borrow these bytes: listing a full directory copies one 512-byte block
+/// instead of a table of 255-byte names, which would cost ~27 KiB of stack.
+struct DirList {
+    raw: [u8; BLOCK_SIZE],
+    /// Total bytes occupied by entry records.
+    size: usize,
+    /// Number of validated entries.
+    count: usize,
+}
+
+impl DirList {
+    /// Entry `index`, present while `index < count`.
+    fn entry(&self, index: usize) -> Option<DirEntry<'_>> {
+        if index >= self.count {
+            return None;
+        }
+        let start = entry_start(&self.raw, self.size, index)?;
+        let name_len = usize::from(self.raw[start]);
+        let name = &self.raw[start + ENTRY_HEADER_BYTES..start + ENTRY_HEADER_BYTES + name_len];
+        Some(DirEntry {
+            name,
+            inode: u16::from_le_bytes([self.raw[start + 1], self.raw[start + 2]]),
+            is_dir: self.raw[start + 3] == 2,
+        })
+    }
+
+    /// Iterates the entries in directory order.
+    fn iter(&self) -> impl Iterator<Item = DirEntry<'_>> {
+        (0..self.count).filter_map(move |index| self.entry(index))
+    }
+}
+
+/// Offset of entry `index` inside a validated variable-width entry area.
+fn entry_start(raw: &[u8], size: usize, index: usize) -> Option<usize> {
+    let mut offset = 0usize;
+    for _ in 0..index {
+        let name_len = usize::from(raw[offset]);
+        if name_len == 0 || offset + ENTRY_HEADER_BYTES + name_len > size {
+            return None;
+        }
+        offset += ENTRY_HEADER_BYTES + name_len;
+    }
+    Some(offset)
+}
+
+/// Name bytes of entry `index` inside a validated variable-width area.
+fn entry_name(raw: &[u8], size: usize, index: usize) -> Option<&[u8]> {
+    let start = entry_start(raw, size, index)?;
+    let name_len = usize::from(raw[start]);
+    if name_len == 0 || start + ENTRY_HEADER_BYTES + name_len > size {
+        return None;
+    }
+    Some(&raw[start + ENTRY_HEADER_BYTES..start + ENTRY_HEADER_BYTES + name_len])
 }
 
 /// A bounded filesystem over a block device.
@@ -544,7 +607,8 @@ impl<D: BlockDevice> AetherFs<D> {
             return Err(FsError::NotDirectory);
         }
         let mut written = 0usize;
-        for entry in self.dir_entries(inode)?.into_iter().flatten() {
+        let entries = self.dir_entries(inode)?;
+        for entry in entries.iter() {
             let name = entry_text(&entry);
             let kind = if entry.is_dir { "d" } else { "f" };
             let size = if entry.is_dir {
@@ -1168,81 +1232,77 @@ impl<D: BlockDevice> AetherFs<D> {
         Ok(())
     }
 
-    fn dir_entries(&mut self, inode: Inode) -> Result<[Option<DirEntry>; MAX_ENTRIES], FsError> {
-        let mut entries: [Option<DirEntry>; MAX_ENTRIES] = [None; MAX_ENTRIES];
+    fn dir_entries(&mut self, inode: Inode) -> Result<DirList, FsError> {
+        let mut raw = [0u8; BLOCK_SIZE];
         if !inode.is_dir() {
             return Err(FsError::NotDirectory);
         }
-        if inode.blocks[0] != 0 {
-            let mut data = [0u8; BLOCK_SIZE];
-            self.device.read_block(inode.blocks[0], &mut data)?;
-            let count = usize::from(inode.size) / ENTRY_BYTES;
-            if count > MAX_ENTRIES {
+        if inode.blocks[0] == 0 {
+            return Ok(DirList {
+                raw,
+                size: 0,
+                count: 0,
+            });
+        }
+        let size = usize::from(inode.size);
+        if size > BLOCK_SIZE {
+            return Err(FsError::Corrupt);
+        }
+        self.device.read_block(inode.blocks[0], &mut raw)?;
+        let mut count = 0usize;
+        let mut offset = 0usize;
+        while offset < size {
+            let name_len = usize::from(raw[offset]);
+            let length = ENTRY_HEADER_BYTES + name_len;
+            if name_len == 0 || offset + length > size {
                 return Err(FsError::Corrupt);
             }
-            for (index, entry) in entries.iter_mut().enumerate() {
-                if index >= count {
-                    break;
-                }
-                let start = index * ENTRY_BYTES;
-                let mut name = [0u8; MAX_NAME];
-                name.copy_from_slice(&data[start..start + MAX_NAME]);
-                let name_len = name.iter().position(|byte| *byte == 0).unwrap_or(MAX_NAME);
-                let inode_number = u16::from_le_bytes([data[start + 16], data[start + 17]]);
-                let kind = data[start + 18];
-                let stored_name = &name[..name_len];
-                // Directory entries are untrusted on-disk bytes. Empty,
-                // control-bearing, slash-bearing, traversal, or non-UTF-8
-                // names would break the `name<TAB>kind<TAB>size` listing
-                // protocol and could forge a path. A zero/out-of-range inode
-                // would name metadata that does not exist.
-                if name_len == 0
-                    || stored_name.iter().any(|byte| byte.is_ascii_control())
-                    || stored_name.contains(&b'/')
-                    || stored_name == b"."
-                    || stored_name == b".."
-                    || core::str::from_utf8(stored_name).is_err()
-                    || inode_number == 0
-                    || usize::from(inode_number) >= MAX_INODES
-                    || !matches!(kind, 1 | 2)
-                {
-                    return Err(FsError::Corrupt);
-                }
-                // The entry kind and the referenced inode must agree. A free
-                // inode or a kind mismatch would let a file operation treat a
-                // directory as a file (or the reverse) and free the wrong
-                // blocks.
-                let referenced = self.read_inode(inode_number)?;
-                if (kind == 2) != referenced.is_dir() {
-                    return Err(FsError::Corrupt);
-                }
-                *entry = Some(DirEntry {
-                    name,
-                    name_len: name_len as u8,
-                    inode: inode_number,
-                    is_dir: kind == 2,
-                });
+            let stored_name = &raw[offset + ENTRY_HEADER_BYTES..offset + length];
+            let inode_number = u16::from_le_bytes([raw[offset + 1], raw[offset + 2]]);
+            let kind = raw[offset + 3];
+            // Directory entries are untrusted on-disk bytes. Empty,
+            // control-bearing, slash-bearing, traversal, or non-UTF-8
+            // names would break the `name<TAB>kind<TAB>size` listing
+            // protocol and could forge a path. A zero/out-of-range inode
+            // would name metadata that does not exist.
+            if stored_name.iter().any(|byte| byte.is_ascii_control())
+                || stored_name.contains(&b'/')
+                || stored_name == b"."
+                || stored_name == b".."
+                || core::str::from_utf8(stored_name).is_err()
+                || inode_number == 0
+                || usize::from(inode_number) >= MAX_INODES
+                || !matches!(kind, 1 | 2)
+            {
+                return Err(FsError::Corrupt);
             }
-            for index in 1..count {
-                let Some(current) = entries[index] else {
-                    continue;
-                };
-                if entries[..index].iter().flatten().any(|existing| {
-                    existing.name_len == current.name_len
-                        && existing.name[..usize::from(existing.name_len)]
-                            == current.name[..usize::from(current.name_len)]
-                }) {
+            // The entry kind and the referenced inode must agree. A free
+            // inode or a kind mismatch would let a file operation treat a
+            // directory as a file (or the reverse) and free the wrong
+            // blocks.
+            let referenced = self.read_inode(inode_number)?;
+            if (kind == 2) != referenced.is_dir() {
+                return Err(FsError::Corrupt);
+            }
+            offset += length;
+            count += 1;
+        }
+        for index in 1..count {
+            let current = entry_name(&raw, size, index).ok_or(FsError::Corrupt)?;
+            for existing in 0..index {
+                if current == entry_name(&raw, size, existing).ok_or(FsError::Corrupt)? {
                     return Err(FsError::Corrupt);
                 }
             }
         }
-        Ok(entries)
+        Ok(DirList { raw, size, count })
     }
 
     fn dir_find(&mut self, directory: u16, name: &[u8]) -> Result<Option<(u16, bool)>, FsError> {
         let inode = self.read_inode(directory)?;
-        for entry in self.dir_entries(inode)?.into_iter().flatten() {
-            if &entry.name[..usize::from(entry.name_len)] == name {
+        let entries = self.dir_entries(inode)?;
+        for entry in entries.iter() {
+            if entry.name == name {
                 return Ok(Some((entry.inode, entry.is_dir)));
             }
         }
@@ -1263,7 +1323,8 @@ impl<D: BlockDevice> AetherFs<D> {
         if !inode.is_dir() {
             return Err(FsError::NotDirectory);
         }
-        if usize::from(inode.size) + ENTRY_BYTES > BLOCK_SIZE {
+        let entry_len = ENTRY_HEADER_BYTES + name.len();
+        if usize::from(inode.size) + entry_len > BLOCK_SIZE {
             return Err(FsError::NoSpace);
         }
         let block = if inode.blocks[0] == 0 {
@@ -1276,43 +1337,57 @@ impl<D: BlockDevice> AetherFs<D> {
         let mut data = [0u8; BLOCK_SIZE];
         self.device.read_block(block, &mut data)?;
         let start = usize::from(inode.size);
-        data[start..start + MAX_NAME].fill(0);
-        data[start..start + name.len()].copy_from_slice(name);
-        data[start + 16..start + 18].copy_from_slice(&inode_number.to_le_bytes());
-        data[start + 18] = if is_dir { 2 } else { 1 };
+        // `name.len()` is bounded by MAX_NAME = 255, which fits one byte.
+        data[start] = name.len() as u8;
+        data[start + 1..start + 3].copy_from_slice(&inode_number.to_le_bytes());
+        data[start + 3] = if is_dir { 2 } else { 1 };
+        data[start + ENTRY_HEADER_BYTES..start + entry_len].copy_from_slice(name);
         self.device.write_block(block, &data)?;
-        inode.size += ENTRY_BYTES as u16;
+        inode.size += entry_len as u16;
         self.write_inode(directory, inode)
     }
 
     fn dir_remove(&mut self, directory: u16, name: &[u8]) -> Result<(), FsError> {
         let mut inode = self.read_inode(directory)?;
-        if inode.blocks[0] == 0 {
+        if inode.blocks[0] == 0 || inode.size == 0 {
             return Err(FsError::NotFound);
         }
+        let size = usize::from(inode.size).min(BLOCK_SIZE);
         let mut data = [0u8; BLOCK_SIZE];
         self.device.read_block(inode.blocks[0], &mut data)?;
-        let count = usize::from(inode.size) / ENTRY_BYTES;
-        for index in 0..count {
-            let start = index * ENTRY_BYTES;
-            let length = data[start..start + MAX_NAME]
-                .iter()
-                .position(|byte| *byte == 0)
-                .unwrap_or(MAX_NAME);
-            if &data[start..start + length] == name {
-                let last = (count - 1) * ENTRY_BYTES;
-                data.copy_within(last..last + ENTRY_BYTES, start);
-                inode.size -= ENTRY_BYTES as u16;
-                self.device.write_block(inode.blocks[0], &data)?;
-                return self.write_inode(directory, inode);
+        let mut position = 0usize;
+        let mut found: Option<(usize, usize)> = None;
+        while position < size {
+            let name_len = usize::from(data[position]);
+            let length = ENTRY_HEADER_BYTES + name_len;
+            if name_len == 0 || position + length > size {
+                return Err(FsError::Corrupt);
             }
+            if &data[position + ENTRY_HEADER_BYTES..position + length] == name {
+                found = Some((position, length));
+                break;
+            }
+            position += length;
         }
-        Err(FsError::NotFound)
+        let (removed, removed_len) = match found {
+            Some(slot) => slot,
+            None => return Err(FsError::NotFound),
+        };
+        // Variable-width entries mean the gap and the last entry are not
+        // interchangeable: slide the whole tail after the gap down by exactly
+        // its size (preserving the order of the surviving entries), then
+        // clear the vacated bytes at the end. `copy_within` is memmove-safe.
+        let new_size = size - removed_len;
+        data.copy_within(removed + removed_len..size, removed);
+        data[new_size..size].fill(0);
+        inode.size = new_size as u16;
+        self.device.write_block(inode.blocks[0], &data)?;
+        self.write_inode(directory, inode)
     }
 }
 
-fn entry_text(entry: &DirEntry) -> &str {
-    core::str::from_utf8(&entry.name[..usize::from(entry.name_len)]).unwrap_or("?")
+fn entry_text<'a>(entry: &'a DirEntry<'a>) -> &'a str {
+    core::str::from_utf8(entry.name).unwrap_or("?")
 }
 
 fn format_entry(out: &mut [u8], name: &str, kind: &str, size: usize) -> Result<usize, FsError> {
@@ -1370,7 +1445,7 @@ impl FixedPath {
         if component.len() > MAX_NAME {
             return Err(FsError::NameTooLong);
         }
-        // A directory entry is a fixed-width byte field. Embedded NULs would
+        // Directory entries store raw name bytes. Embedded NULs would
         // truncate the displayed name, and tabs/newlines would inject extra
         // records into the service listing protocol. Reject control bytes at
         // the API boundary instead of trusting every caller to sanitize them.

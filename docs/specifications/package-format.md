@@ -45,7 +45,8 @@ of the payload. One signature therefore authenticates both. The verifier rejects
 unknown framing versions, truncated records, and trailing bytes.
 
 Limits: manifest ≤ 4 KiB, payload ≤ 64 KiB, at most 16 files, each ≤ 4 KiB, and
-each file name ≤ 16 bytes (the current filesystem limit).
+each file name ≤ 16 bytes (a limit of this packaging framing, independent of
+the filesystem's 255-byte name limit).
 
 ## Manifest
 

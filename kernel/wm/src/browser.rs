@@ -7,13 +7,16 @@
 use crate::{Key, Point, Rect};
 
 /// Maximum path bytes supported by the prototype filesystem.
-pub const PATH_BYTES: usize = 128;
+pub const PATH_BYTES: usize = 512;
 /// Maximum name bytes in the prototype filesystem.
-pub const NAME_BYTES: usize = 16;
+pub const NAME_BYTES: usize = 255;
 /// Maximum directory entries in the prototype filesystem.
-pub const ENTRIES: usize = 25;
+pub const ENTRIES: usize = 102;
 /// Maximum preview bytes; longer files are explicitly marked as truncated.
 pub const PREVIEW_BYTES: usize = 512;
+/// Worst-case listing for a full directory: one line per entry of
+/// name, kind, size, and separators.
+pub const LISTING_BYTES: usize = ENTRIES * (NAME_BYTES + 16);
 
 /// A resource service error suitable for a user-facing Files message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +27,8 @@ pub enum BrowserError {
     Unavailable,
     /// A path or directory response is malformed or exceeds a bound.
     InvalidData,
+    /// A name exceeds the filesystem name limit.
+    NameTooLong,
 }
 
 impl BrowserError {
@@ -34,6 +39,7 @@ impl BrowserError {
             Self::Access => "ACCESS DENIED: PRIVATE APP DATA",
             Self::Unavailable => "RESOURCE UNAVAILABLE - TRY REFRESH",
             Self::InvalidData => "INVALID OR OVERSIZED DIRECTORY DATA",
+            Self::NameTooLong => "NAME TOO LONG (255 BYTE LIMIT)",
         }
     }
 }
@@ -287,11 +293,15 @@ impl Browser {
             self.error = Some(BrowserError::InvalidData);
             return false;
         }
-        let mut listing = [0; 1024];
-        let result = source.list(path, &mut listing).and_then(|len| {
-            let bytes = listing.get(..len).ok_or(BrowserError::InvalidData)?;
-            parse_entries(bytes)
-        });
+        let mut listing = [0u8; LISTING_BYTES];
+        let mut entries = [Entry::EMPTY; ENTRIES];
+        let result = source
+            .list(path, &mut listing)
+            .and_then(|len| {
+                let bytes = listing.get(..len).ok_or(BrowserError::InvalidData)?;
+                parse_entries(bytes, &mut entries)
+            })
+            .map(|count| (entries, count));
         match result {
             Ok((entries, count)) => {
                 self.path = [0; PATH_BYTES];
@@ -501,6 +511,10 @@ impl Browser {
 
     /// Renames the selected entry within the current folder.
     pub fn rename_selected(&mut self, source: &mut impl BrowserSource, name: &str) -> bool {
+        if name.len() > NAME_BYTES {
+            self.error = Some(BrowserError::NameTooLong);
+            return false;
+        }
         if self.preview_open || !valid_name(name) {
             self.error = Some(BrowserError::InvalidData);
             return false;
@@ -593,12 +607,11 @@ fn valid_path(path: &str) -> bool {
         && (path == "/" || path[1..].split('/').all(valid_name))
 }
 
-fn parse_entries(bytes: &[u8]) -> Result<([Entry; ENTRIES], usize), BrowserError> {
+fn parse_entries(bytes: &[u8], entries: &mut [Entry; ENTRIES]) -> Result<usize, BrowserError> {
     let text = core::str::from_utf8(bytes).map_err(|_| BrowserError::InvalidData)?;
     if !text.is_empty() && !text.ends_with('\n') {
         return Err(BrowserError::InvalidData);
     }
-    let mut entries = [Entry::EMPTY; ENTRIES];
     let mut count = 0;
     for line in text.lines() {
         let mut fields = line.split('\t');
@@ -631,7 +644,7 @@ fn parse_entries(bytes: &[u8]) -> Result<([Entry; ENTRIES], usize), BrowserError
         entries[count] = entry;
         count += 1;
     }
-    Ok((entries, count))
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -814,6 +827,7 @@ mod tests {
 
     #[test]
     fn malformed_responses_and_traversal_are_rejected() {
+        let mut entries = [Entry::EMPTY; ENTRIES];
         for listing in [
             "../bad\tf\t1\n",
             "..\td\t0\n",
@@ -823,11 +837,86 @@ mod tests {
             "a\tf\t1\textra\n",
             "a\tf\t1\na\tf\t2\n",
         ] {
-            assert!(parse_entries(listing.as_bytes()).is_err(), "{listing}");
+            assert!(
+                parse_entries(listing.as_bytes(), &mut entries).is_err(),
+                "{listing}"
+            );
         }
         let mut browser = Browser::new();
         for path in ["relative", "/home/../apps", "/home//empty", "/home\n"] {
             assert!(!browser.navigate(path, &mut Source));
         }
+    }
+
+    #[test]
+    fn listings_hold_more_than_twenty_five_long_names() {
+        struct LongSource {
+            suffix: String,
+        }
+        impl BrowserSource for LongSource {
+            fn list(&mut self, _path: &str, out: &mut [u8]) -> Result<usize, BrowserError> {
+                let mut written = 0usize;
+                for index in 0..30u8 {
+                    let name = format!("report-{index:02}-{}", self.suffix);
+                    out[written..written + name.len()].copy_from_slice(name.as_bytes());
+                    written += name.len();
+                    out[written..written + 5].copy_from_slice(b"\tf\t1\n");
+                    written += 5;
+                }
+                Ok(written)
+            }
+            fn read(&mut self, _path: &str, _out: &mut [u8]) -> Result<usize, BrowserError> {
+                Err(BrowserError::Unavailable)
+            }
+        }
+        let mut source = LongSource {
+            suffix: "n".repeat(12),
+        };
+        let first = format!("report-00-{}", source.suffix);
+        let last_name = format!("report-29-{}", source.suffix);
+        let mut browser = Browser::new();
+        assert!(browser.navigate("/home", &mut source));
+        assert_eq!(browser.entries().len(), 30);
+        assert_eq!(browser.entries()[0].name(), first.as_str());
+        assert_eq!(browser.entries()[29].name(), last_name.as_str());
+    }
+
+    #[test]
+    fn rename_accepts_255_bytes_and_rejects_256_with_name_too_long() {
+        struct RenameSink {
+            last: String,
+        }
+        impl BrowserSource for RenameSink {
+            fn list(&mut self, _path: &str, out: &mut [u8]) -> Result<usize, BrowserError> {
+                let data = b"old-name.txt\tf\t1\n";
+                out[..data.len()].copy_from_slice(data);
+                Ok(data.len())
+            }
+            fn read(&mut self, _path: &str, _out: &mut [u8]) -> Result<usize, BrowserError> {
+                Err(BrowserError::Unavailable)
+            }
+            fn rename(&mut self, _path: &str, new_name: &str) -> Result<(), BrowserError> {
+                self.last = new_name.into();
+                Ok(())
+            }
+        }
+        let mut source = RenameSink {
+            last: String::new(),
+        };
+        let mut browser = Browser::new();
+        assert!(browser.navigate("/home", &mut source));
+        let name_255 = "n".repeat(255);
+        assert!(browser.rename_selected(&mut source, &name_255));
+        assert_eq!(browser.error(), None);
+        assert_eq!(source.last, name_255);
+        assert!(!browser.rename_selected(&mut source, &"n".repeat(256)));
+        assert_eq!(browser.error(), Some(BrowserError::NameTooLong));
+        assert_eq!(
+            BrowserError::NameTooLong.message(),
+            "NAME TOO LONG (255 BYTE LIMIT)"
+        );
+        browser.error = None;
+        assert!(!browser.rename_selected(&mut source, "bad\nname"));
+        assert_eq!(browser.error(), Some(BrowserError::InvalidData));
     }
 }

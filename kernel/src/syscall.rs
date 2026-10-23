@@ -778,7 +778,8 @@ fn user_cstr(pml4: PhysFrame, pointer: u64, maximum: u64) -> Option<UserString> 
     None
 }
 
-const USER_STRING_MAX: usize = 256;
+// One path component (255) plus a directory prefix, rounded up.
+const USER_STRING_MAX: usize = 512;
 
 /// A user string copied into a kernel buffer and checked as UTF-8.
 pub struct UserString {

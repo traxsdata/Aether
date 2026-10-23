@@ -19,9 +19,9 @@
 /// Maximum records retained in the Trash index.
 pub const MAX_TRASH_RECORDS: usize = 16;
 /// Maximum bytes in a Trash component.
-pub const MAX_TRASH_NAME: usize = 16;
+pub const MAX_TRASH_NAME: usize = 255;
 /// Maximum bytes in an original absolute path.
-pub const MAX_TRASH_PATH: usize = 128;
+pub const MAX_TRASH_PATH: usize = 512;
 
 /// One recoverable deletion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,7 +29,7 @@ pub struct TrashRecord {
     name: [u8; MAX_TRASH_NAME],
     name_len: u8,
     original: [u8; MAX_TRASH_PATH],
-    original_len: u8,
+    original_len: u16,
 }
 
 impl TrashRecord {
@@ -54,7 +54,7 @@ impl TrashRecord {
         record.name[..name.len()].copy_from_slice(name.as_bytes());
         record.name_len = name.len() as u8;
         record.original[..original.len()].copy_from_slice(original.as_bytes());
-        record.original_len = original.len() as u8;
+        record.original_len = original.len() as u16;
         Some(record)
     }
 
@@ -273,6 +273,45 @@ fn valid_original(path: &str) -> bool {
         && !path.bytes().any(|byte| byte.is_ascii_control())
 }
 
+/// Derives the Trash name for a file being deleted.
+///
+/// The first attempt keeps the original name. Later attempts add a bounded
+/// `tN-` prefix so a name collision in Trash never overwrites an existing
+/// item. The name is truncated on a UTF-8 character boundary: cutting
+/// through a multi-byte sequence would leave invalid UTF-8 that the path
+/// rules would reject after a collision.
+#[must_use]
+pub fn name_for(name: &str, attempt: u8) -> [u8; MAX_TRASH_NAME] {
+    let mut target = [0u8; MAX_TRASH_NAME];
+    let prefix = match attempt {
+        0 => "",
+        1 => "t1-",
+        2 => "t2-",
+        3 => "t3-",
+        4 => "t4-",
+        5 => "t5-",
+        _ => "t9-",
+    }
+    .as_bytes();
+    let available = target.len() - prefix.len();
+    let mut end = name.len().min(available);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    target[..prefix.len()].copy_from_slice(prefix);
+    target[prefix.len()..prefix.len() + end].copy_from_slice(&name.as_bytes()[..end]);
+    target
+}
+
+/// Byte length of the non-NUL portion of a [`name_for`] result.
+#[must_use]
+pub fn name_len(bytes: &[u8; MAX_TRASH_NAME]) -> usize {
+    bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +424,59 @@ mod tests {
             index.record("overflow", "/home/overflow"),
             Err(TrashError::Full)
         );
+    }
+
+    #[test]
+    fn long_names_and_paths_round_trip() {
+        let mut index = index();
+        let name = "n".repeat(MAX_TRASH_NAME);
+        let original = std::format!("/home/dir/{}", "m".repeat(MAX_TRASH_PATH - 10));
+        assert_eq!(name.len(), MAX_TRASH_NAME);
+        assert_eq!(original.len(), MAX_TRASH_PATH);
+        let recorded = index.record(&name, &original).expect("record");
+        assert_eq!(recorded, 0);
+        assert_eq!(index.original(&name), Some(original.as_str()));
+
+        let mut encoded = [0u8; MAX_TRASH_NAME + 1 + MAX_TRASH_PATH + 1];
+        let length = encode(&index, &mut encoded).expect("encode");
+        let mut parsed = TrashIndex::new();
+        assert_eq!(parse(&encoded[..length], &mut parsed), Ok(1));
+        assert_eq!(parsed, index);
+    }
+
+    #[test]
+    fn name_for_keeps_the_name_and_prefixes_attempts() {
+        assert!(name_for("report.odt", 0).starts_with(b"report.odt"));
+        let t1 = name_for("report.odt", 1);
+        let len1 = name_len(&t1);
+        assert_eq!(&t1[..len1], b"t1-report.odt");
+        let t9 = name_for("report.odt", 9);
+        let len9 = name_len(&t9);
+        assert_eq!(&t9[..len9], b"t9-report.odt");
+    }
+
+    #[test]
+    fn name_for_truncates_only_on_utf8_boundaries() {
+        // 255 bytes: fits exactly, no prefix.
+        let name = "a".repeat(255);
+        let out = name_for(&name, 0);
+        assert_eq!(name_len(&out), 255);
+        assert_eq!(&out[..255], name.as_bytes());
+        // 256 bytes: the last byte must be dropped.
+        let name = "a".repeat(256);
+        let out = name_for(&name, 0);
+        assert_eq!(name_len(&out), 255);
+        // A three-byte character straddling the limit is truncated back to a
+        // boundary; the result stays valid UTF-8.
+        let name = std::format!("\u{20ac}{}", "a".repeat(252));
+        let out = name_for(&name, 0);
+        let cut = name_len(&out);
+        assert!(cut <= 255);
+        assert!(core::str::from_utf8(&out[..cut]).is_ok());
+        // The `t1-` prefix costs three bytes even at the limit.
+        let out = name_for(&"a".repeat(255), 1);
+        let cut = name_len(&out);
+        assert_eq!(cut, 3 + 252);
+        assert_eq!(&out[..3], b"t1-");
     }
 }
