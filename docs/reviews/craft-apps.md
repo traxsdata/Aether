@@ -34,7 +34,28 @@ is verified before use. Raw logs, screenshots, and digests are written to
 | CadCraft | 0.10.0 | pass | pass | `cadcraft-cli`; windowed run presented |
 | FigCraft | 0.9.0 | pass | fail | windowed run creates a display, then winit reports `NoCompositor` |
 
-**Summary:** 13/13 headless passes, 9/13 windowed passes.
+**Summary:** 13/13 headless passes, 9/13 windowed passes, for the 2026-10-22
+run recorded above.
+
+### Status and what the driver checks
+
+A headless pass is `make craft-smoke-test` exiting zero: the app is launched
+through its `PT_INTERP` with `CRAFT_ARGS=--version` and must exit zero under
+the Gate 3 host-glibc runtime. A GUI pass is `make craft-gui-test` exiting
+zero: the windowed binary reaches the kernel-owned `AETHER_GATE4_PRESENT_OK`
+marker and the QEMU screenshot is non-blank. Checks skipped via `--no-headless`
+or `--no-gui` are recorded as `-`, not `fail`.
+
+**2026-10-23 (issue #62):** a later run against commit `9c40e14` failed the
+headless checks for PhotoCraft, VectorCraft, DesignCraft, and EffectCraft —
+consistent with the still-open argument-passing issues (#60: `CRAFT_ARGS`
+never reaches non-GridCraft apps; #61: `craft-smoke-test` can never pass for
+them) — yet the driver exited `0`, because its exit status only counted
+records with an `error` key and ignored `headless=fail` / `gui=fail`. The
+driver now exits non-zero whenever any recorded result is an error or any
+executed check is `fail`, so a failing run can no longer be hidden in CI or
+scripted invocation. The table above therefore reflects the 2026-10-22 run
+only; re-run the suite before treating it as a current capability claim.
 
 ## Defects found and fixed
 

@@ -241,6 +241,21 @@ def test_one(
         shutil.rmtree(work, ignore_errors=True)
 
 
+def results_failed(results: list[dict]) -> bool:
+    """True when any result errored, or any executed check recorded 'fail'.
+
+    A skipped check is absent from its record and therefore not a failure;
+    an executed check that did not pass is recorded as the string "fail".
+    """
+    for record in results:
+        if "error" in record:
+            return True
+        for name in ("headless", "gui"):
+            if record.get(name) in ("fail", False):
+                return True
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("apps", nargs="*", help="subset of app names (default: all)")
@@ -280,7 +295,7 @@ def main() -> int:
             f"headless={record.get('headless', '-')} gui={record.get('gui', '-')}"
         )
         print(f"{record['app']:12} {record['version']:8} {state}")
-    return 0 if all("error" not in record for record in results) else 1
+    return 0 if not results_failed(results) else 1
 
 
 if __name__ == "__main__":
