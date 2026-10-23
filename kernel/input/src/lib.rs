@@ -9,9 +9,11 @@
 
 mod keyboard;
 mod mouse;
+mod supertap;
 
 pub use keyboard::{Keyboard, decode};
 pub use mouse::{MouseDecoder, MousePacket};
+pub use supertap::{SUPER_TAP_MAX_TICKS, SuperTapTracker};
 
 /// A decoded key. Printable keys use the unshifted ASCII value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

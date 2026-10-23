@@ -739,18 +739,9 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
     // Super is the only system modifier: every Super-based chord (and the
     // app-independent F3/F4/F10 / Super-tap) is reserved for the window
     // manager no matter which window holds focus. Everything else — plain
-    // letters with Ctrl or Alt included — passes through to the app.
-    let global_shortcut = wm.is_wm_chord(key, modifiers);
-    let linux_focused = wm
-        .focused_window()
-        .and_then(|window| window.kind.linux_slot())
-        .filter(|_| {
-            !global_shortcut
-                && !wm.overview_open()
-                && !wm.spotlight_open()
-                && wm.menu_state().is_none()
-        });
-    if let Some(slot) = linux_focused {
+    // letters with Ctrl or Alt included — passes through to the app. The
+    // decision itself lives on `Wm::linux_key_slot` so it is testable.
+    if let Some(slot) = wm.linux_key_slot(key, modifiers) {
         crate::display::key(slot, key, modifiers);
         return;
     }
@@ -2868,7 +2859,10 @@ fn paint_welcome(wm: &Wm, content: Rect, focused: bool, palette: aether_wm::Pale
     );
     // Canonical chords, rendered with the keyboard's choice of symbol
     // (Win+… / Cmd+… / Super+…, or Ctrl+Alt+… with the fallback key on).
-    let chords = [
+    // Under the fallback "Super+Alt+Left / Right" cannot be pressed (Alt is
+    // always held, and Ctrl+Alt+arrows move the window), so space cycling
+    // is the Ctrl+Alt+1..4 jump only.
+    const SUPER_CHORDS: [(&str, &str); 12] = [
         ("Super+Alt+Left / Right", "SWITCH SPACES"),
         ("F3", "SPACES OVERVIEW"),
         ("Super+Space", "SEARCH AETHER"),
@@ -2876,19 +2870,49 @@ fn paint_welcome(wm: &Wm, content: Rect, focused: bool, palette: aether_wm::Pale
         ("Super+Tab", "CYCLE WINDOWS"),
         ("Super+W", "CLOSE WINDOW"),
         ("Super+M", "MINIMIZE"),
-        ("Super+Q", "QUIT APP"),
+        ("Super+Q", "QUIT APP (CLOSES WINDOW)"),
         ("Super+1 - 4", "SWITCH SPACE"),
         ("Super+Arrows", "MOVE WINDOW"),
         ("Super+Shift+Arrows", "RESIZE WINDOW"),
         ("Super+,", "OPEN SETTINGS"),
     ];
+    // Same list, minus the unpressable Super+Alt cycle line (and with it
+    // promoted to the only space-cycling chord).
+    const FALLBACK_CHORDS: [(&str, &str); 11] = [
+        ("Super+1 - 4", "SWITCH SPACES"),
+        ("F3", "SPACES OVERVIEW"),
+        ("Super+Space", "SEARCH AETHER"),
+        ("TAP SUPER", "OPEN SEARCH"),
+        ("Super+Tab", "CYCLE WINDOWS"),
+        ("Super+W", "CLOSE WINDOW"),
+        ("Super+M", "MINIMIZE"),
+        ("Super+Q", "QUIT APP (CLOSES WINDOW)"),
+        ("Super+Arrows", "MOVE WINDOW"),
+        ("Super+Shift+Arrows", "RESIZE WINDOW"),
+        ("Super+,", "OPEN SETTINGS"),
+    ];
+    let chords: &[(&str, &str)] = if wm.settings().system_key_fallback {
+        &FALLBACK_CHORDS
+    } else {
+        &SUPER_CHORDS
+    };
     let mut y = content.y + 88;
     for (chord, action) in chords {
         if y + 14 > content.bottom() - 30 {
             break;
         }
         let mut buffer = [0u8; 32];
-        let length = wm.settings().render_shortcut(chord, &mut buffer);
+        let length = if *chord == "TAP SUPER" {
+            // Render as "TAP <symbol>" (TAP WIN / TAP CMD / TAP SUPER) with
+            // the keyboard's own word for the Super key, not a fixed phrase.
+            let symbol = wm.settings().shortcut_symbol.prefix();
+            let tail = symbol.as_bytes();
+            buffer[..4].copy_from_slice(b"TAP ");
+            buffer[4..4 + tail.len()].copy_from_slice(tail);
+            4 + tail.len()
+        } else {
+            wm.settings().render_shortcut(chord, &mut buffer)
+        };
         let keys = core::str::from_utf8(&buffer[..length.min(buffer.len())]).unwrap_or("");
         let key_width = keys.len() as i32 * 6 + 12;
         graphics::fill_round_rect(content.x + 16, y - 2, key_width, 14, 4, palette.card_hover);

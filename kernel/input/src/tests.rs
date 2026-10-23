@@ -191,3 +191,55 @@ fn arbitrary_byte_streams_do_not_panic() {
         }
     }
 }
+
+#[test]
+fn a_bare_super_release_inside_the_window_is_a_tap() {
+    let mut tap = SuperTapTracker::new();
+    tap.super_down(1000);
+    assert!(tap.super_up(1003));
+    // A break without a press is not a tap.
+    assert!(!tap.super_up(1004));
+}
+
+#[test]
+fn a_super_release_beyond_the_window_is_not_a_tap() {
+    let mut tap = SuperTapTracker::new();
+    tap.super_down(1000);
+    assert!(!tap.super_up(1000 + SUPER_TAP_MAX_TICKS + 1));
+}
+
+#[test]
+fn a_super_release_exactly_at_the_window_boundary_is_still_a_tap() {
+    let mut tap = SuperTapTracker::new();
+    tap.super_down(1000);
+    assert!(tap.super_up(1000 + SUPER_TAP_MAX_TICKS));
+}
+
+#[test]
+fn a_super_letter_chord_is_not_a_tap() {
+    // A letter make while Super is held arrives as a decoded key event.
+    let mut tap = SuperTapTracker::new();
+    tap.super_down(0);
+    tap.other_down();
+    assert!(!tap.super_up(2));
+}
+
+#[test]
+fn a_super_ctrl_chord_is_not_a_tap() {
+    // A Ctrl make emits no decoded event and only sets the held bit, so the
+    // caller reports it explicitly: Super+Ctrl is a chord, not a tap.
+    let mut tap = SuperTapTracker::new();
+    tap.super_down(0);
+    tap.other_down();
+    assert!(!tap.super_up(1));
+}
+
+#[test]
+fn an_interrupted_hold_is_consumed_but_a_fresh_tap_still_works() {
+    let mut tap = SuperTapTracker::new();
+    tap.super_down(0);
+    tap.other_down();
+    assert!(!tap.super_up(40));
+    tap.super_down(50);
+    assert!(tap.super_up(52));
+}

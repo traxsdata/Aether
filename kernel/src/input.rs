@@ -8,7 +8,7 @@
 
 use crate::arch::x86_64::timer::InterruptGuard;
 use crate::serial_line;
-use aether_input::{EventQueue, Keyboard, MouseDecoder};
+use aether_input::{EventQueue, Keyboard, MouseDecoder, SuperTapTracker};
 pub use aether_input::{Key, KeyEvent, Modifiers};
 use core::cell::UnsafeCell;
 
@@ -335,64 +335,49 @@ pub fn init(width: u32, height: u32) {
     }
 }
 
-/// Tracks Super key presses for the Super-tap gesture (Start-menu style):
-/// Super pressed and released alone, quickly, with no key in between.
-#[derive(Clone, Copy, Debug)]
-struct SuperTapTracker {
-    /// Timer ticks at which Super last went down, or 0 when not held.
-    pressed_at: u64,
-    /// Decoded key events while Super was held (a chord means no tap).
-    keys_while_held: u8,
-}
-
-impl SuperTapTracker {
-    /// Initial state: Super is not held and no tap is pending.
-    const fn new() -> Self {
-        Self {
-            pressed_at: 0,
-            keys_while_held: 0,
-        }
-    }
-}
-
-/// A Super-tap must be under 300 ms (timer runs at 100 Hz).
-const SUPER_TAP_MAX_TICKS: u64 = 30;
-
+/// Decodes one scancode, queues any decoded key event, and drives the
+/// Super-tap tracker. A make for any key other than Super while Super is
+/// held (a regular key or a modifier) cancels the tap; a quick, unbroken
+/// Super release emits the synthetic `Key::SuperTap`.
 fn handle_scancode(scancode: u8) {
     // SAFETY: Interrupts are masked or this is IRQ context.
     unsafe {
-        let before_super = (*KEYBOARD.0.get()).modifiers().super_key;
+        let before = (*KEYBOARD.0.get()).modifiers();
         let produced = (*KEYBOARD.0.get()).push(scancode).map(|event| {
             (*QUEUE.0.get()).push(event);
             true
         });
-        let after_super = (*KEYBOARD.0.get()).modifiers().super_key;
+        let after = (*KEYBOARD.0.get()).modifiers();
+        let now = crate::scheduler::ticks();
         let produced_key = matches!(produced, Some(true));
-        if !before_super && after_super {
+        if !before.super_key && after.super_key {
             // Super went down: start the tap window.
-            (*SUPER_TAP.0.get()).pressed_at = crate::scheduler::ticks();
-            (*SUPER_TAP.0.get()).keys_while_held = 0;
-        } else if before_super && !after_super {
+            (*SUPER_TAP.0.get()).super_down(now);
+        } else if before.super_key && !after.super_key {
             // The last Super key went up. A quick release with no key in
             // between is the system tap (search/open), like the Start menu.
-            let tracker = *SUPER_TAP.0.get();
-            let now = crate::scheduler::ticks();
-            let tapped = tracker.pressed_at != 0
-                && tracker.keys_while_held == 0
-                && now.saturating_sub(tracker.pressed_at) <= SUPER_TAP_MAX_TICKS;
-            (*SUPER_TAP.0.get()).pressed_at = 0;
-            (*SUPER_TAP.0.get()).keys_while_held = 0;
-            if tapped {
+            if (*SUPER_TAP.0.get()).super_up(now) {
                 (*QUEUE.0.get()).push(KeyEvent {
                     key: Key::SuperTap,
                     modifiers: Modifiers::default(),
                 });
             }
-        } else if after_super && produced_key {
-            (*SUPER_TAP.0.get()).keys_while_held =
-                (*SUPER_TAP.0.get()).keys_while_held.saturating_add(1);
+        } else if after.super_key && (produced_key || other_modifier_made(before, after)) {
+            // A key other than Super went down while Super is held: a
+            // regular key (decoded event) or a Ctrl/Alt/Shift make, which
+            // produces no event. Either way, Super+key is a chord, not a
+            // tap.
+            (*SUPER_TAP.0.get()).other_down();
         }
     }
+}
+
+/// Returns `true` when a non-Super modifier was made between two samples.
+/// Modifier makes never produce a decoded key event, so the tracker, which
+/// only sees events, needs them reported explicitly (a Super+Ctrl hold is a
+/// chord, not a tap).
+const fn other_modifier_made(before: Modifiers, after: Modifiers) -> bool {
+    (after.shift && !before.shift) || (after.ctrl && !before.ctrl) || (after.alt && !before.alt)
 }
 
 fn handle_mouse(byte: u8) {
@@ -597,7 +582,7 @@ pub fn self_test() {
         0x1c, // Enter
         // Super+Alt+Right: a key is decoded between Super make and break, so
         // the chord must not read as a Super-tap.
-        0xe0, 0x5c, 0x38, 0xe0, 0x4d, 0xe0, 0xcd, 0xb8, 0xe0, 0xdb,
+        0xe0, 0x5c, 0x38, 0xe0, 0x4d, 0xe0, 0xcd, 0xb8, 0xe0, 0xdc,
         // Super+Alt+Left: back to the first workspace.
         0xe0, 0x5b, 0x38, 0xe0, 0x4b, 0xe0, 0xcb, 0xb8, 0xe0, 0xdb, 0x3d, // F3: overview
         0x01, // Escape: close overview

@@ -191,16 +191,37 @@ class DesktopVM:
                 return state
         raise RuntimeError(f"desktop did not {description}: {state}")
 
-    # Modifier names from the `input` diagnostic, translated to HMP
-    # sendkey tokens for explicit release re-sends. The left and right meta
-    # tokens exercise independent device paths (left and right Super map to
-    # distinct scancode pairs), so both are re-sent.
-    MOD_TOKENS = {
-        "shift": ("shift",),
-        "ctrl": ("ctrl",),
-        "alt": ("alt",),
-        "super": ("meta_l", "meta_r", "menu"),
+    # QMP qcodes this QEMU build (10.2.1) accepts for input-send-event.
+    # Modifier and arrow names match the HMP sendkey tokens, so the
+    # translation is the identity; letters and digits pass through as-is.
+    QCODES = {
+        "ctrl": "ctrl",
+        "shift": "shift",
+        "alt": "alt",
+        "menu": "menu",
+        "meta_l": "meta_l",
+        "meta_r": "meta_r",
+        "spc": "spc",
+        "ret": "ret",
+        "esc": "esc",
+        "tab": "tab",
+        "backspace": "backspace",
+        "left": "left",
+        "right": "right",
+        "up": "up",
+        "down": "down",
+        "f3": "f3",
+        "f4": "f4",
+        "f10": "f10",
     }
+
+    def qcode(self, token: str) -> str:
+        """Translate one HMP sendkey token into a QMP qcode for this build."""
+        if token in self.QCODES:
+            return self.QCODES[token]
+        if len(token) == 1 and (token.isalpha() or token.isdigit()):
+            return token
+        raise ValueError(f"no QMP qcode for key token {token!r}")
 
     def modifiers(self) -> tuple[dict[str, bool], str]:
         text = self.console("input")
@@ -210,43 +231,47 @@ class DesktopVM:
         held = {"shift": match[1] == "1", "ctrl": match[2] == "1", "alt": match[3] == "1", "super": match[4] == "1"}
         return held, text
 
-    def settle_modifiers(self, timeout: float = 15.0):
+    def settle_modifiers(self, timeout: float = 10.0):
         """Wait until the guest reports no modifier keys held.
 
-        In this QEMU/TCG stack a PS/2 break byte can reach the guest much
-        later than the host sent it (a traced boot showed a Super break
-        landing only after two console round-trips), so the guest may still
-        read Super or Shift as held when the harness moves on. The kernel
-        legitimately acts only on the bytes it receives; therefore the
-        harness verifies the modifier state through the guest's own `input`
-        diagnostic and re-sends explicit releases until the guest confirms
-        a clean state before the next plain key is asserted.
+        Nothing is ever re-sent: injection is deterministic (the explicit
+        press/release QMP events sent by key()), so a clean state must
+        follow from the guest consuming the release bytes it received.
+        Only the read-only `input` diagnostic is polled, within a bounded
+        wait. If a modifier is still held at the deadline, that is a real
+        stuck-modifier bug (guest or QEMU) and must fail the gate, not be
+        repaired by the harness.
         """
         deadline = time.monotonic() + timeout
         stuck: list[str] = []
         text = ""
-        while time.monotonic() < deadline:
+        while True:
             held, text = self.modifiers()
             stuck = [name for name, is_held in held.items() if is_held]
-            if not stuck:
-                return
-            for name in stuck:
-                for token in self.MOD_TOKENS.get(name, (name,)):
-                    self.hmp(f"sendkey {token}")
-                    # Give the guest a chance to read the make/break bytes
-                    # before the next command; correctness is confirmed by
-                    # the next modifiers() read, not by this delay.
-                    time.sleep(0.05)
-        raise RuntimeError(f"modifier keys still held in the guest: {stuck}\n{text}")
+            if not stuck or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        if stuck:
+            raise RuntimeError(
+                f"modifier keys still held in the guest after {timeout:g}s: {stuck}\n{text}"
+            )
 
     def key(self, key: str):
-        # HMP sendkey keeps the down-up order the guest decoder relies on
-        # and is the delivery path with a byte-level track record in this
-        # stack; QMP input-send-event key-up events for modifiers have been
-        # observed not to reach the guest. Break bytes can still land late,
-        # so settle_modifiers() guarantees a clean modifier state before
-        # the harness asserts on the next plain key.
-        self.hmp(f"sendkey {key} 20")
+        # Deterministic injection through QEMU's input handler: each chord
+        # is pressed with its modifiers first and the main key last, and
+        # released main key first, modifiers last — one discrete down/up
+        # event per key, in the order the guest decoder expects. The
+        # harness never re-sends bytes; settle_modifiers() proves the
+        # release was consumed instead of papering over it.
+        tokens = key.split("-")
+        events = [
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": self.qcode(token)}}}
+            for token in tokens
+        ] + [
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": self.qcode(token)}}}
+            for token in reversed(tokens)
+        ]
+        self.qmp("input-send-event", {"events": events})
         self.settle_modifiers()
 
     def pointer(self) -> tuple[int, int]:

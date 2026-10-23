@@ -497,6 +497,220 @@ fn ctrl_alt_stands_in_for_super_only_with_fallback_enabled() {
 }
 
 #[test]
+fn tab_cycles_focus_but_ctrl_and_alt_tab_do_not() {
+    let mut wm = sample();
+    let first = wm.focus_id().unwrap();
+
+    wm.key(Key::Tab, Modifiers::default());
+    let second = wm.focus_id().unwrap();
+    assert_ne!(first, second);
+
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    wm.key(Key::Tab, shift);
+    assert_eq!(wm.focus_id(), Some(first));
+
+    // Ctrl+Tab and Alt+Tab are app chords and must not be swallowed by the
+    // manager's focus cycling.
+    wm.key(Key::Tab, ctrl());
+    assert_eq!(wm.focus_id(), Some(first));
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    wm.key(Key::Tab, alt);
+    assert_eq!(wm.focus_id(), Some(first));
+}
+
+#[test]
+fn is_wm_chord_reserves_only_the_manager_chords() {
+    let wm = sample();
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+
+    // Plain Ctrl / Alt / Shift chords still belong to the app.
+    assert!(!wm.is_wm_chord(Key::Char(b'w'), ctrl()));
+    assert!(!wm.is_wm_chord(Key::Tab, ctrl()));
+    assert!(!wm.is_wm_chord(Key::Char(b'f'), ctrl()));
+    assert!(!wm.is_wm_chord(Key::Left, shift));
+    assert!(!wm.is_wm_chord(Key::Right, shift));
+    assert!(!wm.is_wm_chord(Key::Char(b'f'), alt));
+    assert!(!wm.is_wm_chord(Key::Char(b'a'), alt));
+
+    // Super chords are reserved, including the Space and resize forms.
+    let super_alt = Modifiers {
+        super_key: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    let super_shift = Modifiers {
+        super_key: true,
+        shift: true,
+        ..Modifiers::default()
+    };
+    assert!(wm.is_wm_chord(Key::Char(b'w'), super_m()));
+    assert!(wm.is_wm_chord(Key::Tab, super_m()));
+    assert!(wm.is_wm_chord(Key::Char(b' '), super_m()));
+    assert!(wm.is_wm_chord(Key::Char(b'1'), super_m()));
+    assert!(wm.is_wm_chord(Key::Left, super_m()));
+    assert!(wm.is_wm_chord(Key::Right, super_m()));
+    assert!(wm.is_wm_chord(Key::Up, super_m()));
+    assert!(wm.is_wm_chord(Key::Down, super_m()));
+    assert!(wm.is_wm_chord(Key::Left, super_alt));
+    assert!(wm.is_wm_chord(Key::Left, super_shift));
+
+    // App-independent keys are reserved even without a modifier — and with one.
+    let plain = Modifiers::default();
+    assert!(wm.is_wm_chord(Key::Function(3), plain));
+    assert!(wm.is_wm_chord(Key::Function(4), plain));
+    assert!(wm.is_wm_chord(Key::Function(10), plain));
+    assert!(wm.is_wm_chord(Key::SuperTap, plain));
+    assert!(wm.is_wm_chord(Key::Function(3), ctrl()));
+    assert!(wm.is_wm_chord(Key::SuperTap, super_m()));
+}
+
+#[test]
+fn is_wm_chord_under_the_fallback_requires_ctrl_and_alt_together() {
+    let mut wm = sample();
+    wm.toggle_setting(4);
+    assert!(wm.settings().system_key_fallback);
+    let fallback = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+
+    // Ctrl+Alt stands in for Super: those chords are reserved.
+    assert!(wm.is_wm_chord(Key::Char(b'w'), fallback));
+    assert!(wm.is_wm_chord(Key::Tab, fallback));
+    assert!(wm.is_wm_chord(Key::Char(b'2'), fallback));
+    assert!(wm.is_wm_chord(Key::Left, fallback));
+    assert!(wm.is_wm_chord(Key::Right, fallback));
+
+    // Either modifier alone still belongs to the app.
+    assert!(!wm.is_wm_chord(Key::Char(b'w'), ctrl()));
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    assert!(!wm.is_wm_chord(Key::Char(b'f'), alt));
+
+    // App-independent keys stay reserved either way.
+    assert!(wm.is_wm_chord(Key::Function(3), ctrl()));
+    assert!(wm.is_wm_chord(Key::Function(10), Modifiers::default()));
+    assert!(wm.is_wm_chord(Key::SuperTap, Modifiers::default()));
+}
+
+#[test]
+fn linux_key_slot_routes_app_chords_but_keeps_manager_chords_and_overlays() {
+    let mut wm = sample();
+    let linux = wm.open(WindowKind::Linux).unwrap();
+    wm.focus_window(linux);
+
+    // App input passes to the Linux surface — including the Ctrl and Alt
+    // chords that are no longer manager chords.
+    assert_eq!(wm.linux_key_slot(Key::Char(b'w'), ctrl()), Some(0));
+    assert_eq!(wm.linux_key_slot(Key::Tab, ctrl()), Some(0));
+    assert_eq!(
+        wm.linux_key_slot(Key::Char(b'a'), Modifiers::default()),
+        Some(0)
+    );
+
+    // Manager chords and the app-independent keys stay native over the
+    // Linux surface.
+    assert_eq!(wm.linux_key_slot(Key::Char(b'w'), super_m()), None);
+    assert_eq!(
+        wm.linux_key_slot(Key::Function(3), Modifiers::default()),
+        None
+    );
+    assert_eq!(
+        wm.linux_key_slot(Key::Function(10), Modifiers::default()),
+        None
+    );
+    assert_eq!(wm.linux_key_slot(Key::SuperTap, Modifiers::default()), None);
+
+    // A native window routes nothing into Linux.
+    wm.open(WindowKind::Welcome);
+    assert_eq!(wm.linux_key_slot(Key::Char(b'w'), ctrl()), None);
+
+    // Overlays and the menu sit above the Linux surface.
+    wm.focus_window(linux);
+    wm.open_spotlight();
+    assert_eq!(
+        wm.linux_key_slot(Key::Char(b'a'), Modifiers::default()),
+        None
+    );
+    wm.key(Key::Escape, Modifiers::default());
+    assert!(!wm.spotlight_open());
+    wm.toggle_overview();
+    assert_eq!(
+        wm.linux_key_slot(Key::Char(b'a'), Modifiers::default()),
+        None
+    );
+    wm.key(Key::Escape, Modifiers::default());
+    assert!(!wm.overview_open());
+    wm.key(Key::Function(10), Modifiers::default());
+    assert!(wm.menu_state().is_some());
+    assert_eq!(
+        wm.linux_key_slot(Key::Char(b'a'), Modifiers::default()),
+        None
+    );
+    wm.key(Key::Escape, Modifiers::default());
+    assert!(wm.menu_state().is_none());
+    assert_eq!(
+        wm.linux_key_slot(Key::Char(b'a'), Modifiers::default()),
+        Some(0)
+    );
+}
+
+#[test]
+fn fallback_ctrl_alt_arrows_move_and_shift_resizes_the_focused_window() {
+    let mut wm = sample();
+    assert_eq!(wm.workspace(), 0);
+    wm.toggle_setting(4);
+    assert!(wm.settings().system_key_fallback);
+    let id = wm.focus_id().unwrap();
+    let before = wm.window(id).unwrap().frame;
+    let fallback = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    let fallback_shift = Modifiers {
+        ctrl: true,
+        alt: true,
+        shift: true,
+        ..Modifiers::default()
+    };
+
+    // Ctrl+Alt+arrows moves the focused window instead of cycling spaces:
+    // the Super+Alt+arrows form is not pressable under the fallback.
+    wm.key(Key::Left, fallback);
+    let frame = wm.window(id).unwrap().frame;
+    assert_eq!(frame.x, before.x - 8);
+    assert_eq!(frame.y, before.y);
+    assert_eq!(wm.workspace(), 0);
+
+    // Ctrl+Alt+Shift+arrows resizes it; plain move and resize do not touch
+    // the workspace either way.
+    wm.key(Key::Right, fallback_shift);
+    assert_eq!(wm.window(id).unwrap().frame.width, before.width + 8);
+    assert_eq!(wm.workspace(), 0);
+
+    // Under the fallback, space switching is the direct jump.
+    wm.key(Key::Char(b'2'), fallback);
+    assert_eq!(wm.workspace(), 1);
+}
+
+#[test]
 fn render_shortcut_applies_the_symbol_and_fallback_choice() {
     let mut wm = sample();
     fn render(settings: crate::model::Settings, chord: &str) -> String {

@@ -121,7 +121,9 @@ its domain and frees the slot for the next launch.
 ## Spaces and the overview
 
 There are four workspaces. `Super+Alt+Left` and `Super+Alt+Right` cycle them
-with a horizontal slide; `Super+1`…`Super+4` jump directly. Each window
+with a horizontal slide; `Super+1`…`Super+4` jump directly. Under the
+system-shortcut fallback the cycling form is not pressable, so only the
+direct `Ctrl+Alt+1`…`4` jumps are available. Each window
 belongs to one workspace. Switching to an empty workspace leaves focus empty
 rather than inventing a target.
 
@@ -189,7 +191,7 @@ the dock (the `>_` tile after Files) or by searching for `Terminal`.
   palette entry), the alternate screen, and cursor-position reports. It draws
   an 80x24 grid with the Spleen 8x16 font (BSD-2-Clause,
   `kernel/term/FONT-LICENSE`). Keys reach the program as VT100 sequences,
-  including every `Ctrl` and `Alt` chord; only Super chords (`Super+Space`,
+  including every `Ctrl` and `Alt` chord (`Ctrl+Tab` and `Alt+Tab` included); only Super chords (`Super+Space`,
   `Super+Tab`, `Super+1`-`4`, Super and `Super+Shift` arrows, and `Super+W`,
   `Super+M`, `Super+H`, `Super+Q`, `Super+F`, `Super+N`, `Super+,`) stay with
   the window manager.
@@ -221,6 +223,10 @@ Settings provides six live controls:
 - **System shortcut key** — off by default, so Super is the only system
   modifier. When enabled, `Ctrl+Alt` chords stand in for `Super+…` for hosts
   that grab Super combinations; plain Ctrl or Alt still goes to the app.
+  With one exception: `Super+Alt+arrows` (space cycling) is not pressable
+  under the fallback, so `Ctrl+Alt+arrows` move the focused window,
+  `Ctrl+Alt+Shift+arrows` resize it, and space switching is the direct
+  `Ctrl+Alt+1`-`4` jump.
 - **Shortcut symbols** — WINDOWS, MAC, or TEXT: whether rendered chords lead
   with `Win+`, `Cmd+`, or `Super+`. The 5x7 font is ASCII-only, so these are
   word forms of the `⊞`, `⌘`, and Super glyphs, not the glyphs themselves.
@@ -228,14 +234,20 @@ Settings provides six live controls:
 Super is the only system modifier. Keyboard operation has parity with the
 pointer: `Tab` and `Super+Tab` cycle focus, `Super+arrows` move the focused
 window, `Super+Shift+arrows` resize it, `Super+Alt+arrows` cycle spaces,
-`Super+W` closes, `Super+M` minimizes, `Super+H` hides, `Super+Q` quits the
-focused app, `Super+F` zooms, `Super+N` opens Files, `Super+,` opens
-Settings, `F3` opens the Spaces overview, and `Super+Space` (or a bare Super
-tap) opens Aether Search. `Ctrl` and `Alt` chords belong to the focused
-application: in the terminal, `Ctrl+C` ends the running job, and a
-`Ctrl+Alt` chord never moves or resizes a window. When the system shortcut
-key row in Settings is on, `Ctrl+Alt` stands in for Super in every chord
-above. In Files, unmodified Up/Down and `Shift+arrows` select entries rather
+`Super+W` closes the focused window, `Super+M` minimizes it, `Super+H`
+minimizes it and moves focus to the next live window, and `Super+Q` closes
+the focused window — until #121 the same effect as `Super+W`: for a Linux
+app closing the window ends its session (each app owns exactly one window).
+`Super+F` zooms, `Super+N` opens Files, `Super+,` opens Settings, `F3`
+opens the Spaces overview, and `Super+Space` (or a bare Super tap) opens
+Aether Search. `Ctrl` and `Alt` chords, `Ctrl+Tab` and `Alt+Tab` included,
+belong to the focused application: in the terminal, `Ctrl+C` ends the
+running job. When the system shortcut key row in Settings is on, `Ctrl+Alt`
+stands in for Super in the chords above, with one exception:
+`Super+Alt+arrows` is not pressable while Alt is always held, so
+`Ctrl+Alt+arrows` move the window, `Ctrl+Alt+Shift+arrows` resize it, and
+space switching is the `Ctrl+Alt+1`-`4` jump. In Files, unmodified Up/Down
+and `Shift+arrows` select entries rather
 than moving or resizing the window. Settings actions are reachable
 through keyboard menus or search. Focus is visible through the accent border
 and title treatment; minimizing transfers focus immediately, and restoring a

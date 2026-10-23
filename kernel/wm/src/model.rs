@@ -698,7 +698,9 @@ const SYSTEM_ITEMS: [MenuItem; 14] = [
         command: Command::Open(WindowKind::Log),
     },
     MenuItem {
-        label: "Quit Focused App",
+        // Until #121 Super+Q closes the focused window — the same effect as
+        // Super+W, since each app owns exactly one window.
+        label: "Close Focused Window",
         shortcut: "Super+Q",
         command: Command::QuitApp,
     },
@@ -2229,6 +2231,26 @@ impl Wm {
         }
     }
 
+    /// Returns the focused Linux surface's app-domain slot when a key must
+    /// go to the Linux app instead of the window manager: the Linux surface
+    /// holds focus, no overlay or menu is covering it, and the key is not a
+    /// reserved manager chord.
+    ///
+    /// Keeping the routing decision beside [`Self::is_wm_chord`] lets the
+    /// desktop layer route keys without re-deriving the overlay rules, and
+    /// lets plain model state tests cover both decisions.
+    #[must_use]
+    pub fn linux_key_slot(&self, key: Key, modifiers: Modifiers) -> Option<usize> {
+        self.focused_window()
+            .and_then(|window| window.kind.linux_slot())
+            .filter(|_| {
+                !self.is_wm_chord(key, modifiers)
+                    && !self.overview_open()
+                    && !self.spotlight_open()
+                    && self.menu_state().is_none()
+            })
+    }
+
     /// Handles a key event.
     pub fn key(&mut self, key: Key, modifiers: Modifiers) -> KeyOutcome {
         let mut outcome = KeyOutcome::default();
@@ -2490,15 +2512,18 @@ impl Wm {
                     outcome.announce = Some(self.focus_title());
                     return outcome;
                 }
-                // Spaces. With Super held, Super+Alt+arrows cycle Spaces and
-                // Super+arrows move the focused window; held Shift instead
-                // resizes the window (the resize block below).
-                Key::Left if modifiers.alt => {
+                // Spaces. Super+Alt+arrows cycles Spaces; Super+arrows move
+                // the focused window; held Shift instead resizes it (the
+                // resize block below). The fallback cannot express Super+Alt
+                // (Alt is always held there), so under the fallback the
+                // arrows fall through to the move arms and space switching
+                // is the direct Ctrl+Alt+1..4 jump.
+                Key::Left if modifiers.alt && modifiers.super_key => {
                     self.cycle_workspace(-1);
                     outcome.changed = true;
                     return outcome;
                 }
-                Key::Right if modifiers.alt => {
+                Key::Right if modifiers.alt && modifiers.super_key => {
                     self.cycle_workspace(1);
                     outcome.changed = true;
                     return outcome;
@@ -2556,7 +2581,8 @@ impl Wm {
 
         match key {
             // Unmodified Tab still cycles focus; Shift+Tab reverses it.
-            Key::Tab => {
+            // Ctrl+Tab and Alt+Tab belong to the app, not the manager.
+            Key::Tab if !modifiers.ctrl && !modifiers.alt => {
                 self.focus_next(if modifiers.shift { -1 } else { 1 });
                 outcome.changed = true;
             }
@@ -2587,8 +2613,10 @@ impl Wm {
             // The synthetic Super tap is consumed by the search toggle above
             // and never reaches an app in this fall-through.
             Key::SuperTap => {}
-            // Plain letters, arrows, and unreserved F-keys belong to the app.
-            Key::Function(_)
+            // Plain letters, arrows, unreserved F-keys, and Tab bound to an
+            // app modifier (Ctrl+Tab, Alt+Tab) belong to the app.
+            Key::Tab
+            | Key::Function(_)
             | Key::Char(_)
             | Key::Backspace
             | Key::Delete
