@@ -47,6 +47,10 @@ crash-screen-panic-selftest = []
 # Boot with a rollback self-test that removes the current image marker and
 # re-selects, exercising the lost-image branch on every test boot.
 recovery-rollback-selftest = []
+# Boot with a self-test proving the Linux path reader distinguishes a copy
+# fault (EFAULT) from a too-long string (ENAMETOOLONG) and reads a path of the
+# filesystem's maximum length (issue #101).
+path-length-selftest = []
 # Boot the Gate 4 portal slice with a seeded workbook grant and a test-only
 # revocation control path. Not part of the normal kernel feature set.
 gate4-portal-test = []
