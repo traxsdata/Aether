@@ -89,13 +89,16 @@ A claim that the system boots must include the serial transcript or the
 
 ## QEMU test accelerator
 
-The QEMU harnesses use KVM (`-machine q35,accel=kvm -cpu host`) when
-`/dev/kvm` is readable and writable by the current user, and fall back to TCG
-(`-cpu max`) otherwise. `AETHER_QEMU_ACCEL=tcg` or `AETHER_QEMU_ACCEL=kvm`
-forces a mode; requesting `kvm` without a usable `/dev/kvm` fails immediately
-instead of silently emulating, so timings are never misattributed. Every
-harness prints its choice at start (`qemu: accel=... cpu=...`) — cite that
-line when reporting wall-clock results.
+The QEMU harnesses run under TCG (`-machine q35,accel=tcg -cpu max`) by
+default. Set `AETHER_QEMU_ACCEL=kvm` to use KVM (`-cpu host`) instead;
+requesting `kvm` without a readable, writable `/dev/kvm` fails immediately
+rather than silently emulating, so timings are never misattributed.
+`AETHER_QEMU_ACCEL=tcg` pins TCG explicitly. KVM is not the default yet
+because of the kernel signal-delivery bug in issue #83 (~40% of KVM boots
+fail the linux cross-process SIGUSR1 test); once that is fixed the default
+can flip to KVM. Every harness prints its choice at start
+(`qemu: accel=... cpu=...`) — cite that line when reporting wall-clock
+results.
 
 ## Security changes
 
