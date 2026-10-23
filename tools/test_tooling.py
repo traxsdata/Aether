@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Fast regression tests for artifact selection, VMX encoding and boot evidence."""
+"""Fast regression tests for artifact selection, VMX encoding, boot evidence and the Craft driver's exit code."""
 
+import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,20 @@ from unittest.mock import patch
 from boot_support import BASE_MARKERS, find_firmware, find_iso, has_failure
 from make_vmware_vmx import render, vmx_string
 from desktop_smoke import parse_state, read_ppm
+
+
+def _load_script(module_name: str, file_name: str):
+    """Load a sibling tools/ script whose hyphenated name cannot be imported."""
+    spec = importlib.util.spec_from_file_location(
+        module_name, Path(__file__).with_name(file_name)
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+craft_apps = _load_script("_test_craft_apps", "test-craft-apps.py")
 
 
 class ToolingTests(unittest.TestCase):
@@ -123,6 +139,42 @@ class ToolingTests(unittest.TestCase):
         with patch.dict(os.environ, {"OVMF_VARS": "/nonexistent/vars.fd"}, clear=True):
             with self.assertRaises(SystemExit):
                 find_firmware()
+
+    def test_craft_driver_exit_code_counts_failed_checks(self):
+        passed = {"app": "a", "version": "1.0.0", "headless": "pass", "gui": "pass"}
+        skipped = {"app": "a", "version": "1.0.0", "headless": "pass"}  # gui not run
+        headless_failed = {"app": "a", "version": "1.0.0", "headless": "fail", "gui": "pass"}
+        gui_failed = {"app": "a", "version": "1.0.0", "headless": "pass", "gui": "fail"}
+        errored = {"app": "a", "version": "1.0.0", "error": "download failed"}
+        self.assertFalse(craft_apps.results_failed([passed]))
+        self.assertFalse(craft_apps.results_failed([passed, skipped]))
+        self.assertTrue(craft_apps.results_failed([headless_failed]))
+        self.assertTrue(craft_apps.results_failed([passed, gui_failed]))
+        self.assertTrue(craft_apps.results_failed([passed, errored]))
+        self.assertTrue(craft_apps.results_failed([headless_failed, errored]))
+
+    def test_craft_driver_main_exits_nonzero_when_a_check_fails(self):
+        def run_main(record):
+            with tempfile.TemporaryDirectory() as directory:
+                with patch.object(craft_apps, "BUILD", Path(directory)), patch.object(
+                    craft_apps, "ensure_extractor", lambda: Path("/bin/true")
+                ), patch.object(
+                    craft_apps, "test_one", return_value=dict(record)
+                ), patch.object(sys, "argv", ["test-craft-apps.py", "gridcraft", "--cache", directory]):
+                    return craft_apps.main()
+
+        self.assertEqual(
+            run_main({"app": "a", "version": "1.0.0", "headless": "fail", "gui": "pass"}), 1
+        )
+        self.assertEqual(
+            run_main({"app": "a", "version": "1.0.0", "headless": "pass", "gui": "fail"}), 1
+        )
+        self.assertEqual(
+            run_main({"app": "a", "version": "1.0.0", "error": "download failed"}), 1
+        )
+        self.assertEqual(
+            run_main({"app": "a", "version": "1.0.0", "headless": "pass", "gui": "pass"}), 0
+        )
 
 
 if __name__ == "__main__":
