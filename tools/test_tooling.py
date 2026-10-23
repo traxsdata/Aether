@@ -200,5 +200,51 @@ class ToolingTests(unittest.TestCase):
         )
 
 
+stage_firefox = _load_script("_stage_firefox", "stage-firefox.py")
+
+
+class StageFirefoxTests(unittest.TestCase):
+    def test_checked_in_pin_is_complete(self):
+        pin = stage_firefox.read_pin(stage_firefox.DEFAULT_PIN)
+        self.assertTrue(pin["FIREFOX_VERSION"].endswith("esr"))
+        self.assertIn(pin["FIREFOX_VERSION"], pin["FIREFOX_URL"])
+        self.assertTrue(pin["FIREFOX_URL"].endswith("/" + pin["FIREFOX_FILE"]))
+
+    def test_pin_rejects_bad_digest_and_missing_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.pin"
+            path.write_text(
+                "FIREFOX_VERSION=1esr\nFIREFOX_FILE=f.tar.xz\n"
+                "FIREFOX_URL=https://example.invalid/f.tar.xz\n"
+                "FIREFOX_SHA256=ABC\nFIREFOX_APP_ID=org.example\n"
+            )
+            with self.assertRaises(SystemExit):
+                stage_firefox.read_pin(path)
+            path.write_text("FIREFOX_VERSION=1esr\n")
+            with self.assertRaises(SystemExit):
+                stage_firefox.read_pin(path)
+
+    def test_record_version_is_numeric_for_linuxd(self):
+        self.assertEqual(stage_firefox.record_version("153.5.1esr"), "153.5.1")
+        self.assertEqual(stage_firefox.record_version("140.0esr"), "140.0")
+        with self.assertRaises(SystemExit):
+            stage_firefox.record_version("153.0b1")
+
+    def test_runtime_stub_is_an_appimage_elf_ending_at_its_section_table(self):
+        import struct
+
+        stub = stage_firefox.runtime_stub()
+        self.assertEqual(stub[:4], b"\x7fELF")
+        self.assertEqual(stub[8:11], b"AI\x02")
+        e_type, e_machine = struct.unpack_from("<HH", stub, 16)
+        self.assertEqual((e_type, e_machine), (2, 62))
+        shoff = struct.unpack_from("<Q", stub, 40)[0]
+        shentsize, shnum = struct.unpack_from("<HH", stub, 58)
+        # The SquashFS is appended at this offset; AppImage tools compute it
+        # from the section header table.
+        self.assertEqual(shoff + shentsize * shnum, len(stub))
+        self.assertNotIn(b"hsqs", stub)
+
+
 if __name__ == "__main__":
     unittest.main()
