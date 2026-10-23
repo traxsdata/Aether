@@ -87,6 +87,16 @@ A claim that the system boots must include the serial transcript or the
   what cannot be tested on the host.
 - Run `cargo fmt` before submitting. `make lint` must pass.
 
+## QEMU test accelerator
+
+The QEMU harnesses use KVM (`-machine q35,accel=kvm -cpu host`) when
+`/dev/kvm` is readable and writable by the current user, and fall back to TCG
+(`-cpu max`) otherwise. `AETHER_QEMU_ACCEL=tcg` or `AETHER_QEMU_ACCEL=kvm`
+forces a mode; requesting `kvm` without a usable `/dev/kvm` fails immediately
+instead of silently emulating, so timings are never misattributed. Every
+harness prints its choice at start (`qemu: accel=... cpu=...`) — cite that
+line when reporting wall-clock results.
+
 ## Security changes
 
 Changes to the boot hand-off, capability model, IPC, memory isolation, or

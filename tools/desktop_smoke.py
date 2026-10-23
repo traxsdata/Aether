@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from boot_support import BASE_MARKERS, find_firmware, has_failure
+from qemu_accel import accel_args, describe
 
 # Pixels per PS/2 count; mirrors MOUSE_GAIN in kernel/src/input.rs.
 MOUSE_GAIN = 2
@@ -66,6 +67,7 @@ def read_ppm(path: Path) -> tuple[int, int, bytes]:
 
 class DesktopVM:
     def __init__(self, iso: Path, device: str, out: Path):
+        print(f"qemu: {describe()}")
         self.out = out
         out.mkdir(parents=True, exist_ok=True)
         (out / "result.txt").unlink(missing_ok=True)
@@ -75,7 +77,7 @@ class DesktopVM:
             path.unlink(missing_ok=True)
         self.transcript = bytearray()
         code, variables = find_firmware()
-        command = ["qemu-system-x86_64", "-machine", "q35,accel=tcg", "-cpu", "max",
+        command = ["qemu-system-x86_64", *accel_args(),
                    "-m", "2048M", "-smp", "2", "-display", "none", "-vga", "none",
                    "-device", device, "-monitor", "none", "-no-reboot", "-boot", "d",
                    "-cdrom", str(iso), "-qmp", f"unix:{self.qmp_path},server=on,wait=off",

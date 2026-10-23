@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from qemu_accel import accel_args, describe
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
@@ -89,6 +90,7 @@ def main() -> int:
     if not IMAGE.exists():
         print(f"error: {IMAGE} missing; run `make image` first", file=sys.stderr)
         return 2
+    print(f"qemu: {describe()}")
     OUT.mkdir(parents=True, exist_ok=True)
     serial = OUT / "serial.log"
     serial.unlink(missing_ok=True)
@@ -102,8 +104,7 @@ def main() -> int:
 
     command = [
         "qemu-system-x86_64",
-        "-machine", "q35,accel=tcg",
-        "-cpu", "max",
+        *accel_args(),
         "-m", "4G",
         "-display", "none",
         "-device", "VGA",
