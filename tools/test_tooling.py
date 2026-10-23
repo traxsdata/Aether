@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import boot_support
+import qemu_accel
 from boot_support import (
     BASE_MARKERS,
     UNIX_SOCKET_PATH_LIMIT,
@@ -198,6 +199,31 @@ class ToolingTests(unittest.TestCase):
         self.assertEqual(
             run_main({"app": "a", "version": "1.0.0", "headless": "pass", "gui": "pass"}), 0
         )
+
+
+class QemuAccelTests(unittest.TestCase):
+    """The harness accelerator default (issue #83 unblocked KVM)."""
+
+    def choose(self, forced, kvm):
+        env = {} if forced is None else {"AETHER_QEMU_ACCEL": forced}
+        with patch.dict(os.environ, env, clear=False):
+            if forced is None:
+                os.environ.pop("AETHER_QEMU_ACCEL", None)
+            with patch.object(qemu_accel, "kvm_available", return_value=kvm):
+                return qemu_accel.choose_accelerator()
+
+    def test_default_prefers_kvm_when_usable(self):
+        self.assertEqual(self.choose(None, True), ("kvm", "host"))
+
+    def test_default_falls_back_to_tcg_without_kvm(self):
+        self.assertEqual(self.choose(None, False), ("tcg", "max"))
+
+    def test_tcg_override_wins_over_usable_kvm(self):
+        self.assertEqual(self.choose("tcg", True), ("tcg", "max"))
+
+    def test_forced_kvm_without_device_is_an_error(self):
+        with self.assertRaises(SystemExit):
+            self.choose("kvm", False)
 
 
 if __name__ == "__main__":

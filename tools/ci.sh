@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # Local pull-request CI gate. Keeping this script runnable makes failures
-# reproducible without CI; a hosted workflow is a separate follow-up.
+# reproducible locally; .github/workflows/ci.yml runs it on hosted runners.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -24,5 +24,6 @@ make terminal-test
 make fault-test
 make crash-screen-test
 make rollback-test
+make path-length-test
 make negative-test
 make release-demo

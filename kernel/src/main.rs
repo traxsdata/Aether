@@ -363,6 +363,8 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     serial_line!("AETHER_MM_OK");
     cr3_skip_selftest();
     usercopy_selftest();
+    #[cfg(feature = "path-length-selftest")]
+    path_length_selftest();
     net::init();
 
     #[cfg(feature = "fault-selftest")]
@@ -465,6 +467,91 @@ fn smap_selftest(pml4: aether_memory::frame::PhysFrame, address: u64) {
     // with SMAP on this faults and the handler halts.
     let _ = unsafe { core::ptr::read_volatile(address as *const u8) };
     boot_failure("SMAP self-test: direct user read was allowed");
+}
+
+/// Proves the Linux path reader (issue #101) distinguishes a copy fault
+/// (EFAULT) from a no-terminator string (ENAMETOOLONG) and still reads out a
+/// path of the filesystem's maximum length.
+#[cfg(feature = "path-length-selftest")]
+fn path_length_selftest() {
+    let Some(pml4) = memory::paging::current_pml4() else {
+        boot_failure("path-length self-test: no active page table");
+    };
+    let maximum = crate::syscall::USER_STRING_MAX as u64;
+
+    // 1. An unmapped pointer faults while copying -> EFAULT.
+    let fault_addr = aether_abi::user::USER_BASE + 0x10_0000;
+    assert_probe_unmapped(pml4, fault_addr);
+    if !matches!(
+        crate::syscall::user_cstr(pml4, fault_addr, maximum),
+        Err(crate::syscall::UserCStringError::Fault)
+    ) {
+        boot_failure("path-length self-test: an unmapped pointer was not EFAULT");
+    }
+
+    // 2. A string with no NUL within the shared limit -> ENAMETOOLONG.
+    let long_addr = aether_abi::user::USER_BASE + 0x20_0000;
+    assert_probe_unmapped(pml4, long_addr);
+    path_length_map_page(pml4, long_addr);
+    let long_pattern = [b'a'; crate::syscall::USER_STRING_MAX + 2];
+    if crate::syscall::copy_to_user(pml4, long_addr, &long_pattern).is_none() {
+        boot_failure("path-length self-test: could not write the long probe");
+    }
+    if !matches!(
+        crate::syscall::user_cstr(pml4, long_addr, maximum),
+        Err(crate::syscall::UserCStringError::TooLong)
+    ) {
+        boot_failure("path-length self-test: a too-long path was not ENAMETOOLONG");
+    }
+
+    // 3. A 300-byte path (below the shared limit) reads out in full.
+    let ok_addr = aether_abi::user::USER_BASE + 0x30_0000;
+    assert_probe_unmapped(pml4, ok_addr);
+    path_length_map_page(pml4, ok_addr);
+    let mut short_pattern = [b'a'; crate::syscall::USER_STRING_MAX];
+    short_pattern[300] = 0;
+    if crate::syscall::copy_to_user(pml4, ok_addr, &short_pattern).is_none() {
+        boot_failure("path-length self-test: could not write the short probe");
+    }
+    match crate::syscall::user_cstr(pml4, ok_addr, maximum) {
+        Ok(user_string) => {
+            if user_string.as_str().len() != 300 {
+                boot_failure("path-length self-test: a 300-byte path did not read 300 bytes");
+            }
+        }
+        Err(_) => boot_failure("path-length self-test: a 300-byte path was rejected"),
+    }
+
+    serial_line!("AETHER_PATH_LENGTH_OK");
+}
+
+/// Fails the boot if a self-test probe page is unexpectedly already mapped, so
+/// the test never maps over a live user page.
+#[cfg(feature = "path-length-selftest")]
+fn assert_probe_unmapped(pml4: aether_memory::frame::PhysFrame, address: u64) {
+    if memory::paging::user_leaf_present(pml4, address) {
+        boot_failure("path-length self-test: probe page is already mapped");
+    }
+}
+
+/// Maps one freshly-allocated page into the user window for the self-test.
+#[cfg(feature = "path-length-selftest")]
+fn path_length_map_page(pml4: aether_memory::frame::PhysFrame, vspace: u64) {
+    let mapped = memory::with_frame_allocator(|frames| {
+        let frame = frames.allocate()?;
+        memory::paging::map_user_page(
+            pml4,
+            frames,
+            vspace,
+            frame,
+            aether_memory::paging::PageFlags::WRITABLE,
+        )
+        .ok()
+    })
+    .flatten();
+    if mapped.is_none() {
+        boot_failure("path-length self-test: could not map a probe page");
+    }
 }
 
 fn boot_failure(reason: &str) -> ! {

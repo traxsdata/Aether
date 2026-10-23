@@ -30,9 +30,10 @@ Rust host and Python tooling tests, the QEMU boot test, the UEFI ISO boot and
 real-input desktop/Files tests on VGA/SVGA emulation, the shell test, the
 fault-path test, the rollback-path test, a negative boot test that proves the
 harness rejects a deliberately failing kernel, and the signed-release tamper
-demonstration. A hosted GitHub Actions workflow that runs the same commands is a
-follow-up; until it is published, run `make ci` locally before opening the pull
-request so failures are not spread across reviewers.
+demonstration. The hosted GitHub Actions workflow
+(`.github/workflows/ci.yml`) runs the same `make ci` on every pull request and
+push to `main`, using software (TCG) QEMU emulation. Run `make ci` locally
+before opening the pull request so failures are not spread across reviewers.
 
 The gate also generates the Workstation VMX for the tested ISO; this verifies
 configuration generation, not a VMware Workstation boot. Actual Workstation
@@ -89,14 +90,13 @@ A claim that the system boots must include the serial transcript or the
 
 ## QEMU test accelerator
 
-The QEMU harnesses run under TCG (`-machine q35,accel=tcg -cpu max`) by
-default. Set `AETHER_QEMU_ACCEL=kvm` to use KVM (`-cpu host`) instead;
-requesting `kvm` without a readable, writable `/dev/kvm` fails immediately
-rather than silently emulating, so timings are never misattributed.
-`AETHER_QEMU_ACCEL=tcg` pins TCG explicitly. KVM is not the default yet
-because of the kernel signal-delivery bug in issue #83 (~40% of KVM boots
-fail the linux cross-process SIGUSR1 test); once that is fixed the default
-can flip to KVM. Every harness prints its choice at start
+The QEMU harnesses run under KVM (`-machine q35,accel=kvm -cpu host`) by
+default when `/dev/kvm` is readable and writable by the current user, and
+fall back to TCG (`-machine q35,accel=tcg -cpu max`) otherwise. Set
+`AETHER_QEMU_ACCEL=tcg` to pin TCG explicitly, or `AETHER_QEMU_ACCEL=kvm`
+to require KVM: requesting `kvm` without a usable `/dev/kvm` fails
+immediately rather than silently emulating, so timings are never
+misattributed. Every harness prints its choice at start
 (`qemu: accel=... cpu=...`) — cite that line when reporting wall-clock
 results.
 

@@ -118,7 +118,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft craft-apps-stage iso-craft-apps iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test \
+.PHONY: all kernel user loader image iso iso-gridcraft craft-apps-stage iso-craft-apps iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test path-length-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -641,6 +641,12 @@ crash-screen-test:
 rollback-test:
 	$(MAKE) KERNEL_FEATURES=recovery-rollback-selftest image
 	AETHER_EXTRA_MARKERS=AETHER_RECOVERY_ROLLBACK_OK $(PYTHON) tools/test-boot.py
+
+# Prove the Linux path reader (issue #101) treats a copy fault as EFAULT, a
+# no-terminator string as ENAMETOOLONG, and still reads a 300-byte path.
+path-length-test:
+	$(MAKE) KERNEL_FEATURES=path-length-selftest image
+	AETHER_EXTRA_MARKERS=AETHER_PATH_LENGTH_OK $(PYTHON) tools/test-boot.py
 
 # Build a kernel that deliberately fails after paging and require the normal
 # harness to detect the failure marker. This checks the CI gate itself, not

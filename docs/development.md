@@ -233,6 +233,7 @@ a pull request:
 demo, and writes a report; run it before a release. Neither gate qualifies
 VMware Workstation or replaces an external security/accessibility review.
 
-The gate does not require KVM, root access, or secrets. A GitHub Actions
-workflow will install `qemu-system-x86`, `ovmf`, and `mtools` and run the same
-script once it is published.
+The gate does not require KVM, root access, or secrets. The GitHub Actions
+workflow (`.github/workflows/ci.yml`) installs `qemu-system-x86`, `ovmf`, `mtools`
+and the other prerequisites, forces `AETHER_QEMU_ACCEL=tcg`, and runs the same
+script on every pull request and push to `main`.
