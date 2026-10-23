@@ -262,8 +262,14 @@ termination (`AETHER_LINUX_SIGNAL_DEFAULT_OK`). A bounded `clone3` thread
 create/join and its `EINVAL`/`ENOSYS` rejections are tested
 (`AETHER_LINUX_CLONE3_OK`), as are `set_robust_list`/`get_robust_list` and
 owner-died wakeup on thread exit (`AETHER_LINUX_ROBUST_FUTEX_OK`) and bounded
-`rseq` registration/validation (`AETHER_LINUX_RSEQ_OK`). Futex timeout behavior
-is tested (`AETHER_LINUX_FUTEX_TIMEOUT_OK`). Eventfd counters are shared across
+`rseq` registration/validation (`AETHER_LINUX_RSEQ_OK`). Futex timeout behavior,
+including absolute `FUTEX_WAIT_BITSET` deadlines on `CLOCK_MONOTONIC` and on
+`CLOCK_REALTIME` (`FUTEX_CLOCK_REALTIME`, as `pthread_cond_timedwait` uses), is
+tested (`AETHER_LINUX_FUTEX_TIMEOUT_OK`). Futex words in `MAP_SHARED` frames are
+keyed by physical address; all other words are keyed by virtual address in the
+process's address space, so a waiter that blocked before a `fork` is still
+woken after the parent's next write copies the page
+(`AETHER_LINUX_FUTEX_FORK_OK`). Eventfd counters are shared across
 threads in one tgid (and remain process-private across fork). Blocking
 multiplexing is covered by `poll` finite/infinite timeouts over a pipe and an
 eventfd (`AETHER_LINUX_POLL_BLOCK_OK`), `epoll_wait` finite/infinite waits with

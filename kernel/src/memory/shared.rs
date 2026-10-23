@@ -160,6 +160,17 @@ pub fn find_file(file_key: u64, file_offset: u64) -> Option<PhysFrame> {
     Some(entry.frame)
 }
 
+/// Returns `true` when `frame` is a registered `MAP_SHARED` frame.
+pub fn is_registered(frame: PhysFrame) -> bool {
+    // SAFETY: Single-CPU serialization as described on `RegistryCell`.
+    let registry = unsafe { &*REGISTRY.0.get() };
+    registry
+        .entries
+        .iter()
+        .flatten()
+        .any(|entry| entry.frame == frame)
+}
+
 /// Adds a reference to a shared frame.
 ///
 /// Returns `false` when the frame is not registered, which means it is a

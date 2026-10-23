@@ -149,7 +149,8 @@ This is recorded as a deviation, not a change of decision. While it stands:
   `rt_sigreturn` keeps only the user-changeable flags and forces the user code
   and data selectors; writable+executable memory requires a signed
   `memory=jit` import record; `PROT_NONE` pages are supervisor-only guard
-  pages; futex waiters are keyed by physical address; and signals and
+  pages; futex waiters are keyed by physical address for `MAP_SHARED` frames and by
+  address space and virtual address otherwise; and signals and
   process groups are scoped to the application domain.
 - **Claims.** No compatibility record or release note may describe the Linux
   layer as a user-space service or as outside the kernel's trusted computing

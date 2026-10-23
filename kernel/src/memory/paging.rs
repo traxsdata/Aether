@@ -1303,12 +1303,6 @@ fn user_leaf_slot(pml4: PhysFrame, address: u64) -> Option<(PhysFrame, usize)> {
     Some((child_table(pd, pd_index)?, pt_index))
 }
 
-/// Gives the page holding a futex word its own frame if it is copy-on-write,
-/// so the word's physical address stays its key after the next write.
-pub fn settle_cow_page(pml4: PhysFrame, address: u64) -> bool {
-    resolve_cow_range(pml4, address, 1)
-}
-
 fn user_leaf_entry(pml4: PhysFrame, address: u64) -> Option<PageTableEntry> {
     let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
     // SAFETY: The PML4 is the active or a task-owned table and the kernel

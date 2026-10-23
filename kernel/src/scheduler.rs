@@ -610,7 +610,11 @@ struct Task {
     tgid: usize,
     pgid: usize,
     sid: usize,
+    /// Key of the futex word this task waits on: a physical address for a
+    /// `MAP_SHARED` frame (`futex_space == 0`), otherwise the virtual address
+    /// in the address space named by `futex_space`. Zero when not waiting.
     futex_address: u64,
+    futex_space: u64,
     futex_deadline: u64,
     clear_child_tid: u64,
     /// Descriptors of the owning process. The threads of one process share
@@ -738,6 +742,7 @@ impl Task {
             pgid: 0,
             sid: 0,
             futex_address: 0,
+            futex_space: 0,
             futex_deadline: 0,
             clear_child_tid: 0,
             linux_fds: FdSlots(0),
@@ -2836,24 +2841,29 @@ pub fn linux_set_tid_address(pointer: u64) -> i64 {
     current as i64
 }
 
-/// Returns the wait-queue key for a futex word in the current address space.
+/// Returns the wait-queue key `(space, address)` for a futex word in the
+/// current address space, following Linux's `get_futex_key`.
 ///
-/// Waiters are keyed by the word's physical address, not its virtual one. A
-/// virtual key would let one application wake or requeue another
-/// application's waiters that happen to use the same address. Threads share
-/// a page table and so a key; `MAP_SHARED` memory is the same frame in every
-/// process that maps it, so shared futexes still meet across `fork`.
-/// Private memory shared copy-on-write after `fork` is made private here, as
-/// on Linux, where a private futex never meets one in another process.
-fn futex_key(address: u64) -> Option<u64> {
+/// A word in a `MAP_SHARED` frame is keyed by its physical address (space
+/// zero): that frame is the same in every process that maps it, so shared
+/// futexes meet across `fork`. Any other word is private to the process and
+/// is keyed by its virtual address in this address space; threads share the
+/// page table, and so the key. A physical key is not stable for private
+/// memory: `fork` makes the page copy-on-write and the next write moves it
+/// to a new frame, which stranded waiters that blocked before the fork
+/// (issue #146). The private key also keeps one application from reaching
+/// another's waiters.
+fn futex_key(address: u64) -> Option<(u64, u64)> {
     let tasks = unsafe { &*TASKS.0.get() };
-    let pml4 = PhysFrame::from_address(tasks[CURRENT.load(Ordering::Relaxed)].pml4)?;
-    // A copy-on-write page changes frame on its first write, which would
-    // strand waiters keyed by the old one, so it gets its own frame first.
-    if !paging::settle_cow_page(pml4, address) {
-        return None;
-    }
-    paging::user_physical_address(pml4, address)
+    let space = tasks[CURRENT.load(Ordering::Relaxed)].pml4;
+    let pml4 = PhysFrame::from_address(space)?;
+    let shared = paging::user_physical_address(pml4, address).filter(|physical| {
+        PhysFrame::from_address(physical & !0xfff).is_some_and(crate::memory::shared::is_registered)
+    });
+    Some(match shared {
+        Some(physical) => (0, physical),
+        None => (space, address),
+    })
 }
 
 /// Blocks the current Linux task on a futex word.
@@ -2862,13 +2872,14 @@ pub fn linux_futex_wait(
     address: u64,
     timeout_ticks: Option<u64>,
 ) -> *mut InterruptFrame {
-    let Some(key) = futex_key(address) else {
+    let Some((space, key)) = futex_key(address) else {
         // SAFETY: `frame` is the live Linux syscall frame on this task's stack.
         unsafe { (*frame).rax = LINUX_EFAULT as u64 };
         return frame;
     };
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
+    tasks[current].futex_space = space;
     tasks[current].futex_address = key;
     tasks[current].futex_deadline = timeout_ticks
         .and_then(|ticks| TICKS.load(Ordering::Relaxed).checked_add(ticks))
@@ -2886,7 +2897,7 @@ pub fn linux_futex_wait(
 
 /// Wakes up to `count` tasks blocked on `address`.
 pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
-    let Some(address) = futex_key(address) else {
+    let Some((space, address)) = futex_key(address) else {
         return 0;
     };
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -2895,7 +2906,10 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
         if woken >= count {
             break;
         }
-        if task.state == TaskState::Blocked && task.futex_address == address {
+        if task.state == TaskState::Blocked
+            && task.futex_address == address
+            && task.futex_space == space
+        {
             task.state = TaskState::Ready;
             task.futex_address = 0;
             task.futex_deadline = 0;
@@ -2905,6 +2919,59 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
     woken as i64
 }
 
+/// Debug-only dump of every Linux task's wait state (issue #146).
+///
+/// For a blocked task the saved frame is the syscall frame, so `rip` is the
+/// user return address and `rax`/`rdi`/`rsi`/`rdx`/`r10` the call's result
+/// slot and arguments. For a futex waiter the line also prints the word's
+/// current value and the frame its virtual address resolves to now, so a
+/// waiter keyed by a stale frame is visible.
+#[cfg(feature = "linux-wait-dump")]
+fn linux_wait_dump(now: u64) {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let running = CURRENT.load(Ordering::Relaxed);
+    for (index, task) in tasks.iter().enumerate() {
+        if task.abi != TaskAbi::Linux || task.state == TaskState::Empty || index == running {
+            continue;
+        }
+        // SAFETY: a task that is not running saved its interrupt frame at
+        // `saved_rsp` on its own kernel stack, which stays allocated.
+        let frame = unsafe { &*(task.saved_rsp as *const InterruptFrame) };
+        let resolved = PhysFrame::from_address(task.pml4)
+            .and_then(|pml4| paging::user_physical_address(pml4, frame.rdi))
+            .unwrap_or(0);
+        let word = if task.futex_address != 0 && resolved != 0 && frame.rdi.is_multiple_of(4) {
+            // SAFETY: `resolved` is the identity-mapped physical address of
+            // a present, 4-byte aligned word of this task's user mapping.
+            unsafe { core::ptr::read_volatile(resolved as *const u32) }
+        } else {
+            0
+        };
+        serial_line!(
+            "WAITDUMP t={} task={} tgid={} state={:?} wait={:?} last={} rip={:#x} rax={:#x} rdi={:#x} rsi={:#x} rdx={:#x} r10={:#x} futex_space={:#x} futex_key={:#x} now_phys={:#x} word={:#x} deadline={} wait_deadline={} cpu={}",
+            now / 100,
+            index,
+            task.tgid,
+            task.state,
+            task.wait_kind,
+            task.last_syscall,
+            frame.rip,
+            frame.rax,
+            frame.rdi,
+            frame.rsi,
+            frame.rdx,
+            frame.r10,
+            task.futex_space,
+            task.futex_address,
+            resolved,
+            word,
+            task.futex_deadline,
+            task.wait_deadline,
+            task.cpu_ticks
+        );
+    }
+}
+
 /// Implements the wake-then-requeue half of `FUTEX_CMP_REQUEUE`.
 ///
 /// Up to `wake` waiters on `address` become ready; every further waiter on the
@@ -2912,7 +2979,9 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
 /// word to `target`, so a later `FUTEX_WAKE(target)` reaches it. This mirrors
 /// the POSIX condition-variable hand-off glibc performs on broadcast.
 pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -> i64 {
-    let (Some(address), Some(target)) = (futex_key(address), futex_key(target)) else {
+    let (Some((space, address)), Some((target_space, target))) =
+        (futex_key(address), futex_key(target))
+    else {
         return LINUX_EFAULT;
     };
     let tasks = unsafe { &mut *TASKS.0.get() };
@@ -2922,7 +2991,10 @@ pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -
         if woken >= wake && moved >= requeue {
             break;
         }
-        if task.state != TaskState::Blocked || task.futex_address != address {
+        if task.state != TaskState::Blocked
+            || task.futex_address != address
+            || task.futex_space != space
+        {
             continue;
         }
         if woken < wake {
@@ -2931,6 +3003,7 @@ pub fn linux_futex_requeue(address: u64, target: u64, wake: u64, requeue: u64) -
             task.futex_deadline = 0;
             woken += 1;
         } else {
+            task.futex_space = target_space;
             task.futex_address = target;
             task.futex_deadline = 0;
             moved += 1;
@@ -2988,7 +3061,7 @@ pub fn futex_trace(command: u64, address: u64, value: u32, arg4: u64, target: u6
 /// identifiable from the serial log without a debugger. The trace prints one
 /// line whenever the call number changes, so a burst of identical calls
 /// collapses into a single line.
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(any(feature = "gate4-gui-test", feature = "linux-wait-dump"))]
 pub fn linux_set_last_syscall(number: u64) {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
@@ -3004,7 +3077,7 @@ pub fn linux_set_last_syscall(number: u64) {
 ///
 /// The trace is bounded: the emulated serial port cannot carry an unbounded
 /// number of lines.
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(any(feature = "gate4-gui-test", feature = "linux-wait-dump"))]
 pub fn linux_trace_enosys(number: u64) {
     const TRACE_LIMIT: usize = 32;
     static TRACED: AtomicUsize = AtomicUsize::new(0);
@@ -3079,7 +3152,7 @@ pub fn linux_trace_fdcall(number: u64, fd: u64, result: i64) {
 }
 
 /// Returns `true` when the current task belongs to the Gate 4 GUI program.
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(any(feature = "gate4-gui-test", feature = "linux-wait-dump"))]
 pub fn linux_is_appimage_task() -> bool {
     current_app_slot() < crate::linux::MAX_APPS
 }
@@ -8829,6 +8902,11 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             task.wait_deadline = 0;
             task.state = TaskState::Ready;
         }
+    }
+
+    #[cfg(feature = "linux-wait-dump")]
+    if now.is_multiple_of(1000) {
+        linux_wait_dump(now);
     }
 
     // An armed timerfd crossing its deadline wakes poll/epoll waiters so they
