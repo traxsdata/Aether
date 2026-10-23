@@ -583,7 +583,7 @@ net-test:
 terminal-test: image
 	$(PYTHON) tools/test-terminal.py
 
-iso:
+iso: image
 	sh tools/make-iso.sh
 
 # Prove the distribution ISO follows the El Torito UEFI path used by VMware.
