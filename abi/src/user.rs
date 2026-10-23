@@ -61,7 +61,11 @@ pub enum Syscall {
     List = 8,
     /// Return a file's size and rights without opening it.
     Stat = 9,
-    /// Yield until the next timer tick. Used by tests and cooperative loops.
+    /// Sleep for `arg0` timer ticks. The caller is parked as `Blocked` with a
+    /// wake deadline ([`sleep_wake_deadline`]) and is not selected before that
+    /// deadline; the kernel timer re-arms it once the deadline elapses
+    /// ([`deadline_elapsed`]). `arg0` of `0` parks until the very next tick.
+    /// Returns zero.
     Sleep = 10,
     /// Return the current system uptime in timer ticks.
     Uptime = 11,
@@ -213,6 +217,31 @@ impl Syscall {
             _ => None,
         }
     }
+}
+
+/// Computes the absolute wake deadline (in timer ticks) for a
+/// [`Syscall::Sleep`] of `ticks` ticks, measured from `now` (the scheduler
+/// tick count, as reported by [`Syscall::Uptime`]).
+///
+/// The result wraps at `u64::MAX` the same way the scheduler's tick counter
+/// does, so the [`deadline_elapsed`] check stays the same unsigned
+/// comparison the kernel already uses for every other deadline wait.
+#[must_use]
+pub fn sleep_wake_deadline(now: u64, ticks: u64) -> u64 {
+    now.wrapping_add(ticks)
+}
+
+/// Returns whether a caller parked by [`Syscall::Sleep`] (or blocked on another
+/// deadline wait) with absolute tick `deadline` — `0` meaning "no deadline" —
+/// should be woken at tick `now`.
+///
+/// This is the exact predicate the kernel's timer path uses to release a
+/// sleeping task from `Blocked` back to `Ready`: a sleeping task is not
+/// selected before its deadline and is selected at the deadline and after; a
+/// task with no deadline is only ever retired, never woken by the tick.
+#[must_use]
+pub fn deadline_elapsed(deadline: u64, now: u64) -> bool {
+    deadline != 0 && now >= deadline
 }
 
 /// File access flags passed to [`Syscall::Open`].
@@ -540,6 +569,75 @@ pub enum UserTestResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOW: u64 = 1_000;
+
+    #[test]
+    fn sleep_deadline_is_now_plus_ticks() {
+        assert_eq!(sleep_wake_deadline(NOW, 0), NOW);
+        assert_eq!(sleep_wake_deadline(NOW, 1), NOW + 1);
+        assert_eq!(sleep_wake_deadline(NOW, 100), NOW + 100);
+        // Duration is relative to the moment the sleep was requested.
+        assert_eq!(sleep_wake_deadline(NOW + 7, 40), NOW + 47);
+    }
+
+    #[test]
+    fn sleep_task_is_not_selected_before_its_deadline() {
+        for ticks in [1u64, 5, 100, u32::MAX as u64] {
+            let deadline = sleep_wake_deadline(NOW, ticks);
+            for now in NOW..deadline {
+                assert!(
+                    !deadline_elapsed(deadline, now),
+                    "a sleeping task must stay parked at now={now} before its deadline {deadline}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sleep_task_is_selected_at_and_after_its_deadline() {
+        for ticks in [1u64, 5, 100, u32::MAX as u64] {
+            let deadline = sleep_wake_deadline(NOW, ticks);
+            assert!(
+                deadline_elapsed(deadline, deadline),
+                "woken exactly at the deadline"
+            );
+            assert!(
+                deadline_elapsed(deadline, deadline + 1),
+                "woken one tick after the deadline"
+            );
+            assert!(
+                deadline_elapsed(deadline, u64::MAX),
+                "woken far after the deadline"
+            );
+        }
+    }
+
+    #[test]
+    fn sleep_with_no_deadline_is_never_woken_by_the_tick() {
+        // `0` is the sentinel for "no deadline": retired, not ticked awake.
+        assert!(!deadline_elapsed(0, NOW));
+        assert!(!deadline_elapsed(0, u64::MAX));
+    }
+
+    #[test]
+    fn sleep_deadline_wraps_like_the_scheduler_tick_counter() {
+        // A deadline computed near `u64::MAX` wraps exactly like the
+        // scheduler's tick counter, and the wake check is the same unsigned
+        // comparison the kernel uses for futex, poll, and timer deadlines, so
+        // a wrapped deadline still wakes the task once the counter reaches it.
+        let now = u64::MAX - 2;
+        let deadline = sleep_wake_deadline(now, 5);
+        assert_eq!(deadline, 2);
+        assert!(
+            deadline_elapsed(deadline, deadline),
+            "woken exactly at the deadline"
+        );
+        assert!(
+            deadline_elapsed(deadline, deadline + 1),
+            "woken one tick after"
+        );
+    }
 
     #[test]
     fn every_syscall_number_round_trips() {

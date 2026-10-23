@@ -768,7 +768,7 @@ impl Shell {
                 break;
             }
             if !progress {
-                let _ = sdk::sleep();
+                let _ = sdk::sleep(1);
             }
         }
         if let Some(pipe) = input_open {

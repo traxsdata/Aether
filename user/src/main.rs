@@ -477,7 +477,7 @@ pub extern "C" fn _start() -> ! {
         fail("yield did not schedule");
     }
     let before_sleep = sdk::uptime();
-    let _ = sdk::sleep();
+    let _ = sdk::sleep(1);
     if sdk::uptime() <= before_sleep {
         fail("sleep did not schedule");
     }

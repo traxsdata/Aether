@@ -134,7 +134,7 @@ Implemented calls:
 | 7 | `close` | handle | 0 |
 | 8 | `list` | path, path length, buffer, length | bytes written |
 | 9 | `stat` | path, path length | file size |
-| 10 | `sleep` | — | 0 after yielding to the scheduler (no sleep queue yet) |
+| 10 | `sleep` | duration in timer ticks in `RDI` (low 32 bits; 0 = until the next tick) | 0; the caller is parked `Blocked` with an absolute wake deadline and is not selected before it elapses |
 | 11 | `uptime` | — | timer ticks |
 | 12 | `portal_open` | path, path length, rights | file handle |
 | 13 | `create_window` | reserved | reserved |
@@ -173,6 +173,9 @@ Rules for this implementation:
   present with the user bit (and writable for output) before a copy.
 - File paths are resolved relative to the caller's kernel-owned root; `..` is
   rejected.
+- `sleep` parks the caller as `Blocked` with a wake deadline of
+  `uptime() + ticks` and releases it only when a scheduler tick observes the
+  deadline as elapsed; it never returns to a `Ready` state, unlike `yield`.
 - Sender identity is derived from the current task, not from a message field.
 - Portal access requires an exact process-root, path, and right grant.
 - A ring-3 fault retires the task; the kernel remains alive.

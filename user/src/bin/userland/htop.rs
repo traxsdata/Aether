@@ -590,7 +590,7 @@ pub fn main(args: &Args) -> i64 {
                 dirty = true;
             }
             None => {
-                let _ = sdk::sleep();
+                let _ = sdk::sleep(2);
             }
         }
         if sdk::uptime() >= next_sample {

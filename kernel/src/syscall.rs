@@ -9,7 +9,6 @@
 
 use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::serial;
-use crate::arch::x86_64::timer;
 use crate::arch::x86_64::usercopy;
 use crate::linux_policy;
 use crate::memory::paging;
@@ -101,6 +100,7 @@ fn service_syscall_allowed(call: Syscall) -> bool {
             | Syscall::Uptime
             | Syscall::EndpointSend
             | Syscall::EndpointReceive
+            | Syscall::EndpointReceiveTimeout
     )
 }
 
@@ -174,13 +174,37 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         return frame;
     }
 
-    // Yield and sleep must actually give another ready task a chance to run.
-    // The frame is saved by the scheduler and resumed after the next tick (or
-    // immediately if another task is ready), with RAX set to zero.
-    if matches!(call, Syscall::Yield | Syscall::Sleep) {
+    // Yield and sleep must both hand the CPU to the next runnable task: the
+    // frame is saved by the scheduler and resumed after the next tick (or
+    // immediately if another task is ready), with RAX set to zero. Sleep
+    // additionally parks the caller as `Blocked` for its arg0 duration; the
+    // timer path releases it only when the wake deadline elapses.
+    if call == Syscall::Yield {
         // SAFETY: Same frame invariant as above.
         unsafe { (*frame).rax = 0 };
         return scheduler::yield_current(frame);
+    }
+    if call == Syscall::Sleep {
+        // The low 32 bits are the duration, as with `EndpointReceiveTimeout`.
+        let ticks = rdi & u64::from(u32::MAX);
+        return scheduler::sleep_current(frame, ticks);
+    }
+    // A blocking receive parks the caller as `Blocked` for one tick per empty
+    // queue re-check, the way `Sleep` parks: the timer path releases it and
+    // the re-executed receive reports the message or the expired deadline.
+    if call == Syscall::EndpointReceiveTimeout {
+        // The low 32 bits are the deadline in ticks; zero waits without a
+        // deadline, as with `Sleep`.
+        let fifth = unsafe { (*frame).r8 };
+        return endpoint_receive_timeout(
+            frame,
+            pml4,
+            rdi,
+            rsi,
+            rdx,
+            r10,
+            fifth & u64::from(u32::MAX),
+        );
     }
 
     let result = match call {
@@ -202,11 +226,7 @@ pub fn dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         Syscall::Stat => crate::fs::sys_stat(pml4, rdi, rsi).unwrap_or(errno::EINVAL),
         Syscall::EndpointCreate => endpoint_create(),
         Syscall::EndpointSend => endpoint_send(pml4, rdi, rsi, rdx, r10),
-        Syscall::EndpointReceive => endpoint_receive(pml4, rdi, rsi, rdx, r10, None),
-        Syscall::EndpointReceiveTimeout => {
-            let fifth = unsafe { (*frame).r8 };
-            endpoint_receive(pml4, rdi, rsi, rdx, r10, Some(fifth & u64::from(u32::MAX)))
-        }
+        Syscall::EndpointReceive => endpoint_receive(pml4, rdi, rsi, rdx, r10),
         Syscall::EndpointClose => endpoint_close(rdi),
         Syscall::Spawn => crate::terminal::sys_spawn(pml4, rdi, rsi, rdx, r10),
         Syscall::Wait => {
@@ -3251,58 +3271,104 @@ fn ipc_denied_usage() -> i64 {
 /// slot is released, so it is never consumed without the table entry
 /// staying visible to the caller.
 ///
-/// With `timeout` set, the call is a blocking receive: an empty queue yields
-/// the CPU and retries on the next timer wakeup until a message arrives or the
-/// tick deadline passes. Interrupts are re-enabled only around the wait, and
-/// the syscall gate is restored to its masked state before returning.
-fn endpoint_receive(
+/// An empty queue denies the call with `EAGAIN`; a caller that needs to wait
+/// uses [`endpoint_receive_timeout`] instead, which parks until a message
+/// arrives or its tick deadline elapses.
+fn endpoint_receive(pml4: PhysFrame, handle: u64, pointer: u64, length: u64, out: u64) -> i64 {
+    let Some(cap) = receive_capability(pml4, handle, pointer, length, out) else {
+        return ipc_denied_usage();
+    };
+    match receive_once(pml4, cap, pointer, out) {
+        Ok(received_len) => {
+            IPC_RECEIVES.fetch_add(1, Ordering::Release);
+            received_len as i64
+        }
+        Err(error) => ipc_denied(error),
+    }
+}
+
+/// `EndpointReceiveTimeout`: waits for a message by parking as `Blocked`.
+///
+/// Every empty queue re-check parks the caller for one tick, the way `Sleep`
+/// parks: the timer path releases the task, the re-executed `int 0x80`
+/// re-enters this call, and the receiver checks the queue again. Because a
+/// parked task is only released on a live tick, it always hands the CPU to a
+/// runnable task while it waits, unlike a busy wait inside the gate. A zero
+/// deadline parks until a message arrives or the task is retired.
+///
+/// The deadline is absolute and survives the parks: on re-execution the
+/// restart marker takes precedence over the re-passed `r8`, so the wait
+/// elapses at the requested tick instead of one tick after every park.
+/// `IPC_BLOCKS` counts the parked re-checks and `IPC_TIMEOUTS` the deadlines
+/// that expired.
+fn endpoint_receive_timeout(
+    frame: *mut InterruptFrame,
     pml4: PhysFrame,
     handle: u64,
     pointer: u64,
     length: u64,
     out: u64,
-    timeout: Option<u64>,
-) -> i64 {
-    let Some(cap) = decode_ipc_handle(handle) else {
-        return ipc_denied_usage();
+    ticks: u64,
+) -> *mut InterruptFrame {
+    let number = Syscall::EndpointReceiveTimeout as u64;
+    // A receiver that parked arrives here again with its original arguments:
+    // the restart marker carries the deadline it computed on first entry.
+    let deadline = match scheduler::linux_take_restart(number) {
+        Some(restored) => restored,
+        None => (ticks != 0).then(|| scheduler::ticks().saturating_add(ticks)),
     };
-    if (length as usize) < MAX_MESSAGE_BYTES {
-        return ipc_denied_usage();
-    }
-    if out == 0 || out >= USER_LIMIT || !linux_user_range_valid(pml4, out, 4, true) {
-        return ipc_denied_usage();
-    }
-    if ranges_overlap(pointer, length, out, 4) {
-        return ipc_denied_usage();
-    }
-
-    let deadline =
-        timeout.and_then(|ticks| (ticks != 0).then(|| scheduler::ticks().saturating_add(ticks)));
-
-    loop {
-        match receive_once(pml4, cap, pointer, out) {
-            Ok(received_len) => {
-                IPC_RECEIVES.fetch_add(1, Ordering::Release);
-                return received_len as i64;
+    let Some(cap) = receive_capability(pml4, handle, pointer, length, out) else {
+        // SAFETY: The syscall gate passes the live frame of the interrupted
+        // task with interrupts masked, the same invariant `dispatch` relies
+        // on for its own result writes.
+        unsafe { (*frame).rax = ipc_denied_usage() as u64 };
+        return frame;
+    };
+    match receive_once(pml4, cap, pointer, out) {
+        Ok(received_len) => {
+            IPC_RECEIVES.fetch_add(1, Ordering::Release);
+            // SAFETY: Same live-frame invariant as the write above.
+            unsafe { (*frame).rax = received_len as u64 };
+        }
+        Err(IpcError::Empty) => {
+            // An unbounded wait (0) is only cancelled by a message or task
+            // retirement; a finite timeout has expired at its own tick.
+            if deadline.is_some_and(|deadline| scheduler::ticks() >= deadline) {
+                IPC_TIMEOUTS.fetch_add(1, Ordering::Release);
+                // SAFETY: Same live-frame invariant as the write above.
+                unsafe { (*frame).rax = errno::ETIMEDOUT as u64 };
+                return frame;
             }
-            Err(IpcError::Empty) if timeout.is_some() => {
-                // A finite timeout has expired, and an unbounded wait (0) is
-                // only cancelled by a message or task retirement.
-                if deadline.is_some_and(|deadline| scheduler::ticks() >= deadline) {
-                    IPC_TIMEOUTS.fetch_add(1, Ordering::Release);
-                    return errno::ETIMEDOUT;
-                }
-                IPC_BLOCKS.fetch_add(1, Ordering::Release);
-                // Let the timer and every other task run. The gate entered
-                // with interrupts masked; restore that state before return so
-                // the syscall epilogue is not preempted.
-                timer::enable_interrupts();
-                timer::halt_until_interrupt();
-                timer::disable_interrupts();
-            }
-            Err(error) => return ipc_denied(error),
+            IPC_BLOCKS.fetch_add(1, Ordering::Release);
+            return scheduler::receive_park(frame, number, deadline);
+        }
+        Err(error) => {
+            // SAFETY: Same live-frame invariant as the write above.
+            unsafe { (*frame).rax = ipc_denied(error) as u64 };
         }
     }
+    frame
+}
+
+/// Validates the receive arguments and returns the caller's endpoint
+/// capability, or `None` when a field is invalid.
+fn receive_capability(
+    pml4: PhysFrame,
+    handle: u64,
+    pointer: u64,
+    length: u64,
+    out: u64,
+) -> Option<aether_ipc::CapHandle> {
+    let cap = decode_ipc_handle(handle)?;
+    if (length as usize) < MAX_MESSAGE_BYTES
+        || out == 0
+        || out >= USER_LIMIT
+        || !linux_user_range_valid(pml4, out, 4, true)
+        || ranges_overlap(pointer, length, out, 4)
+    {
+        return None;
+    }
+    Some(cap)
 }
 
 /// One validated receive attempt for [`endpoint_receive`].
