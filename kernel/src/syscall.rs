@@ -10,6 +10,7 @@
 use crate::arch::x86_64::idt::InterruptFrame;
 use crate::arch::x86_64::serial;
 use crate::arch::x86_64::usercopy;
+use crate::linux_gap;
 use crate::linux_policy;
 use crate::memory::paging;
 use crate::memory::shared;
@@ -305,6 +306,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     match class {
         linux_policy::Class::Unknown => {
             linux_policy::record_unknown();
+            linux_gap::record(number, linux_gap::Tag::UnknownSyscall, 0, 0);
             #[cfg(feature = "gate4-gui-test")]
             if scheduler::linux_is_appimage_task() {
                 // The bounded trace names the calls the application needs and
@@ -322,6 +324,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         }
         linux_policy::Class::Device => {
             linux_policy::record_denied(class);
+            linux_gap::record(number, linux_gap::Tag::DeviceFacility, 0, 0);
             // SAFETY: Same live-frame invariant as above.
             unsafe { (*frame).rax = LINUX_EACCES as u64 };
             return frame;
@@ -932,9 +935,21 @@ fn linux_mmap(
     if flags & LINUX_MAP_PRIVATE != 0 && shared
         || flags & (LINUX_MAP_PRIVATE | LINUX_MAP_SHARED) == 0
     {
+        linux_gap::record(
+            9,
+            linux_gap::Tag::MmapFlags,
+            flags as u32,
+            protections as u32,
+        );
         return LINUX_EINVAL;
     }
     if protections & !7 != 0 {
+        linux_gap::record(
+            9,
+            linux_gap::Tag::MmapFlags,
+            protections as u32,
+            flags as u32,
+        );
         return LINUX_EINVAL;
     }
     // Writable+executable memory is for JIT compilers only (LLVM's section
@@ -1009,6 +1024,12 @@ fn linux_mmap(
     };
     let Some(page_flags) = linux_mmap_page_flags(protections) else {
         let _ = scheduler::linux_vma_remove(start, length);
+        linux_gap::record(
+            9,
+            linux_gap::Tag::MmapFlags,
+            protections as u32,
+            flags as u32,
+        );
         return LINUX_EINVAL;
     };
     if shared {
@@ -1157,7 +1178,11 @@ fn linux_mremap(
 ) -> i64 {
     const MREMAP_MAYMOVE: u64 = 1;
     const MREMAP_FIXED: u64 = 2;
-    if new_size == 0 || old_size == 0 || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED) != 0 {
+    if new_size == 0 || old_size == 0 {
+        return LINUX_EINVAL;
+    }
+    if flags & !(MREMAP_MAYMOVE | MREMAP_FIXED) != 0 {
+        linux_gap::record(25, linux_gap::Tag::MremapFlags, flags as u32, 0);
         return LINUX_EINVAL;
     }
     let Some(old_size) = old_size.checked_add(0xfff).map(|value| value & !0xfff) else {
@@ -1764,7 +1789,10 @@ fn linux_fcntl(fd: u64, command: u64, argument: u64) -> i64 {
     match command {
         0 | 1030 => scheduler::linux_dup(fd).map_or_else(|error| error, |new| new as i64),
         1..=4 => 0,
-        _ => LINUX_EINVAL,
+        _ => {
+            linux_gap::record(72, linux_gap::Tag::FcntlCommand, command as u32, 0);
+            LINUX_EINVAL
+        }
     }
 }
 
@@ -2505,6 +2533,9 @@ fn linux_clone_process(
         || flags & CLONE_SIGNAL_MASK != SIGCHLD
         || flags & (CLONE_VM | CLONE_VFORK) == CLONE_VM
     {
+        // `vfork` reaches this path with always-supported flags, so the
+        // recorded number is the caller's clone call.
+        linux_gap::record(56, linux_gap::Tag::CloneFlags, flags as u32, 0);
         return Cloned::Done(LINUX_EINVAL);
     }
     let spec = scheduler::ForkSpec {
@@ -2581,13 +2612,16 @@ fn linux_clone3(
     // set_tid, and cgroups fail explicitly instead of silently changing
     // meaning; glibc falls back to clone on ENOSYS.
     if pidfd != 0 || set_tid != 0 || set_tid_size != 0 || cgroup != 0 {
+        linux_gap::record(435, linux_gap::Tag::Clone3Flags, flags as u32, 0);
         return Cloned::Done(LINUX_ENOSYS);
     }
     if flags & CLONE_SIGNAL_MASK != 0 {
+        linux_gap::record(435, linux_gap::Tag::Clone3Flags, flags as u32, 0);
         return Cloned::Done(LINUX_EINVAL);
     }
     if flags & CLONE_THREAD == 0 {
         if exit_signal != SIGCHLD {
+            linux_gap::record(435, linux_gap::Tag::Clone3Flags, flags as u32, 0);
             return Cloned::Done(LINUX_EINVAL);
         }
         let child_stack = if stack == 0 {
@@ -2612,6 +2646,7 @@ fn linux_clone3(
         || flags & !SUPPORTED != 0
         || flags & (CLONE_VM | CLONE_THREAD) != (CLONE_VM | CLONE_THREAD)
     {
+        linux_gap::record(435, linux_gap::Tag::Clone3Flags, flags as u32, 0);
         return Cloned::Done(LINUX_ENOSYS);
     }
     if stack == 0 {

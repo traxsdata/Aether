@@ -21,6 +21,7 @@ mod icons;
 mod input;
 mod ipc;
 mod linux;
+mod linux_gap;
 mod linux_loader;
 mod linux_policy;
 mod linuxd;

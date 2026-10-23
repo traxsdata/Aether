@@ -1469,6 +1469,17 @@ after_seccomp:
     syscall
     cmp $-22, %rax
     jne fail_clone_process
+    /* The second known ABI gap (issue #102): the kernel has no
+       PR_SET_ENDIAN, so this must fail with EINVAL and leave a row in
+       the linux-gap table alongside the clone refusal above. */
+    PRCTL 7, 1                  /* PR_SET_ENDIAN */
+    cmp $-22, %rax
+    jne fail_gap
+    mov $1, %rax
+    mov $1, %rdi
+    lea gap_message(%rip), %rsi
+    mov $gap_message_len, %rdx
+    syscall
     mov $1, %rax
     mov $1, %rdi
     lea clone_process_message(%rip), %rsi
@@ -4892,6 +4903,10 @@ fail_clone_process:
     lea clone_process_failure(%rip), %rsi
     mov $clone_process_failure_len, %rdx
     jmp report_failure
+fail_gap:
+    lea gap_failure(%rip), %rsi
+    mov $gap_failure_len, %rdx
+    jmp report_failure
 fail_seccomp:
     lea seccomp_failure(%rip), %rsi
     mov $seccomp_failure_len, %rdx
@@ -5531,6 +5546,12 @@ clone_process_message:
 clone_process_failure:
     .ascii "AETHER_LINUX_CLONE_PROCESS_FAIL\n"
     .set clone_process_failure_len, . - clone_process_failure
+gap_message:
+    .ascii "AETHER_LINUX_GAP_OK clone=einval prctl=einval\n"
+    .set gap_message_len, . - gap_message
+gap_failure:
+    .ascii "AETHER_LINUX_GAP_FAIL\n"
+    .set gap_failure_len, . - gap_failure
 cow_message:
     .ascii "AETHER_LINUX_COW_FORK_OK child=private parent=private kernel_write=ok mprotect=ok\n"
     .set cow_message_len, . - cow_message

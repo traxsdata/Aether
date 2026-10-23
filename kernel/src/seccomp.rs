@@ -20,6 +20,7 @@
 //!   `CAP_SYS_ADMIN`.
 
 use crate::arch::x86_64::idt::InterruptFrame;
+use crate::linux_gap;
 use crate::scheduler;
 use crate::syscall::copy_from_user;
 use aether_memory::frame::PhysFrame;
@@ -300,6 +301,14 @@ pub fn sys_prctl(pml4: PhysFrame, option: u64, args: [u64; 4]) -> i64 {
             let name = scheduler::linux_task_name();
             crate::syscall::copy_to_user(pml4, args[0], &name).map_or(EFAULT, |()| 0)
         }
-        _ => EINVAL,
+        _ => {
+            linux_gap::record(
+                157,
+                linux_gap::Tag::PrctlOption,
+                option as u32,
+                args[0] as u32,
+            );
+            EINVAL
+        }
     }
 }

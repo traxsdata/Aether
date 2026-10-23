@@ -149,6 +149,9 @@ def main() -> int:
             ("desktop", "desktop: space="),
             ("input", "input: dropped="),
             ("uptime", "uptime:"),
+            ("linux-gaps", "syscall=56/clone"),
+            ("linux-gaps", "syscall=157/prctl"),
+            ("linux-gaps linux", "syscall=157/prctl"),
         ):
             output = send_command(client, command)
             transcript += output

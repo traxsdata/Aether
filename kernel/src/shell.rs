@@ -126,6 +126,10 @@ fn execute_line() {
         "packages" => crate::packaging::print_status(),
         "runtime" => crate::runtime::print_status(),
         "linuxd" => crate::linuxd::print_status(),
+        "linux-gaps" => {
+            let filter = if argument.is_empty() { "" } else { argument };
+            crate::linux_gap::print(filter)
+        }
         "linux-erase" => {
             if argument.is_empty() {
                 serial_line!("linux-erase: usage: linux-erase <appimage|test>");
@@ -176,6 +180,7 @@ fn print_help() {
     serial_line!("  packages         installed package and verification status");
     serial_line!("  runtime          per-application runtime profiles");
     serial_line!("  linuxd           Linux runtime manager and AppImage status");
+    serial_line!("  linux-gaps [APP] unimplemented Linux syscall and flag gaps");
     serial_line!("  linux-erase APP  erase an application's settings/logs overlay");
     serial_line!("  updates          signed update and rollback status");
     serial_line!("  desktop [redraw|reset] compositor state and rendering timings");

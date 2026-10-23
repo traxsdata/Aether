@@ -403,7 +403,10 @@ pub fn dispatch(frame: *mut InterruptFrame, pml4: PhysFrame, number: u64) -> *mu
         55 => Done(getsockopt(pml4, a0, a1 as u32, a2 as u32, a3, a4)),
         // recvmmsg and sendmmsg: glibc and Firefox fall back to the single
         // message calls.
-        _ => Done(ENOSYS),
+        _ => {
+            crate::linux_gap::record(number, crate::linux_gap::Tag::UnknownSyscall, 0, 0);
+            Done(ENOSYS)
+        }
     };
     match outcome {
         Done(result) => linux_result(frame, result),
@@ -479,6 +482,12 @@ fn write_address(
 
 fn socket(domain: u64, kind: u64, protocol: u64) -> i64 {
     if kind & !(SOCK_TYPE_MASK | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+        crate::linux_gap::record(
+            41,
+            crate::linux_gap::Tag::SocketKind,
+            domain as u32,
+            kind as u32,
+        );
         return EINVAL;
     }
     let nonblock = kind & SOCK_NONBLOCK != 0;
@@ -488,7 +497,15 @@ fn socket(domain: u64, kind: u64, protocol: u64) -> i64 {
         AF_INET | AF_INET6 => {
             inet::InetSocket::new(domain as u16, socket_type, protocol).map(SocketKind::Inet)
         }
-        _ => Err(EAFNOSUPPORT),
+        other => {
+            crate::linux_gap::record(
+                41,
+                crate::linux_gap::Tag::SocketKind,
+                other as u32,
+                socket_type,
+            );
+            Err(EAFNOSUPPORT)
+        }
     };
     let result = created
         .and_then(|kind| allocate(kind, nonblock))
@@ -928,10 +945,22 @@ fn setsockopt(pml4: PhysFrame, fd: u64, level: u32, name: u32, pointer: u64, len
     if len != 0 && copy_from_user(pml4, pointer, &mut value[..len]).is_none() {
         return EFAULT;
     }
-    with_socket(fd, |kind, _| match kind {
-        SocketKind::Unix(socket) => socket.setsockopt(level, name, &value[..len]),
-        SocketKind::Inet(socket) => socket.setsockopt(level, name, &value[..len]),
-    })
+    let result = socket_index(fd)
+        .and_then(slot)
+        .and_then(|slot| match &mut slot.kind {
+            SocketKind::Unix(socket) => socket.setsockopt(level, name, &value[..len]),
+            SocketKind::Inet(socket) => socket.setsockopt(level, name, &value[..len]),
+        });
+    scheduler::linux_wake_pollers();
+    if let Err(error) = result
+        && (error == ENOPROTOOPT || error == EINVAL || error == EOPNOTSUPP)
+    {
+        crate::linux_gap::record(54, crate::linux_gap::Tag::SetsockoptOption, level, name);
+    }
+    match result {
+        Ok(()) => 0,
+        Err(error) => error,
+    }
 }
 
 fn getsockopt(
