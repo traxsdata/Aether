@@ -24,7 +24,6 @@ def main() -> int:
             ["cargo", "metadata", "--format-version", "1", "--locked"],
             cwd=ROOT,
             text=True,
-            stderr=subprocess.STDOUT,
         )
     except (OSError, subprocess.CalledProcessError) as error:
         print(f"error: cargo metadata failed: {error}", file=sys.stderr)
