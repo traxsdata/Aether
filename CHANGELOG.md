@@ -544,6 +544,14 @@ versioning scheme until the kernel ABI stabilises.
 
 ### Changed
 
+- The `sleep` syscall takes a duration in timer ticks (`arg0`, 100 Hz) and
+  parks the caller `Blocked` until `on_tick` passes the deadline; it no longer
+  only yields. `sdk::sleep` is `sleep(ticks: u32)`, the shell `sleep` command
+  is now accurate to one tick, and `htop`, pipe pumps, and selftests pass
+  explicit tick intervals. The system ABI documents the duration; no syscall
+  table version bump is needed. `endpoint_receive_timeout` now parks the
+  caller the same way (see Fixed).
+
 - Portal grant records are fixed-size validated records rather than
   `&'static str` boot seeds. Corrupt or duplicate stores fail closed instead of
   loading partially.
@@ -601,6 +609,14 @@ versioning scheme until the kernel ABI stabilises.
   after the user program exits.
 
 ### Fixed
+
+- `endpoint_receive_timeout` no longer busy HLT-retries inside the syscall.
+  That spin kept reselecting the same task as long as it was the only Ready
+  one, which starved the boot loop and hung boot after the last Linux process
+  exited. The wait now parks the caller `Blocked` and wakes from `on_tick`: a
+  queued message is reported within one tick, zero still waits indefinitely,
+  and `ETIMEDOUT` arrives at the original request deadline. The Linux service
+  uses the blocking receive for launch requests.
 
 - `make gate4-gui-portal-test` passes again. It waited for the quota and
   Gate 4 display markers, which the fixture compiles out of the GUI build

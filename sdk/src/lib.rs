@@ -70,10 +70,15 @@ pub fn yield_now() -> i64 {
     unsafe { syscall4(Syscall::Yield as u64, 0, 0, 0, 0) }
 }
 
-/// Sleeps until the next timer tick.
-pub fn sleep() -> i64 {
-    // SAFETY: No pointers or handles are involved.
-    unsafe { syscall4(Syscall::Sleep as u64, 0, 0, 0, 0) }
+/// Sleeps for `ticks` timer ticks, parking the caller out of the ready queue.
+///
+/// `ticks` is measured in scheduler ticks (100 Hz on the supported platform).
+/// The caller is blocked until its wake deadline elapses, so an idle program
+/// neither burns CPU nor steals time slices while it waits. `0` still yields
+/// to the next tick. Returns zero.
+pub fn sleep(ticks: u32) -> i64 {
+    // SAFETY: `ticks` is a scalar duration; no pointers or handles involved.
+    unsafe { syscall4(Syscall::Sleep as u64, u64::from(ticks), 0, 0, 0) }
 }
 
 /// Returns the current process identifier.

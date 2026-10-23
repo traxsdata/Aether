@@ -69,10 +69,12 @@ Implemented in `kernel/ipc` (`aether-ipc`) plus a kernel object table:
   `EAGAIN` and an empty queue denies `endpoint_receive` with `EAGAIN`; the
   kernel counts denied attempts and the boot gate requires the negative paths
   to have run.
-- Blocking receive (`endpoint_receive_timeout`, system call 19) yields the CPU
-  through the timer while the queue is empty and returns `ETIMEDOUT` after a
-  tick deadline. A timeout of zero waits without a deadline. The syscall gate
-  restores its masked interrupt state before returning.
+- Blocking receive (`endpoint_receive_timeout`, system call 19) parks the
+  caller as `Blocked` for one tick per empty re-check and returns
+  `ETIMEDOUT` once the tick deadline has elapsed. A timeout of zero waits
+  without a deadline. The absolute deadline survives the parks through the
+  restart fields, and the receiver is only released on a live tick, so it
+  always hands the CPU to a runnable task while it waits.
 - Closing an endpoint (`endpoint_close`, system call 18) revokes every alias in
   the caller's table. When the caller owns the object, it is destroyed and the
   slot generation advances, so aliases held by other tasks fail with `EBADF`

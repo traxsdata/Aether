@@ -19,7 +19,8 @@ use crate::serial_line;
 use aether_abi::user::{
     ARGUMENT_BLOCK_BYTES, MAX_ARGUMENTS, PROCESS_FLAG_SESSION, PROCESS_FLAG_USER,
     PROCESS_NAME_BYTES, ProcessKind, ProcessRecord, ProcessState, USER_BASE, USER_LIMIT,
-    USER_STACK_PAGES, USER_STACK_TOP, UserTestResult, errno, fixed_name,
+    USER_STACK_PAGES, USER_STACK_TOP, UserTestResult, deadline_elapsed, errno, fixed_name,
+    sleep_wake_deadline,
 };
 use aether_boot_common::elf;
 use aether_fs::FsError;
@@ -8578,8 +8579,7 @@ fn schedule_next(current: usize) -> *mut InterruptFrame {
 ///
 /// The syscall gate calls this with interrupts masked. If another task is
 /// ready, it runs immediately; otherwise the idle task runs until the next
-/// timer tick selects this task again. `Sleep` uses the same scheduling point:
-/// the prototype has no sleep queue, but it must not return without yielding.
+/// timer tick selects this task again.
 pub fn yield_current(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
@@ -8588,6 +8588,62 @@ pub fn yield_current(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         tasks[current].state = TaskState::Ready;
     }
     schedule_next(current)
+}
+
+/// Parks the current task as `Blocked` for `ticks` timer ticks and returns
+/// the frame to resume once the wake deadline has elapsed.
+///
+/// The deadline goes to the same field the kernel uses for its other
+/// deadline waits, so the timer path releases the task exactly when the
+/// deadline elapses and never before. A zero duration still spans one tick,
+/// because a parked task is only released on a live tick. RAX is restored to
+/// zero before the first context switch, so the resumed frame reports zero
+/// like it already does after `Yield` or a blocking `EndpointReceiveTimeout`.
+pub fn sleep_current(frame: *mut InterruptFrame, ticks: u64) -> *mut InterruptFrame {
+    // SAFETY: The syscall gate passes the live frame of the interrupted task
+    // with interrupts masked, the same invariant `yield_current` relies on.
+    unsafe { (*frame).rax = 0 };
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    // SAFETY: The scheduler owns the current task's wait fields; this call
+    // runs in the single-CPU, interrupt-masked syscall context.
+    tasks[current].wait_deadline = sleep_wake_deadline(TICKS.load(Ordering::Relaxed), ticks);
+    tasks[current].wait_kind = LinuxWaitKind::None;
+    tasks[current].state = TaskState::Blocked;
+    yield_current(frame)
+}
+
+/// Parks the current task for one tick, rewinding the interrupted system
+/// call so it re-executes on wake.
+///
+/// A blocking endpoint receive uses this for every empty re-check: the timer
+/// path releases the task exactly as it releases `Sleep`, and the re-run
+/// receiver re-checks the queue against the absolute `deadline`, which it
+/// keeps in the restart fields so it survives the parks. A task with no
+/// deadline parks until a message arrives or the task is retired.
+/// `linux_take_restart` gives the re-executed call the deadline back.
+pub fn receive_park(
+    frame: *mut InterruptFrame,
+    syscall: u64,
+    deadline: Option<u64>,
+) -> *mut InterruptFrame {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    // SAFETY: The scheduler owns the current task's wait and restart fields;
+    // this call runs in the single-CPU, interrupt-masked syscall context.
+    let task = &mut tasks[current];
+    task.wait_kind = LinuxWaitKind::None;
+    task.wait_deadline = sleep_wake_deadline(TICKS.load(Ordering::Relaxed), 1);
+    task.restart_syscall = syscall;
+    task.restart_deadline = deadline.unwrap_or(0);
+    task.restart_infinite = deadline.is_none();
+    task.state = TaskState::Blocked;
+    // SAFETY: Native calls always enter through the two-byte `int 0x80`, so
+    // rewinding two bytes re-executes the interrupted receive on resume; the
+    // same invariant `linux_park` relies on for the Linux `syscall` gate.
+    unsafe { (*frame).rip = (*frame).rip.wrapping_sub(2) };
+    task.restart_rip = unsafe { (*frame).rip };
+    yield_current(frame)
 }
 
 /// Returns true when `frame` is about to re-execute the parked wait of task
@@ -8657,8 +8713,7 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         }
         // Sleep, poll, epoll, and pipe waits re-check their own condition when
         // resumed, so only the deadline expiry needs a wake here.
-        if task.state == TaskState::Blocked && task.wait_deadline != 0 && now >= task.wait_deadline
-        {
+        if task.state == TaskState::Blocked && deadline_elapsed(task.wait_deadline, now) {
             task.wait_kind = LinuxWaitKind::None;
             task.wait_deadline = 0;
             task.state = TaskState::Ready;

@@ -24,6 +24,7 @@
 #![no_std]
 #![no_main]
 
+use aether_abi::user::errno;
 use aether_sdk as sdk;
 
 /// First capability granted to this task: receive on the request endpoint.
@@ -55,7 +56,14 @@ const DENY_PROTOCOL: u8 = 3;
 const MAX_FIELD: usize = 63;
 /// The service stays resident so the desktop can launch several apps.
 const MAX_ROUNDS: usize = 64;
-const IDLE_LIMIT: usize = 200_000;
+/// Quiet window for one blocking receive: long enough for the desktop to
+/// queue a request between scheduler ticks, short enough to stay responsive.
+const RECEIVE_WAIT_TICKS: u32 = 10;
+/// Consecutive quiet windows before the service gives up. Each window now
+/// blocks for `RECEIVE_WAIT_TICKS` ticks of a parked deadline wait instead of
+/// one tick of the old poll-plus-yield loop, so the wall-clock budget stays
+/// at roughly the same 200 000 scheduler ticks (~33 minutes) as before.
+const IDLE_LIMIT: usize = 20_000;
 
 fn puts(text: &str) {
     let _ = sdk::print_str(text);
@@ -261,7 +269,7 @@ pub extern "C" fn _start() -> ! {
         if rounds >= MAX_ROUNDS {
             fail("launch request round limit reached");
         }
-        match sdk::endpoint_receive(REQUEST_HANDLE, &mut buffer) {
+        match sdk::endpoint_receive_timeout(REQUEST_HANDLE, &mut buffer, RECEIVE_WAIT_TICKS) {
             Ok((length, transferred)) => {
                 if transferred != 0 || length == 0 {
                     fail("malformed launch request envelope");
@@ -272,8 +280,9 @@ pub extern "C" fn _start() -> ! {
                     if idle > IDLE_LIMIT {
                         fail("launch request incomplete");
                     }
-                    idle += 1;
-                    let _ = sdk::sleep();
+                    // The request is still open: the next blocking receive
+                    // waits for the remaining tags instead of polling, and a
+                    // stalled sender is counted by the timeout path below.
                     continue;
                 }
 
@@ -313,12 +322,16 @@ pub extern "C" fn _start() -> ! {
                 request.reset();
                 continue;
             }
-            Err(_) => {
+            Err(error) => {
+                if error != errno::ETIMEDOUT {
+                    fail("launch request receive failed");
+                }
+                // An expired window is flow control, not a fault: the service
+                // keeps waiting for the desktop's next launch request.
                 idle += 1;
                 if idle > IDLE_LIMIT {
                     fail("no launch request arrived");
                 }
-                let _ = sdk::sleep();
             }
         }
     }

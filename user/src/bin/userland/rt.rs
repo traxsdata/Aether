@@ -93,7 +93,7 @@ pub fn write_all(mut bytes: &[u8]) {
             sdk::exit(141);
         }
         if written == errno::EAGAIN || written == 0 {
-            let _ = sdk::sleep();
+            let _ = sdk::sleep(1);
             continue;
         }
         if written < 0 {
@@ -170,7 +170,7 @@ pub fn read_raw(buffer: &mut [u8]) -> usize {
         match sdk::read_input(buffer) {
             Ok(count) => return count,
             Err(errno::EAGAIN) => {
-                let _ = sdk::sleep();
+                let _ = sdk::sleep(1);
             }
             Err(_) => return 0,
         }

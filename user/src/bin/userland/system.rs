@@ -295,7 +295,7 @@ pub fn sleep(args: &Args) -> i64 {
         .map_or(0, |digit| u64::from(digit.wrapping_sub(b'0')).min(9));
     let deadline = sdk::uptime() + seconds * hz + tenths * hz / 10;
     while sdk::uptime() < deadline {
-        let _ = sdk::sleep();
+        let _ = sdk::sleep(1);
     }
     0
 }
