@@ -488,6 +488,11 @@ gesture, and there is no GPU service.
   with `TSYNC`, strict mode, stacked classic BPF filters checked and run by
   the host-tested `aether-seccomp` crate, and `SIGSYS` traps with
   `si_syscall`, `si_errno`, and `si_arch` (`AETHER_LINUX_SECCOMP_OK`).
+- [x] Process-creating `clone` and `clone3` (glibc `fork` flags,
+  `CLONE_CHILD_SETTID`/`CLEARTID`, `CLONE_SETTLS`, a new stack) and `vfork`
+  semantics for `vfork` and `CLONE_VM | CLONE_VFORK`, which `posix_spawn`
+  uses; namespaces fail with `EPERM` (`AETHER_LINUX_CLONE_PROCESS_OK`).
+- [ ] Copy-on-write `fork`. Every fork still copies the whole address space.
 - [ ] On-demand AppImage import. Every imported file still stays resident in
   the fixed heap arena; large applications need a selective import of the
   files they open.
