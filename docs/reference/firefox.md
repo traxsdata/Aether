@@ -87,6 +87,19 @@ the kernel and given only to the app named by `LINUX_APPIMAGE_ARGS_APP`.
 log in `build/serial.log` to see how far Firefox got. The current blockers are
 listed in issue #107.
 
+To see where a hung run is waiting, add the debug-only `linux-wait-dump`
+kernel feature:
+
+```sh
+make firefox-headless-test FIREFOX_FEATURES="large-apps gate4-runtime linux-wait-dump"
+```
+
+Every 10 s the kernel then prints one `WAITDUMP` line per Linux task: its
+state, wait kind, last system call, saved user `rip` and syscall arguments,
+and for a futex waiter the key, the word's current value and its deadline.
+The feature also enables the bounded `linux: enosys nr=...` trace. It is never
+part of a normal build.
+
 Two workarounds in [`tools/firefox-headless-root.sh`](../../tools/firefox-headless-root.sh)
 are test scaffolding, not product behaviour:
 

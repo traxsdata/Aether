@@ -62,3 +62,6 @@ gate4-runtime = []
 gate4-gui-test = ["aether-memory/gate4"]
 # Linux-sized mapping limits for large applications such as Firefox.
 large-apps = ["aether-memory/large-apps"]
+# Debug only: every 10 s, print each Linux task's state, wait kind, futex
+# word and saved user registers to the serial log (issue #146).
+linux-wait-dump = []

@@ -2919,6 +2919,59 @@ pub fn linux_futex_wake(address: u64, count: u64) -> i64 {
     woken as i64
 }
 
+/// Debug-only dump of every Linux task's wait state (issue #146).
+///
+/// For a blocked task the saved frame is the syscall frame, so `rip` is the
+/// user return address and `rax`/`rdi`/`rsi`/`rdx`/`r10` the call's result
+/// slot and arguments. For a futex waiter the line also prints the word's
+/// current value and the frame its virtual address resolves to now, so a
+/// waiter keyed by a stale frame is visible.
+#[cfg(feature = "linux-wait-dump")]
+fn linux_wait_dump(now: u64) {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let running = CURRENT.load(Ordering::Relaxed);
+    for (index, task) in tasks.iter().enumerate() {
+        if task.abi != TaskAbi::Linux || task.state == TaskState::Empty || index == running {
+            continue;
+        }
+        // SAFETY: a task that is not running saved its interrupt frame at
+        // `saved_rsp` on its own kernel stack, which stays allocated.
+        let frame = unsafe { &*(task.saved_rsp as *const InterruptFrame) };
+        let resolved = PhysFrame::from_address(task.pml4)
+            .and_then(|pml4| paging::user_physical_address(pml4, frame.rdi))
+            .unwrap_or(0);
+        let word = if task.futex_address != 0 && resolved != 0 && frame.rdi.is_multiple_of(4) {
+            // SAFETY: `resolved` is the identity-mapped physical address of
+            // a present, 4-byte aligned word of this task's user mapping.
+            unsafe { core::ptr::read_volatile(resolved as *const u32) }
+        } else {
+            0
+        };
+        serial_line!(
+            "WAITDUMP t={} task={} tgid={} state={:?} wait={:?} last={} rip={:#x} rax={:#x} rdi={:#x} rsi={:#x} rdx={:#x} r10={:#x} futex_space={:#x} futex_key={:#x} now_phys={:#x} word={:#x} deadline={} wait_deadline={} cpu={}",
+            now / 100,
+            index,
+            task.tgid,
+            task.state,
+            task.wait_kind,
+            task.last_syscall,
+            frame.rip,
+            frame.rax,
+            frame.rdi,
+            frame.rsi,
+            frame.rdx,
+            frame.r10,
+            task.futex_space,
+            task.futex_address,
+            resolved,
+            word,
+            task.futex_deadline,
+            task.wait_deadline,
+            task.cpu_ticks
+        );
+    }
+}
+
 /// Implements the wake-then-requeue half of `FUTEX_CMP_REQUEUE`.
 ///
 /// Up to `wake` waiters on `address` become ready; every further waiter on the
@@ -3008,7 +3061,7 @@ pub fn futex_trace(command: u64, address: u64, value: u32, arg4: u64, target: u6
 /// identifiable from the serial log without a debugger. The trace prints one
 /// line whenever the call number changes, so a burst of identical calls
 /// collapses into a single line.
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(any(feature = "gate4-gui-test", feature = "linux-wait-dump"))]
 pub fn linux_set_last_syscall(number: u64) {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
@@ -3024,7 +3077,7 @@ pub fn linux_set_last_syscall(number: u64) {
 ///
 /// The trace is bounded: the emulated serial port cannot carry an unbounded
 /// number of lines.
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(any(feature = "gate4-gui-test", feature = "linux-wait-dump"))]
 pub fn linux_trace_enosys(number: u64) {
     const TRACE_LIMIT: usize = 32;
     static TRACED: AtomicUsize = AtomicUsize::new(0);
@@ -3099,7 +3152,7 @@ pub fn linux_trace_fdcall(number: u64, fd: u64, result: i64) {
 }
 
 /// Returns `true` when the current task belongs to the Gate 4 GUI program.
-#[cfg(feature = "gate4-gui-test")]
+#[cfg(any(feature = "gate4-gui-test", feature = "linux-wait-dump"))]
 pub fn linux_is_appimage_task() -> bool {
     current_app_slot() < crate::linux::MAX_APPS
 }
@@ -8849,6 +8902,11 @@ pub fn on_tick(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             task.wait_deadline = 0;
             task.state = TaskState::Ready;
         }
+    }
+
+    #[cfg(feature = "linux-wait-dump")]
+    if now.is_multiple_of(1000) {
+        linux_wait_dump(now);
     }
 
     // An armed timerfd crossing its deadline wakes poll/epoll waiters so they

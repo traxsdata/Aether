@@ -288,7 +288,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         return frame;
     }
     scheduler::linux_begin_syscall(number);
-    #[cfg(feature = "gate4-gui-test")]
+    #[cfg(any(feature = "gate4-gui-test", feature = "linux-wait-dump"))]
     scheduler::linux_set_last_syscall(number);
     let first = unsafe { (*frame).rdi };
     let second = unsafe { (*frame).rsi };
@@ -305,7 +305,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     match class {
         linux_policy::Class::Unknown => {
             linux_policy::record_unknown();
-            #[cfg(feature = "gate4-gui-test")]
+            #[cfg(any(feature = "gate4-gui-test", feature = "linux-wait-dump"))]
             if scheduler::linux_is_appimage_task() {
                 // The bounded trace names the calls the application needs and
                 // the prototype does not implement yet.
