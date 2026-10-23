@@ -33,6 +33,7 @@ mod random;
 mod recovery;
 mod runtime;
 mod scheduler;
+mod seccomp;
 mod shell;
 mod socket;
 mod supervisor;

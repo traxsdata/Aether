@@ -12,6 +12,7 @@ authors.workspace = true
 aether-abi = { path = "../abi" }
 aether-appimage = { path = "../apps/linux/appimage" }
 aether-linux-elf = { path = "../apps/linux/elf" }
+aether-seccomp = { path = "../apps/linux/seccomp" }
 aether-squashfs = { path = "../apps/linux/squashfs" }
 aether-boot-common = { path = "../boot/common" }
 aether-fs = { path = "fs" }

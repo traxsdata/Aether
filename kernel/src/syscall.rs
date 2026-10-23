@@ -252,6 +252,11 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         return frame;
     }
     let number = unsafe { (*frame).rax };
+    // Seccomp sees every call first, unknown numbers included, so a
+    // process's own filter narrows what the default-deny policy allows.
+    if let Some(frame) = crate::seccomp::check(frame, number) {
+        return frame;
+    }
     scheduler::linux_begin_syscall(number);
     #[cfg(feature = "gate4-gui-test")]
     scheduler::linux_set_last_syscall(number);
@@ -417,6 +422,14 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         63 => linux_uname(pml4, first),
         102 | 104 | 107 | 108 => 1000,
         158 => linux_arch_prctl(pml4, first, second),
+        157 => crate::seccomp::sys_prctl(
+            pml4,
+            first,
+            [second, third, unsafe { (*frame).r10 }, unsafe {
+                (*frame).r8
+            }],
+        ),
+        317 => crate::seccomp::sys_seccomp(pml4, first, second, third),
         202 => return linux_futex(frame, pml4),
         273 => linux_set_robust_list(pml4, first, second),
         274 => linux_get_robust_list(pml4, first, second, third),

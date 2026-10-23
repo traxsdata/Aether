@@ -484,6 +484,10 @@ gesture, and there is no GPU service.
   `SIGPIPE`. There is no named or abstract namespace, and descriptors whose
   state lives in the sending task (eventfd, epoll, timerfd, inotify, display)
   cannot be passed (`AETHER_LINUX_UNIX_OK`).
+- [x] Seccomp: `prctl(PR_SET_NO_NEW_PRIVS)`, `seccomp(SECCOMP_SET_MODE_FILTER)`
+  with `TSYNC`, strict mode, stacked classic BPF filters checked and run by
+  the host-tested `aether-seccomp` crate, and `SIGSYS` traps with
+  `si_syscall`, `si_errno`, and `si_arch` (`AETHER_LINUX_SECCOMP_OK`).
 - [ ] On-demand AppImage import. Every imported file still stays resident in
   the fixed heap arena; large applications need a selective import of the
   files they open.
