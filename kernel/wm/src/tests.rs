@@ -11,7 +11,10 @@ use crate::layout::{
     self, DOCK_ITEMS, DOCK_SLOTS, DockSlot, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
     default_window_frame, dock_panel, overview_cards, traffic_lights, work_area,
 };
-use crate::model::{Command, Key, MenuKind, Modifiers, WORKSPACES, WindowKind, WindowState, Wm};
+use crate::model::{
+    Command, Key, MenuKind, Modifiers, SETTINGS_RECORD_LEN, SETTINGS_RECORD_VERSION, Settings,
+    SettingsParseError, WORKSPACES, WindowKind, WindowState, Wm,
+};
 use crate::theme::{Palette, ThemeKind};
 
 fn sample() -> Wm {
@@ -438,6 +441,103 @@ fn glass_setting_cycles_and_is_shared_by_the_palette_contract() {
     );
     wm.toggle_setting(2);
     assert_eq!(wm.settings().glass, crate::theme::GlassLevel::Clear);
+}
+
+#[test]
+fn settings_record_round_trips_every_combination() {
+    use crate::theme::GlassLevel;
+    let settings = Settings {
+        reduce_motion: true,
+        high_contrast: true,
+        glass: GlassLevel::Tinted,
+        magnify_dock: false,
+    };
+    let mut buffer = [0u8; SETTINGS_RECORD_LEN];
+    settings.encode(&mut buffer);
+    assert_eq!(Settings::parse(&buffer), Ok(settings));
+    for glass in [GlassLevel::Clear, GlassLevel::Balanced, GlassLevel::Tinted] {
+        let settings = Settings {
+            glass,
+            ..Settings::new()
+        };
+        settings.encode(&mut buffer);
+        assert_eq!(Settings::parse(&buffer), Ok(settings));
+        assert_eq!(Settings::parse(&buffer).unwrap().glass, glass);
+    }
+    let settings = Settings::new();
+    settings.encode(&mut buffer);
+    assert_eq!(Settings::parse(&buffer), Ok(settings));
+}
+
+#[test]
+fn settings_record_rejects_truncated_input() {
+    let settings = Settings {
+        reduce_motion: true,
+        high_contrast: false,
+        glass: crate::theme::GlassLevel::Tinted,
+        magnify_dock: true,
+    };
+    let mut buffer = [0u8; SETTINGS_RECORD_LEN];
+    settings.encode(&mut buffer);
+    for length in 0..SETTINGS_RECORD_LEN {
+        assert_eq!(
+            Settings::parse(&buffer[..length]),
+            Err(SettingsParseError::Truncated)
+        );
+    }
+    assert_eq!(Settings::parse(&[]), Err(SettingsParseError::Truncated));
+}
+
+#[test]
+fn settings_record_rejects_unknown_magic() {
+    let mut buffer = [0u8; SETTINGS_RECORD_LEN];
+    Settings::new().encode(&mut buffer);
+    buffer[0] ^= 0xFF;
+    assert_eq!(
+        Settings::parse(&buffer),
+        Err(SettingsParseError::UnknownMagic)
+    );
+}
+
+#[test]
+fn settings_record_rejects_unknown_version() {
+    let mut buffer = [0u8; SETTINGS_RECORD_LEN];
+    Settings::new().encode(&mut buffer);
+    buffer[4] = SETTINGS_RECORD_VERSION.wrapping_add(1);
+    assert_eq!(
+        Settings::parse(&buffer),
+        Err(SettingsParseError::UnsupportedVersion)
+    );
+}
+
+#[test]
+fn settings_record_rejects_invalid_fields() {
+    let mut buffer = [0u8; SETTINGS_RECORD_LEN];
+    Settings::new().encode(&mut buffer);
+    buffer[5] = 2;
+    assert_eq!(
+        Settings::parse(&buffer),
+        Err(SettingsParseError::InvalidField)
+    );
+    let mut buffer = [0u8; SETTINGS_RECORD_LEN];
+    Settings::new().encode(&mut buffer);
+    buffer[7] = 4;
+    assert_eq!(
+        Settings::parse(&buffer),
+        Err(SettingsParseError::InvalidField)
+    );
+}
+
+#[test]
+fn toggle_marks_settings_dirty_until_cleared() {
+    let mut wm = sample();
+    assert!(!wm.settings_dirty());
+    wm.toggle_setting(1);
+    assert!(wm.settings_dirty());
+    wm.clear_settings_dirty();
+    assert!(!wm.settings_dirty());
+    wm.toggle_setting(9);
+    assert!(!wm.settings_dirty());
 }
 
 #[test]

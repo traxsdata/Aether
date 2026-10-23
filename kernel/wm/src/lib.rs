@@ -33,7 +33,8 @@ pub use layout::{
 };
 pub use model::{
     Command, Hit, Key, KeyOutcome, MAX_WINDOWS, MenuItem, MenuKind, MenuState, Modifiers,
-    SearchItem, Settings, WORKSPACES, Window, WindowKind, WindowState, Wm,
+    SETTINGS_MAGIC, SETTINGS_RECORD_LEN, SETTINGS_RECORD_VERSION, SearchItem, Settings,
+    SettingsParseError, WORKSPACES, Window, WindowKind, WindowState, Wm,
 };
 pub use theme::{GlassLevel, Palette, ThemeKind};
 

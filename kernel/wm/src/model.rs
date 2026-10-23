@@ -230,6 +230,39 @@ pub struct Settings {
     pub magnify_dock: bool,
 }
 
+/// Identity of the persistable settings record.
+pub const SETTINGS_MAGIC: &[u8; 4] = b"AETH";
+/// Record format version; bump when the layout changes.
+pub const SETTINGS_RECORD_VERSION: u8 = 1;
+/// Total record length: the four-byte magic, the version byte, and one byte
+/// per setting.
+pub const SETTINGS_RECORD_LEN: usize = 9;
+
+/// Why a persistable settings record refused to decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsParseError {
+    /// The record is shorter than [`SETTINGS_RECORD_LEN`].
+    Truncated,
+    /// The leading bytes are not [`SETTINGS_MAGIC`].
+    UnknownMagic,
+    /// The version byte is not understood by this build.
+    UnsupportedVersion,
+    /// A per-setting byte is not a valid value.
+    InvalidField,
+}
+
+impl core::fmt::Display for SettingsParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let text = match self {
+            Self::Truncated => "truncated",
+            Self::UnknownMagic => "unknown magic",
+            Self::UnsupportedVersion => "unknown version",
+            Self::InvalidField => "invalid field",
+        };
+        f.write_str(text)
+    }
+}
+
 impl Settings {
     /// Default settings.
     #[must_use]
@@ -301,6 +334,49 @@ impl Settings {
             2 => self.glass.label(),
             _ => "",
         }
+    }
+
+    /// Encodes into `out`, which must fit [`SETTINGS_RECORD_LEN`] bytes.
+    pub fn encode(&self, out: &mut [u8]) {
+        if out.len() < SETTINGS_RECORD_LEN {
+            return;
+        }
+        out[..SETTINGS_MAGIC.len()].copy_from_slice(SETTINGS_MAGIC);
+        out[SETTINGS_MAGIC.len()] = SETTINGS_RECORD_VERSION;
+        out[SETTINGS_MAGIC.len() + 1] = u8::from(self.reduce_motion);
+        out[SETTINGS_MAGIC.len() + 2] = u8::from(self.high_contrast);
+        out[SETTINGS_MAGIC.len() + 3] = self.glass.index();
+        out[SETTINGS_MAGIC.len() + 4] = u8::from(self.magnify_dock);
+    }
+
+    /// Decodes a record produced by [`Self::encode`].
+    ///
+    /// A truncated record, an unknown magic, an unsupported version, or an
+    /// invalid field maps to a distinct error so the caller falls back to
+    /// [`Self::new`] without leaking a partial state.
+    pub fn parse(data: &[u8]) -> Result<Self, SettingsParseError> {
+        if data.len() < SETTINGS_RECORD_LEN {
+            return Err(SettingsParseError::Truncated);
+        }
+        if &data[..SETTINGS_MAGIC.len()] != SETTINGS_MAGIC {
+            return Err(SettingsParseError::UnknownMagic);
+        }
+        if data[SETTINGS_MAGIC.len()] != SETTINGS_RECORD_VERSION {
+            return Err(SettingsParseError::UnsupportedVersion);
+        }
+        let bit = |offset: usize| match data[SETTINGS_MAGIC.len() + offset] {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(SettingsParseError::InvalidField),
+        };
+        let glass = GlassLevel::from_index(data[SETTINGS_MAGIC.len() + 3])
+            .ok_or(SettingsParseError::InvalidField)?;
+        Ok(Self {
+            reduce_motion: bit(1)?,
+            high_contrast: bit(2)?,
+            glass,
+            magnify_dock: bit(4)?,
+        })
     }
 }
 
@@ -905,6 +981,9 @@ pub struct Wm {
     dragging: Option<Drag>,
     last_click: Option<(u8, u64)>,
     settings: Settings,
+    /// A setting changed since the last persist; cleared when the desktop
+    /// stores it to the volume.
+    settings_dirty: bool,
 }
 
 impl Wm {
@@ -934,6 +1013,7 @@ impl Wm {
             dragging: None,
             last_click: None,
             settings: Settings::new(),
+            settings_dirty: false,
         }
     }
 
@@ -1683,6 +1763,9 @@ impl Wm {
     }
 
     /// Toggles an accessibility or appearance setting.
+    ///
+    /// Marks the settings store dirty when a value changes, so the desktop
+    /// persists it exactly once.
     pub fn toggle_setting(&mut self, row: usize) {
         match row {
             0 => {
@@ -1698,8 +1781,25 @@ impl Wm {
                 self.dock_target = layout::dock_slot_at(self.cursor, self.screen);
                 self.dock_hover = [0; DOCK_ITEMS];
             }
-            _ => {}
+            _ => return,
         }
+        self.settings_dirty = true;
+    }
+
+    /// Whether a setting changed since the last store.
+    #[must_use]
+    pub const fn settings_dirty(self) -> bool {
+        self.settings_dirty
+    }
+
+    /// Clear after the desktop has persisted the current settings.
+    pub fn clear_settings_dirty(&mut self) {
+        self.settings_dirty = false;
+    }
+
+    /// Replaces the settings, as loaded from the persisted record at boot.
+    pub fn apply_settings(&mut self, settings: Settings) {
+        self.settings = settings;
     }
 
     /// Returns the rectangle of a settings row.

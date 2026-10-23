@@ -642,6 +642,13 @@ rollback-test:
 	$(MAKE) KERNEL_FEATURES=recovery-rollback-selftest image
 	AETHER_EXTRA_MARKERS=AETHER_RECOVERY_ROLLBACK_OK $(PYTHON) tools/test-boot.py
 
+# Change accessibility settings on a booted desktop, verify the record is on
+# the volume, then re-run the before-first-frame load on a fresh window
+# manager (the simulated reboot) and require the saved values to be applied.
+settings-persist-test:
+	$(MAKE) KERNEL_FEATURES=settings-persist-selftest image
+	AETHER_EXTRA_MARKERS=AETHER_SETTINGS_PERSIST_OK $(PYTHON) tools/test-boot.py
+
 # Build a kernel that deliberately fails after paging and require the normal
 # harness to detect the failure marker. This checks the CI gate itself, not
 # just the boot path.

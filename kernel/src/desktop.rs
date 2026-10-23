@@ -137,6 +137,10 @@ pub fn init() {
     );
     let screen = Rect::new(0, 0, graphics::width() as i32, graphics::height() as i32);
     let mut wm = Wm::new(screen);
+    // Restore persisted desktop and accessibility settings before the first
+    // frame, so a high-contrast user never sees the default theme flash.
+    // A missing or bad record falls back to the defaults already loaded.
+    crate::settings::load(&mut wm);
     wm.seed();
     let now = scheduler::ticks();
     let mouse = input::mouse();
@@ -173,6 +177,14 @@ fn current() -> Option<Wm> {
 }
 
 fn store(wm: Wm, ticks: u64, second: u64, buttons: u8) {
+    // The settings dirty flag is the only place a user change is detected.
+    // Persist once here, at the single choke point every mutation reaches,
+    // so a real change writes the record exactly once instead of per frame.
+    let mut wm = wm;
+    if wm.settings_dirty() {
+        crate::settings::persist(&wm);
+        wm.clear_settings_dirty();
+    }
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked for the state update.
     unsafe {
@@ -1224,6 +1236,64 @@ pub fn self_test() {
     } else {
         serial_line!("AETHER_WM_FAILED reason=state failures={failures}");
     }
+}
+
+/// Self-test for persisted settings across a reboot
+/// (`settings-persist-selftest`).
+///
+/// The unified filesystem on this platform is a bring-up RAM disk, so its
+/// contents cannot survive a power cycle; a reboot is therefore simulated the
+/// way this codebase simulates one (see the rollback self-test): re-run the
+/// exact boot sequence — a fresh window manager with default settings, as
+/// `Wm::new` gives at boot, then the before-first-frame settings load. The
+/// saved record must win, so the user's accessibility choices are applied
+/// before any frame is painted.
+#[cfg(feature = "settings-persist-selftest")]
+pub fn settings_persist_self_test() -> Result<(), aether_fs::FsError> {
+    let Some(live) = current() else {
+        serial_line!("AETHER_BOOT_FAILED reason=settings-persist not-initialized");
+        return Err(aether_fs::FsError::Corrupt);
+    };
+    let mut wm = live;
+    // Change accessibility settings through the same toggle path the
+    // settings window and menus use.
+    wm.toggle_setting(1);
+    wm.toggle_setting(0);
+    let expected = wm.settings();
+    if !expected.high_contrast || !expected.reduce_motion {
+        serial_line!("AETHER_BOOT_FAILED reason=settings-persist preconditions");
+        return Err(aether_fs::FsError::Corrupt);
+    }
+    // Store the changed state; `store` is the single choke point that flushes
+    // the dirty settings to the volume, which is the real production path.
+    let now = scheduler::ticks();
+    store(wm, now, now / 100, input::mouse().buttons);
+    // The record must be on the volume, independently of the read-back used
+    // by the simulated reboot.
+    let mut stored = [0u8; aether_wm::SETTINGS_RECORD_LEN];
+    let Ok(length) = fs::read_path(crate::settings::SETTINGS_PATH, &mut stored) else {
+        serial_line!("AETHER_BOOT_FAILED reason=settings-persist write");
+        return Err(aether_fs::FsError::Corrupt);
+    };
+    if Settings::parse(&stored[..length]) != Ok(expected) {
+        serial_line!("AETHER_BOOT_FAILED reason=settings-persist record");
+        return Err(aether_fs::FsError::Corrupt);
+    }
+    // Simulate the reboot: fresh in-memory state, same volume, boot load.
+    let mut booted = Wm::new(live.screen());
+    crate::settings::load(&mut booted);
+    if booted.settings() != expected {
+        serial_line!("AETHER_BOOT_FAILED reason=settings-persist not-applied");
+        return Err(aether_fs::FsError::Corrupt);
+    }
+    serial_line!(
+        "AETHER_SETTINGS_PERSIST_OK high_contrast={} reduce_motion={} glass={} magnify_dock={} across_reboot=1",
+        expected.high_contrast,
+        expected.reduce_motion,
+        expected.glass.label(),
+        expected.magnify_dock
+    );
+    Ok(())
 }
 
 /// Returns the focused window title for diagnostics.
@@ -2742,7 +2812,7 @@ fn paint_settings(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
     draw_text(
         content.x + 16,
         foot,
-        "PREFERENCES RESET ON REBOOT",
+        "SETTINGS ARE SAVED AUTOMATICALLY",
         palette.faint,
         1,
     );

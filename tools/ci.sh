@@ -24,5 +24,6 @@ make terminal-test
 make fault-test
 make crash-screen-test
 make rollback-test
+make settings-persist-test
 make negative-test
 make release-demo

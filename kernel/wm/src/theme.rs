@@ -73,6 +73,27 @@ impl GlassLevel {
         }
     }
 
+    /// Compact single-byte form for the persistable settings record.
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        match self {
+            Self::Clear => 0,
+            Self::Balanced => 1,
+            Self::Tinted => 2,
+        }
+    }
+
+    /// Rebuilds a level from its single-byte form, rejecting unknown values.
+    #[must_use]
+    pub const fn from_index(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Clear),
+            1 => Some(Self::Balanced),
+            2 => Some(Self::Tinted),
+            _ => None,
+        }
+    }
+
     /// Alpha for menu-bar and dock glass.
     #[must_use]
     pub const fn panel_alpha(self) -> u8 {

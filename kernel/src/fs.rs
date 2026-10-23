@@ -153,6 +153,10 @@ pub fn init() -> Result<(), FsError> {
         "home/Projects",
         "home/Shared",
         "home/Trash",
+        // Hidden user config area for the desktop settings record
+        // (`kernel/src/settings.rs`); created last so Home listings keep
+        // their familiar order.
+        crate::settings::CONFIG_DIR,
     ] {
         filesystem.mkdir("/", directory)?;
     }

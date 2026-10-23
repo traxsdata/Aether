@@ -47,6 +47,10 @@ crash-screen-panic-selftest = []
 # Boot with a rollback self-test that removes the current image marker and
 # re-selects, exercising the lost-image branch on every test boot.
 recovery-rollback-selftest = []
+# Boot with the settings-persistence self-test: toggle accessibility
+# settings, verify the on-volume record, then re-run the boot load path on a
+# fresh window manager and require the saved values to be applied.
+settings-persist-selftest = []
 # Boot the Gate 4 portal slice with a seeded workbook grant and a test-only
 # revocation control path. Not part of the normal kernel feature set.
 gate4-portal-test = []

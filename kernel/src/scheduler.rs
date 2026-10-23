@@ -1450,6 +1450,8 @@ fn init(allocator: &mut FrameAllocator<'_>) -> Result<(), SchedulerError> {
     crate::input::init(crate::graphics::width(), crate::graphics::height());
     crate::input::self_test();
     crate::desktop::self_test();
+    #[cfg(feature = "settings-persist-selftest")]
+    crate::desktop::settings_persist_self_test().map_err(SchedulerError::Filesystem)?;
     crate::shell::init();
 
     // Load the native user program into its own PML4. The kernel identity map

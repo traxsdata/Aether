@@ -34,6 +34,7 @@ mod recovery;
 mod runtime;
 mod scheduler;
 mod seccomp;
+mod settings;
 mod shell;
 mod socket;
 mod supervisor;
