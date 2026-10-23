@@ -179,8 +179,12 @@ exact AppImage digest, and the runtime version.
   Named fixture markers are enumerated in the roadmap and host-interface
   inventory. Shared anonymous mapping contents survive `fork` through a
   reference-counted physical-frame registry: the child aliases the parent's
-  frames while private pages are copied, so writes are visible in both
-  directions and neither process frees a frame still owned by the other.
+  frames, so writes are visible in both directions and neither process frees
+  a frame still owned by the other. Private pages are shared copy-on-write:
+  both sides map the frame read-only, a per-frame owner count (one `u16` per
+  frame, allocated at boot) keeps it alive, and the first write from user code
+  or through a kernel user copy gives the writer its own frame. A frame the
+  count table cannot track is copied eagerly at `fork`, as before.
   Read-shared file mappings use a bounded page cache keyed by rootfs/overlay
   inode and page offset, so unrelated processes mapping the same page alias one
   frame. The cache is RAM-only: writes are not written back to the read-only

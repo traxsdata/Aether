@@ -276,6 +276,23 @@ impl<'a> FrameAllocator<'a> {
         }
     }
 
+    /// One past the highest frame that is free now, or 0 when none is.
+    ///
+    /// Frames above this limit are already in use and so are kernel-owned
+    /// until freed, which lets a per-frame table cover only the memory that
+    /// can still reach an address space.
+    #[must_use]
+    pub fn free_frame_limit(&self) -> u64 {
+        self.bitmap
+            .iter()
+            .rposition(|byte| *byte != 0xff)
+            .map_or(0, |byte| {
+                let bits = self.bitmap[byte];
+                let bit = 7 - u64::from((!bits).leading_zeros());
+                (byte as u64 * 8 + bit + 1).min(self.frame_count)
+            })
+    }
+
     fn max_address(&self) -> u64 {
         self.frame_count * PAGE_SIZE
     }
@@ -364,6 +381,17 @@ mod tests {
             frames.stats().free_frames,
             stats.free_frames - 100 + 4 * 256
         );
+    }
+
+    #[test]
+    fn reports_one_past_the_highest_free_frame() {
+        let mut bitmap = allocator(64); // 512 frames = 2 MiB
+        let mut frames = FrameAllocator::new(&mut bitmap);
+        assert_eq!(frames.free_frame_limit(), 0);
+        frames.free_range(MIB, 4096 * 3);
+        assert_eq!(frames.free_frame_limit(), 256 + 3);
+        frames.free_range(2 * MIB - 4096, 4096);
+        assert_eq!(frames.free_frame_limit(), 512);
     }
 
     #[test]

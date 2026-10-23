@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Kernel physical-memory and paging support.
 
+pub mod cow;
 mod heap;
 pub mod paging;
 pub mod shared;
@@ -16,6 +17,12 @@ pub fn init_heap() -> Option<(usize, usize)> {
     let bytes = heap::requested_bytes();
     let start = with_frame_allocator(|frames| heap::init(frames, bytes))??;
     Some((start, bytes))
+}
+
+/// Allocates the copy-on-write count table. Returns the frames it covers, or
+/// `None` when `fork` will copy every page eagerly.
+pub fn init_cow() -> Option<u64> {
+    with_frame_allocator(cow::init)?
 }
 
 use aether_memory::PAGE_SIZE;
@@ -50,6 +57,10 @@ unsafe impl Sync for AllocatorCell {}
 
 static FRAME_ALLOCATOR: AllocatorCell = AllocatorCell(UnsafeCell::new(MaybeUninit::uninit()));
 static FRAME_ALLOCATOR_READY: AtomicBool = AtomicBool::new(false);
+/// Set while a closure holds the allocator, so a nested call (for example
+/// from a page fault taken inside one) gets `None` instead of a second
+/// mutable reference.
+static FRAME_ALLOCATOR_BUSY: AtomicBool = AtomicBool::new(false);
 
 /// Creates the kernel frame allocator and stores it for runtime use.
 ///
@@ -74,19 +85,24 @@ pub fn init_frame_allocator() {
 
 /// Runs `operation` with the kernel frame allocator.
 ///
-/// Returns `None` before [`init_frame_allocator`] has run. The borrow ends when
-/// `operation` returns; do not re-enter this function from the closure.
+/// Returns `None` before [`init_frame_allocator`] has run, and from a call
+/// nested inside another call's closure. The borrow ends when `operation`
+/// returns.
 pub fn with_frame_allocator<R>(
     operation: impl FnOnce(&mut FrameAllocator<'static>) -> R,
 ) -> Option<R> {
-    if !FRAME_ALLOCATOR_READY.load(Ordering::Acquire) {
+    if !FRAME_ALLOCATOR_READY.load(Ordering::Acquire)
+        || FRAME_ALLOCATOR_BUSY.swap(true, Ordering::Acquire)
+    {
         return None;
     }
     // SAFETY: Readiness was published after initialization. The single-CPU
-    // kernel serializes allocator use with interrupt masking, and the closure
-    // receives the only live reference for its duration.
+    // kernel serializes allocator use with interrupt masking, and the busy
+    // flag gives the closure the only live reference for its duration.
     let allocator = unsafe { (*FRAME_ALLOCATOR.0.get()).assume_init_mut() };
-    Some(operation(allocator))
+    let result = operation(allocator);
+    FRAME_ALLOCATOR_BUSY.store(false, Ordering::Release);
+    Some(result)
 }
 
 /// Returns allocator capacity for diagnostics.

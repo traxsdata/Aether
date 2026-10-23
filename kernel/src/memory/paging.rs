@@ -19,7 +19,7 @@ use aether_memory::{LARGE_PAGE_SIZE, PAGE_SIZE};
 use core::arch::asm;
 use core::ptr;
 
-use super::shared;
+use super::{cow, shared};
 
 /// Low region mapped with 4 KiB pages.
 const LOW_REGION_BYTES: u64 = LARGE_PAGE_SIZE;
@@ -387,47 +387,229 @@ pub fn map_allocated_user_page(
 
 /// Copies every present user page into a fresh address space.
 ///
-/// Private frames are eagerly copied. Frames registered as shared are retained
-/// and mapped into the child, preserving `MAP_SHARED` aliasing across `fork`.
-/// The caller owns the returned PML4 and is responsible for releasing its
-/// frames when the process exits.
+/// Frames registered as shared are retained and mapped into the child,
+/// preserving `MAP_SHARED` aliasing across `fork`. Private frames are shared
+/// copy-on-write: both sides map them read-only, a writable page is marked
+/// [`PageFlags::COPY_ON_WRITE`], and the first write copies it (see
+/// [`resolve_cow`]). A private frame the count table cannot track is copied
+/// eagerly. `source` must be the active address space, since its writable
+/// pages are made read-only here.
+///
+/// Only the page tables that exist are walked, so the cost follows the
+/// mapped size of the parent, not the size of the user window. The caller
+/// owns the returned PML4 and is responsible for releasing its frames when
+/// the process exits. On failure everything the child holds is released.
 pub fn copy_user_address_space(
     allocator: &mut FrameAllocator<'_>,
     source: PhysFrame,
 ) -> Result<PhysFrame, PagingError> {
     let target = create_empty_user_address_space(allocator)?;
-    let mut address = USER_BASE;
-    while address < USER_LIMIT {
-        if let Some(entry) = user_leaf_entry(source, address)
-            && is_user_leaf(entry)
-        {
-            let Some(shared_frame) = PhysFrame::from_address(entry.address()) else {
-                return Err(PagingError::UnrepresentableAddress(entry.address()));
-            };
-            if shared::retain(shared_frame) {
-                if let Err(error) =
-                    map_user_page(target, allocator, address, shared_frame, entry.flags())
-                {
-                    let _ = shared::release(allocator, shared_frame);
-                    return Err(error);
-                }
-            } else {
-                let frame = allocator.allocate().ok_or(PagingError::OutOfMemory)?;
-                // SAFETY: Both frames are identity-mapped and exclusively owned
-                // by their respective address spaces.
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        entry.address() as *const u8,
-                        frame.start_address() as *mut u8,
-                        PAGE_SIZE as usize,
-                    );
-                }
-                map_user_page(target, allocator, address, frame, entry.flags())?;
-            }
-        }
-        address += PAGE_SIZE;
+    if let Err(error) = copy_user_leaves(allocator, source, target) {
+        // SAFETY: The child was created above and is not active or owned by
+        // a task yet.
+        unsafe { destroy_user_address_space(allocator, target) };
+        return Err(error);
     }
     Ok(target)
+}
+
+fn copy_user_leaves(
+    allocator: &mut FrameAllocator<'_>,
+    source: PhysFrame,
+    target: PhysFrame,
+) -> Result<(), PagingError> {
+    let first = aether_memory::paging::indices(USER_BASE)[0];
+    let last = aether_memory::paging::indices(USER_LIMIT - 1)[0];
+    for pml4_index in first..=last {
+        let Some(pdpt) = child_table(source, pml4_index) else {
+            continue;
+        };
+        for pdpt_index in 0..PAGE_TABLE_ENTRIES {
+            let Some(pd) = child_table(pdpt, pdpt_index) else {
+                continue;
+            };
+            for pd_index in 0..PAGE_TABLE_ENTRIES {
+                let Some(pt) = child_table(pd, pd_index) else {
+                    continue;
+                };
+                for pt_index in 0..PAGE_TABLE_ENTRIES {
+                    let address = ((pml4_index as u64) << 39)
+                        | ((pdpt_index as u64) << 30)
+                        | ((pd_index as u64) << 21)
+                        | ((pt_index as u64) << 12);
+                    if !(USER_BASE..USER_LIMIT).contains(&address) {
+                        continue;
+                    }
+                    // SAFETY: `pt` is a page table of the source address
+                    // space and is identity-mapped.
+                    let entry = unsafe { (*table_ptr(pt)).entry(pt_index) };
+                    if is_user_leaf(entry) {
+                        copy_user_leaf(allocator, target, address, pt, pt_index, entry)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns the table an entry of `table` points to, if it is present and not
+/// a large page.
+fn child_table(table: PhysFrame, index: usize) -> Option<PhysFrame> {
+    // SAFETY: Page-table frames are identity-mapped and owned by the address
+    // space being walked.
+    let entry = unsafe { (*table_ptr(table)).entry(index) };
+    if !entry.is_present() || entry.is_huge() {
+        return None;
+    }
+    PhysFrame::from_address(entry.address())
+}
+
+fn copy_user_leaf(
+    allocator: &mut FrameAllocator<'_>,
+    target: PhysFrame,
+    address: u64,
+    source_pt: PhysFrame,
+    pt_index: usize,
+    entry: PageTableEntry,
+) -> Result<(), PagingError> {
+    let Some(frame) = PhysFrame::from_address(entry.address()) else {
+        return Err(PagingError::UnrepresentableAddress(entry.address()));
+    };
+    if shared::retain(frame) {
+        if let Err(error) = map_user_page(target, allocator, address, frame, entry.flags()) {
+            let _ = shared::release(allocator, frame);
+            return Err(error);
+        }
+        return Ok(());
+    }
+    if cow::share(frame) {
+        let mut flags = entry.flags();
+        if flags.contains(PageFlags::WRITABLE) {
+            flags = flags.without(PageFlags::WRITABLE) | PageFlags::COPY_ON_WRITE;
+            let shared_entry = PageTableEntry::new(frame.start_address(), flags)
+                .ok_or(PagingError::UnrepresentableAddress(frame.start_address()))?;
+            // SAFETY: `source_pt` is the active address space's table for
+            // `address`; the stale writable translation is flushed next.
+            unsafe { (*table_ptr(source_pt)).set_entry(pt_index, shared_entry) };
+            flush_page(address);
+        }
+        if let Err(error) = map_user_page(target, allocator, address, frame, flags) {
+            let _ = cow::release(frame);
+            return Err(error);
+        }
+        return Ok(());
+    }
+    let copy = allocator.allocate().ok_or(PagingError::OutOfMemory)?;
+    // SAFETY: Both frames are identity-mapped; the new one is exclusively
+    // owned here and the source is only read.
+    unsafe {
+        ptr::copy_nonoverlapping(
+            frame.start_address() as *const u8,
+            copy.start_address() as *mut u8,
+            PAGE_SIZE as usize,
+        );
+    }
+    let mut flags = entry.flags();
+    if flags.contains(PageFlags::COPY_ON_WRITE) {
+        // The child's copy is its own, so it may be written directly.
+        flags = flags.without(PageFlags::COPY_ON_WRITE) | PageFlags::WRITABLE;
+    }
+    if let Err(error) = map_user_page(target, allocator, address, copy, flags) {
+        let _ = allocator.deallocate(copy);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Gives a write access to a copy-on-write page its own frame.
+///
+/// Returns `false` when `address` is not a user page marked
+/// [`PageFlags::COPY_ON_WRITE`], or no frame is free; the fault is then a
+/// real one. When another address space still shares the frame it is copied;
+/// when this mapping is the last owner it is simply made writable.
+pub fn resolve_cow(allocator: &mut FrameAllocator<'_>, pml4: PhysFrame, address: u64) -> bool {
+    if !(USER_BASE..USER_LIMIT).contains(&address) {
+        return false;
+    }
+    let page = address & !(PAGE_SIZE - 1);
+    let Some((pt, pt_index)) = user_leaf_slot(pml4, page) else {
+        return false;
+    };
+    // SAFETY: `pt` is a page table of `pml4` and is identity-mapped.
+    let entry = unsafe { (*table_ptr(pt)).entry(pt_index) };
+    let flags = entry.flags();
+    if !entry.is_present()
+        || !flags.contains(PageFlags::USER)
+        || !flags.contains(PageFlags::COPY_ON_WRITE)
+    {
+        return false;
+    }
+    let Some(frame) = PhysFrame::from_address(entry.address()) else {
+        return false;
+    };
+    let mut owned = frame;
+    if cow::is_shared(frame) {
+        let Some(copy) = allocator.allocate() else {
+            return false;
+        };
+        // SAFETY: Both frames are identity-mapped; the copy is exclusively
+        // owned here and the shared source is only read.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                frame.start_address() as *const u8,
+                copy.start_address() as *mut u8,
+                PAGE_SIZE as usize,
+            );
+        }
+        let _ = cow::release(frame);
+        owned = copy;
+    }
+    let flags = flags.without(PageFlags::COPY_ON_WRITE) | PageFlags::WRITABLE;
+    let Some(updated) = PageTableEntry::new(owned.start_address(), flags) else {
+        return false;
+    };
+    // SAFETY: As above; the stale read-only translation is flushed next.
+    unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
+    flush_page(page);
+    true
+}
+
+/// Resolves a write fault on a copy-on-write page of the active address
+/// space. Returns `true` when the faulting write can be retried.
+pub fn resolve_cow_fault(address: u64) -> bool {
+    let Some(pml4) = current_pml4() else {
+        return false;
+    };
+    super::with_frame_allocator(|allocator| resolve_cow(allocator, pml4, address)).unwrap_or(false)
+}
+
+/// Breaks copy-on-write sharing for every page of a user range that is about
+/// to be written through the kernel's identity map.
+fn resolve_cow_range(pml4: PhysFrame, address: u64, length: u64) -> bool {
+    let Some(end) = address.checked_add(length) else {
+        return false;
+    };
+    let mut page = address & !(PAGE_SIZE - 1);
+    while page < end {
+        if user_leaf_entry(pml4, page)
+            .is_some_and(|entry| entry.flags().contains(PageFlags::COPY_ON_WRITE))
+            && !super::with_frame_allocator(|allocator| resolve_cow(allocator, pml4, page))
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        page = page.saturating_add(PAGE_SIZE);
+    }
+    true
+}
+
+/// Returns a user leaf's own frame to the allocator unless another mapping
+/// still owns it through the shared registry or copy-on-write.
+fn release_user_frame(allocator: &mut FrameAllocator<'_>, frame: PhysFrame) {
+    if !shared::release(allocator, frame) && !cow::release(frame) {
+        let _ = allocator.deallocate(frame);
+    }
 }
 
 /// Allocates and maps a user range eagerly.
@@ -504,8 +686,8 @@ pub fn map_shared_anonymous_range(
 
 /// Unmaps a user range and returns its frames to the allocator.
 ///
-/// Registered shared frames lose one reference and are freed only with their
-/// last owner. Absent pages are skipped so a caller can release a partially
+/// Registered shared and copy-on-write frames lose one reference and are
+/// freed only with their last owner. Absent pages are skipped so a caller can release a partially
 /// populated range. The number of released frames is returned.
 pub fn unmap_user_range(
     allocator: &mut FrameAllocator<'_>,
@@ -520,11 +702,8 @@ pub fn unmap_user_range(
         if let Some(entry) = user_leaf_entry(pml4, address)
             && is_user_leaf(entry)
         {
-            if let Some(frame) = PhysFrame::from_address(entry.address())
-                && !shared::release(allocator, frame)
-            {
-                // Not a registered shared frame: this address space owns it.
-                let _ = allocator.deallocate(frame);
+            if let Some(frame) = PhysFrame::from_address(entry.address()) {
+                release_user_frame(allocator, frame);
             }
             if clear_user_leaf(pml4, address) {
                 flush_page(address);
@@ -539,7 +718,8 @@ pub fn unmap_user_range(
 /// Releases every user frame and page-table frame of an address space,
 /// including the PML4 itself.
 ///
-/// Shared frames lose one reference; private frames return to the allocator.
+/// Shared and copy-on-write frames lose one reference; private frames return
+/// to the allocator.
 /// Only the PML4 slots that cover [`USER_BASE`]..[`USER_LIMIT`] are walked, so
 /// the shared kernel entries are never touched.
 ///
@@ -582,10 +762,8 @@ pub unsafe fn destroy_user_address_space(allocator: &mut FrameAllocator<'_>, pml
                         if !is_user_leaf(leaf) {
                             continue;
                         }
-                        if let Some(frame) = PhysFrame::from_address(leaf.address())
-                            && !shared::release(allocator, frame)
-                        {
-                            let _ = allocator.deallocate(frame);
+                        if let Some(frame) = PhysFrame::from_address(leaf.address()) {
+                            release_user_frame(allocator, frame);
                         }
                     }
                     let _ = allocator.deallocate(pt);
@@ -766,6 +944,21 @@ pub const LINUX_HEAP_PAGES: u64 = 4096;
 /// First address available to Linux `mmap` after the heap window.
 pub const LINUX_MMAP_BASE: u64 = LINUX_ARENA_BASE + LINUX_HEAP_PAGES * PAGE_SIZE;
 
+/// Returns the leaf flags `mprotect` installs for the frame at `physical`.
+///
+/// A frame still shared copy-on-write stays read-only even when the new
+/// protection is writable; the first write then copies it.
+fn protected_leaf_flags(physical: u64, flags: PageFlags) -> PageFlags {
+    let leaf = user_leaf_flags(flags);
+    if leaf.contains(PageFlags::WRITABLE)
+        && PhysFrame::from_address(physical).is_some_and(cow::is_shared)
+    {
+        leaf.without(PageFlags::WRITABLE) | PageFlags::COPY_ON_WRITE
+    } else {
+        leaf
+    }
+}
+
 /// Changes permissions on an existing user range.
 pub fn protect_user_range(
     pml4: PhysFrame,
@@ -807,7 +1000,7 @@ pub fn protect_user_range(
             return Err(PagingError::MissingKernelMapping);
         }
         let address_phys = entry.address();
-        let updated = PageTableEntry::new(address_phys, user_leaf_flags(flags))
+        let updated = PageTableEntry::new(address_phys, protected_leaf_flags(address_phys, flags))
             .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
         unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
         flush_page(address);
@@ -876,8 +1069,9 @@ pub fn protect_user_range_if_present(
         let entry = unsafe { (*table_ptr(pt)).entry(pt_index) };
         if entry.is_present() {
             let address_phys = entry.address();
-            let updated = PageTableEntry::new(address_phys, user_leaf_flags(flags))
-                .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
+            let updated =
+                PageTableEntry::new(address_phys, protected_leaf_flags(address_phys, flags))
+                    .ok_or(PagingError::UnrepresentableAddress(address_phys))?;
             unsafe { (*table_ptr(pt)).set_entry(pt_index, updated) };
             flush_page(address);
         }
@@ -890,7 +1084,7 @@ pub fn protect_user_range_if_present(
 /// with user permissions.
 ///
 /// System calls use this before dereferencing a user pointer. A write requires
-/// every page to be writable; a read only requires presence. The range may be
+/// every page to be writable or copy-on-write; a read only requires presence. The range may be
 /// empty, which is valid and copies nothing.
 #[must_use]
 pub fn user_range_valid(pml4: PhysFrame, address: u64, len: u64, write: bool) -> bool {
@@ -912,7 +1106,12 @@ pub fn user_range_valid(pml4: PhysFrame, address: u64, len: u64, write: bool) ->
         if !entry.is_present() || !entry.flags().contains(PageFlags::USER) {
             return false;
         }
-        if write && !entry.flags().contains(PageFlags::WRITABLE) {
+        // A copy-on-write page is writable; the write itself faults and is
+        // given its own frame.
+        if write
+            && !entry.flags().contains(PageFlags::WRITABLE)
+            && !entry.flags().contains(PageFlags::COPY_ON_WRITE)
+        {
             return false;
         }
         page = page.saturating_add(PAGE_SIZE);
@@ -924,7 +1123,11 @@ pub fn user_range_valid(pml4: PhysFrame, address: u64, len: u64, write: bool) ->
 /// without changing CR3. This is used when completing a blocked syscall for a
 /// process other than the currently scheduled one.
 pub fn write_user_bytes(pml4: PhysFrame, address: u64, bytes: &[u8]) -> bool {
-    if !user_range_valid(pml4, address, bytes.len() as u64, true) {
+    // The copy below goes through the identity map, which never faults, so a
+    // copy-on-write page must get its own frame first.
+    if !user_range_valid(pml4, address, bytes.len() as u64, true)
+        || !resolve_cow_range(pml4, address, bytes.len() as u64)
+    {
         return false;
     }
     let mut copied = 0usize;
@@ -1052,6 +1255,20 @@ pub fn user_physical_address(pml4: PhysFrame, address: u64) -> Option<u64> {
         return None;
     }
     Some(entry.address() + (address & (PAGE_SIZE - 1)))
+}
+
+/// Returns the page table and index holding the leaf for `address`.
+fn user_leaf_slot(pml4: PhysFrame, address: u64) -> Option<(PhysFrame, usize)> {
+    let [pml4_index, pdpt_index, pd_index, pt_index] = aether_memory::paging::indices(address);
+    let pdpt = child_table(pml4, pml4_index)?;
+    let pd = child_table(pdpt, pdpt_index)?;
+    Some((child_table(pd, pd_index)?, pt_index))
+}
+
+/// Gives the page holding a futex word its own frame if it is copy-on-write,
+/// so the word's physical address stays its key after the next write.
+pub fn settle_cow_page(pml4: PhysFrame, address: u64) -> bool {
+    resolve_cow_range(pml4, address, 1)
 }
 
 fn user_leaf_entry(pml4: PhysFrame, address: u64) -> Option<PageTableEntry> {

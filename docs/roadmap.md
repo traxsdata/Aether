@@ -492,7 +492,10 @@ gesture, and there is no GPU service.
   `CLONE_CHILD_SETTID`/`CLEARTID`, `CLONE_SETTLS`, a new stack) and `vfork`
   semantics for `vfork` and `CLONE_VM | CLONE_VFORK`, which `posix_spawn`
   uses; namespaces fail with `EPERM` (`AETHER_LINUX_CLONE_PROCESS_OK`).
-- [ ] Copy-on-write `fork`. Every fork still copies the whole address space.
+- [x] Copy-on-write `fork`: private frames are shared read-only with a
+  per-frame owner count and copied on the first write from user code or the
+  kernel, `mprotect` keeps shared frames read-only, and futex words get their
+  own frame before keying (`AETHER_LINUX_COW_FORK_OK`).
 - [ ] On-demand AppImage import. Every imported file still stays resident in
   the fixed heap arena; large applications need a selective import of the
   files they open.
@@ -577,7 +580,7 @@ gesture, and there is no GPU service.
   sharing, and complete inotify semantics.
 - [x] Thread creation: `clone` with `CLONE_VM|CLONE_THREAD`, per-thread
   kernel stacks, TLS, tgid/tid, and clear-child-tid join.
-- [x] Process creation: eager-copy `fork`, blocking `wait4` with nonchild and
+- [x] Process creation: `fork`, blocking `wait4` with nonchild and
   selector checks, and descriptor inheritance.
 - [x] Static `execve`: resolve a rootfs ELF, build a new address space, and
   enter its entry point.

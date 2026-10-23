@@ -42,6 +42,11 @@ impl PageFlags {
     /// `mprotect` and `munmap`, but [`PageFlags::USER`] is clear, so every
     /// user-mode access faults and user-pointer validation rejects it.
     pub const GUARD: Self = Self(1 << 9);
+    /// Software bit (ignored by the CPU): a private page that is writable but
+    /// mapped read-only because `fork` shares its frame with another address
+    /// space. The first write copies the frame (or, once no other mapping is
+    /// left, makes it writable again) and clears this bit.
+    pub const COPY_ON_WRITE: Self = Self(1 << 10);
     /// Instruction fetches are forbidden.
     pub const NO_EXECUTE: Self = Self(1 << 63);
 
