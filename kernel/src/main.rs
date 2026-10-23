@@ -208,11 +208,6 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         if protection.smep { "on" } else { "unsupported" },
         if protection.smap { "on" } else { "unsupported" }
     );
-    // SAFETY: PGE only widens what a CR3 write flushes. No `GLOBAL` leaf
-    // exists yet; the kernel's page tables, which install them, are activated
-    // later in this boot sequence.
-    unsafe { arch::x86_64::cpu::enable_global_pages() };
-    serial_line!("boot: cpu: CR4.PGE global pages on");
     // SAFETY: Boot is single-threaded, interrupts are disabled, and no user
     // task has run vector code yet.
     let xsave = unsafe { arch::x86_64::cpu::enable_extended_state() };
@@ -313,6 +308,14 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             }
             None => boot_failure("frame allocator unavailable"),
         };
+    // SAFETY: Paging init above has installed, and activated, the kernel's own
+    // `GLOBAL` leaves (present but ignored while PGE=0). Enabling CR4.PGE now,
+    // after CR3 left the firmware's tables, is what makes them take effect, and
+    // the PGE 0→1 transition flushes the entire TLB, globals included, so no
+    // translation from the firmware's page tables — global or not — survives
+    // into the kernel.
+    unsafe { arch::x86_64::cpu::enable_global_pages() };
+    serial_line!("boot: cpu: CR4.PGE global pages on");
 
     match graphics::init(&info.framebuffer, framebuffer_mapped) {
         Ok(true) => {

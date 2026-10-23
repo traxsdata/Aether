@@ -80,8 +80,14 @@ is identity-based.
 
 Global pages: every kernel leaf entry (low RAM, kernel sections, large pages,
 the framebuffer, and runtime MMIO windows) is mapped `GLOBAL`, and `CR4.PGE`
-is enabled during CPU init, before the map is installed. The kernel's
-translation is byte-identical in every address space — each task's PML4 copies
+is enabled as soon as paging init has activated the kernel's own tables.
+That ordering is required: enabling PGE while the firmware's page tables are
+still in CR3 would make any firmware entry with the G bit set a global TLB
+entry the kernel's CR3 write cannot flush. The PGE 0→1 transition flushes
+the whole TLB, globals included, so nothing from the firmware survives, and
+the kernel's `GLOBAL` leaves (present but ignored while PGE=0) take effect
+only from that point on. The kernel's translation is byte-identical in every
+address space — each task's PML4 copies
 the kernel's PML4 slot 0 entry onto the shared kernel page tables — so keeping
 those translations across CR3 writes is safe and removes the cost of re-walking
 the identity map on every context switch. Any post-boot change to a global

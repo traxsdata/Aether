@@ -162,16 +162,23 @@ pub unsafe fn enable_supervisor_protection() -> SupervisorProtection {
 /// space: each task's PML4 copies the kernel's PML4 slot 0 entry and thus
 /// points at the same kernel page tables, so those translations are identical
 /// everywhere and marking the leaves `GLOBAL` is safe.
-/// PGE is only meaningful once the kernel maps pages with `PageFlags::GLOBAL`,
-/// which happens during paging init, so it must be enabled before that.
+///
+/// This must run **after** the kernel's own page tables are active, not
+/// before them while the firmware's tables are still in CR3: enabling PGE
+/// early would make any firmware table entry with the G bit set a global
+/// TLB entry that the kernel's CR3 write cannot flush. Turning PGE on from 0
+/// to 1 flushes the entire TLB, globals included, so no firmware translation
+/// can survive, and the kernel's `GLOBAL` leaves (present but ignored while
+/// PGE=0) take effect only from this point on.
 ///
 /// # Safety
 ///
-/// Must run once during boot, at CPL0, with interrupts disabled, and before
-/// any page table with a `GLOBAL` entry is activated.
+/// Must run once during boot, at CPL0, with interrupts disabled, and after
+/// the kernel's own `GLOBAL` page tables have been activated.
 pub unsafe fn enable_global_pages() {
-    // SAFETY: CR4 is writable at CPL0, PGE is architectural on x86-64, and no
-    // `GLOBAL` page table entry is activated yet.
+    // SAFETY: CR4 is writable at CPL0, PGE is architectural on x86-64, and
+    // the caller activated the kernel's own global leaves first; the PGE 0→1
+    // transition's full TLB flush discards any stale or firmware translations.
     unsafe { write_cr4(read_cr4() | CR4_PGE) };
 }
 
