@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 from boot_support import BASE_MARKERS, find_firmware, has_failure
+from qemu_accel import accel_args, describe
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
@@ -81,10 +82,7 @@ NIC_MODEL = os.environ.get("AETHER_NIC_MODEL", "")
 def qemu_command(code: Path, variables: Path | None) -> list[str]:
     command = [
         "qemu-system-x86_64",
-        "-machine",
-        "q35,accel=tcg",
-        "-cpu",
-        "max",
+        *accel_args(),
         "-m",
         os.environ.get("AETHER_MEMORY", "1024M"),
         "-display",
@@ -173,6 +171,7 @@ def main() -> int:
         print("error: build/aether.img missing; run `make image`", file=sys.stderr)
         return 2
 
+    print(f"qemu: {describe()}")
     code, variables = find_firmware()
     BUILD.mkdir(exist_ok=True)
     SERIAL.unlink(missing_ok=True)

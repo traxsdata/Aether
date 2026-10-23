@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 from boot_support import find_firmware, has_failure
+from qemu_accel import accel_args, describe
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
@@ -26,10 +27,7 @@ VARS = BUILD / "OVMF_VARS.fd"
 def qemu_command(code: Path, variables: Path | None) -> list[str]:
     command = [
         "qemu-system-x86_64",
-        "-machine",
-        "q35,accel=tcg",
-        "-cpu",
-        "max",
+        *accel_args(),
         "-m",
         "1024M",
         "-display",
@@ -97,6 +95,7 @@ def main() -> int:
         print("error: build/aether.img missing; run `make image`", file=sys.stderr)
         return 2
 
+    print(f"qemu: {describe()}")
     code, variables = find_firmware()
     BUILD.mkdir(exist_ok=True)
     SOCKET.unlink(missing_ok=True)
