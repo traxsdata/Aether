@@ -221,8 +221,8 @@ grants, and the desktop is not a security authority.
   against guarded/padded surfaces, hashes, signatures, package/update/runtime
   policy, build tooling, and the defensive ELF parser.
 - `make test`, which boots the FAT image under QEMU with OVMF and requires
-  `AETHER_MM_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`, `AETHER_CAP_OK`,
-  `AETHER_IPC_OK`, `AETHER_IPC_USER_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`,
+  `AETHER_MM_OK`, `AETHER_CR3_OK`, `AETHER_SCHED_OK`, `AETHER_ISOLATION_OK`,
+  `AETHER_CAP_OK`, `AETHER_IPC_OK`, `AETHER_IPC_USER_OK`, `AETHER_APP_OK`, `AETHER_FS_OK`,
   `AETHER_SANDBOX_OK`, `AETHER_SUPERVISOR_OK`, `AETHER_RECOVERY_OK`,
   `AETHER_REVOCATION_OK`, `AETHER_PACKAGE_OK`, `AETHER_RUNTIME_OK`,
   `AETHER_UPDATE_OK`, `AETHER_GRAPHICS_OK`, `AETHER_DESKTOP_OK`,

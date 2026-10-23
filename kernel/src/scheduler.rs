@@ -1235,6 +1235,14 @@ pub fn run() -> ! {
                 TICKS.load(Ordering::Relaxed)
             );
             serial_line!("AETHER_ISOLATION_OK tasks={WORKER_COUNT}");
+            // Running evidence that same-address-space switches avoided the
+            // CR3 reload: the boot self-test guarantees at least one skip, and
+            // Linux threads reusing a process space add more.
+            serial_line!(
+                "sched: cr3 reloads={} skips={}",
+                crate::memory::paging::cr3_reloads(),
+                crate::memory::paging::cr3_skips()
+            );
             serial_line!("AETHER_CAP_OK denials={denied}");
             serial_line!("AETHER_IPC_OK messages={messages}");
             let escapes = crate::fs::escape_denials();

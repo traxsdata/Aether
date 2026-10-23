@@ -112,6 +112,7 @@ class ToolingTests(unittest.TestCase):
         self.assertIn("AETHER_INPUT_OK", BASE_MARKERS)
         self.assertIn("AETHER_LINUX_PROCESS_GROUP_OK", BASE_MARKERS)
         self.assertIn("AETHER_LINUX_APPIMAGE_STAGED_OK", BASE_MARKERS)
+        self.assertIn("AETHER_CR3_OK", BASE_MARKERS)
 
     def test_iso_selection_and_explicit_override(self):
         with tempfile.TemporaryDirectory() as directory:
