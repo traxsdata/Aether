@@ -357,9 +357,14 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         121 => linux_getpgid(first),
         124 => linux_getsid(first),
         57 => scheduler::linux_fork(frame).map_or_else(|error| error, |pid| pid as i64),
+        // vfork is clone(CLONE_VM | CLONE_VFORK | SIGCHLD) on the caller's stack.
+        58 => match linux_clone(frame, pml4, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0) {
+            Cloned::Done(result) => result,
+            Cloned::Vfork(child) => return scheduler::linux_vfork_wait(frame, child),
+        },
         59 => return linux_execve(frame, pml4, first, second, third),
         61 => return linux_wait4(frame, pml4, first, second, third),
-        56 => linux_clone(
+        56 => match linux_clone(
             frame,
             pml4,
             first,
@@ -367,8 +372,14 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
             third,
             unsafe { (*frame).r10 },
             unsafe { (*frame).r8 },
-        ),
-        435 => linux_clone3(frame, pml4, first, second),
+        ) {
+            Cloned::Done(result) => result,
+            Cloned::Vfork(child) => return scheduler::linux_vfork_wait(frame, child),
+        },
+        435 => match linux_clone3(frame, pml4, first, second) {
+            Cloned::Done(result) => result,
+            Cloned::Vfork(child) => return scheduler::linux_vfork_wait(frame, child),
+        },
         62 => linux_kill(pml4, first, second),
         234 => linux_tgkill(pml4, first, second, third),
         72 => linux_fcntl(first, second, third),
@@ -2320,6 +2331,28 @@ fn linux_wait4(
     frame
 }
 
+const CLONE_VM: u64 = 0x0000_0100;
+const CLONE_FS: u64 = 0x0000_0200;
+const CLONE_FILES: u64 = 0x0000_0400;
+const CLONE_SIGHAND: u64 = 0x0000_0800;
+const CLONE_VFORK: u64 = 0x0000_4000;
+const CLONE_THREAD: u64 = 0x0001_0000;
+const CLONE_SETTLS: u64 = 0x0008_0000;
+const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+/// `CLONE_NEWNS` and the other namespace flags. No namespace can be created.
+const CLONE_NAMESPACES: u64 = 0x0002_0000 | 0x7e00_0000;
+/// The low byte of `clone` flags is the child's exit signal.
+const CLONE_SIGNAL_MASK: u64 = 0xff;
+const SIGCHLD: u64 = 17;
+
+/// Outcome of a `clone`: a result, or a `vfork` child the caller waits for.
+enum Cloned {
+    Done(i64),
+    Vfork(usize),
+}
+
 fn linux_clone(
     frame: *mut InterruptFrame,
     pml4: PhysFrame,
@@ -2328,23 +2361,23 @@ fn linux_clone(
     parent_tid: u64,
     child_tid: u64,
     tls: u64,
-) -> i64 {
-    const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
-    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
-    const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+) -> Cloned {
     if flags & CLONE_PARENT_SETTID != 0
         && (parent_tid == 0 || !linux_user_range_valid(pml4, parent_tid, 4, true))
     {
-        return LINUX_EFAULT;
+        return Cloned::Done(LINUX_EFAULT);
     }
     if flags & (CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID) != 0
         && (child_tid == 0 || !linux_user_range_valid(pml4, child_tid, 4, true))
     {
-        return LINUX_EFAULT;
+        return Cloned::Done(LINUX_EFAULT);
+    }
+    if flags & CLONE_THREAD == 0 {
+        return linux_clone_process(frame, pml4, flags, child_stack, parent_tid, child_tid, tls);
     }
     let tid = match scheduler::linux_clone(frame, flags, child_stack, child_tid, tls) {
         Ok(tid) => tid,
-        Err(error) => return error,
+        Err(error) => return Cloned::Done(error),
     };
     if flags & CLONE_PARENT_SETTID != 0 {
         let _ = write_user_u32(pml4, parent_tid, tid as u32);
@@ -2352,7 +2385,70 @@ fn linux_clone(
     if flags & CLONE_CHILD_SETTID != 0 {
         let _ = write_user_u32(pml4, child_tid, tid as u32);
     }
-    tid as i64
+    Cloned::Done(tid as i64)
+}
+
+/// `clone` without `CLONE_THREAD`: a new process, as glibc's `fork` and
+/// `posix_spawn` create them.
+///
+/// The child always gets a private copy of the address space and the
+/// descriptor table. `CLONE_VM` is accepted only with `CLONE_VFORK`, where
+/// the parent is suspended until the child execs or exits, so a copy is
+/// indistinguishable from a shared space except for writes the child makes
+/// before `execve`: `posix_spawn` cannot report an exec failure through
+/// memory and instead sees the child exit with status 127. Sharing
+/// descriptors, signal handlers, or the filesystem context between
+/// processes is not supported, and namespaces fail with `EPERM`.
+fn linux_clone_process(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    flags: u64,
+    child_stack: u64,
+    parent_tid: u64,
+    child_tid: u64,
+    tls: u64,
+) -> Cloned {
+    const SUPPORTED: u64 = CLONE_SIGNAL_MASK
+        | CLONE_VM
+        | CLONE_VFORK
+        | CLONE_SETTLS
+        | CLONE_PARENT_SETTID
+        | CLONE_CHILD_CLEARTID
+        | CLONE_CHILD_SETTID;
+    if flags & CLONE_NAMESPACES != 0 {
+        return Cloned::Done(LINUX_EPERM);
+    }
+    if flags & !SUPPORTED != 0
+        || flags & CLONE_SIGNAL_MASK != SIGCHLD
+        || flags & (CLONE_VM | CLONE_VFORK) == CLONE_VM
+    {
+        return Cloned::Done(LINUX_EINVAL);
+    }
+    let spec = scheduler::ForkSpec {
+        stack: child_stack,
+        tls: (flags & CLONE_SETTLS != 0).then_some(tls),
+        clear_child_tid: if flags & CLONE_CHILD_CLEARTID != 0 {
+            child_tid
+        } else {
+            0
+        },
+    };
+    let pid = match scheduler::linux_fork_with(frame, spec) {
+        Ok(pid) => pid,
+        Err(error) => return Cloned::Done(error),
+    };
+    if flags & CLONE_PARENT_SETTID != 0 {
+        let _ = write_user_u32(pml4, parent_tid, pid as u32);
+    }
+    // The child's tid word lives in the child's own copy of memory.
+    if flags & CLONE_CHILD_SETTID != 0 {
+        let _ = scheduler::linux_write_task_u32(pid, child_tid, pid as u32);
+    }
+    if flags & CLONE_VFORK != 0 {
+        Cloned::Vfork(pid)
+    } else {
+        Cloned::Done(pid as i64)
+    }
 }
 
 fn linux_clone3(
@@ -2360,18 +2456,9 @@ fn linux_clone3(
     pml4: PhysFrame,
     arguments_pointer: u64,
     size: u64,
-) -> i64 {
+) -> Cloned {
     const CLONE_ARGS_SIZE: u64 = 88;
     const CLONE_ARGS_MIN: u64 = 64;
-    const CLONE_VM: u64 = 0x0000_0100;
-    const CLONE_FS: u64 = 0x0000_0200;
-    const CLONE_FILES: u64 = 0x0000_0400;
-    const CLONE_SIGHAND: u64 = 0x0000_0800;
-    const CLONE_THREAD: u64 = 0x0001_0000;
-    const CLONE_SETTLS: u64 = 0x0008_0000;
-    const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
-    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
-    const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
     const SUPPORTED: u64 = CLONE_VM
         | CLONE_FS
         | CLONE_FILES
@@ -2383,12 +2470,12 @@ fn linux_clone3(
         | CLONE_CHILD_SETTID;
 
     if size < CLONE_ARGS_MIN {
-        return LINUX_EINVAL;
+        return Cloned::Done(LINUX_EINVAL);
     }
     let read = size.min(CLONE_ARGS_SIZE);
     let mut raw = [0u8; CLONE_ARGS_SIZE as usize];
     if copy_from_user(pml4, arguments_pointer, &mut raw[..read as usize]).is_none() {
-        return LINUX_EFAULT;
+        return Cloned::Done(LINUX_EFAULT);
     }
     let field = |offset: usize| -> u64 {
         raw.get(offset..offset + 8)
@@ -2407,32 +2494,56 @@ fn linux_clone3(
     let set_tid_size = field(72);
     let cgroup = field(80);
 
-    // Only the thread-creating subset of clone3 is mapped to the bounded
-    // clone path. pidfds, set_tid, cgroups, and non-thread process creation
-    // fail explicitly instead of silently changing meaning.
-    if pidfd != 0
-        || set_tid != 0
-        || set_tid_size != 0
-        || cgroup != 0
-        || exit_signal != 0
+    // Threads and new processes map onto the bounded clone paths. pidfds,
+    // set_tid, and cgroups fail explicitly instead of silently changing
+    // meaning; glibc falls back to clone on ENOSYS.
+    if pidfd != 0 || set_tid != 0 || set_tid_size != 0 || cgroup != 0 {
+        return Cloned::Done(LINUX_ENOSYS);
+    }
+    if flags & CLONE_SIGNAL_MASK != 0 {
+        return Cloned::Done(LINUX_EINVAL);
+    }
+    if flags & CLONE_THREAD == 0 {
+        if exit_signal != SIGCHLD {
+            return Cloned::Done(LINUX_EINVAL);
+        }
+        let child_stack = if stack == 0 {
+            0
+        } else {
+            match stack.checked_add(stack_size) {
+                Some(top) => top & !15,
+                None => return Cloned::Done(LINUX_EINVAL),
+            }
+        };
+        return linux_clone(
+            frame,
+            pml4,
+            flags | SIGCHLD,
+            child_stack,
+            parent_tid,
+            child_tid,
+            tls,
+        );
+    }
+    if exit_signal != 0
         || flags & !SUPPORTED != 0
         || flags & (CLONE_VM | CLONE_THREAD) != (CLONE_VM | CLONE_THREAD)
     {
-        return LINUX_ENOSYS;
+        return Cloned::Done(LINUX_ENOSYS);
     }
     if stack == 0 {
-        return LINUX_EINVAL;
+        return Cloned::Done(LINUX_EINVAL);
     }
     let child_stack = if stack_size == 0 {
         stack & !15
     } else {
         let Some(top) = stack.checked_add(stack_size) else {
-            return LINUX_EINVAL;
+            return Cloned::Done(LINUX_EINVAL);
         };
         top & !15
     };
     if !(aether_abi::user::USER_BASE..aether_abi::user::USER_LIMIT).contains(&child_stack) {
-        return LINUX_EINVAL;
+        return Cloned::Done(LINUX_EINVAL);
     }
     linux_clone(frame, pml4, flags, child_stack, parent_tid, child_tid, tls)
 }

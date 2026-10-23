@@ -1354,6 +1354,134 @@ seccomp_sigsys_handler:
     ret
 
 after_seccomp:
+    /* Process clone: glibc fork flags, vfork, clone3, refused flags. */
+    push %rbx
+    push %r12
+    sub $160, %rsp
+    movl $0, 112(%rsp)          /* parent tid word */
+    movl $0, 116(%rsp)          /* child tid word */
+    mov $56, %rax               /* clone(SIGCHLD | CHILD_SETTID | PARENT_SETTID) */
+    mov $0x01100011, %rdi
+    xor %rsi, %rsi
+    lea 112(%rsp), %rdx
+    lea 116(%rsp), %r10
+    xor %r8, %r8
+    syscall
+    test %rax, %rax
+    js fail_clone_process
+    jz clone_process_child
+    mov %rax, %r12
+    cmpl %r12d, 112(%rsp)
+    jne fail_clone_process
+    cmpl $0, 116(%rsp)          /* the child's tid word is in its own copy */
+    jne fail_clone_process
+    mov $61, %rax
+    mov %r12, %rdi
+    lea 144(%rsp), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp %r12, %rax
+    jne fail_clone_process
+    cmpl $0x500, 144(%rsp)
+    jne fail_clone_process
+    /* vfork: the parent resumes only after the child exits. */
+    mov $58, %rax
+    syscall
+    test %rax, %rax
+    js fail_clone_process
+    jz clone_vfork_child
+    mov %rax, %r12
+    mov $61, %rax               /* WNOHANG: the child is already gone */
+    mov %r12, %rdi
+    lea 144(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    cmp %r12, %rax
+    jne fail_clone_process
+    cmpl $0x700, 144(%rsp)
+    jne fail_clone_process
+    /* clone3(CLONE_VM | CLONE_VFORK, exit_signal SIGCHLD), as posix_spawn. */
+    lea 0(%rsp), %rdi
+    mov $11, %rcx
+    xor %rax, %rax
+1:
+    movq $0, (%rdi)
+    add $8, %rdi
+    loop 1b
+    movq $0x4100, 0(%rsp)
+    movq $17, 32(%rsp)
+    mov $435, %rax
+    mov %rsp, %rdi
+    mov $88, %rsi
+    syscall
+    test %rax, %rax
+    js fail_clone_process
+    jz clone_spawn_child
+    mov %rax, %r12
+    mov $61, %rax
+    mov %r12, %rdi
+    lea 144(%rsp), %rsi
+    mov $1, %rdx
+    xor %r10, %r10
+    syscall
+    cmp %r12, %rax
+    jne fail_clone_process
+    cmpl $0x900, 144(%rsp)
+    jne fail_clone_process
+    /* Namespaces are refused, and CLONE_VM without CLONE_VFORK cannot share
+       an address space between processes. */
+    mov $56, %rax
+    mov $0x10000011, %rdi       /* CLONE_NEWUSER | SIGCHLD */
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    xor %r8, %r8
+    syscall
+    cmp $-1, %rax
+    jne fail_clone_process
+    mov $56, %rax
+    mov $0x111, %rdi            /* CLONE_VM | SIGCHLD */
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    xor %r8, %r8
+    syscall
+    cmp $-22, %rax
+    jne fail_clone_process
+    mov $1, %rax
+    mov $1, %rdi
+    lea clone_process_message(%rip), %rsi
+    mov $clone_process_message_len, %rdx
+    syscall
+    add $160, %rsp
+    pop %r12
+    pop %rbx
+    jmp after_clone_process
+
+clone_process_child:
+    mov $39, %rax               /* CLONE_CHILD_SETTID wrote our pid */
+    syscall
+    cmpl %eax, 116(%rsp)
+    jne 1f
+    mov $60, %rax
+    mov $5, %rdi
+    syscall
+1:
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+clone_vfork_child:
+    mov $60, %rax
+    mov $7, %rdi
+    syscall
+clone_spawn_child:
+    mov $60, %rax
+    mov $9, %rdi
+    syscall
+
+after_clone_process:
     /* Thread + futex: map a shared page, clone, wait for the child. */
     sub $16, %rsp
     movq $0, 0(%rsp)
@@ -4624,6 +4752,10 @@ fail_dir:
     lea dir_failure(%rip), %rsi
     mov $dir_failure_len, %rdx
     jmp report_failure
+fail_clone_process:
+    lea clone_process_failure(%rip), %rsi
+    mov $clone_process_failure_len, %rdx
+    jmp report_failure
 fail_seccomp:
     lea seccomp_failure(%rip), %rsi
     mov $seccomp_failure_len, %rdx
@@ -5257,6 +5389,12 @@ shared_fork_message:
 map_shared_file_message:
     .ascii "AETHER_LINUX_MAP_SHARED_FILE_OK file=rootfs read=ok msync=eopnotsupp\n"
     .set map_shared_file_message_len, . - map_shared_file_message
+clone_process_message:
+    .ascii "AETHER_LINUX_CLONE_PROCESS_OK fork_flags=ok settid=ok vfork=ok clone3=ok namespaces=eperm\n"
+    .set clone_process_message_len, . - clone_process_message
+clone_process_failure:
+    .ascii "AETHER_LINUX_CLONE_PROCESS_FAIL\n"
+    .set clone_process_failure_len, . - clone_process_failure
 seccomp_message:
     .ascii "AETHER_LINUX_SECCOMP_OK nnp=ok errno=ok stack=ok trap=ok kill=ok prctl=ok\n"
     .set seccomp_message_len, . - seccomp_message

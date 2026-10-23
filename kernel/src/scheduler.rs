@@ -283,6 +283,8 @@ enum LinuxWaitKind {
     Sleep,
     PipeRead(usize),
     PipeWrite(usize),
+    /// A `vfork` parent waiting for the child (by tgid) to exec or exit.
+    Vfork(usize),
 }
 
 /// Public wait reasons for syscall handlers.
@@ -2396,6 +2398,23 @@ pub fn linux_clone(
 /// Forks the current Linux process into a fresh address space.
 #[allow(clippy::too_many_arguments)]
 pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
+    linux_fork_with(frame, ForkSpec::default())
+}
+
+/// How a process-creating `clone` differs from a plain `fork`.
+#[derive(Clone, Copy, Default)]
+pub struct ForkSpec {
+    /// New user stack pointer for the child; 0 keeps the parent's.
+    pub stack: u64,
+    /// `CLONE_SETTLS`: the child's `fs` base.
+    pub tls: Option<u64>,
+    /// `CLONE_CHILD_CLEARTID`: cleared and futex-woken when the child exits.
+    pub clear_child_tid: u64,
+}
+
+/// Creates a child process with a private copy of the caller's address
+/// space and descriptor table, and returns its id.
+pub fn linux_fork_with(frame: *mut InterruptFrame, spec: ForkSpec) -> Result<usize, i64> {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let current = CURRENT.load(Ordering::Relaxed);
     let domain = tasks[current].overlay_app;
@@ -2498,6 +2517,10 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.robust_list_len = 0;
     child.rseq = 0;
     child.rseq_len = 0;
+    child.clear_child_tid = spec.clear_child_tid;
+    if let Some(tls) = spec.tls {
+        child.fs_base = tls;
+    }
 
     let frame_size = core::mem::size_of::<InterruptFrame>() as u64;
     let frame_end = (kernel_top - 16) & !15;
@@ -2511,10 +2534,40 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
             frame_size as usize,
         );
         (*(frame_start as *mut InterruptFrame)).rax = 0;
+        if spec.stack != 0 {
+            (*(frame_start as *mut InterruptFrame)).rsp = spec.stack;
+        }
     }
     child.saved_rsp = frame_start;
     tasks[slot] = child;
     Ok(slot)
+}
+
+/// Writes a `u32` into task `slot`'s own memory, through its page tables
+/// rather than the active ones (`CLONE_CHILD_SETTID` for a new process).
+pub fn linux_write_task_u32(slot: usize, pointer: u64, value: u32) -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks
+        .get(slot)
+        .and_then(|task| PhysFrame::from_address(task.pml4))
+        .is_some_and(|pml4| paging::write_user_bytes(pml4, pointer, &value.to_ne_bytes()))
+}
+
+/// Suspends the caller until child `tgid` execs or exits, as `vfork`
+/// requires. The call returns the child's id when the parent resumes.
+pub fn linux_vfork_wait(frame: *mut InterruptFrame, tgid: usize) -> *mut InterruptFrame {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    // SAFETY: The syscall entry passes a live frame for this task.
+    unsafe { (*frame).rax = tgid as u64 };
+    let child = &tasks[tgid];
+    if child.state == TaskState::Empty || child.state == TaskState::Done {
+        return frame;
+    }
+    tasks[current].wait_kind = LinuxWaitKind::Vfork(tgid);
+    tasks[current].wait_deadline = 0;
+    tasks[current].state = TaskState::Blocked;
+    yield_current(frame)
 }
 
 /// Replaces the current task's address space after `execve`.
@@ -2542,9 +2595,11 @@ pub fn linux_replace_image(pml4: PhysFrame) {
     task.shared_vmas.reset();
     task.brk = paging::LINUX_ARENA_BASE;
     task.fs_base = 0;
+    let tgid = task.tgid;
     if old_address != pml4.start_address() {
         retire_address_space(old_address);
     }
+    linux_vfork_done(tgid);
 }
 
 /// Reaps an exited child of the current process.
@@ -3009,6 +3064,11 @@ pub fn linux_wake_pollers() {
     linux_wake_matching(|kind| kind == LinuxWaitKind::Poll);
 }
 
+/// Releases a `vfork` parent once its child (`tgid`) has exec'd or exited.
+fn linux_vfork_done(tgid: usize) {
+    linux_wake_matching(|kind| kind == LinuxWaitKind::Vfork(tgid));
+}
+
 /// Wakes tasks blocked on either end of a pipe when its state changes.
 fn linux_wake_pipe(index: usize) {
     linux_wake_matching(|kind| {
@@ -3357,6 +3417,12 @@ fn interrupt_blocked(index: usize) {
     let tasks = unsafe { &mut *TASKS.0.get() };
     let task = &mut tasks[index];
     if task.state != TaskState::Blocked || task.saved_rsp == 0 {
+        return;
+    }
+    // A `vfork` parent waits like Linux's killable wait: signals stay
+    // pending until the child execs or exits, and the parent's result is
+    // already the child's id.
+    if matches!(task.wait_kind, LinuxWaitKind::Vfork(_)) {
         return;
     }
     // A blocked inotify read has no rewound syscall instruction; clear its
@@ -3990,6 +4056,7 @@ fn terminate_thread_group(index: usize, signum: u64) {
 
 /// Queues the default-ignored SIGCHLD notification on a Linux parent.
 fn queue_child_signal(child: usize) {
+    linux_vfork_done(child);
     let tasks = unsafe { &mut *TASKS.0.get() };
     let parent = tasks[child].parent;
     if parent == 0 || parent >= tasks.len() || parent == child {
