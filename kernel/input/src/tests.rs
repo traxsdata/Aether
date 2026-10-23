@@ -51,6 +51,38 @@ fn extended_alt_and_super_are_captured() {
 }
 
 #[test]
+fn super_chord_release_leaves_no_modifier_held() {
+    let mut keyboard = Keyboard::new();
+    // E0 5B 31 B1 E0 DB: Super down, N down, N up, Super up.
+    assert!(keyboard.push(0xe0).is_none());
+    assert!(keyboard.push(0x5b).is_none());
+    let event = keyboard.push(0x31).unwrap();
+    assert_eq!(event.key, Key::Char(b'n'));
+    assert!(event.modifiers.super_key);
+    assert!(!event.modifiers.ctrl && !event.modifiers.alt && !event.modifiers.shift);
+    assert!(keyboard.push(0xb1).is_none());
+    assert!(keyboard.push(0xe0).is_none());
+    assert!(keyboard.push(0xdb).is_none());
+    assert_eq!(keyboard.modifiers(), Modifiers::default());
+    // A following key must arrive free of the released modifier.
+    let plain = keyboard.push(0x4d).unwrap();
+    assert_eq!(plain.key, Key::Right);
+    assert_eq!(plain.modifiers, Modifiers::default());
+}
+
+#[test]
+fn super_right_chord_captures_and_releases_super() {
+    let mut keyboard = Keyboard::new();
+    for byte in [0xe0, 0x5b, 0xe0, 0x4d, 0xe0, 0xcd, 0xe0, 0xdb] {
+        let decoded = keyboard.push(byte);
+        assert!(decoded.is_none() || decoded.unwrap().modifiers.super_key);
+    }
+    let moved = keyboard.push(0x39).unwrap();
+    assert!(!moved.modifiers.super_key);
+    assert_eq!(keyboard.modifiers(), Modifiers::default());
+}
+
+#[test]
 fn pause_and_print_screen_do_not_leave_fake_modifiers_held() {
     let mut keyboard = Keyboard::new();
     for byte in [

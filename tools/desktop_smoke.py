@@ -191,11 +191,63 @@ class DesktopVM:
                 return state
         raise RuntimeError(f"desktop did not {description}: {state}")
 
+    # Modifier names from the `input` diagnostic, translated to HMP
+    # sendkey tokens for explicit release re-sends. The left and right meta
+    # tokens exercise independent device paths (left and right Super map to
+    # distinct scancode pairs), so both are re-sent.
+    MOD_TOKENS = {
+        "shift": ("shift",),
+        "ctrl": ("ctrl",),
+        "alt": ("alt",),
+        "super": ("meta_l", "meta_r", "menu"),
+    }
+
+    def modifiers(self) -> tuple[dict[str, bool], str]:
+        text = self.console("input")
+        match = re.search(r"shift=([01]) ctrl=([01]) alt=([01]) super=([01])", text)
+        if not match:
+            raise RuntimeError(f"missing modifier diagnostics: {text}")
+        held = {"shift": match[1] == "1", "ctrl": match[2] == "1", "alt": match[3] == "1", "super": match[4] == "1"}
+        return held, text
+
+    def settle_modifiers(self, timeout: float = 15.0):
+        """Wait until the guest reports no modifier keys held.
+
+        In this QEMU/TCG stack a PS/2 break byte can reach the guest much
+        later than the host sent it (a traced boot showed a Super break
+        landing only after two console round-trips), so the guest may still
+        read Super or Shift as held when the harness moves on. The kernel
+        legitimately acts only on the bytes it receives; therefore the
+        harness verifies the modifier state through the guest's own `input`
+        diagnostic and re-sends explicit releases until the guest confirms
+        a clean state before the next plain key is asserted.
+        """
+        deadline = time.monotonic() + timeout
+        stuck: list[str] = []
+        text = ""
+        while time.monotonic() < deadline:
+            held, text = self.modifiers()
+            stuck = [name for name, is_held in held.items() if is_held]
+            if not stuck:
+                return
+            for name in stuck:
+                for token in self.MOD_TOKENS.get(name, (name,)):
+                    self.hmp(f"sendkey {token}")
+                    # Give the guest a chance to read the make/break bytes
+                    # before the next command; correctness is confirmed by
+                    # the next modifiers() read, not by this delay.
+                    time.sleep(0.05)
+        raise RuntimeError(f"modifier keys still held in the guest: {stuck}\n{text}")
+
     def key(self, key: str):
+        # HMP sendkey keeps the down-up order the guest decoder relies on
+        # and is the delivery path with a byte-level track record in this
+        # stack; QMP input-send-event key-up events for modifiers have been
+        # observed not to reach the guest. Break bytes can still land late,
+        # so settle_modifiers() guarantees a clean modifier state before
+        # the harness asserts on the next plain key.
         self.hmp(f"sendkey {key} 20")
-        # Let the emulated controller deliver the break codes before the next
-        # chord. This is a device-pacing delay, not an animation success check.
-        time.sleep(0.04)
+        self.settle_modifiers()
 
     def pointer(self) -> tuple[int, int]:
         text = self.console("input")
@@ -239,11 +291,12 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
         state = vm.state()
         welcome = state["windows"]["Welcome"]
         x, y, width, height = welcome["frame"]
-        vm.key("right")  # E0 dedicated arrow, not the old keypad-only self-test
-        state = vm.wait(lambda value: value["windows"]["Welcome"]["frame"][0] == x + 8, "move with the dedicated Right key")
-        vm.key("ctrl-right")
+        # QEMU's HMP has no generic "super" token; meta_l is the Super key.
+        vm.key("meta_l-right")  # E0 dedicated arrow, not the old keypad-only self-test
+        state = vm.wait(lambda value: value["windows"]["Welcome"]["frame"][0] == x + 8, "move the window with Super+Right")
+        vm.key("meta_l-alt-right")
         vm.wait(lambda value: value["workspace"] == 1 and not value["transition_active"], "finish switching to Space 2")
-        vm.key("ctrl-left")
+        vm.key("meta_l-alt-left")
         # Logical workspace/focus changes precede the slide animation. Wait for
         # the guest's actual transition state, not an arbitrary host delay,
         # before clicking coordinates from the final logical window frames.
@@ -257,8 +310,8 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
         vm.move_to(x + width // 2 + 40, y + 36)
         vm.button(False)
         vm.wait(lambda value: value["windows"]["Welcome"]["frame"][:2] == (x + 40, y + 24), "drag the title bar")
-        vm.key("shift-right")
-        vm.wait(lambda value: value["windows"]["Welcome"]["frame"][2] == width + 8, "resize with Shift+Right")
+        vm.key("meta_l-shift-right")
+        vm.wait(lambda value: value["windows"]["Welcome"]["frame"][2] == width + 8, "resize with Super+Shift+Right")
 
         # Partial repaints must produce the same pixels as an explicit full paint
         # (apart from the changing uptime clock in the menu bar).
@@ -283,7 +336,7 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
 
         # Files is no longer just painted chrome: both pointer and keyboard
         # navigate real folders and open a service-backed, read-only preview.
-        vm.key("ctrl-n")
+        vm.key("meta_l-n")
         state = vm.wait(lambda value: value["focus"] == value["windows"]["Files"]["id"], "focus Files")
         fx, fy, fw, fh = state["windows"]["Files"]["frame"]
         sidebar = max(92, min(138, (fw - 2) // 3))
@@ -311,7 +364,7 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
         vm.key("ret")  # root's first entry is the private application vaults
         vm.wait(lambda value: value["path"] == "/" and "Access" in value["files_error"], "deny browsing private application data")
 
-        vm.key("ctrl-spc")
+        vm.key("meta_l-spc")
         vm.wait(lambda value: value["mode"] == "SEARCH", "open Aether Search")
         for letter in "portal":
             vm.key(letter)
@@ -329,7 +382,7 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
             raise RuntimeError(f"portal consent click did not install a grant:\n{grants}")
         vm.console("portal revoke 1")
 
-        vm.key("ctrl-spc")
+        vm.key("meta_l-spc")
         vm.wait(lambda value: value["mode"] == "SEARCH", "reopen Aether Search")
         panel_width = min(520, w - 64)
         panel_height = min(312, h - 100)

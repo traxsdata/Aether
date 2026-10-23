@@ -819,18 +819,24 @@ pub fn key(slot: usize, key: Key, modifiers: crate::input::Modifiers) {
     if modifiers.super_key {
         modifier_bits |= 8;
     }
+    // A Super-tap is a synthetic desktop event and is never forwarded to a
+    // Linux surface.
     let code = match key {
-        Key::Char(byte) => u32::from(byte),
-        Key::Enter => 0x1000,
-        Key::Backspace => 0x1001,
-        Key::Delete => 0x1002,
-        Key::Tab => 0x1003,
-        Key::Escape => 0x1004,
-        Key::Up => 0x1005,
-        Key::Down => 0x1006,
-        Key::Left => 0x1007,
-        Key::Right => 0x1008,
-        Key::Function(number) => 0x1100 | u32::from(number),
+        Key::Char(byte) => Some(u32::from(byte)),
+        Key::Enter => Some(0x1000),
+        Key::Backspace => Some(0x1001),
+        Key::Delete => Some(0x1002),
+        Key::Tab => Some(0x1003),
+        Key::Escape => Some(0x1004),
+        Key::Up => Some(0x1005),
+        Key::Down => Some(0x1006),
+        Key::Left => Some(0x1007),
+        Key::Right => Some(0x1008),
+        Key::Function(number) => Some(0x1100 | u32::from(number)),
+        Key::SuperTap => None,
+    };
+    let Some(code) = code else {
+        return;
     };
     with_state(slot, |state| {
         if !state.open || state.window.is_none() {

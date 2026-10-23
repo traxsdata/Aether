@@ -38,6 +38,11 @@ pub enum Key {
     Right,
     /// Function key, one-based.
     Function(u8),
+    /// Synthetic event: the Super key was pressed and released alone, quickly,
+    /// with no other key in between. Produced by the kernel's input service
+    /// (no scancode exists for it); the desktop treats it as the system
+    /// search/open chord.
+    SuperTap,
 }
 
 /// Keyboard modifiers captured at the key's make scancode.
@@ -54,10 +59,15 @@ pub struct Modifiers {
 }
 
 impl Modifiers {
-    /// Returns `true` when any command modifier is held.
+    /// Returns `true` when the platform command modifier (Super) is held.
+    ///
+    /// Ctrl and Alt belong to the application, never to the window manager;
+    /// only Super is a system modifier. Hosts that grab Super chords can
+    /// substitute `Ctrl+Alt`, but that policy lives with the window manager
+    /// (see the system-shortcut-key setting), not with the raw decoders.
     #[must_use]
     pub const fn command(self) -> bool {
-        self.ctrl || self.alt || self.super_key
+        self.super_key
     }
 }
 

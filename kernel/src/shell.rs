@@ -109,15 +109,20 @@ fn execute_line() {
         "security" => security(),
         "input" => {
             let mouse = crate::input::mouse();
+            let mods = crate::input::held_modifiers();
             serial_line!(
-                "input: dropped={} received={} mouse={} packets={} cursor={},{} pointer_dropped={}",
+                "input: dropped={} received={} mouse={} packets={} cursor={},{} pointer_dropped={} shift={} ctrl={} alt={} super={}",
                 crate::input::dropped(),
                 crate::input::received(),
                 if mouse.available { "ps2" } else { "synthetic" },
                 mouse.packets,
                 mouse.x,
                 mouse.y,
-                crate::input::pointer_dropped()
+                crate::input::pointer_dropped(),
+                if mods.shift { 1 } else { 0 },
+                if mods.ctrl { 1 } else { 0 },
+                if mods.alt { 1 } else { 0 },
+                if mods.super_key { 1 } else { 0 }
             );
         }
         "mem" => memory(),

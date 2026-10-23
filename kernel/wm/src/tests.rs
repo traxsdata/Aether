@@ -27,6 +27,13 @@ fn ctrl() -> Modifiers {
     }
 }
 
+fn super_m() -> Modifiers {
+    Modifiers {
+        super_key: true,
+        ..Modifiers::default()
+    }
+}
+
 #[test]
 fn geometry_respects_half_open_edges() {
     let rect = Rect::new(10, 20, 30, 40);
@@ -285,37 +292,250 @@ fn menu_title_opens_the_matching_menu() {
 }
 
 #[test]
-fn keyboard_shortcuts_control_windows_and_spaces() {
+fn super_chords_control_windows_and_spaces() {
     let mut wm = sample();
     let welcome = wm.window_id(WindowKind::Welcome).unwrap();
-    wm.key(Key::Char(b'2'), ctrl());
+    wm.key(Key::Char(b'2'), super_m());
     assert_eq!(wm.workspace(), 1);
-    wm.key(Key::Char(b'1'), ctrl());
+    wm.key(Key::Char(b'1'), super_m());
     assert_eq!(wm.workspace(), 0);
     wm.focus_window(welcome);
-    wm.key(Key::Char(b'm'), ctrl());
+    wm.key(Key::Char(b'm'), super_m());
     assert_eq!(wm.window(welcome).unwrap().state, WindowState::Minimized);
     wm.open(WindowKind::Welcome);
-    wm.key(Key::Char(b'f'), ctrl());
+    wm.key(Key::Char(b'f'), super_m());
     assert_eq!(wm.window(welcome).unwrap().state, WindowState::Maximized);
-    wm.key(Key::Char(b'f'), ctrl());
+    wm.key(Key::Char(b'f'), super_m());
     assert_eq!(wm.window(welcome).unwrap().state, WindowState::Normal);
-    wm.key(Key::Char(b'w'), ctrl());
+    wm.key(Key::Char(b'w'), super_m());
     assert!(wm.window(welcome).unwrap().closing);
 }
 
 #[test]
-fn ctrl_tab_cycles_focus_in_both_directions() {
+fn plain_ctrl_and_alt_chords_no_longer_control_the_window_manager() {
+    let mut wm = sample();
+    let id = wm.focus_id().unwrap();
+    let before = wm.window(id).unwrap().frame;
+    // Ctrl used to grab window and Space switching; with Super as the only
+    // system modifier these must no-op, so they reach the focused app.
+    wm.key(Key::Char(b'w'), ctrl());
+    assert!(!wm.window(id).unwrap().closing);
+    wm.key(Key::Char(b'm'), ctrl());
+    assert_eq!(wm.window(id).unwrap().state, WindowState::Normal);
+    wm.key(Key::Char(b'q'), ctrl());
+    assert!(!wm.window(id).unwrap().closing);
+    wm.key(Key::Char(b' '), ctrl());
+    assert!(!wm.spotlight_open());
+    wm.key(Key::Char(b'2'), ctrl());
+    assert_eq!(wm.workspace(), 0);
+    wm.key(Key::Right, ctrl());
+    wm.key(
+        Key::Right,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(wm.window(id).unwrap().frame, before);
+    // Alt alone is never a system modifier either.
+    let mods = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    wm.key(Key::Char(b'w'), mods);
+    assert!(!wm.window(id).unwrap().closing);
+    wm.key(Key::Right, mods);
+    assert_eq!(wm.window(id).unwrap().frame, before);
+}
+
+#[test]
+fn super_tab_cycles_focus_in_both_directions() {
     let mut wm = sample();
     let first = wm.focus_id();
-    wm.key(Key::Tab, ctrl());
+    wm.key(Key::Tab, super_m());
     let second = wm.focus_id();
     assert!(second.is_some());
     assert_ne!(first, second);
-    let mut shift = ctrl();
-    shift.shift = true;
-    wm.key(Key::Tab, shift);
+    let mods = Modifiers {
+        super_key: true,
+        shift: true,
+        ..Modifiers::default()
+    };
+    wm.key(Key::Tab, mods);
     assert_eq!(wm.focus_id(), first);
+}
+
+#[test]
+fn super_backtick_cycles_focus_forward() {
+    let mut wm = sample();
+    let first = wm.focus_id();
+    wm.key(Key::Char(b'`'), super_m());
+    assert_ne!(first, wm.focus_id());
+}
+
+#[test]
+fn super_arrows_move_the_focused_window_without_resizing() {
+    let mut wm = sample();
+    let id = wm.focus_id().unwrap();
+    let before = wm.window(id).unwrap().frame;
+    wm.key(Key::Left, super_m());
+    let moved = wm.window(id).unwrap().frame;
+    assert_eq!(moved.x, before.x - 8);
+    assert_eq!(moved.y, before.y);
+    assert_eq!((moved.width, moved.height), (before.width, before.height));
+    wm.key(Key::Down, super_m());
+    let moved = wm.window(id).unwrap().frame;
+    assert_eq!(moved.y, before.y + 8);
+    assert_eq!((moved.width, moved.height), (before.width, before.height));
+}
+
+#[test]
+fn super_shift_arrows_resize_the_focused_window() {
+    let mut wm = sample();
+    let id = wm.focus_id().unwrap();
+    let before = wm.window(id).unwrap().frame;
+    let mut mods = super_m();
+    mods.shift = true;
+    wm.key(Key::Right, mods);
+    assert_eq!(wm.window(id).unwrap().frame.width, before.width + 8);
+    wm.key(Key::Up, mods);
+    let frame = wm.window(id).unwrap().frame;
+    assert_eq!(frame.height, before.height - 8);
+    wm.key(Key::Down, mods);
+    assert_eq!(wm.window(id).unwrap().frame.height, before.height);
+    wm.key(Key::Left, mods);
+    assert_eq!(wm.window(id).unwrap().frame.width, before.width);
+}
+
+#[test]
+fn super_alt_arrows_cycle_spaces_while_plain_arrows_move() {
+    let mut wm = sample();
+    assert_eq!(wm.workspace(), 0);
+    let mods = Modifiers {
+        super_key: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    wm.key(Key::Right, mods);
+    assert_eq!(wm.workspace(), 1);
+    wm.key(Key::Left, mods);
+    assert_eq!(wm.workspace(), 0);
+    wm.cycle_workspace(-1);
+    assert_eq!(wm.workspace(), crate::model::WORKSPACES - 1);
+}
+
+#[test]
+fn plain_shift_arrows_never_move_or_resize_the_window() {
+    let mut wm = sample();
+    let id = wm.focus_id().unwrap();
+    let before = wm.window(id).unwrap().frame;
+    let mods = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    for key in [Key::Left, Key::Right, Key::Up, Key::Down] {
+        wm.key(key, mods);
+    }
+    assert_eq!(wm.window(id).unwrap().frame, before);
+}
+
+#[test]
+fn super_h_hides_the_focused_window_and_recedes_it() {
+    let mut wm = sample();
+    let welcome = wm.focus_id().unwrap();
+    wm.key(Key::Char(b'h'), super_m());
+    assert_eq!(wm.window(welcome).unwrap().state, WindowState::Minimized);
+    // Focus hands over to another live window.
+    assert_ne!(wm.focus_id(), Some(welcome));
+    assert!(wm.focus_id().is_some());
+}
+
+#[test]
+fn super_q_closes_the_focused_app_window() {
+    let mut wm = sample();
+    let welcome = wm.focus_id().unwrap();
+    wm.key(Key::Char(b'q'), super_m());
+    assert!(wm.window(welcome).unwrap().closing);
+}
+
+#[test]
+fn ctrl_alt_stands_in_for_super_only_with_fallback_enabled() {
+    let mut wm = sample();
+    let id = wm.focus_id().unwrap();
+    let fallback = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    let ctrl_only = ctrl();
+    let alt_only = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+
+    // Fallback off: Ctrl+Alt is not a command.
+    wm.key(Key::Char(b'2'), fallback);
+    assert_eq!(wm.workspace(), 0);
+
+    // Fallback on: Ctrl+Alt acts as Super.
+    wm.toggle_setting(4);
+    assert!(wm.settings().system_key_fallback);
+    wm.key(Key::Char(b'2'), fallback);
+    assert_eq!(wm.workspace(), 1);
+    wm.key(Key::Char(b' '), fallback);
+    assert!(wm.spotlight_open());
+    wm.key(Key::Escape, Modifiers::default());
+
+    // But both keys are required; plain Ctrl or Alt still belong to the app.
+    wm.key(Key::Char(b'2'), ctrl_only);
+    assert_eq!(wm.workspace(), 1);
+    wm.key(Key::Char(b'2'), alt_only);
+    assert_eq!(wm.workspace(), 1);
+    wm.key(Key::Char(b'w'), ctrl_only);
+    wm.key(Key::Char(b'w'), alt_only);
+    assert!(!wm.window(id).unwrap().closing);
+}
+
+#[test]
+fn render_shortcut_applies_the_symbol_and_fallback_choice() {
+    let mut wm = sample();
+    fn render(settings: crate::model::Settings, chord: &str) -> String {
+        let mut out = [0u8; 64];
+        let len = settings.render_shortcut(chord, &mut out);
+        core::str::from_utf8(&out[..len.min(out.len())])
+            .unwrap()
+            .to_string()
+    }
+
+    let settings = wm.settings();
+    // Default renders with the Windows symbol; plain keys pass through.
+    assert_eq!(render(settings, "Super+W"), "Win+W");
+    assert_eq!(render(settings, "Super+Alt+Left"), "Win+Alt+Left");
+    assert_eq!(render(settings, "F3"), "F3");
+
+    // The symbol cycles Windows, Mac, then Super.
+    wm.toggle_setting(5);
+    assert_eq!(render(wm.settings(), "Super+W"), "Cmd+W");
+    wm.toggle_setting(5);
+    assert_eq!(render(wm.settings(), "Super+W"), "Super+W");
+    wm.toggle_setting(5);
+    assert_eq!(
+        wm.settings().shortcut_symbol,
+        crate::model::ShortcutSymbol::Windows
+    );
+
+    // The fallback key overrides the symbol and drops the overlapping Alt,
+    // so "Super+Alt+Left" is the keys actually pressed.
+    wm.toggle_setting(4);
+    let settings = wm.settings();
+    assert_eq!(render(settings, "Super+W"), "Ctrl+Alt+W");
+    assert_eq!(render(settings, "Super+Alt+Left"), "Ctrl+Alt+Left");
+    assert_eq!(render(settings, "F3"), "F3");
+
+    // Short output buffers truncate the copy but report the full length.
+    let mut out = [0u8; 5];
+    assert_eq!(settings.render_shortcut("Super+W", &mut out), 10);
+    assert_eq!(&out[..5], b"Ctrl+");
 }
 
 #[test]
@@ -416,14 +636,21 @@ fn settings_rows_are_clickable_and_accessible() {
     let settings = wm.open(WindowKind::Settings).unwrap();
     wm.focus_window(settings);
     wm.finish_animations();
-    assert!(wm.settings_row_rect(settings, 0).is_some());
-    assert!(wm.settings_row_rect(settings, 1).is_some());
-    assert!(wm.settings_row_rect(settings, 2).is_some());
-    assert!(wm.settings_row_rect(settings, 3).is_some());
+    for row in 0..crate::model::Settings::row_count() {
+        assert!(wm.settings_row_rect(settings, row).is_some(), "row {row}");
+    }
     let row = wm.settings_row_rect(settings, 0).unwrap().center();
     wm.pointer_down(row, 0);
     assert!(wm.settings().reduce_motion);
     assert!(wm.window(settings).is_some());
+    // The multivalue symbol row advances its value, the fallback row toggles.
+    wm.pointer_down(wm.settings_row_rect(settings, 5).unwrap().center(), 8);
+    assert_eq!(
+        wm.settings().shortcut_symbol,
+        crate::model::ShortcutSymbol::Mac
+    );
+    wm.pointer_down(wm.settings_row_rect(settings, 4).unwrap().center(), 16);
+    assert!(wm.settings().system_key_fallback);
 }
 
 #[test]
@@ -470,7 +697,7 @@ fn spotlight_status_item_and_shortcut_open_search() {
     wm.key(
         Key::Char(b' '),
         Modifiers {
-            ctrl: true,
+            super_key: true,
             ..Modifiers::default()
         },
     );
@@ -478,10 +705,21 @@ fn spotlight_status_item_and_shortcut_open_search() {
     wm.key(
         Key::Char(b' '),
         Modifiers {
-            ctrl: true,
+            super_key: true,
             ..Modifiers::default()
         },
     );
+    assert!(!wm.spotlight_open());
+}
+
+#[test]
+fn super_tap_opens_and_closes_search() {
+    let mut wm = sample();
+    let outcome = wm.key(Key::SuperTap, Modifiers::default());
+    assert!(outcome.changed);
+    assert!(wm.spotlight_open());
+    let outcome = wm.key(Key::SuperTap, Modifiers::default());
+    assert!(outcome.changed);
     assert!(!wm.spotlight_open());
 }
 
@@ -708,13 +946,9 @@ fn keyboard_can_open_every_menu_and_resize_without_a_pointer() {
     }
     wm.key(Key::Escape, Modifiers::default());
     let before = wm.focused_window().unwrap().frame;
-    wm.key(
-        Key::Right,
-        Modifiers {
-            shift: true,
-            ..Modifiers::default()
-        },
-    );
+    let mut mods = super_m();
+    mods.shift = true;
+    wm.key(Key::Right, mods);
     assert_eq!(wm.focused_window().unwrap().frame.width, before.width + 8);
 }
 

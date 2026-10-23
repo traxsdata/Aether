@@ -735,8 +735,12 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
     };
     // While the Linux surface owns focus, keys go to its endpoint instead of
     // the native window manager. Overlays and menus keep native focus.
-    let global_shortcut =
-        matches!(key, Key::Function(3 | 4 | 10)) || (modifiers.command() && key == Key::Char(b'w'));
+    //
+    // Super is the only system modifier: every Super-based chord (and the
+    // app-independent F3/F4/F10 / Super-tap) is reserved for the window
+    // manager no matter which window holds focus. Everything else — plain
+    // letters with Ctrl or Alt included — passes through to the app.
+    let global_shortcut = wm.is_wm_chord(key, modifiers);
     let linux_focused = wm
         .focused_window()
         .and_then(|window| window.kind.linux_slot())
@@ -756,7 +760,7 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
         && !wm.overview_open()
         && !wm.spotlight_open()
         && wm.menu_state().is_none()
-        && !modifiers.command();
+        && !wm.command_active(modifiers);
     if applications_focused {
         let count = crate::linux::pack_len();
         if count > 0 {
@@ -802,7 +806,7 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
         && !wm.overview_open()
         && !wm.spotlight_open()
         && wm.menu_state().is_none();
-    if terminal_focused && !desktop_shortcut(key, modifiers) {
+    if terminal_focused && !desktop_shortcut(&wm, key, modifiers) {
         crate::terminal::key(key, modifiers);
         return;
     }
@@ -818,6 +822,9 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
         Key::Left => WmKey::Left,
         Key::Right => WmKey::Right,
         Key::Function(number) => WmKey::Function(number),
+        // A Super-tap toggles Aether Search from the window manager; nothing
+        // to translate.
+        Key::SuperTap => WmKey::SuperTap,
     };
     let files_active = wm
         .focused_window()
@@ -825,7 +832,7 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
         && !wm.overview_open()
         && !wm.spotlight_open()
         && wm.menu_state().is_none()
-        && !modifiers.command()
+        && !wm.command_active(modifiers)
         && !modifiers.shift;
     let files_focused = wm
         .focused_window()
@@ -836,7 +843,7 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
     if files_focused && rename_state().active {
         match key {
             Key::Char(byte)
-                if !modifiers.command()
+                if !wm.command_active(modifiers)
                     && (byte.is_ascii_alphanumeric() || b"-. _".contains(&byte)) =>
             {
                 if byte != b' ' {
@@ -898,17 +905,11 @@ pub fn on_key(key: Key, modifiers: Modifiers) {
 }
 
 /// Returns `true` for the keys the desktop keeps while the Terminal has focus:
-/// window and Space switching and search. Everything else, Ctrl letters
-/// included, belongs to the terminal program.
-fn desktop_shortcut(key: Key, modifiers: Modifiers) -> bool {
-    if modifiers.super_key || modifiers.alt {
-        return true;
-    }
-    modifiers.ctrl
-        && matches!(
-            key,
-            Key::Char(b' ' | b'1'..=b'4') | Key::Tab | Key::Left | Key::Right | Key::Up
-        )
+/// Super-based window/Space/search chords plus the app-independent F3/F4/F10.
+/// Everything else, Ctrl and Alt letters included, belongs to the terminal
+/// program.
+fn desktop_shortcut(wm: &Wm, key: Key, modifiers: Modifiers) -> bool {
+    wm.is_wm_chord(key, modifiers)
 }
 
 /// Opens (or focuses) the Terminal window. Used by the console's `term open`.
@@ -2712,11 +2713,11 @@ fn paint_settings(wm: &Wm, content: Rect, palette: aether_wm::Palette) {
         draw_text(rect.x + 10, rect.y + 6, label, palette.text, 1);
         draw_text(rect.x + 10, rect.y + 18, detail, palette.muted, 1);
         let control_x = rect.right() - 52;
-        if row == 2 {
+        if Settings::is_multivalue(row) {
             draw_text_right(
                 rect.right() - 12,
                 rect.y + 11,
-                settings.glass.label(),
+                settings.value_label(row),
                 palette.accent,
                 1,
             );
@@ -2865,18 +2866,30 @@ fn paint_welcome(wm: &Wm, content: Rect, focused: bool, palette: aether_wm::Pale
         palette.muted,
         1,
     );
-    let shortcuts = [
-        ("CTRL + LEFT / RIGHT", "SWITCH SPACES"),
-        ("CTRL + UP", "SPACES OVERVIEW"),
-        ("CTRL + SPACE", "SEARCH AETHER"),
-        ("CTRL + TAB", "CYCLE WINDOWS"),
-        ("DRAG CORNER", "RESIZE WINDOW"),
+    // Canonical chords, rendered with the keyboard's choice of symbol
+    // (Win+… / Cmd+… / Super+…, or Ctrl+Alt+… with the fallback key on).
+    let chords = [
+        ("Super+Alt+Left / Right", "SWITCH SPACES"),
+        ("F3", "SPACES OVERVIEW"),
+        ("Super+Space", "SEARCH AETHER"),
+        ("TAP SUPER", "OPEN SEARCH"),
+        ("Super+Tab", "CYCLE WINDOWS"),
+        ("Super+W", "CLOSE WINDOW"),
+        ("Super+M", "MINIMIZE"),
+        ("Super+Q", "QUIT APP"),
+        ("Super+1 - 4", "SWITCH SPACE"),
+        ("Super+Arrows", "MOVE WINDOW"),
+        ("Super+Shift+Arrows", "RESIZE WINDOW"),
+        ("Super+,", "OPEN SETTINGS"),
     ];
     let mut y = content.y + 88;
-    for (keys, action) in shortcuts {
+    for (chord, action) in chords {
         if y + 14 > content.bottom() - 30 {
             break;
         }
+        let mut buffer = [0u8; 32];
+        let length = wm.settings().render_shortcut(chord, &mut buffer);
+        let keys = core::str::from_utf8(&buffer[..length.min(buffer.len())]).unwrap_or("");
         let key_width = keys.len() as i32 * 6 + 12;
         graphics::fill_round_rect(content.x + 16, y - 2, key_width, 14, 4, palette.card_hover);
         draw_text(content.x + 22, y + 1, keys, palette.accent, 1);
@@ -3074,13 +3087,10 @@ fn paint_menu(wm: &Wm, palette: aether_wm::Palette, glass: GlassLevel) {
             1,
         );
         if !item.shortcut.is_empty() {
-            draw_text_right(
-                rect.right() - 10,
-                rect.y + 7,
-                item.shortcut,
-                palette.faint,
-                1,
-            );
+            let mut buffer = [0u8; 40];
+            let length = wm.settings().render_shortcut(item.shortcut, &mut buffer);
+            let label = core::str::from_utf8(&buffer[..length.min(buffer.len())]).unwrap_or("");
+            draw_text_right(rect.right() - 10, rect.y + 7, label, palette.faint, 1);
         }
     }
 }

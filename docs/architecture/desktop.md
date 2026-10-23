@@ -120,19 +120,20 @@ its domain and frees the slot for the next launch.
 
 ## Spaces and the overview
 
-There are four workspaces. `Ctrl+Left` and `Ctrl+Right` cycle them with a
-horizontal slide; `Ctrl+1`…`Ctrl+4` jump directly. Each window belongs to one
-workspace. Switching to an empty workspace leaves focus empty rather than
-inventing a target.
+There are four workspaces. `Super+Alt+Left` and `Super+Alt+Right` cycle them
+with a horizontal slide; `Super+1`…`Super+4` jump directly. Each window
+belongs to one workspace. Switching to an empty workspace leaves focus empty
+rather than inventing a target.
 
-`Ctrl+Up`, `F3`, the Spaces status item, and the Spaces dock tile open the
-overview. It shows four desktop cards with live window previews and counts.
+`F3`, the Spaces status item, and the Spaces dock tile open the overview.
+It shows four desktop cards with live window previews and counts.
 Arrow keys select a card, `Enter` switches, `Escape` closes, and a click on a
 card switches directly.
 
 ## Spotlight-style search
 
-`Ctrl+Space` (or the search status item) opens Aether Search. It filters
+`Super+Space`, a bare Super tap, or the search status item opens Aether
+Search. It filters
 applications, workspaces, the overview, and accessibility actions as the user
 types. Arrow keys select a result, `Enter` executes it, `Backspace` edits the
 query, and `Escape` closes the panel. The index is a bounded static table; no
@@ -143,7 +144,7 @@ from a search result.
 
 Files is a working **scoped RAM-filesystem browser and mutator**, not a
 decorative listing or a complete Explorer implementation. Open it from the dock
-or `Ctrl+N`:
+or `Super+N`:
 
 - Click a sidebar location: Home, Recent, Favorites, Documents, Downloads,
   Pictures, Music, Videos, Projects, Shared, Applications, Devices, or Trash.
@@ -187,9 +188,11 @@ the dock (the `>_` tile after Files) or by searching for `Terminal`.
   insert/delete, SGR colours (16, 256, and true colour mapped to the nearest
   palette entry), the alternate screen, and cursor-position reports. It draws
   an 80x24 grid with the Spleen 8x16 font (BSD-2-Clause,
-  `kernel/term/FONT-LICENSE`). Keys reach the program as VT100 sequences;
-  desktop shortcuts (Super/Alt chords, `Ctrl+Space`, `Ctrl+Tab`,
-  `Ctrl+1`-`4`, and `Ctrl+Left`/`Right`/`Up`) stay with the window manager.
+  `kernel/term/FONT-LICENSE`). Keys reach the program as VT100 sequences,
+  including every `Ctrl` and `Alt` chord; only Super chords (`Super+Space`,
+  `Super+Tab`, `Super+1`-`4`, Super and `Super+Shift` arrows, and `Super+W`,
+  `Super+M`, `Super+H`, `Super+Q`, `Super+F`, `Super+N`, `Super+,`) stay with
+  the window manager.
 - **Session.** Opening the window starts `sh`; closing it ends every program
   in the session. Ctrl+C ends the running job and returns to the prompt unless
   the program asked for raw input (as `nano` and `htop` do). A full-screen
@@ -207,7 +210,7 @@ the dock (the `>_` tile after Files) or by searching for `Terminal`.
 
 ## Liquid Glass and accessibility
 
-Settings provides four live controls:
+Settings provides six live controls:
 
 - **Reduce motion** — completes transitions without intermediate frames.
 - **High contrast** — black surfaces, white text, signal-yellow focus, and
@@ -215,12 +218,25 @@ Settings provides four live controls:
 - **Liquid Glass** — Clear, Balanced, or Tinted. The level changes the alpha of
   menu-bar, dock, toolbar, sidebar, and window surfaces.
 - **Magnify dock** — enables or disables pointer-driven icon magnification.
+- **System shortcut key** — off by default, so Super is the only system
+  modifier. When enabled, `Ctrl+Alt` chords stand in for `Super+…` for hosts
+  that grab Super combinations; plain Ctrl or Alt still goes to the app.
+- **Shortcut symbols** — WINDOWS, MAC, or TEXT: whether rendered chords lead
+  with `Win+`, `Cmd+`, or `Super+`. The 5x7 font is ASCII-only, so these are
+  word forms of the `⊞`, `⌘`, and Super glyphs, not the glyphs themselves.
 
-Keyboard operation has parity with the pointer: `Tab`/`Ctrl+Tab` cycle focus,
-arrow keys move the focused window, `Ctrl+W` closes, `Ctrl+M` minimizes,
-`Ctrl+F` zooms, `Ctrl+N` opens Files, `Ctrl+,` opens Settings, and `F3` opens
-Spaces. `Shift+arrows` resize a floating window. In Files, unmodified Up/Down
-select entries rather than moving the window. Settings actions are reachable
+Super is the only system modifier. Keyboard operation has parity with the
+pointer: `Tab` and `Super+Tab` cycle focus, `Super+arrows` move the focused
+window, `Super+Shift+arrows` resize it, `Super+Alt+arrows` cycle spaces,
+`Super+W` closes, `Super+M` minimizes, `Super+H` hides, `Super+Q` quits the
+focused app, `Super+F` zooms, `Super+N` opens Files, `Super+,` opens
+Settings, `F3` opens the Spaces overview, and `Super+Space` (or a bare Super
+tap) opens Aether Search. `Ctrl` and `Alt` chords belong to the focused
+application: in the terminal, `Ctrl+C` ends the running job, and a
+`Ctrl+Alt` chord never moves or resizes a window. When the system shortcut
+key row in Settings is on, `Ctrl+Alt` stands in for Super in every chord
+above. In Files, unmodified Up/Down and `Shift+arrows` select entries rather
+than moving or resizing the window. Settings actions are reachable
 through keyboard menus or search. Focus is visible through the accent border
 and title treatment; minimizing transfers focus immediately, and restoring a
 zoomed window preserves its zoom state.
@@ -235,7 +251,9 @@ accessibility scope of this milestone.
 `kernel/src/input.rs` owns IRQ1 and IRQ12. The 8259 PIC unmasks IRQ0, IRQ1, the
 IRQ2 cascade, and IRQ12; the IDT installs vectors 32, 33, and 44. The keyboard
 handler decodes set-1 make/break scancodes, including E0 dedicated arrows, and
-tracks both sides of Ctrl, Alt, Shift, and Super independently. The mouse driver initialises the auxiliary PS/2
+tracks both sides of Ctrl, Alt, Shift, and Super independently. A short bare
+Super press — no decoded key inside its 300 ms window — reaches the desktop
+as a Super tap, which opens and closes Aether Search. The mouse driver initialises the auxiliary PS/2
 port, enables data reporting, and decodes three-byte packets with correct 9-bit
 sign extension and inverted Y. Both paths use bounded FIFOs and never call the
 desktop from interrupt context. Pointer presses/releases are retained between

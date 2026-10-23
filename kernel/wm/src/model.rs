@@ -217,6 +217,54 @@ impl Window {
     }
 }
 
+/// How system-shortcut chords are written in menus, help, and tooltips.
+///
+/// The 5x7 system font renders ASCII only, so the glyph choices are word
+/// forms of `⊞` (Windows), `⌘` (Mac), and plain `Super`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShortcutSymbol {
+    /// Render as `Win+…` (Windows ⊞ key).
+    #[default]
+    Windows,
+    /// Render as `Cmd+…` (Apple Command key).
+    Mac,
+    /// Render as `Super+…`.
+    Text,
+}
+
+impl ShortcutSymbol {
+    /// The next symbol, for the settings cycle control.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Windows => Self::Mac,
+            Self::Mac => Self::Text,
+            Self::Text => Self::Windows,
+        }
+    }
+
+    /// Short setting label (`WINDOWS`, …).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Windows => "WINDOWS",
+            Self::Mac => "MAC",
+            Self::Text => "TEXT",
+        }
+    }
+
+    /// The prefix that stands in for the system modifier in rendered chords
+    /// (`Win`, `Cmd`, or `Super`).
+    #[must_use]
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            Self::Windows => "Win",
+            Self::Mac => "Cmd",
+            Self::Text => "Super",
+        }
+    }
+}
+
 /// Appearance and accessibility preferences held in memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -228,6 +276,13 @@ pub struct Settings {
     pub glass: GlassLevel,
     /// Enlarge dock icons under the pointer.
     pub magnify_dock: bool,
+    /// When `false` (default), the Super key is the only system modifier.
+    /// When `true`, `Ctrl+Alt` chords stand in for `Super+…` on hosts whose
+    /// hypervisor grabs Super combinations; plain Ctrl or Alt still goes to
+    /// the focused app.
+    pub system_key_fallback: bool,
+    /// Rendering style for shortcut chords shown to the user.
+    pub shortcut_symbol: ShortcutSymbol,
 }
 
 impl Settings {
@@ -239,6 +294,8 @@ impl Settings {
             high_contrast: false,
             glass: GlassLevel::Balanced,
             magnify_dock: true,
+            system_key_fallback: false,
+            shortcut_symbol: ShortcutSymbol::Windows,
         }
     }
 
@@ -261,7 +318,7 @@ impl Settings {
     /// Returns the number of settings rows.
     #[must_use]
     pub const fn row_count() -> usize {
-        4
+        6
     }
 
     /// Returns a row's label and detail text.
@@ -278,8 +335,23 @@ impl Settings {
             ),
             2 => ("Liquid Glass", "Clear, Balanced, or Tinted translucency"),
             3 => ("Magnify dock", "Enlarge dock icons under the pointer"),
+            4 => (
+                "System shortcut key",
+                "Ctrl+Alt chords act when hosts grab Super chords",
+            ),
+            5 => (
+                "Shortcut symbols",
+                "How chords are written in menus and help",
+            ),
             _ => ("", ""),
         }
+    }
+
+    /// Whether a row shows a cycling label (three states or more) instead of
+    /// an on/off switch.
+    #[must_use]
+    pub const fn is_multivalue(index: usize) -> bool {
+        matches!(index, 2 | 5)
     }
 
     /// Returns the current value of a row.
@@ -290,7 +362,23 @@ impl Settings {
             1 => self.high_contrast,
             2 => true,
             3 => self.magnify_dock,
+            4 => self.system_key_fallback,
             _ => false,
+        }
+    }
+
+    /// Advances a multivalue row one step; returns the new display label.
+    pub fn advance_multivalue(&mut self, index: usize) -> Option<&'static str> {
+        match index {
+            2 => {
+                self.glass = self.glass.next();
+                Some(self.glass.label())
+            }
+            5 => {
+                self.shortcut_symbol = self.shortcut_symbol.next();
+                Some(self.shortcut_symbol.label())
+            }
+            _ => None,
         }
     }
 
@@ -299,7 +387,48 @@ impl Settings {
     pub const fn value_label(self, index: usize) -> &'static str {
         match index {
             2 => self.glass.label(),
+            5 => self.shortcut_symbol.label(),
             _ => "",
+        }
+    }
+
+    /// Renders a canonical chord (stored as `Super+…`) using the active
+    /// keyboard: the chosen symbol prefix, or `Ctrl+Alt+…` when the
+    /// system-shortcut-key fallback is on. Other chords (plain keys, F-keys)
+    /// pass through. Copies up to `out.len()` bytes and returns the length.
+    #[must_use]
+    pub fn render_shortcut(&self, chord: &str, out: &mut [u8]) -> usize {
+        if let Some(rest) = chord.strip_prefix("Super+") {
+            // The fallback key is Ctrl+Alt, standing in for Super: the chord's
+            // own Alt overlaps it and is dropped, so "Super+Alt+Left" is the
+            // real keys pressed, "Ctrl+Alt+Left".
+            let rest = if self.system_key_fallback {
+                rest.strip_prefix("Alt+").unwrap_or(rest)
+            } else {
+                rest
+            };
+            let prefix: &str = if self.system_key_fallback {
+                "Ctrl+Alt"
+            } else {
+                self.shortcut_symbol.prefix()
+            };
+            let mut written = 0usize;
+            for byte in prefix
+                .bytes()
+                .chain(core::iter::once(b'+'))
+                .chain(rest.bytes())
+            {
+                if written < out.len() {
+                    out[written] = byte;
+                }
+                written += 1;
+            }
+            written
+        } else {
+            let bytes = chord.as_bytes();
+            let copy_len = bytes.len().min(out.len());
+            out[..copy_len].copy_from_slice(&bytes[..copy_len]);
+            bytes.len()
         }
     }
 }
@@ -393,6 +522,12 @@ pub enum Command {
     CloseFocused,
     /// Minimize the focused window.
     MinimizeFocused,
+    /// Hide the focused window: minimize it and move focus to the next window
+    /// so the app recedes from view.
+    HideFocused,
+    /// Quit the focused app. In this window model one app owns one window, so
+    /// quitting closes that window (which ends Linux apps' sessions).
+    QuitApp,
     /// Zoom or unzoom the focused window.
     ZoomFocused,
     /// Focus the next window.
@@ -526,7 +661,7 @@ const SEARCH_ITEMS: [SearchItem; 16] = [
     },
 ];
 
-const SYSTEM_ITEMS: [MenuItem; 13] = [
+const SYSTEM_ITEMS: [MenuItem; 14] = [
     MenuItem {
         label: "About This Aether",
         shortcut: "",
@@ -539,7 +674,7 @@ const SYSTEM_ITEMS: [MenuItem; 13] = [
     },
     MenuItem {
         label: "System Settings",
-        shortcut: "Ctrl+,",
+        shortcut: "Super+,",
         command: Command::Open(WindowKind::Settings),
     },
     MenuItem {
@@ -563,13 +698,18 @@ const SYSTEM_ITEMS: [MenuItem; 13] = [
         command: Command::Open(WindowKind::Log),
     },
     MenuItem {
+        label: "Quit Focused App",
+        shortcut: "Super+Q",
+        command: Command::QuitApp,
+    },
+    MenuItem {
         label: "-",
         shortcut: "",
         command: Command::None,
     },
     MenuItem {
         label: "Show All Windows",
-        shortcut: "Ctrl+Up",
+        shortcut: "F3",
         command: Command::ShowOverview,
     },
     MenuItem {
@@ -594,20 +734,25 @@ const SYSTEM_ITEMS: [MenuItem; 13] = [
     },
 ];
 
-const APP_ITEMS: [MenuItem; 8] = [
+const APP_ITEMS: [MenuItem; 9] = [
     MenuItem {
         label: "Close Window",
-        shortcut: "Ctrl+W",
+        shortcut: "Super+W",
         command: Command::CloseFocused,
     },
     MenuItem {
         label: "Minimize",
-        shortcut: "Ctrl+M",
+        shortcut: "Super+M",
         command: Command::MinimizeFocused,
     },
     MenuItem {
+        label: "Hide",
+        shortcut: "Super+H",
+        command: Command::HideFocused,
+    },
+    MenuItem {
         label: "Zoom",
-        shortcut: "Ctrl+F",
+        shortcut: "Super+F",
         command: Command::ZoomFocused,
     },
     MenuItem {
@@ -617,12 +762,12 @@ const APP_ITEMS: [MenuItem; 8] = [
     },
     MenuItem {
         label: "Next Window",
-        shortcut: "Ctrl+Tab",
+        shortcut: "Super+Tab",
         command: Command::NextWindow,
     },
     MenuItem {
         label: "Previous Window",
-        shortcut: "Ctrl+Shift+Tab",
+        shortcut: "Super+Shift+Tab",
         command: Command::PreviousWindow,
     },
     MenuItem {
@@ -632,7 +777,7 @@ const APP_ITEMS: [MenuItem; 8] = [
     },
     MenuItem {
         label: "System Settings",
-        shortcut: "Ctrl+,",
+        shortcut: "Super+,",
         command: Command::Open(WindowKind::Settings),
     },
 ];
@@ -640,7 +785,7 @@ const APP_ITEMS: [MenuItem; 8] = [
 const FILE_ITEMS: [MenuItem; 5] = [
     MenuItem {
         label: "Open Files",
-        shortcut: "Ctrl+N",
+        shortcut: "Super+N",
         command: Command::Open(WindowKind::Files),
     },
     MenuItem {
@@ -655,12 +800,12 @@ const FILE_ITEMS: [MenuItem; 5] = [
     },
     MenuItem {
         label: "Close Window",
-        shortcut: "Ctrl+W",
+        shortcut: "Super+W",
         command: Command::CloseFocused,
     },
     MenuItem {
         label: "Minimize",
-        shortcut: "Ctrl+M",
+        shortcut: "Super+M",
         command: Command::MinimizeFocused,
     },
 ];
@@ -668,7 +813,7 @@ const FILE_ITEMS: [MenuItem; 5] = [
 const VIEW_ITEMS: [MenuItem; 10] = [
     MenuItem {
         label: "Show All Windows",
-        shortcut: "Ctrl+Up",
+        shortcut: "F3",
         command: Command::ShowOverview,
     },
     MenuItem {
@@ -678,22 +823,22 @@ const VIEW_ITEMS: [MenuItem; 10] = [
     },
     MenuItem {
         label: "Space 1",
-        shortcut: "Ctrl+1",
+        shortcut: "Super+1",
         command: Command::Workspace(0),
     },
     MenuItem {
         label: "Space 2",
-        shortcut: "Ctrl+2",
+        shortcut: "Super+2",
         command: Command::Workspace(1),
     },
     MenuItem {
         label: "Space 3",
-        shortcut: "Ctrl+3",
+        shortcut: "Super+3",
         command: Command::Workspace(2),
     },
     MenuItem {
         label: "Space 4",
-        shortcut: "Ctrl+4",
+        shortcut: "Super+4",
         command: Command::Workspace(3),
     },
     MenuItem {
@@ -718,25 +863,30 @@ const VIEW_ITEMS: [MenuItem; 10] = [
     },
 ];
 
-const WINDOW_ITEMS: [MenuItem; 6] = [
+const WINDOW_ITEMS: [MenuItem; 7] = [
     MenuItem {
         label: "Minimize",
-        shortcut: "Ctrl+M",
+        shortcut: "Super+M",
         command: Command::MinimizeFocused,
     },
     MenuItem {
+        label: "Hide",
+        shortcut: "Super+H",
+        command: Command::HideFocused,
+    },
+    MenuItem {
         label: "Zoom",
-        shortcut: "Ctrl+F",
+        shortcut: "Super+F",
         command: Command::ZoomFocused,
     },
     MenuItem {
         label: "Next Window",
-        shortcut: "Ctrl+Tab",
+        shortcut: "Super+Tab",
         command: Command::NextWindow,
     },
     MenuItem {
         label: "Previous Window",
-        shortcut: "Ctrl+Shift+Tab",
+        shortcut: "Super+Shift+Tab",
         command: Command::PreviousWindow,
     },
     MenuItem {
@@ -746,7 +896,7 @@ const WINDOW_ITEMS: [MenuItem; 6] = [
     },
     MenuItem {
         label: "Close Window",
-        shortcut: "Ctrl+W",
+        shortcut: "Super+W",
         command: Command::CloseFocused,
     },
 ];
@@ -1662,6 +1812,22 @@ impl Wm {
                     self.minimize_window(id);
                 }
             }
+            Command::HideFocused => {
+                if let Some(id) = self.focus {
+                    self.minimize_window(id);
+                    // Minimize already hands focus to the topmost window;
+                    // make the recede explicit when it could not.
+                    if self.focus == Some(id) && self.window_count() > 1 {
+                        self.focus_next(1);
+                    }
+                }
+            }
+            Command::QuitApp => {
+                // One app owns one window: ending that window ends the app.
+                if let Some(id) = self.focus {
+                    self.close_window(id);
+                }
+            }
             Command::ZoomFocused => {
                 if let Some(id) = self.focus {
                     self.zoom_window(id);
@@ -1692,12 +1858,15 @@ impl Wm {
                 }
             }
             1 => self.settings.high_contrast = !self.settings.high_contrast,
-            2 => self.settings.glass = self.settings.glass.next(),
+            2 | 5 => {
+                self.settings.advance_multivalue(row);
+            }
             3 => {
                 self.settings.magnify_dock = !self.settings.magnify_dock;
                 self.dock_target = layout::dock_slot_at(self.cursor, self.screen);
                 self.dock_hover = [0; DOCK_ITEMS];
             }
+            4 => self.settings.system_key_fallback = !self.settings.system_key_fallback,
             _ => {}
         }
     }
@@ -2015,12 +2184,71 @@ impl Wm {
         self.dragging = None;
     }
 
+    /// Returns `true` when the modifiers form a system chord: the Super key
+    /// alone, or — when the host grabs Super chords — `Ctrl+Alt` together
+    /// (system-shortcut-key fallback). Plain Ctrl or Alt always belongs to the
+    /// focused app and never counts.
+    #[must_use]
+    pub const fn command_active(&self, modifiers: Modifiers) -> bool {
+        modifiers.super_key
+            || (self.settings.system_key_fallback && modifiers.ctrl && modifiers.alt)
+    }
+
+    /// Returns `true` for key events the window manager reserves as system
+    /// chords: the app-independent keys (F3, F4, F10, and Super-tap), or a
+    /// system chord plus one of the bound keys. With the Linux surface
+    /// focused, exactly these — and nothing else — are kept away from the app.
+    #[must_use]
+    pub const fn is_wm_chord(&self, key: Key, modifiers: Modifiers) -> bool {
+        if self.command_active(modifiers) {
+            matches!(
+                key,
+                Key::SuperTap
+                    | Key::Tab
+                    | Key::Up
+                    | Key::Down
+                    | Key::Left
+                    | Key::Right
+                    | Key::Char(
+                        b' ' | b','
+                            | b'`'
+                            | b'1'
+                            | b'2'
+                            | b'3'
+                            | b'4'
+                            | b'f'
+                            | b'h'
+                            | b'm'
+                            | b'n'
+                            | b'q'
+                            | b'w'
+                    )
+            )
+        } else {
+            matches!(key, Key::Function(3 | 4 | 10) | Key::SuperTap)
+        }
+    }
+
     /// Handles a key event.
     pub fn key(&mut self, key: Key, modifiers: Modifiers) -> KeyOutcome {
         let mut outcome = KeyOutcome::default();
 
+        // Super-tap (Super pressed and released alone, quickly) toggles
+        // Aether Search, like the Start menu on Windows. A Super+key chord
+        // never produces this event, so it cannot misfire.
+        if key == Key::SuperTap {
+            if self.spotlight_open {
+                self.close_spotlight();
+            } else {
+                self.open_spotlight();
+            }
+            outcome.changed = true;
+            outcome.announce = Some("SEARCH");
+            return outcome;
+        }
+
         if self.spotlight_open {
-            if (modifiers.ctrl || modifiers.super_key) && key == Key::Char(b' ') {
+            if self.command_active(modifiers) && key == Key::Char(b' ') {
                 self.spotlight_open = false;
                 outcome.changed = true;
                 return outcome;
@@ -2067,7 +2295,8 @@ impl Wm {
                 | Key::Function(_)
                 | Key::Left
                 | Key::Right
-                | Key::Delete => {}
+                | Key::Delete
+                | Key::SuperTap => {}
             }
             return outcome;
         }
@@ -2192,15 +2421,20 @@ impl Wm {
             }
         }
 
-        let command = modifiers.command();
-        if (modifiers.ctrl || modifiers.super_key) && key == Key::Char(b' ') {
+        let command = self.command_active(modifiers);
+
+        // Super+Space opens Aether Search, regardless of which window holds
+        // focus. (Under the fallback key it is Ctrl+Alt+Space.)
+        if command && key == Key::Char(b' ') {
             self.open_spotlight();
             outcome.changed = true;
             outcome.announce = Some("SEARCH");
             return outcome;
         }
+
         if command {
             match key {
+                // Window and app chords.
                 Key::Char(b'w') => {
                     self.execute(Command::CloseFocused);
                     outcome.changed = true;
@@ -2211,6 +2445,18 @@ impl Wm {
                     self.execute(Command::MinimizeFocused);
                     outcome.changed = true;
                     outcome.announce = Some("MINIMIZE");
+                    return outcome;
+                }
+                Key::Char(b'h') => {
+                    self.execute(Command::HideFocused);
+                    outcome.changed = true;
+                    outcome.announce = Some("HIDE");
+                    return outcome;
+                }
+                Key::Char(b'q') => {
+                    self.execute(Command::QuitApp);
+                    outcome.changed = true;
+                    outcome.announce = Some("QUIT");
                     return outcome;
                 }
                 Key::Char(b'f') => {
@@ -2231,6 +2477,54 @@ impl Wm {
                     outcome.announce = Some("SETTINGS");
                     return outcome;
                 }
+                // App switcher / app's windows.
+                Key::Tab => {
+                    self.focus_next(if modifiers.shift { -1 } else { 1 });
+                    outcome.changed = true;
+                    outcome.announce = Some(self.focus_title());
+                    return outcome;
+                }
+                Key::Char(b'`') => {
+                    self.focus_next(1);
+                    outcome.changed = true;
+                    outcome.announce = Some(self.focus_title());
+                    return outcome;
+                }
+                // Spaces. With Super held, Super+Alt+arrows cycle Spaces and
+                // Super+arrows move the focused window; held Shift instead
+                // resizes the window (the resize block below).
+                Key::Left if modifiers.alt => {
+                    self.cycle_workspace(-1);
+                    outcome.changed = true;
+                    return outcome;
+                }
+                Key::Right if modifiers.alt => {
+                    self.cycle_workspace(1);
+                    outcome.changed = true;
+                    return outcome;
+                }
+                // Move the focused window.
+                Key::Left if !modifiers.shift => {
+                    self.move_focused(-8, 0);
+                    outcome.changed = true;
+                    return outcome;
+                }
+                Key::Right if !modifiers.shift => {
+                    self.move_focused(8, 0);
+                    outcome.changed = true;
+                    return outcome;
+                }
+                Key::Up if !modifiers.shift => {
+                    self.move_focused(0, -8);
+                    outcome.changed = true;
+                    return outcome;
+                }
+                Key::Down if !modifiers.shift => {
+                    self.move_focused(0, 8);
+                    outcome.changed = true;
+                    return outcome;
+                }
+                // Jump directly to a workspace.
                 Key::Char(b'1'..=b'4') => {
                     if let Key::Char(value) = key {
                         self.switch_workspace(value - b'1');
@@ -2239,32 +2533,13 @@ impl Wm {
                     }
                     return outcome;
                 }
-                Key::Tab => {
-                    self.focus_next(if modifiers.shift { -1 } else { 1 });
-                    outcome.changed = true;
-                    outcome.announce = Some(self.focus_title());
-                    return outcome;
-                }
-                Key::Left => {
-                    self.cycle_workspace(-1);
-                    outcome.changed = true;
-                    return outcome;
-                }
-                Key::Right => {
-                    self.cycle_workspace(1);
-                    outcome.changed = true;
-                    return outcome;
-                }
-                Key::Up => {
-                    self.toggle_overview();
-                    outcome.changed = true;
-                    return outcome;
-                }
                 _ => {}
             }
         }
 
-        if modifiers.shift && !command {
+        // Resize the focused window with a Super-based chord. A plain
+        // Shift+arrow always belongs to the app (text selection, caret, …).
+        if command && modifiers.shift {
             let delta = match key {
                 Key::Left => Some((-8, 0)),
                 Key::Right => Some((8, 0)),
@@ -2280,6 +2555,7 @@ impl Wm {
         }
 
         match key {
+            // Unmodified Tab still cycles focus; Shift+Tab reverses it.
             Key::Tab => {
                 self.focus_next(if modifiers.shift { -1 } else { 1 });
                 outcome.changed = true;
@@ -2288,25 +2564,11 @@ impl Wm {
                 self.menu = None;
                 outcome.changed = true;
             }
-            Key::Up => {
-                self.move_focused(0, -8);
-                outcome.changed = true;
-            }
-            Key::Down => {
-                self.move_focused(0, 8);
-                outcome.changed = true;
-            }
-            Key::Left => {
-                self.move_focused(-8, 0);
-                outcome.changed = true;
-            }
-            Key::Right => {
-                self.move_focused(8, 0);
-                outcome.changed = true;
-            }
             Key::Enter => {
                 outcome.announce = Some(self.focus_title());
             }
+            // App-independent function keys keep working while a Linux app
+            // focuses (overview, applications, system menu).
             Key::Function(3) => {
                 self.toggle_overview();
                 outcome.changed = true;
@@ -2322,7 +2584,18 @@ impl Wm {
                 }
                 outcome.changed = true;
             }
-            Key::Function(_) | Key::Char(_) | Key::Backspace | Key::Delete => {}
+            // The synthetic Super tap is consumed by the search toggle above
+            // and never reaches an app in this fall-through.
+            Key::SuperTap => {}
+            // Plain letters, arrows, and unreserved F-keys belong to the app.
+            Key::Function(_)
+            | Key::Char(_)
+            | Key::Backspace
+            | Key::Delete
+            | Key::Up
+            | Key::Down
+            | Key::Left
+            | Key::Right => {}
         }
         outcome
     }

@@ -957,6 +957,9 @@ pub fn encode_key(key: Key, modifiers: Modifiers, out: &mut [u8; 8]) -> usize {
         Key::Down => b"\x1b[B",
         Key::Right => b"\x1b[C",
         Key::Left => b"\x1b[D",
+        // A Super-tap is a synthetic system event handled by the desktop;
+        // it never appears in terminal input.
+        Key::SuperTap => return 0,
         Key::Function(number) => match number {
             1 => b"\x1bOP",
             2 => b"\x1bOQ",

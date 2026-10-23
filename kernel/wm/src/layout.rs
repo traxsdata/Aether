@@ -223,7 +223,14 @@ pub fn default_window_frame(kind: WindowKind, screen: Rect, cascade: i32) -> Rec
         )
     };
     let width = width.max(MIN_WINDOW_WIDTH).min(area.width);
-    let height = height.max(MIN_WINDOW_HEIGHT).min(area.height);
+    // List-style windows keep a minimum height so every row stays visible on
+    // the smallest supported screens without bloating them on large ones.
+    let min_height = match kind {
+        WindowKind::Settings => 300,
+        WindowKind::Welcome => 318,
+        _ => MIN_WINDOW_HEIGHT,
+    };
+    let height = height.max(min_height).min(area.height);
     let cascade = cascade.clamp(0, 72);
     let (x, y) = match kind {
         WindowKind::Files => (area.x + 18 + cascade, area.y + 20 + cascade),

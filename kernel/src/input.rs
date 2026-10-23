@@ -111,6 +111,7 @@ static MOUSE: Global<MouseState> = Global(UnsafeCell::new(MouseState::new()));
 static KEYBOARD: Global<Keyboard> = Global(UnsafeCell::new(Keyboard::new()));
 static POINTER_EVENTS: Global<EventQueue<MouseSnapshot, QUEUE_LEN>> =
     Global(UnsafeCell::new(EventQueue::new()));
+static SUPER_TAP: Global<SuperTapTracker> = Global(UnsafeCell::new(SuperTapTracker::new()));
 
 const PS2_DATA: u16 = 0x60;
 const PS2_STATUS: u16 = 0x64;
@@ -320,6 +321,7 @@ pub fn init(width: u32, height: u32) {
         (*MOUSE.0.get()).reset(width as i32, height as i32);
         *KEYBOARD.0.get() = Keyboard::new();
         *POINTER_EVENTS.0.get() = EventQueue::new();
+        *SUPER_TAP.0.get() = SuperTapTracker::new();
     }
     let available = probe_mouse();
     // SAFETY: Still inside the interrupt guard and this is the only writer.
@@ -333,11 +335,62 @@ pub fn init(width: u32, height: u32) {
     }
 }
 
+/// Tracks Super key presses for the Super-tap gesture (Start-menu style):
+/// Super pressed and released alone, quickly, with no key in between.
+#[derive(Clone, Copy, Debug)]
+struct SuperTapTracker {
+    /// Timer ticks at which Super last went down, or 0 when not held.
+    pressed_at: u64,
+    /// Decoded key events while Super was held (a chord means no tap).
+    keys_while_held: u8,
+}
+
+impl SuperTapTracker {
+    /// Initial state: Super is not held and no tap is pending.
+    const fn new() -> Self {
+        Self {
+            pressed_at: 0,
+            keys_while_held: 0,
+        }
+    }
+}
+
+/// A Super-tap must be under 300 ms (timer runs at 100 Hz).
+const SUPER_TAP_MAX_TICKS: u64 = 30;
+
 fn handle_scancode(scancode: u8) {
     // SAFETY: Interrupts are masked or this is IRQ context.
     unsafe {
-        if let Some(event) = (*KEYBOARD.0.get()).push(scancode) {
+        let before_super = (*KEYBOARD.0.get()).modifiers().super_key;
+        let produced = (*KEYBOARD.0.get()).push(scancode).map(|event| {
             (*QUEUE.0.get()).push(event);
+            true
+        });
+        let after_super = (*KEYBOARD.0.get()).modifiers().super_key;
+        let produced_key = matches!(produced, Some(true));
+        if !before_super && after_super {
+            // Super went down: start the tap window.
+            (*SUPER_TAP.0.get()).pressed_at = crate::scheduler::ticks();
+            (*SUPER_TAP.0.get()).keys_while_held = 0;
+        } else if before_super && !after_super {
+            // The last Super key went up. A quick release with no key in
+            // between is the system tap (search/open), like the Start menu.
+            let tracker = *SUPER_TAP.0.get();
+            let now = crate::scheduler::ticks();
+            let tapped = tracker.pressed_at != 0
+                && tracker.keys_while_held == 0
+                && now.saturating_sub(tracker.pressed_at) <= SUPER_TAP_MAX_TICKS;
+            (*SUPER_TAP.0.get()).pressed_at = 0;
+            (*SUPER_TAP.0.get()).keys_while_held = 0;
+            if tapped {
+                (*QUEUE.0.get()).push(KeyEvent {
+                    key: Key::SuperTap,
+                    modifiers: Modifiers::default(),
+                });
+            }
+        } else if after_super && produced_key {
+            (*SUPER_TAP.0.get()).keys_while_held =
+                (*SUPER_TAP.0.get()).keys_while_held.saturating_add(1);
         }
     }
 }
@@ -429,6 +482,19 @@ pub fn key_pending() -> bool {
     let _guard = InterruptGuard::enter();
     // SAFETY: Interrupts are masked while the queue state is sampled.
     unsafe { !(*QUEUE.0.get()).is_empty() }
+}
+
+/// Returns the modifier keys currently held, as decoded by the keyboard.
+///
+/// Surfacing this to the shell diagnostics lets a test harness wait for a
+/// modifier release to land before it asserts on plain keys: a Super that
+/// still reads as held would otherwise silently route plain arrows and
+/// letters as system chords.
+#[must_use]
+pub fn held_modifiers() -> Modifiers {
+    let _guard = InterruptGuard::enter();
+    // SAFETY: Interrupts are masked for the read.
+    unsafe { (*KEYBOARD.0.get()).modifiers() }
 }
 
 /// Drains queued keys into the desktop service.
@@ -529,9 +595,11 @@ pub fn self_test() {
         0xe0, 0x4d, 0xe0, 0xcd, // dedicated Right, make/break
         0xe0, 0x50, 0xe0, 0xd0, // dedicated Down, make/break
         0x1c, // Enter
-        0x1d, 0xe0, 0x4d, 0xe0, 0xcd, 0x9d, // Ctrl+Right
-        0xe0, 0x1d, 0xe0, 0x4b, 0xe0, 0xcb, 0xe0, 0x9d, // right Ctrl+Left
-        0x3d, // F3: overview
+        // Super+Alt+Right: a key is decoded between Super make and break, so
+        // the chord must not read as a Super-tap.
+        0xe0, 0x5c, 0x38, 0xe0, 0x4d, 0xe0, 0xcd, 0xb8, 0xe0, 0xdb,
+        // Super+Alt+Left: back to the first workspace.
+        0xe0, 0x5b, 0x38, 0xe0, 0x4b, 0xe0, 0xcb, 0xb8, 0xe0, 0xdb, 0x3d, // F3: overview
         0x01, // Escape: close overview
     ] {
         inject(scancode);
