@@ -90,6 +90,7 @@ dependencies = [
  "aether-memory",
  "aether-net",
  "aether-packaging",
+ "aether-seccomp",
  "aether-services",
  "aether-squashfs",
  "aether-term",
@@ -133,6 +134,10 @@ version = "0.1.0"
 dependencies = [
  "aether-abi",
 ]
+
+[[package]]
+name = "aether-seccomp"
+version = "0.1.0"
 
 [[package]]
 name = "aether-services"

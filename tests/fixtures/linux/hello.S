@@ -45,6 +45,26 @@
     movl $0, 100(%rsp)
 .endm
 
+/* seccomp(op, flags, fprog at 0(%rsp)). */
+.macro SECCOMP op, flags
+    mov $317, %rax
+    mov $\op, %rdi
+    mov $\flags, %rsi
+    mov %rsp, %rdx
+    syscall
+.endm
+
+/* prctl(option, arg2, 0, 0, 0). */
+.macro PRCTL option, arg
+    mov $157, %rax
+    mov $\option, %rdi
+    mov $\arg, %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    xor %r8, %r8
+    syscall
+.endm
+
     .section .text
     .global _start
     .type _start, @function
@@ -1132,6 +1152,208 @@ unix_seqpacket:
     pop %rbx
 
 after_unix:
+    /* seccomp: filters run in forked children, since none can be removed. */
+    push %rbx
+    push %r12
+    sub $160, %rsp
+    mov $57, %rax               /* fork */
+    syscall
+    test %rax, %rax
+    js fail_seccomp
+    jz seccomp_child
+    mov %rax, %r12
+    mov $61, %rax               /* wait4(child, &status, 0, 0) */
+    mov %r12, %rdi
+    lea 144(%rsp), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp %r12, %rax
+    jne fail_seccomp
+    cmpl $0, 144(%rsp)
+    jne fail_seccomp
+    mov $57, %rax
+    syscall
+    test %rax, %rax
+    js fail_seccomp
+    jz seccomp_kill_child
+    mov %rax, %r12
+    mov $61, %rax
+    mov %r12, %rdi
+    lea 144(%rsp), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp %r12, %rax
+    jne fail_seccomp
+    cmpl $31, 144(%rsp)         /* WIFSIGNALED: killed by SIGSYS */
+    jne fail_seccomp
+    mov $1, %rax
+    mov $1, %rdi
+    lea seccomp_message(%rip), %rsi
+    mov $seccomp_message_len, %rdx
+    syscall
+    add $160, %rsp
+    pop %r12
+    pop %rbx
+    jmp after_seccomp
+
+seccomp_child:
+    movw $seccomp_filter_a_len, 0(%rsp)
+    lea seccomp_filter_a(%rip), %rax
+    mov %rax, 8(%rsp)
+    /* Without no_new_privs a filter is refused. */
+    SECCOMP 1, 0
+    cmp $-13, %rax              /* -EACCES */
+    jne seccomp_child_fail
+    PRCTL 39, 0
+    test %rax, %rax
+    jnz seccomp_child_fail
+    PRCTL 38, 1
+    test %rax, %rax
+    jnz seccomp_child_fail
+    PRCTL 39, 0
+    cmp $1, %rax
+    jne seccomp_child_fail
+    /* SECCOMP_GET_ACTION_AVAIL: traps yes, user notification no. */
+    movl $0x00030000, 64(%rsp)
+    mov $317, %rax
+    mov $2, %rdi
+    xor %rsi, %rsi
+    lea 64(%rsp), %rdx
+    syscall
+    test %rax, %rax
+    jnz seccomp_child_fail
+    movl $0x7fc00000, 64(%rsp)
+    mov $317, %rax
+    mov $2, %rdi
+    xor %rsi, %rsi
+    lea 64(%rsp), %rdx
+    syscall
+    cmp $-95, %rax              /* -EOPNOTSUPP */
+    jne seccomp_child_fail
+    /* An empty program and the listener flag are refused. */
+    movw $0, 0(%rsp)
+    SECCOMP 1, 0
+    cmp $-22, %rax
+    jne seccomp_child_fail
+    movw $seccomp_filter_a_len, 0(%rsp)
+    SECCOMP 1, 8
+    cmp $-22, %rax
+    jne seccomp_child_fail
+    SECCOMP 1, 0
+    test %rax, %rax
+    jnz seccomp_child_fail
+    PRCTL 21, 0                 /* PR_GET_SECCOMP: filter mode */
+    cmp $2, %rax
+    jne seccomp_child_fail
+    mov $317, %rax              /* strict mode cannot replace a filter */
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    xor %rdx, %rdx
+    syscall
+    cmp $-22, %rax
+    jne seccomp_child_fail
+    mov $39, %rax               /* getpid: SECCOMP_RET_ERRNO | EPERM */
+    syscall
+    cmp $-1, %rax
+    jne seccomp_child_fail
+    /* A stacked filter's equal-rank result wins: the newest filter runs
+       first. TSYNC succeeds because no other thread exists. */
+    movw $seccomp_filter_b_len, 0(%rsp)
+    lea seccomp_filter_b(%rip), %rax
+    mov %rax, 8(%rsp)
+    SECCOMP 1, 1
+    test %rax, %rax
+    jnz seccomp_child_fail
+    mov $39, %rax
+    syscall
+    cmp $-2, %rax
+    jne seccomp_child_fail
+    /* SECCOMP_RET_TRAP: SIGSYS with si_syscall, si_errno, si_arch; the
+       handler sets the result through the ucontext. */
+    lea seccomp_sigsys_handler(%rip), %rax
+    mov %rax, 16(%rsp)
+    movq $0x04000004, 24(%rsp)  /* SA_SIGINFO | SA_RESTORER */
+    lea signal_restorer(%rip), %rax
+    mov %rax, 32(%rsp)
+    movq $0, 40(%rsp)
+    mov $13, %rax               /* rt_sigaction(SIGSYS) */
+    mov $31, %rdi
+    lea 16(%rsp), %rsi
+    xor %rdx, %rdx
+    mov $8, %r10
+    syscall
+    test %rax, %rax
+    jnz seccomp_child_fail
+    mov $102, %rax              /* getuid */
+    syscall
+    cmp $4242, %rax
+    jne seccomp_child_fail
+    /* PR_SET_NAME and PR_GET_NAME round-trip. */
+    mov $157, %rax
+    mov $15, %rdi
+    lea seccomp_name(%rip), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    xor %r8, %r8
+    syscall
+    test %rax, %rax
+    jnz seccomp_child_fail
+    movq $-1, 80(%rsp)
+    mov $157, %rax
+    mov $16, %rdi
+    lea 80(%rsp), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    xor %r8, %r8
+    syscall
+    test %rax, %rax
+    jnz seccomp_child_fail
+    mov seccomp_name(%rip), %rax
+    cmp 80(%rsp), %rax
+    jne seccomp_child_fail
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+seccomp_child_fail:
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+
+seccomp_kill_child:
+    PRCTL 38, 1
+    movw $seccomp_filter_c_len, 0(%rsp)
+    lea seccomp_filter_c(%rip), %rax
+    mov %rax, 8(%rsp)
+    SECCOMP 1, 0
+    test %rax, %rax
+    jnz seccomp_child_fail
+    mov $110, %rax              /* getppid: SECCOMP_RET_KILL_THREAD */
+    syscall
+    jmp seccomp_child_fail
+
+seccomp_sigsys_handler:
+    /* rdi=signo, rsi=&siginfo, rdx=&ucontext; mcontext rax is at 144. */
+    mov $-1, %rax
+    cmpl $31, 0(%rsi)
+    jne 1f
+    cmpl $7, 4(%rsi)            /* si_errno: SECCOMP_RET_DATA */
+    jne 1f
+    cmpl $1, 8(%rsi)            /* si_code: SYS_SECCOMP */
+    jne 1f
+    cmpl $102, 24(%rsi)         /* si_syscall */
+    jne 1f
+    cmpl $0xc000003e, 28(%rsi)  /* si_arch: AUDIT_ARCH_X86_64 */
+    jne 1f
+    cmpq $102, 144(%rdx)        /* rax rolled back to the call number */
+    jne 1f
+    mov $4242, %rax
+1:
+    mov %rax, 144(%rdx)
+    ret
+
+after_seccomp:
     /* Thread + futex: map a shared page, clone, wait for the child. */
     sub $16, %rsp
     movq $0, 0(%rsp)
@@ -4402,6 +4624,10 @@ fail_dir:
     lea dir_failure(%rip), %rsi
     mov $dir_failure_len, %rdx
     jmp report_failure
+fail_seccomp:
+    lea seccomp_failure(%rip), %rsi
+    mov $seccomp_failure_len, %rdx
+    jmp report_failure
 fail_unix:
     lea unix_failure(%rip), %rsi
     mov $unix_failure_len, %rdx
@@ -5031,6 +5257,75 @@ shared_fork_message:
 map_shared_file_message:
     .ascii "AETHER_LINUX_MAP_SHARED_FILE_OK file=rootfs read=ok msync=eopnotsupp\n"
     .set map_shared_file_message_len, . - map_shared_file_message
+seccomp_message:
+    .ascii "AETHER_LINUX_SECCOMP_OK nnp=ok errno=ok stack=ok trap=ok kill=ok prctl=ok\n"
+    .set seccomp_message_len, . - seccomp_message
+seccomp_failure:
+    .ascii "AETHER_LINUX_SECCOMP_FAIL\n"
+    .set seccomp_failure_len, . - seccomp_failure
+seccomp_name:
+    .asciz "sandbox"
+    .balign 8
+/* Check the architecture, deny getpid with EPERM, trap getuid with data 7. */
+seccomp_filter_a:
+    .short 0x20
+    .byte 0, 0
+    .long 4
+    .short 0x15
+    .byte 1, 0
+    .long 0xc000003e
+    .short 0x06
+    .byte 0, 0
+    .long 0x80000000
+    .short 0x20
+    .byte 0, 0
+    .long 0
+    .short 0x15
+    .byte 0, 1
+    .long 39
+    .short 0x06
+    .byte 0, 0
+    .long 0x00050001
+    .short 0x15
+    .byte 0, 1
+    .long 102
+    .short 0x06
+    .byte 0, 0
+    .long 0x00030007
+    .short 0x06
+    .byte 0, 0
+    .long 0x7fff0000
+    .set seccomp_filter_a_len, (. - seccomp_filter_a) / 8
+/* Deny getpid with ENOENT (2). */
+seccomp_filter_b:
+    .short 0x20
+    .byte 0, 0
+    .long 0
+    .short 0x15
+    .byte 0, 1
+    .long 39
+    .short 0x06
+    .byte 0, 0
+    .long 0x00050002
+    .short 0x06
+    .byte 0, 0
+    .long 0x7fff0000
+    .set seccomp_filter_b_len, (. - seccomp_filter_b) / 8
+/* Kill on getppid. */
+seccomp_filter_c:
+    .short 0x20
+    .byte 0, 0
+    .long 0
+    .short 0x15
+    .byte 0, 1
+    .long 110
+    .short 0x06
+    .byte 0, 0
+    .long 0
+    .short 0x06
+    .byte 0, 0
+    .long 0x7fff0000
+    .set seccomp_filter_c_len, (. - seccomp_filter_c) / 8
 unix_message:
     .ascii "AETHER_LINUX_UNIX_OK socketpair=ok scm_rights=ok fork=ok seqpacket=ok epipe=ok\n"
     .set unix_message_len, . - unix_message

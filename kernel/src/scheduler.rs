@@ -29,6 +29,7 @@ use aether_memory::frame::{FrameAllocator, PhysFrame};
 use aether_memory::vma::{VmaError, VmaTable};
 use aether_services::ServiceError;
 use aether_services::runtime::RuntimeError;
+use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -492,6 +493,10 @@ struct SigInfo {
     pid: u32,
     uid: u32,
     address: u64,
+    /// `si_errno`; the `SECCOMP_RET_DATA` of a seccomp trap.
+    errno: i32,
+    /// `si_syscall` of a seccomp trap.
+    syscall: i32,
 }
 
 /// x86-64 `struct sigcontext` as embedded in `ucontext_t` (`mcontext`).
@@ -554,6 +559,9 @@ struct RtSigFrame {
 const MAX_SIGNALS: usize = 64;
 const SIGKILL: usize = 9;
 const SIGCHLD: usize = 17;
+const SIGSYS: usize = 31;
+/// `si_code` of a seccomp `SIGSYS`.
+const SYS_SECCOMP: i32 = 1;
 
 // `rt_sigaction` flag bits.
 const SA_SIGINFO: u64 = 0x0000_0004;
@@ -655,6 +663,17 @@ struct Task {
     /// verified AppImage record that declares `network=client`; inherited
     /// like `jit`. The user's consent is checked on every socket.
     network_client: bool,
+    /// Stacked seccomp filters, newest first. Threads and forks share the
+    /// chain, `execve` keeps it, and nothing can remove a filter.
+    seccomp: Option<Rc<crate::seccomp::Filter>>,
+    /// `SECCOMP_MODE_STRICT`: only read, write, exit, and rt_sigreturn.
+    seccomp_strict: bool,
+    /// `PR_SET_NO_NEW_PRIVS`; required before a filter can be installed and
+    /// never cleared.
+    no_new_privs: bool,
+    /// `PR_SET_DUMPABLE`. Nothing reads another process's memory, so the
+    /// flag is bookkeeping for programs that check it.
+    dumpable: bool,
     /// Terminal session attachment and standard input/output routing.
     io: crate::terminal::TaskIo,
     /// Timer ticks this task was interrupted on the CPU.
@@ -747,6 +766,10 @@ impl Task {
             display: false,
             jit: false,
             network_client: false,
+            seccomp: None,
+            seccomp_strict: false,
+            no_new_privs: false,
+            dumpable: true,
             io: crate::terminal::TaskIo::NONE,
             cpu_ticks: 0,
             memory_kib: 0,
@@ -2340,6 +2363,10 @@ pub fn linux_clone(
     thread.handles = parent_handles;
     thread.jit = tasks[current].jit;
     thread.network_client = tasks[current].network_client;
+    thread.seccomp = tasks[current].seccomp.clone();
+    thread.seccomp_strict = tasks[current].seccomp_strict;
+    thread.no_new_privs = tasks[current].no_new_privs;
+    thread.dumpable = tasks[current].dumpable;
     // A thread belongs to the same application domain, so it may use the
     // display endpoint when the process was granted it. Some Craft apps create
     // their Wayland connection on a worker thread; without this the shim fell
@@ -2429,6 +2456,10 @@ pub fn linux_fork(frame: *mut InterruptFrame) -> Result<usize, i64> {
     child.overlay_app = overlay_app;
     child.jit = tasks[current].jit;
     child.network_client = tasks[current].network_client;
+    child.seccomp = tasks[current].seccomp.clone();
+    child.seccomp_strict = tasks[current].seccomp_strict;
+    child.no_new_privs = tasks[current].no_new_privs;
+    child.dumpable = tasks[current].dumpable;
     // The fork belongs to the same signed application domain and inherits its
     // display grant. A child that opens the endpoint first owns it; a second
     // opener still gets EBUSY from the display service.
@@ -3271,6 +3302,7 @@ pub fn linux_send_signal_to(tgid: usize, tid: Option<usize>, signum: u64) -> i64
                 pid: sender,
                 uid: 0,
                 address: 0,
+                ..SigInfo::default()
             },
         );
         if index != current {
@@ -3401,8 +3433,15 @@ fn default_action(signum: usize) -> DefaultAction {
 /// Writes the x86-64 `siginfo_t` payload for a queued signal.
 fn write_siginfo(info: &mut [u8; 128], signum: usize, queued: SigInfo) {
     info[0..4].copy_from_slice(&(signum as i32).to_ne_bytes());
-    info[4..8].copy_from_slice(&0i32.to_ne_bytes());
+    info[4..8].copy_from_slice(&queued.errno.to_ne_bytes());
     info[8..12].copy_from_slice(&queued.code.to_ne_bytes());
+    if signum == SIGSYS && queued.code == SYS_SECCOMP {
+        // `_sigsys`: call address, system call number, audit architecture.
+        info[16..24].copy_from_slice(&queued.address.to_ne_bytes());
+        info[24..28].copy_from_slice(&queued.syscall.to_ne_bytes());
+        info[28..32].copy_from_slice(&aether_seccomp::AUDIT_ARCH_X86_64.to_ne_bytes());
+        return;
+    }
     match queued.code {
         0 | -6 | -1 => {
             info[16..20].copy_from_slice(&(queued.pid as i32).to_ne_bytes());
@@ -3701,9 +3740,183 @@ pub fn linux_deliver_fault(
             pid: 0,
             uid: 0,
             address,
+            ..SigInfo::default()
         },
     );
     deliver_signal_to(current, frame)
+}
+
+/// Runs `f` on the current task's seccomp state: its newest filter and
+/// whether strict mode is on.
+pub fn linux_with_seccomp<R>(f: impl FnOnce(Option<&crate::seccomp::Filter>, bool) -> R) -> R {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let task = &tasks[CURRENT.load(Ordering::Relaxed)];
+    f(task.seccomp.as_deref(), task.seccomp_strict)
+}
+
+/// The current task's newest seccomp filter, to stack a new one on.
+#[must_use]
+pub fn linux_seccomp_filter() -> Option<Rc<crate::seccomp::Filter>> {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].seccomp.clone()
+}
+
+/// Enters `SECCOMP_MODE_STRICT`. Fails with `EINVAL` once a filter is set.
+pub fn linux_seccomp_set_strict() -> Result<(), i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    if task.seccomp.is_some() {
+        return Err(LINUX_EINVAL);
+    }
+    task.seccomp_strict = true;
+    Ok(())
+}
+
+/// Installs `filter` as the current task's newest seccomp filter.
+///
+/// With `sync` (`SECCOMP_FILTER_FLAG_TSYNC`) every other thread of the
+/// process gets it too, which is allowed only when each thread's filter is
+/// one the caller's chain already contains. Otherwise nothing changes and
+/// the error is the first such thread's id, or `ESRCH` with `esrch`.
+pub fn linux_seccomp_install(
+    filter: Rc<crate::seccomp::Filter>,
+    sync: bool,
+    esrch: bool,
+) -> Result<(), i64> {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let tgid = tasks[current].tgid;
+    let live = |task: &Task| {
+        task.state != TaskState::Empty
+            && task.state != TaskState::Done
+            && task.abi == TaskAbi::Linux
+            && task.tgid == tgid
+    };
+    if sync {
+        for (slot, task) in tasks.iter().enumerate() {
+            if slot == current || !live(task) {
+                continue;
+            }
+            let ancestor = match &task.seccomp {
+                None => !task.seccomp_strict,
+                Some(theirs) => filter.descends_from(theirs),
+            };
+            if !ancestor {
+                return Err(if esrch { LINUX_ESRCH } else { slot as i64 });
+            }
+        }
+        let no_new_privs = tasks[current].no_new_privs;
+        for (slot, task) in tasks.iter_mut().enumerate() {
+            if slot != current && live(task) {
+                task.seccomp = Some(Rc::clone(&filter));
+                task.no_new_privs |= no_new_privs;
+            }
+        }
+    }
+    tasks[current].seccomp = Some(filter);
+    Ok(())
+}
+
+/// `PR_GET_NO_NEW_PRIVS`.
+#[must_use]
+pub fn linux_no_new_privs() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].no_new_privs
+}
+
+/// `PR_SET_NO_NEW_PRIVS`; the flag is never cleared.
+pub fn linux_set_no_new_privs() {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].no_new_privs = true;
+}
+
+/// `PR_GET_DUMPABLE`.
+#[must_use]
+pub fn linux_dumpable() -> bool {
+    let tasks = unsafe { &*TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].dumpable
+}
+
+/// `PR_SET_DUMPABLE`.
+pub fn linux_set_dumpable(dumpable: bool) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    tasks[CURRENT.load(Ordering::Relaxed)].dumpable = dumpable;
+}
+
+/// `PR_GET_NAME`: the task's name, NUL padded to Linux `TASK_COMM_LEN`.
+#[must_use]
+pub fn linux_task_name() -> [u8; 16] {
+    let tasks = unsafe { &*TASKS.0.get() };
+    let name = &tasks[CURRENT.load(Ordering::Relaxed)].name;
+    let mut out = [0u8; 16];
+    let len = name
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(name.len())
+        .min(15);
+    out[..len].copy_from_slice(&name[..len]);
+    out
+}
+
+/// `PR_SET_NAME`: renames the calling thread (at most 15 bytes).
+pub fn linux_set_task_name(name: &[u8]) {
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let task = &mut tasks[CURRENT.load(Ordering::Relaxed)];
+    let len = name.len().min(15);
+    task.name = [0; PROCESS_NAME_BYTES];
+    task.name[..len].copy_from_slice(&name[..len]);
+}
+
+/// Ends the calling process for a seccomp kill with `signum`. The system
+/// call never runs.
+pub fn linux_seccomp_kill(frame: *mut InterruptFrame, signum: usize) -> *mut InterruptFrame {
+    {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        tasks[CURRENT.load(Ordering::Relaxed)].signal_exit = signum as u8;
+    }
+    linux_signal_exit(frame)
+}
+
+/// `SECCOMP_RET_TRAP`: skips the system call and raises `SIGSYS` with the
+/// call's number and `errno` as `si_errno`. Like Linux `force_sig`, a
+/// blocked or ignored `SIGSYS` is unblocked and reset to the default, so the
+/// violation either reaches a handler or ends the process.
+pub fn linux_seccomp_trap(
+    frame: *mut InterruptFrame,
+    number: u64,
+    errno: u16,
+) -> *mut InterruptFrame {
+    let current = CURRENT.load(Ordering::Relaxed);
+    {
+        let tasks = unsafe { &mut *TASKS.0.get() };
+        let task = &mut tasks[current];
+        let bit = 1u64 << (SIGSYS - 1);
+        task.sigblocked &= !bit;
+        if task.sigactions[SIGSYS - 1].is_some_and(|action| action.handler == 1) {
+            task.sigactions[SIGSYS - 1] = None;
+        }
+    }
+    // SAFETY: The syscall entry passes a live frame for this task.
+    let rip = unsafe { (*frame).rip };
+    queue_signal(
+        current,
+        SIGSYS,
+        SigInfo {
+            code: SYS_SECCOMP,
+            address: rip,
+            errno: i32::from(errno),
+            syscall: number as i32,
+            ..SigInfo::default()
+        },
+    );
+    // Linux rolls the registers back, so the handler sees the call number
+    // in `rax` and decides the result itself.
+    unsafe { (*frame).rax = number };
+    linux_deliver_signal(frame);
+    if linux_signal_pending_exit() {
+        return linux_signal_exit(frame);
+    }
+    frame
 }
 
 /// Returns true when delivery selected a default termination for the caller.
@@ -3796,6 +4009,7 @@ fn queue_child_signal(child: usize) {
             pid: child_tgid,
             uid: 0,
             address: 0,
+            ..SigInfo::default()
         });
     }
     tasks[parent].sigpending |= bit;
@@ -3974,6 +4188,7 @@ pub fn linux_send_signal_group(pgid: usize, signal: u64) -> i64 {
                 pid: sender,
                 uid: 0,
                 address: 0,
+                ..SigInfo::default()
             },
         );
         if index != current {
