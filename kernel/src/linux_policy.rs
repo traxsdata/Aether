@@ -71,16 +71,16 @@ pub const fn classify(number: u64) -> Class {
         9 | 10 | 11 | 12 | 25 | 26 | 158 => Class::Memory,
         // clone, fork, vfork, execve, exit, wait4, getpid, set/get groups,
         // set_tid_address and similar process bookkeeping.
-        39 | 56 | 57 | 58 | 59 | 60 | 61 | 63 | 102 | 104 | 107 | 108 | 109 | 110 | 112 | 121
-        | 186 | 218 | 231 | 273 | 274 | 334 | 435 => Class::Process,
+        39 | 56 | 57 | 58 | 59 | 60 | 61 | 63 | 102 | 104 | 107 | 108 | 109 | 110 | 112 | 118
+        | 120 | 121 | 186 | 218 | 231 | 273 | 274 | 334 | 435 => Class::Process,
         // prctl and seccomp: a process may narrow its own system calls.
         157 | 317 => Class::Process,
         // rt_sigaction, rt_sigprocmask, rt_sigreturn, kill, tgkill, sigaltstack.
         13 | 14 | 15 | 62 | 131 | 234 => Class::Signal,
-        // clock_gettime, nanosleep, clock_nanosleep, timerfd.
-        35 | 228 | 230 | 283 | 286 | 287 => Class::Time,
-        // poll/yield/futex/epoll/eventfd/pipe.
-        7 | 24 | 202 | 232 | 233 | 281 | 290 | 291 | 293 => Class::Sync,
+        // clock_gettime, gettimeofday, time, nanosleep, clock_nanosleep, timerfd.
+        35 | 96 | 201 | 228 | 230 | 283 | 286 | 287 => Class::Time,
+        // poll/ppoll/yield/futex/epoll/eventfd/pipe.
+        7 | 24 | 202 | 232 | 233 | 271 | 281 | 290 | 291 | 293 => Class::Sync,
         // Socket calls: routed to the socket layer and its network policy.
         41..=55 | 288 | 299 | 307 => Class::Network,
         // Device, module, mount, tracing, and privileged kernel facilities.

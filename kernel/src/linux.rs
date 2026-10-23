@@ -49,6 +49,24 @@ const APPIMAGE_ARGS: &str = match option_env!("AETHER_LINUX_APPIMAGE_ARGS") {
 /// Maximum configured arguments; the loader allows 16 argv entries including
 /// the program path that this list is prefixed with.
 pub const MAX_APPIMAGE_ARGUMENTS: usize = 15;
+/// Optional extra environment (`|`-separated `NAME=value` entries) for the
+/// selected AppImage program, appended after the runtime's own variables.
+const APPIMAGE_ENV: &str = match option_env!("AETHER_LINUX_APPIMAGE_ENV") {
+    Some(value) => value,
+    None => "",
+};
+/// Maximum configured environment entries. The loader allows 16 in total, so
+/// the scheduler still rejects a launch whose combined list is too long.
+pub const MAX_APPIMAGE_ENVIRONMENT: usize = 16;
+/// The signed app identity that receives the configured argv and environment.
+///
+/// Both lists are compiled in for one app. When this is unset the historical
+/// GridCraft rule applies (the portal workbook path must not reach any other
+/// app in a multi-app pack); a harness that stages a single app names it here.
+const APPIMAGE_ARGS_APP: &str = match option_env!("AETHER_LINUX_APPIMAGE_ARGS_APP") {
+    Some(value) => value,
+    None => "",
+};
 /// The kernel's trust root, chosen at build time (see `kernel/build.rs`).
 const TRUST_PUBLIC_KEY: &str = env!("AETHER_TRUST_PUBLIC_KEY");
 const TRUST_PUBLISHER: &str = "Aether Test Publisher";
@@ -674,27 +692,60 @@ pub fn app_is_dynamic(slot: usize) -> bool {
     app(slot).is_some_and(|app| app.dynamic)
 }
 
+/// Returns `true` when the compile-time argv/environment belong to `slot`.
+fn receives_configuration(slot: usize) -> bool {
+    app(slot).is_some_and(|app| configured_for(&app.id, APPIMAGE_ARGS_APP))
+}
+
+/// The configuration target rule: an explicit identity must match exactly.
+/// Without one, only GridCraft receives the lists, because its configured
+/// argument is a private portal path that no other app may see.
+fn configured_for(id: &str, target: &str) -> bool {
+    if target.is_empty() {
+        id.ends_with(".gridcraft")
+    } else {
+        id == target
+    }
+}
+
+/// Splits a compile-time `|` list into a bounded array.
+///
+/// `None` means the list has more than `N` entries.
+fn split_list<const N: usize>(list: &'static str) -> Option<([&'static str; N], usize)> {
+    let mut values = [""; N];
+    let mut count = 0usize;
+    for value in list.split('|').filter(|value| !value.is_empty()) {
+        if count == N {
+            return None;
+        }
+        values[count] = value;
+        count += 1;
+    }
+    Some((values, count))
+}
+
 /// Returns the configured arguments for the imported program.
 ///
 /// `None` means the compile-time list exceeds the loader's bounded argv array;
 /// the caller must reject the launch rather than silently truncate it.
 #[must_use]
 pub fn app_arguments(slot: usize) -> Option<([&'static str; MAX_APPIMAGE_ARGUMENTS], usize)> {
-    let mut arguments = [""; MAX_APPIMAGE_ARGUMENTS];
-    let mut count = 0usize;
-    // The configured argument list is the GridCraft portal workbook. A
-    // different imported app must not receive that private namespace path.
-    if !app(slot).is_some_and(|app| app.id.ends_with(".gridcraft")) {
-        return Some((arguments, 0));
+    if !receives_configuration(slot) {
+        return Some(([""; MAX_APPIMAGE_ARGUMENTS], 0));
     }
-    for argument in APPIMAGE_ARGS.split('|').filter(|value| !value.is_empty()) {
-        if count == MAX_APPIMAGE_ARGUMENTS {
-            return None;
-        }
-        arguments[count] = argument;
-        count += 1;
+    split_list(APPIMAGE_ARGS)
+}
+
+/// Returns the configured extra environment for the imported program.
+///
+/// `None` means the compile-time list is too long; the caller must reject the
+/// launch rather than silently truncate it.
+#[must_use]
+pub fn app_environment(slot: usize) -> Option<([&'static str; MAX_APPIMAGE_ENVIRONMENT], usize)> {
+    if !receives_configuration(slot) {
+        return Some(([""; MAX_APPIMAGE_ENVIRONMENT], 0));
     }
-    Some((arguments, count))
+    split_list(APPIMAGE_ENV)
 }
 
 /// Returns the file index for an absolute, normalized path.

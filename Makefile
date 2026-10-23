@@ -50,6 +50,11 @@ LINUX_APPIMAGE_PROGRAM ?= /usr/bin/app
 # Optional | separated argv for the selected AppImage program. The default is
 # empty so the static boot fixture keeps argv = [program path].
 LINUX_APPIMAGE_ARGS ?=
+# Optional | separated NAME=value entries appended to the program environment.
+LINUX_APPIMAGE_ENV ?=
+# Signed app id that receives the configured argv/environment. Empty keeps the
+# GridCraft-only rule, so a multi-app pack never leaks the portal workbook path.
+LINUX_APPIMAGE_ARGS_APP ?=
 # Experimental Gate 3 headless GridCraft run.
 GATECRAFT_APPIMAGE ?= /tmp/opencode/gridcraft.AppImage
 GATE3_APP_PROGRAM ?= /usr/bin/gridcraft-cli
@@ -75,6 +80,21 @@ CRAFT_TIMEOUT ?= 300
 CRAFT_GUI_TIMEOUT ?= 600
 CRAFT_OUT ?= $(BUILD)/craft-app
 CRAFT_GUI_SCREENSHOT ?= $(CRAFT_OUT)/gui.ppm
+# Firefox ESR staging (firefox-stage) and the milestone 1 headless discovery
+# run (firefox-headless-test). The pin lives in tools/pins/firefox-esr.pin.
+FIREFOX_OUT ?= $(BUILD)/firefox
+FIREFOX_ID ?= org.mozilla.firefox
+FIREFOX_STAGE_FLAGS ?=
+# firefox-bin is the browser; `firefox` is a launcher that execs it.
+FIREFOX_PROGRAM ?= /opt/firefox/firefox-bin
+FIREFOX_ARGS ?= --headless|--screenshot|/tmp/out.png|file:///usr/share/firefox-test/index.html
+FIREFOX_ENV ?= MOZ_HEADLESS=1|MOZ_DISABLE_CONTENT_SANDBOX=1|MOZ_DISABLE_GMP_SANDBOX=1|MOZ_DISABLE_RDD_SANDBOX=1|MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1|MOZ_FORCE_DISABLE_E10S=153.5.1|MOZ_CRASHREPORTER_DISABLE=1
+# large-apps: Linux-sized fd/thread/mapping limits; gate4-runtime: the 1.5 GiB
+# kernel heap that holds the imported trees.
+FIREFOX_FEATURES ?= large-apps gate4-runtime
+FIREFOX_MEMORY ?= 6G
+FIREFOX_TIMEOUT ?= 1800
+FIREFOX_IMAGE_SIZE ?= 448M
 # Full Craft app suite staged for the multi-app ISO.
 CRAFT_APPS_DIR ?= $(BUILD)/craft-apps
 CRAFT_APP_CACHE ?= /tmp/opencode/craft-apps
@@ -118,7 +138,7 @@ KERNEL_FEATURE_FLAGS := $(if $(KERNEL_FEATURES),--features "$(KERNEL_FEATURES)")
 # ET_EXEC file with all relocations resolved at link time.
 USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
-.PHONY: all kernel user loader image iso iso-gridcraft craft-apps-stage iso-craft-apps iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test path-length-test \
+.PHONY: all kernel user loader image iso iso-gridcraft craft-apps-stage iso-craft-apps iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test firefox-stage firefox-headless-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test path-length-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
 	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
 
@@ -234,6 +254,8 @@ kernel: user linux-fixture
 	AETHER_LINUX_RUNTIME_PIN="$$(cat $(LINUX_RUNTIME_PIN) 2>/dev/null || true)" \
 	AETHER_LINUX_APPIMAGE_PROGRAM=$(LINUX_APPIMAGE_PROGRAM) \
 	AETHER_LINUX_APPIMAGE_ARGS='$(LINUX_APPIMAGE_ARGS)' \
+	AETHER_LINUX_APPIMAGE_ENV='$(LINUX_APPIMAGE_ENV)' \
+	AETHER_LINUX_APPIMAGE_ARGS_APP='$(LINUX_APPIMAGE_ARGS_APP)' \
 	AETHER_LINUX_DYN_PATH=$(LINUX_DYN_PATH) \
 		$(CARGO) build -p aether-kernel --release --target $(KERNEL_TARGET) --locked $(KERNEL_FEATURE_FLAGS)
 	cp target/$(KERNEL_TARGET)/release/aether-kernel $(KERNEL_ELF)
@@ -386,6 +408,7 @@ craft-smoke-test:
 	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
 		LINUX_APPIMAGE_PROGRAM=$(CRAFT_PROGRAM) \
 		LINUX_APPIMAGE_ARGS='$(CRAFT_ARGS)' \
+		LINUX_APPIMAGE_ARGS_APP='$(CRAFT_ID)' \
 		STAGED_APPIMAGE=$(CRAFT_APPIMAGE) \
 		STAGED_APPIMAGE_RECORD=$(CRAFT_OUT)/app.import \
 		IMAGE_SIZE=$(CRAFT_IMAGE_SIZE) image
@@ -415,6 +438,7 @@ craft-gui-test: gate4-runtime
 		STAGED_RUNTIME_RECORD=$(GATE4_RUNTIME_RECORD) \
 		LINUX_APPIMAGE_PROGRAM=$(CRAFT_PROGRAM) \
 		LINUX_APPIMAGE_ARGS='$(CRAFT_ARGS)' \
+		LINUX_APPIMAGE_ARGS_APP='$(CRAFT_ID)' \
 		STAGED_APPIMAGE=$(CRAFT_APPIMAGE) \
 		STAGED_APPIMAGE_RECORD=$(CRAFT_OUT)/app.import \
 		IMAGE_SIZE=$(CRAFT_IMAGE_SIZE) image
@@ -422,6 +446,48 @@ craft-gui-test: gate4-runtime
 	AETHER_GATE4_TIMEOUT=$(CRAFT_GUI_TIMEOUT) \
 	AETHER_GATE4_SCREENSHOT=$(abspath $(CRAFT_GUI_SCREENSHOT)) \
 	$(PYTHON) tools/gate4_smoke.py
+
+# Firefox ESR (issue #118). `firefox-stage` downloads the pinned tarball once
+# into build/firefox/cache (tools/pins/firefox-esr.pin), wraps it as an AppImage
+# and signs a memory=jit import record. Neither target is part of `make ci`.
+firefox-stage:
+	$(PYTHON) tools/stage-firefox.py --out $(FIREFOX_OUT) $(FIREFOX_STAGE_FLAGS)
+
+# Milestone 1 discovery run (issue #107): boot the staged Firefox headless in
+# the Gate 3 glibc runtime with Linux-sized limits and try a screenshot of a
+# page in the image. This does not pass yet; the serial log in
+# build/serial.log records how far it got. See docs/reference/firefox.md.
+firefox-headless-test:
+	$(MAKE) firefox-stage FIREFOX_STAGE_FLAGS="--keep-root $(FIREFOX_STAGE_FLAGS)"
+	$(MAKE) KERNEL_FEATURES="$(FIREFOX_FEATURES)" LINUX_RUNTIME_PREBUILT=1 linux-fixture
+	sh tools/build-gate3-runtime.sh $(LINUX_ROOTFS) $(LINUX_ROOTFS_RECORD) \
+		$(LINUX_RUNTIME_PIN) $(LINUX_RUNTIME_MANIFEST) $(LINUX_RUNTIME_SEED)
+	@mkdir -p $(BUILD)/gate3-runtime-root/usr/bin
+	printf 'AETHER_LINUX_ROOT_OK source=/etc/motd\nAETHER_GATE3_ROOT_OK source=/etc/motd\n' \
+		> $(BUILD)/gate3-runtime-root/etc/motd
+	cp $(LINUX_INTERP_ELF) $(BUILD)/gate3-runtime-root/lib/ld-aether.so
+	cp $(LINUX_DYN_ELF) $(BUILD)/gate3-runtime-root/usr/bin/dynamic
+	cp $(LINUX_EXEC_ELF) $(BUILD)/gate3-runtime-root/usr/bin/exec
+	cp $(LINUX_DYN_EXEC_ELF) $(BUILD)/gate3-runtime-root/usr/bin/dynamic-exec
+	sh tools/firefox-headless-root.sh $(FIREFOX_OUT)/root $(BUILD)/gate3-runtime-root
+	sh tools/build-runtime-rootfs.sh $(BUILD)/gate3-runtime-root \
+		$(LINUX_ROOTFS) $(LINUX_RUNTIME_SEED) org.aether.linux-runtime \
+		"$(GATE3_RUNTIME_VERSION)" "Aether Test Publisher" \
+		$(LINUX_ROOTFS_RECORD)
+	$(MAKE) LINUX_RUNTIME_PREBUILT=1 \
+		KERNEL_FEATURES="$(FIREFOX_FEATURES)" \
+		LINUX_APPIMAGE_PROGRAM=$(FIREFOX_PROGRAM) \
+		LINUX_APPIMAGE_ARGS='$(FIREFOX_ARGS)' \
+		LINUX_APPIMAGE_ENV='$(FIREFOX_ENV)' \
+		LINUX_APPIMAGE_ARGS_APP=$(FIREFOX_ID) \
+		STAGED_APPIMAGE=$(FIREFOX_OUT)/firefox.AppImage \
+		STAGED_APPIMAGE_RECORD=$(FIREFOX_OUT)/firefox.import \
+		IMAGE_SIZE=$(FIREFOX_IMAGE_SIZE) image
+	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
+	AETHER_MEMORY=$(FIREFOX_MEMORY) \
+	AETHER_BOOT_TIMEOUT=$(FIREFOX_TIMEOUT) \
+	AETHER_REQUIRE_TEXT="AETHER_LINUX_APPIMAGE_STAGED_OK|id=$(FIREFOX_ID)|bytes=$$(stat -c %s '$(FIREFOX_OUT)/firefox.AppImage')" \
+	$(PYTHON) tools/test-boot.py
 
 # Gate 4 portal slice: run a small static Linux AppImage fixture that opens a
 # seeded workbook through the exact-file portal namespace, saves new bytes,

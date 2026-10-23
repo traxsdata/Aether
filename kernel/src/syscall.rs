@@ -335,7 +335,8 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         3 => scheduler::linux_close(first),
         8 => scheduler::linux_lseek(first, second as i64, third),
         4 | 6 => linux_stat(pml4, first, second),
-        7 => return linux_poll(frame, pml4, first, second, third),
+        7 => return linux_poll(frame, pml4, first, second, third as i64, 7),
+        271 => return linux_ppoll(frame, pml4, first, second, third),
         35 => return linux_nanosleep(frame, pml4, first, second),
         230 => {
             return linux_clock_nanosleep(frame, pml4, first, second, third, unsafe {
@@ -463,6 +464,10 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         218 => scheduler::linux_set_tid_address(first),
         63 => linux_uname(pml4, first),
         102 | 104 | 107 | 108 => 1000,
+        // getresuid/getresgid: real, effective and saved ids are all 1000.
+        118 | 120 => linux_getres_ids(pml4, [first, second, third]),
+        // time(): CLOCK_REALTIME seconds, also stored through the pointer.
+        201 => linux_time(pml4, first),
         158 => linux_arch_prctl(pml4, first, second),
         157 => crate::seccomp::sys_prctl(
             pml4,
@@ -477,6 +482,7 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         274 => linux_get_robust_list(pml4, first, second, third),
         334 => linux_rseq(pml4, first, second, third, unsafe { (*frame).r10 }),
         228 => linux_clock_gettime(pml4, first, second),
+        96 => linux_gettimeofday(pml4, first, second),
         318 => linux_getrandom(pml4, first, second),
         257 => linux_openat(pml4, first, second, third),
         319 => scheduler::linux_memfd_create().map_or_else(|error| error, |fd| fd as i64),
@@ -1558,8 +1564,15 @@ fn linux_readlink(
         Err(error) => return error.errno(),
     };
     let path = path.as_str();
+    let mut exe = [0u8; 256];
     let target: &[u8] = match path {
-        "/proc/self/exe" | "/proc/thread-self/exe" => b"/usr/bin/aether-linux",
+        // Programs such as Firefox locate their install directory from the
+        // link, so report the image the process runs. The boot fixtures have
+        // no recorded path and keep the synthetic name.
+        "/proc/self/exe" | "/proc/thread-self/exe" => match scheduler::linux_exe_path(&mut exe) {
+            Some(length) => &exe[..length],
+            None => b"/usr/bin/aether-linux",
+        },
         "/proc/self/cwd" | "/proc/thread-self/cwd" => b"/",
         _ => return LINUX_EINVAL,
     };
@@ -1658,19 +1671,45 @@ fn linux_pipe2(pml4: PhysFrame, fds_pointer: u64, _flags: u64) -> i64 {
     write_user_bytes(pml4, fds_pointer, &buffer).map_or(LINUX_EFAULT, |()| 0)
 }
 
+/// `ppoll`: `poll` with a `timespec` timeout.
+///
+/// glibc implements `poll()` with this call, so GLib's main loop (Firefox)
+/// reaches it. The optional signal mask is not swapped in for the wait: as
+/// with `poll`, pending signals interrupt the wait and are delivered on return.
+fn linux_ppoll(
+    frame: *mut InterruptFrame,
+    pml4: PhysFrame,
+    fds_pointer: u64,
+    count: u64,
+    timeout_pointer: u64,
+) -> *mut InterruptFrame {
+    let timeout = if timeout_pointer == 0 {
+        -1
+    } else {
+        let Some((seconds, nanoseconds)) = read_timespec(pml4, timeout_pointer) else {
+            return linux_result(frame, LINUX_EINVAL);
+        };
+        seconds
+            .saturating_mul(1000)
+            .saturating_add(nanoseconds.div_ceil(1_000_000))
+            .min(i64::MAX as u64) as i64
+    };
+    linux_poll(frame, pml4, fds_pointer, count, timeout, 271)
+}
+
 fn linux_poll(
     frame: *mut InterruptFrame,
     pml4: PhysFrame,
     fds_pointer: u64,
     count: u64,
-    timeout: u64,
+    timeout: i64,
+    number: u64,
 ) -> *mut InterruptFrame {
     if count > 16 {
         return linux_result(frame, LINUX_EINVAL);
     }
     // poll's timeout is signed: negative waits forever, zero probes once.
-    let timeout = timeout as i64;
-    let deadline = match scheduler::linux_take_restart(7) {
+    let deadline = match scheduler::linux_take_restart(number) {
         Some(deadline) => deadline,
         None => linux_poll_deadline(timeout),
     };
@@ -1711,7 +1750,7 @@ fn linux_poll(
     if scheduler::linux_signal_pending() {
         return linux_result(frame, LINUX_EINTR);
     }
-    scheduler::linux_park(frame, 7, scheduler::LinuxWait::Poll, deadline)
+    scheduler::linux_park(frame, number, scheduler::LinuxWait::Poll, deadline)
 }
 
 fn linux_getdents(
@@ -2226,6 +2265,10 @@ fn linux_execve(
             (*frame).rsp = loaded.stack_pointer;
         }
         scheduler::linux_replace_image(loaded.pml4);
+        if let Ok(interpreter_image) = aether_linux_elf::parse(interpreter) {
+            scheduler::linux_seed_exec_vmas(&parsed, &interpreter_image);
+        }
+        scheduler::linux_set_exe_path(path);
         return frame;
     }
 
@@ -2279,6 +2322,7 @@ fn linux_execve(
         (*frame).rsp = stack_pointer;
     }
     scheduler::linux_replace_image(new_pml4);
+    scheduler::linux_set_exe_path(path);
     frame
 }
 
@@ -2862,6 +2906,51 @@ const LINUX_ETIMEDOUT: i64 = -110;
 
 fn write_user_u32(pml4: PhysFrame, pointer: u64, value: u32) -> Option<()> {
     write_user_bytes(pml4, pointer, &value.to_le_bytes())
+}
+
+fn linux_getres_ids(pml4: PhysFrame, pointers: [u64; 3]) -> i64 {
+    for pointer in pointers {
+        if write_user_bytes(pml4, pointer, &1000u32.to_ne_bytes()).is_none() {
+            return LINUX_EFAULT;
+        }
+    }
+    0
+}
+
+fn linux_time(pml4: PhysFrame, pointer: u64) -> i64 {
+    let uptime = scheduler::ticks() / 100;
+    let Some(epoch) = crate::arch::x86_64::rtc::boot_epoch(uptime) else {
+        return LINUX_EINVAL;
+    };
+    let seconds = epoch.saturating_add(uptime) as i64;
+    if pointer != 0 && write_user_bytes(pml4, pointer, &seconds.to_le_bytes()).is_none() {
+        return LINUX_EFAULT;
+    }
+    seconds
+}
+
+/// `gettimeofday`: `CLOCK_REALTIME` in microseconds. There is no vDSO, so
+/// glibc makes the system call. The obsolete timezone argument is zeroed.
+fn linux_gettimeofday(pml4: PhysFrame, timeval_pointer: u64, timezone_pointer: u64) -> i64 {
+    let ticks = scheduler::ticks();
+    let uptime = ticks / 100;
+    if timeval_pointer != 0 {
+        let Some(epoch) = crate::arch::x86_64::rtc::boot_epoch(uptime) else {
+            return LINUX_EINVAL;
+        };
+        let seconds = epoch.saturating_add(uptime) as i64;
+        let micros = ((ticks % 100) * 10_000) as i64;
+        let mut buffer = [0u8; 16];
+        buffer[..8].copy_from_slice(&seconds.to_le_bytes());
+        buffer[8..].copy_from_slice(&micros.to_le_bytes());
+        if write_user_bytes(pml4, timeval_pointer, &buffer).is_none() {
+            return LINUX_EFAULT;
+        }
+    }
+    if timezone_pointer != 0 && write_user_bytes(pml4, timezone_pointer, &[0u8; 8]).is_none() {
+        return LINUX_EFAULT;
+    }
+    0
 }
 
 fn linux_clock_gettime(pml4: PhysFrame, clock: u64, pointer: u64) -> i64 {

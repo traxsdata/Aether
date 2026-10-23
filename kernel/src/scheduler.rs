@@ -618,6 +618,9 @@ struct Task {
     linux_fds: FdSlots,
     /// Imported app-domain slot; `crate::linux::MAX_APPS` for native tasks.
     app_slot: usize,
+    /// Path of the running Linux executable, reported by
+    /// `readlink("/proc/self/exe")`. Empty for the boot fixtures.
+    exe_path: ExePath,
     /// Per-application overlay store selected by the runtime manager.
     overlay_app: u8,
     inotify_wait_pointer: u64,
@@ -739,6 +742,7 @@ impl Task {
             clear_child_tid: 0,
             linux_fds: FdSlots(0),
             app_slot: crate::linux::MAX_APPS,
+            exe_path: ExePath::EMPTY,
             overlay_app: 0,
             inotify_wait_pointer: 0,
             inotify_wait_length: 0,
@@ -1755,6 +1759,18 @@ pub fn launch_appimage(slot: usize) -> Result<(), SchedulerError> {
             "HOME=/tmp",
             "TMPDIR=/tmp",
         ];
+        // The harness may add variables for the staged app; the loader takes
+        // at most MAX_APPIMAGE_ENVIRONMENT entries, so reject rather than drop.
+        let (extra, extra_count) =
+            crate::linux::app_environment(slot).ok_or(SchedulerError::LinuxAppArguments)?;
+        let mut combined = [""; crate::linux::MAX_APPIMAGE_ENVIRONMENT];
+        let total = environment.len() + extra_count;
+        if total > combined.len() {
+            serial_line!("sched: appimage environment has {total} entries");
+            return Err(SchedulerError::LinuxAppArguments);
+        }
+        combined[..environment.len()].copy_from_slice(&environment);
+        combined[environment.len()..total].copy_from_slice(&extra[..extra_count]);
         let loaded = crate::memory::with_frame_allocator(|allocator| {
             crate::linux_loader::load(
                 allocator,
@@ -1762,7 +1778,7 @@ pub fn launch_appimage(slot: usize) -> Result<(), SchedulerError> {
                 interpreter,
                 program_path,
                 &arguments[..1 + count],
-                &environment,
+                &combined[..total],
             )
         })
         .ok_or(SchedulerError::OutOfMemory)?
@@ -1806,6 +1822,9 @@ pub fn launch_appimage(slot: usize) -> Result<(), SchedulerError> {
     app_task.root = crate::fs::DEMO_ROOT;
     app_task.brk = paging::LINUX_ARENA_BASE;
     app_task.app_slot = slot;
+    if let Some((_, _, path)) = crate::linux::app_identity(slot) {
+        app_task.exe_path = ExePath::new(path);
+    }
     app_task.overlay_app = slot as u8;
     app_task.tgid = task_index;
     app_task.bind_file_state(task_index);
@@ -1862,6 +1881,28 @@ pub fn launch_appimage(slot: usize) -> Result<(), SchedulerError> {
         dynamic.is_some()
     );
     Ok(())
+}
+
+/// Records the VMAs of a freshly `execve`d dynamic image in the current task.
+///
+/// `linux_replace_image` clears the tables; without these entries the
+/// dynamic linker's RELRO `mprotect` fails with `ENOMEM` (issue #107).
+pub fn linux_seed_exec_vmas(
+    main_image: &aether_linux_elf::Image<'_>,
+    interpreter_image: &aether_linux_elf::Image<'_>,
+) {
+    let current = CURRENT.load(Ordering::Relaxed);
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    let Some(task) = tasks.get_mut(current) else {
+        return;
+    };
+    seed_linux_vmas(task, main_image, crate::linux_loader::MAIN_BASE);
+    seed_linux_vmas(task, interpreter_image, crate::linux_loader::INTERP_BASE);
+    let _ = task.vmas.insert_at(
+        USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE,
+        USER_STACK_PAGES * PAGE_SIZE,
+        aether_memory::vma::PROT_READ | aether_memory::vma::PROT_WRITE,
+    );
 }
 
 fn seed_linux_vmas(task: &mut Task, image: &aether_linux_elf::Image<'_>, bias: u64) {
@@ -2380,6 +2421,7 @@ pub fn linux_clone(
     thread.tgid = parent_tgid;
     thread.bind_file_state(parent_tgid);
     thread.app_slot = tasks[current].app_slot;
+    thread.exe_path = tasks[current].exe_path;
     thread.overlay_app = parent_overlay_app;
     thread.handles = parent_handles;
     thread.jit = tasks[current].jit;
@@ -2491,6 +2533,7 @@ pub fn linux_fork_with(frame: *mut InterruptFrame, spec: ForkSpec) -> Result<usi
     child.sid = tasks[current].sid;
     child.parent = current;
     child.app_slot = tasks[current].app_slot;
+    child.exe_path = tasks[current].exe_path;
     child.overlay_app = overlay_app;
     child.jit = tasks[current].jit;
     child.network_client = tasks[current].network_client;
@@ -2590,6 +2633,56 @@ pub fn linux_vfork_wait(frame: *mut InterruptFrame, tgid: usize) -> *mut Interru
 }
 
 /// Replaces the current task's address space after `execve`.
+/// Bounded copy of a Linux executable path for `/proc/self/exe`.
+#[derive(Clone, Copy)]
+struct ExePath {
+    bytes: [u8; EXE_PATH_BYTES],
+    length: u16,
+}
+
+/// Longest executable path kept; `execve` already rejects longer paths.
+const EXE_PATH_BYTES: usize = 256;
+
+impl ExePath {
+    const EMPTY: Self = Self {
+        bytes: [0; EXE_PATH_BYTES],
+        length: 0,
+    };
+
+    /// Keeps `path`, or nothing when it does not fit.
+    fn new(path: &str) -> Self {
+        let mut value = Self::EMPTY;
+        if let Some(target) = value.bytes.get_mut(..path.len()) {
+            target.copy_from_slice(path.as_bytes());
+            value.length = path.len() as u16;
+        }
+        value
+    }
+}
+
+/// Records the image path after a successful `execve` of the current process.
+pub fn linux_set_exe_path(path: &str) {
+    let current = CURRENT.load(Ordering::Relaxed);
+    let tasks = unsafe { &mut *TASKS.0.get() };
+    if let Some(task) = tasks.get_mut(current) {
+        task.exe_path = ExePath::new(path);
+    }
+}
+
+/// Copies the current executable path into `buffer` and returns its length,
+/// or `None` when the task has no recorded path (the boot fixtures).
+pub fn linux_exe_path(buffer: &mut [u8; 256]) -> Option<usize> {
+    let current = CURRENT.load(Ordering::Relaxed);
+    let tasks = unsafe { &*TASKS.0.get() };
+    let path = &tasks.get(current)?.exe_path;
+    let length = usize::from(path.length);
+    if length == 0 {
+        return None;
+    }
+    buffer[..length].copy_from_slice(&path.bytes[..length]);
+    Some(length)
+}
+
 pub fn linux_replace_image(pml4: PhysFrame) {
     let current = CURRENT.load(Ordering::Relaxed);
     // execve replaces the whole process: other threads of the group would
