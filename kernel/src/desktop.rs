@@ -75,7 +75,7 @@ struct DesktopState {
 #[derive(Clone, Copy)]
 struct RenameState {
     active: bool,
-    buffer: [u8; 16],
+    buffer: [u8; 255],
     len: usize,
 }
 
@@ -83,7 +83,7 @@ impl RenameState {
     const fn new() -> Self {
         Self {
             active: false,
-            buffer: [0; 16],
+            buffer: [0; 255],
             len: 0,
         }
     }
@@ -311,7 +311,7 @@ fn rename_state() -> RenameState {
 fn begin_rename() -> bool {
     let Some(name) = with_browser(|browser| {
         browser.selected_name().map(|name| {
-            let mut buffer = [0u8; 16];
+            let mut buffer = [0u8; 255];
             let length = name.len().min(buffer.len());
             buffer[..length].copy_from_slice(&name.as_bytes()[..length]);
             (buffer, length)
@@ -359,12 +359,12 @@ fn rename_backspace() {
     }
 }
 
-fn rename_name() -> Option<([u8; 16], usize)> {
+fn rename_name() -> Option<([u8; 255], usize)> {
     let state = rename_state();
     if !state.active || state.len == 0 {
         return None;
     }
-    let mut name = [0u8; 16];
+    let mut name = [0u8; 255];
     name[..state.len].copy_from_slice(&state.buffer[..state.len]);
     Some((name, state.len))
 }

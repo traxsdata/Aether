@@ -130,7 +130,9 @@ pub fn ls(args: &Args) -> i64 {
                 continue;
             }
         }
-        let mut buffer = [0u8; 2048];
+        // The kernel clamps listings to MAX_SYSCALL_IO bytes; a directory full
+        // of 255-byte names can exceed it and fails closed.
+        let mut buffer = [0u8; 4096];
         let listing = match Listing::read(&path, &mut buffer) {
             Ok(listing) => listing,
             Err(error) => {
@@ -150,7 +152,7 @@ pub fn ls(args: &Args) -> i64 {
             name: "",
             directory: false,
             size: 0,
-        }; 64];
+        }; 102];
         let mut count = 0;
         for entry in listing.entries() {
             if count < entries.len() {

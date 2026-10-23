@@ -290,6 +290,8 @@ pub mod errno {
     pub const EISDIR: i64 = -15;
     /// The directory is not empty.
     pub const ENOTEMPTY: i64 = -16;
+    /// A name or path exceeds the filesystem's length limit.
+    pub const ENAMETOOLONG: i64 = -36;
 }
 
 /// Maximum size of a [`Syscall::Spawn`] argument block.
@@ -696,5 +698,32 @@ mod tests {
         }
         assert!(is_terminal_program("htop"));
         assert!(!is_terminal_program("aether-init"));
+    }
+
+    #[test]
+    fn name_too_long_uses_the_posix_value() {
+        // Userland and the Linux-ABI surface must agree on this code.
+        assert_eq!(errno::ENAMETOOLONG, -36);
+        // And it must not collide with any earlier native-ABI value.
+        for other in [
+            errno::ENOSYS,
+            errno::EINVAL,
+            errno::EACCES,
+            errno::ENOENT,
+            errno::ENOSPC,
+            errno::EPERM,
+            errno::EBADF,
+            errno::ENOGRANT,
+            errno::EIO,
+            errno::EAGAIN,
+            errno::ETIMEDOUT,
+            errno::EPIPE,
+            errno::EEXIST,
+            errno::ENOTDIR,
+            errno::EISDIR,
+            errno::ENOTEMPTY,
+        ] {
+            assert_ne!(errno::ENAMETOOLONG, other);
+        }
     }
 }

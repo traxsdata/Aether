@@ -130,13 +130,17 @@ pub enum TaskAbi {
 }
 
 #[derive(Clone, Copy)]
+#[allow(clippy::large_enum_variant)]
+// `Portal` carries a full filesystem backing path, so the variant is wide.
+// It lives per-descriptor in static task state, and 512-byte copies are safe
+// on even the 16 KiB ring-0 worker stacks.
 enum LinuxFileSource {
     Root(usize),
     Overlay(usize),
     /// An exact-file portal grant resolved to a kernel filesystem backing path.
     Portal {
         path: [u8; PORTAL_PATH_BYTES],
-        len: u8,
+        len: u16,
         rights: u8,
     },
     /// A bounded staging slot for `<granted-file>.sctmp`.
@@ -4841,7 +4845,7 @@ pub fn linux_portal_open(namespace: &str, flags: u64) -> Result<u64, i64> {
             *slot = Some(LinuxFile {
                 source: LinuxFileSource::Portal {
                     path,
-                    len: length as u8,
+                    len: length as u16,
                     rights: rights as u8,
                 },
                 offset: 0,

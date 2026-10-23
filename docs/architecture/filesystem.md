@@ -15,9 +15,10 @@ production on-disk format.
 | Portal | `kernel/src/portal.rs` | exact-path grants outside a process root |
 
 The format is intentionally bounded: 512 blocks (256 KiB), 96 inodes, at most
-8 blocks (4 KiB) per file, 25 entries per directory block, and a 16-slot open
-table. The inode table is reserved before the first data block. Exhaustion is
-reported as `ENOSPC`; no metadata allocation can grow without bound.
+8 blocks (4 KiB) per file, up to 102 variable-width entries per directory
+block, and a 16-slot open table. The inode table is reserved before the first
+data block. Exhaustion is reported as `ENOSPC`; no metadata allocation can
+grow without bound.
 
 The current user rights are `READ`, `WRITE`, and `CREATE`. Separate delete,
 rename, execute, and directory-listing rights from the specification are not
@@ -40,8 +41,8 @@ task:
 - the sibling application record uses `/apps/other`.
 
 `resolve(scope, path)` joins the root and the untrusted path, rejects every
-`..` component, rejects names longer than 16 bytes, and bounds the result to 128
-bytes. A leading `/` is still interpreted relative to the caller's root. This
+`..` component, rejects names longer than 255 bytes, and bounds the result to
+512 bytes. A leading `/` is still interpreted relative to the caller's root. This
 makes sibling access by traversal impossible by construction, even if a caller
 sends a malformed path.
 

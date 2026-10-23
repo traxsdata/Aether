@@ -170,10 +170,10 @@ fn debug_directory_layout() {
         std::println!("new inode mode={} is_file={}", read.mode, read.is_file());
         let parent_inode = fs.read_inode(parent).expect("parent2");
         let entries = fs.dir_entries(parent_inode).expect("entries");
-        for entry in entries.into_iter().flatten() {
+        for entry in entries.iter() {
             std::println!(
                 "entry {} inode={} dir={}",
-                entry.name_len,
+                entry.name.len(),
                 entry.inode,
                 entry.is_dir
             );
@@ -383,7 +383,7 @@ fn corrupt_inode_metadata_is_rejected_without_panicking() {
         );
     }
 
-    // A directory size that is not a whole number of entries is corrupt.
+    // A directory size that cannot hold a whole entry is corrupt.
     fs.write_inode(
         7,
         Inode {
@@ -470,22 +470,28 @@ fn corrupt_directory_entries_fail_closed() {
 
     // A newline in a stored name would forge a second listing line.
     let mut injected = data;
-    injected[0] = b'\n';
+    injected[4] = b'\n';
     fs.device.write_block(block, &injected).expect("write");
     let mut out = [0u8; 128];
     assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
 
     // A zero inode is not a valid directory entry.
     let mut zero = data;
-    zero[16] = 0;
-    zero[17] = 0;
+    zero[1] = 0;
+    zero[2] = 0;
     fs.device.write_block(block, &zero).expect("write");
     assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
 
     // An unknown kind byte is not silently treated as a regular file.
     let mut kind = data;
-    kind[18] = 9;
+    kind[3] = 9;
     fs.device.write_block(block, &kind).expect("write");
+    assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
+
+    // A zero name length is not a valid entry record.
+    let mut lens = data;
+    lens[0] = 0;
+    fs.device.write_block(block, &lens).expect("write");
     assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
 
     fs.device.write_block(block, &data).expect("restore");
@@ -506,16 +512,22 @@ fn directory_entries_must_match_their_inode_kind_and_name_rules() {
 
     // The file's inode cannot be described as a directory entry.
     let mut wrong_kind = data;
-    wrong_kind[18] = 2;
+    wrong_kind[3] = 2;
     fs.device.write_block(block, &wrong_kind).expect("write");
     let mut out = [0u8; 128];
     assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
 
     // Slash-bearing and traversal names cannot enter the listing protocol.
-    for name in [b"/etc".as_slice(), b".".as_slice(), b"..".as_slice()] {
+    // The first entry is `length, inode, kind, name` starting at `data[0]`.
+    for name in [
+        b"/etc".as_slice(),
+        b".".as_slice(),
+        b".".as_slice(),
+        b"..".as_slice(),
+    ] {
         let mut bad_name = data;
-        bad_name[..MAX_NAME].fill(0);
-        bad_name[..name.len()].copy_from_slice(name);
+        bad_name[0] = name.len() as u8;
+        bad_name[4..4 + name.len()].copy_from_slice(name);
         fs.device.write_block(block, &bad_name).expect("write");
         assert_eq!(fs.list("/", "dir", &mut out), Err(FsError::Corrupt));
     }
@@ -823,4 +835,178 @@ fn corrupted_images_never_panic_metadata_paths() {
             let _ = fs.close(id);
         }
     }
+}
+
+#[test]
+fn names_at_the_255_byte_limit_are_accepted_and_256_rejected() {
+    let mut fs = filesystem();
+    let at_limit = "a".repeat(MAX_NAME);
+    assert_eq!(at_limit.len(), 255);
+    fs.write_file("/", &at_limit, b"content")
+        .expect("file at limit");
+    assert_eq!(fs.stat("/", &at_limit).expect("stat"), 7);
+    let mut buffer = [0u8; 16];
+    let length = fs.read_file("/", &at_limit, &mut buffer).expect("read");
+    assert_eq!(&buffer[..length], b"content");
+    assert_eq!(fs.mkdir("/", &at_limit), Err(FsError::Exists)); // the name exists
+    assert_eq!(
+        fs.write_file("/", &"b".repeat(MAX_NAME + 1), b"x"),
+        Err(FsError::NameTooLong)
+    );
+    assert_eq!(
+        fs.mkdir("/", &"c".repeat(MAX_NAME + 1)),
+        Err(FsError::NameTooLong)
+    );
+    // A 256-byte component cannot even be resolved.
+    assert_eq!(
+        fs.stat("/", &"d".repeat(MAX_NAME + 1)),
+        Err(FsError::NameTooLong)
+    );
+    // The long name works again after the original is removed.
+    fs.remove("/", &at_limit).expect("remove at-limit");
+    fs.mkdir("/", &at_limit).expect("dir at limit");
+}
+
+#[test]
+fn the_name_limit_counts_bytes_not_characters() {
+    let mut fs = filesystem();
+    // 85 three-byte euro signs are exactly 255 bytes and valid UTF-8.
+    let at_limit = "\u{20ac}".repeat(85);
+    assert_eq!(at_limit.len(), 255);
+    fs.mkdir("/", "u").expect("u");
+    fs.write_file("/u", &at_limit, b"one")
+        .expect("utf8 at limit");
+    assert_eq!(fs.stat("/u", &at_limit).expect("stat"), 3);
+    // 86 signs are 258 bytes: over the limit by 3 bytes.
+    assert_eq!(
+        fs.write_file("/u", &"\u{20ac}".repeat(86), b"x"),
+        Err(FsError::NameTooLong),
+        "86 euro signs are 258 bytes and must be rejected"
+    );
+    // A name that reaches 255 bytes only at its final two-byte character
+    // still fits; the limit is checked in bytes, not per char.
+    let boundary = "a".repeat(253);
+    assert_eq!(boundary.len(), 253);
+    fs.mkdir("/", "b").expect("b");
+    fs.write_file("/b", format!("{boundary}\u{00e9}").as_str(), b"three")
+        .expect("boundary at limit");
+}
+
+#[test]
+fn variable_width_entries_pack_and_remove_independently() {
+    let mut fs = filesystem();
+    fs.mkdir("/", "v").expect("v");
+    let n30 = "c".repeat(30);
+    let n60 = "d".repeat(60);
+    fs.write_file("/", "v/a", b"1").expect("1 byte name");
+    fs.write_file("/", "v/aaaaaaaaaa", b"2")
+        .expect("10 byte name");
+    fs.write_file("/", format!("v/{n30}").as_str(), b"3")
+        .expect("30 byte name");
+    fs.write_file("/", format!("v/{n60}").as_str(), b"4")
+        .expect("60 byte name");
+
+    let mut out = [0u8; 512];
+    let length = fs.list("/", "v", &mut out).expect("list");
+    assert!(out[..length].windows(3).any(|w| w == b"ccc"));
+    assert!(out[..length].windows(3).any(|w| w == b"ddd"));
+
+    // Removing the middle entry must keep the longer entries after it.
+    fs.remove("/", format!("v/{n30}").as_str())
+        .expect("remove 30");
+    let length = fs.list("/", "v", &mut out).expect("re-list");
+    let listing = core::str::from_utf8(&out[..length]).expect("utf8");
+    assert!(
+        !listing.contains(&n30),
+        "removed name must be gone: {listing}"
+    );
+    assert!(
+        listing.contains(&n60),
+        "longer sibling must survive: {listing}"
+    );
+    assert!(
+        listing.contains("aaaaaaaaaa"),
+        "shorter sibling must survive: {listing}"
+    );
+    let mut buffer = [0u8; 8];
+    let content = fs
+        .read_file("/", format!("v/{n60}").as_str(), &mut buffer)
+        .expect("read 60");
+    assert_eq!(&buffer[..content], b"4");
+
+    // Renaming away from a middle slot is the same packing problem: the
+    // directory must stay consistent for the remaining names.
+    fs.rename("/", "v/aaaaaaaaaa", "v/moved").expect("rename");
+    let length = fs.list("/", "v", &mut out).expect("list after rename");
+    let listing = core::str::from_utf8(&out[..length]).expect("utf8");
+    assert!(
+        !listing.contains("aaaaaaaaaa"),
+        "old name must be gone: {listing}"
+    );
+    assert!(
+        listing.contains("moved"),
+        "new name must be present: {listing}"
+    );
+    assert!(listing.contains(&n60), "sibling must survive: {listing}");
+    assert!(
+        listing.contains("a\tf\t1"),
+        "short name must survive: {listing}"
+    );
+}
+
+#[test]
+fn a_full_directory_still_lists_every_entry() {
+    let mut fs = filesystem();
+    fs.mkdir("/", "full").expect("full");
+    // 8 names of 60 bytes: 8 * (4 header + 60 name) = 512, exactly one block;
+    // the ninth must not fit.
+    let names: Vec<String> = (0..8)
+        .map(|i| format!("{i:03}{}", "e".repeat(57)))
+        .collect();
+    assert!(names.iter().all(|name| name.len() == 60));
+    for name in &names {
+        fs.write_file("/", format!("full/{name}").as_str(), b"x")
+            .expect("write");
+    }
+    let mut out = [0u8; 16 * 64];
+    let length = fs.list("/", "full", &mut out).expect("list full dir");
+    for name in &names {
+        assert!(
+            &out[..length]
+                .windows(name.len())
+                .any(|w| w == name.as_bytes())
+        );
+    }
+    // The 9th entry must fail with NoSpace, not overflow the block.
+    assert_eq!(
+        fs.write_file("/", format!("full/{}", "e".repeat(60)).as_str(), b"x"),
+        Err(FsError::NoSpace)
+    );
+}
+
+#[test]
+fn version_two_volumes_are_rejected_without_parsing() {
+    let mut fs = filesystem();
+    let mut superblock = [0u8; BLOCK_SIZE];
+    fs.device
+        .read_block(0, &mut superblock)
+        .expect("read superblock");
+    // Rewriting the version down to 2 simulates a volume from the old
+    // fixed-width entry era: the current reader must fail closed.
+    superblock[4..6].copy_from_slice(&2u16.to_le_bytes());
+    fs.device
+        .write_block(0, &superblock)
+        .expect("write superblock");
+    assert_eq!(fs.usage(), Err(FsError::Corrupt));
+    let mut buffer = [0u8; 32];
+    assert_eq!(
+        fs.read_file("/", "missing", &mut buffer),
+        Err(FsError::Corrupt)
+    );
+    // Restoring the version makes the volume usable again.
+    superblock[4..6].copy_from_slice(&VERSION.to_le_bytes());
+    fs.device
+        .write_block(0, &superblock)
+        .expect("restore superblock");
+    assert!(fs.usage().is_ok());
 }

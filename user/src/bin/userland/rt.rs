@@ -14,7 +14,7 @@ use core::fmt::{self, Write as _};
 /// Largest file the volume stores.
 pub const MAX_FILE: usize = 4096;
 /// Longest path the kernel resolves.
-pub const MAX_PATH: usize = 128;
+pub const MAX_PATH: usize = 512;
 
 /// The argument block: working directory, program name, and arguments.
 pub struct Args {

@@ -10,9 +10,9 @@
 /// Maximum stored grants.
 pub const MAX_GRANTS: usize = 8;
 /// Maximum bytes in a process root.
-pub const MAX_ROOT_BYTES: usize = 64;
+pub const MAX_ROOT_BYTES: usize = 512;
 /// Maximum bytes in a portal path.
-pub const MAX_PATH_BYTES: usize = 128;
+pub const MAX_PATH_BYTES: usize = 512;
 /// Linux-visible namespace that fronts the exact-file grant table.
 pub const PORTAL_PREFIX: &str = "/run/aether/portal/";
 /// A grant id is sixteen lowercase hexadecimal digits.
@@ -22,9 +22,9 @@ pub const GRANT_ID_BYTES: usize = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortalGrant {
     root: [u8; MAX_ROOT_BYTES],
-    root_len: u8,
+    root_len: u16,
     path: [u8; MAX_PATH_BYTES],
-    path_len: u8,
+    path_len: u16,
     /// File rights bit set (`READ` = 1, `WRITE` = 2).
     pub rights: u64,
 }
@@ -51,9 +51,9 @@ impl PortalGrant {
         let rights = rights & (crate::portal_store::READ | crate::portal_store::WRITE);
         let mut grant = Self::EMPTY;
         grant.root[..root.len()].copy_from_slice(root.as_bytes());
-        grant.root_len = root.len() as u8;
+        grant.root_len = root.len() as u16;
         grant.path[..path.len()].copy_from_slice(path.as_bytes());
-        grant.path_len = path.len() as u8;
+        grant.path_len = path.len() as u16;
         grant.rights = rights;
         Some(grant)
     }

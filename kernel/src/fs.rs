@@ -302,7 +302,7 @@ fn map_error(error: FsError) -> i64 {
         FsError::NotFound => errno::ENOENT,
         FsError::NoSpace | FsError::TooManyOpen | FsError::FileTooLarge => errno::ENOSPC,
         FsError::BadHandle => errno::EBADF,
-        FsError::NameTooLong | FsError::PathTooLong => errno::EINVAL,
+        FsError::NameTooLong | FsError::PathTooLong => errno::ENAMETOOLONG,
         FsError::Io | FsError::NotFormatted | FsError::Corrupt => errno::EIO,
         FsError::NotDirectory => errno::ENOTDIR,
         FsError::IsDirectory => errno::EISDIR,
@@ -765,31 +765,17 @@ fn browser_scope(path: &str) -> Result<(&'static str, &str), FsError> {
 const TRASH_ROOT: &str = "/home/Trash";
 
 fn trash_name(name: &str, attempt: u8) -> [u8; aether_fs::MAX_NAME] {
-    let mut target = [0u8; aether_fs::MAX_NAME];
-    let prefix = match attempt {
-        0 => "",
-        // Keep the original name when possible; otherwise use a bounded
-        // `tN-` prefix so a collision in Trash never overwrites an item.
-        1 => "t1-",
-        2 => "t2-",
-        3 => "t3-",
-        4 => "t4-",
-        5 => "t5-",
-        _ => "t9-",
-    };
-    let prefix = prefix.as_bytes();
-    let available = target.len() - prefix.len();
-    // Truncate on a UTF-8 boundary. Cutting through a multi-byte character
-    // would make trash_path reject the name and the delete fail after a
-    // collision.
-    let mut end = name.len().min(available);
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    target[..prefix.len()].copy_from_slice(prefix);
-    target[prefix.len()..prefix.len() + end].copy_from_slice(&name.as_bytes()[..end]);
-    target
+    // The naming policy (tN- collision prefix, UTF-8-boundary truncation) is
+    // host-tested in aether-services, so it lives there, not here.
+    trash::name_for(name, attempt)
 }
+
+// Trash names are filesystem names: the bounds must stay in lockstep so a
+// collision-prefixed name always fits one entry.
+const _: () = assert!(
+    trash::MAX_TRASH_NAME == aether_fs::MAX_NAME,
+    "Trash names must fit one filesystem name"
+);
 
 fn trash_path<'a>(
     name: &str,
@@ -980,8 +966,10 @@ impl aether_wm::browser::BrowserSource for BrowserFiles {
         if path == TRASH_ROOT || path.starts_with("/home/Trash/") {
             return Err(aether_wm::browser::BrowserError::Access);
         }
+        if new_name.len() > aether_fs::MAX_NAME {
+            return Err(aether_wm::browser::BrowserError::NameTooLong);
+        }
         if new_name.is_empty()
-            || new_name.len() > aether_fs::MAX_NAME
             || new_name == "."
             || new_name == ".."
             || new_name
@@ -1033,7 +1021,8 @@ fn browser_error(error: FsError) -> aether_wm::browser::BrowserError {
     use aether_wm::browser::BrowserError;
     match error {
         FsError::Access | FsError::Escape => BrowserError::Access,
-        FsError::PathTooLong | FsError::NameTooLong | FsError::Corrupt => BrowserError::InvalidData,
+        FsError::NameTooLong => BrowserError::NameTooLong,
+        FsError::PathTooLong | FsError::Corrupt => BrowserError::InvalidData,
         _ => BrowserError::Unavailable,
     }
 }
