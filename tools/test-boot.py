@@ -224,9 +224,22 @@ def main() -> int:
                     print(log)
                     print("FAIL: boot reported an error", file=sys.stderr)
                     return 1
-                if all(marker in log for marker in SUCCESS_MARKERS) and all(
-                    text in log for text in REQUIRE_TEXT
-                ):
+                if all(marker in log for marker in SUCCESS_MARKERS):
+                    # Every success marker is present, which includes
+                    # AETHER_BOOT_OK: the kernel has reached its terminal
+                    # state and passed its self-tests, so no further evidence
+                    # will arrive. Judge the required text immediately instead
+                    # of waiting out the timeout when a line is missing.
+                    missing = [text for text in REQUIRE_TEXT if text not in log]
+                    if missing:
+                        print(log)
+                        print(f"missing required text: {missing}", file=sys.stderr)
+                        print(
+                            "FAIL: boot reached its terminal state without all "
+                            "required text",
+                            file=sys.stderr,
+                        )
+                        return 1
                     print(log)
                     print(f"PASS: {' '.join(SUCCESS_MARKERS)}")
                     if REQUIRE_TEXT:

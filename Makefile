@@ -355,8 +355,11 @@ photocraft-test:
 
 # Generic headless smoke test for a Craft app: stage a pinned AppImage, run its
 # selected program in the Gate 3 glibc runtime, and require the kernel-owned
-# import, exit, and denial markers. Use `--version` (or the app's headless
-# command) through CRAFT_ARGS.
+# boot and import evidence (AETHER_BOOT_OK is only printed after the kernel
+# verified the imported app exited with status zero). The GridCraft gate
+# markers are not required here, so any Craft app can pass. Append app output
+# with CRAFT_REQUIRE_TEXT. Use `--version` (or the app's headless command)
+# through CRAFT_ARGS.
 craft-smoke-test:
 	@test -n "$(CRAFT_ID)" || { echo "error: CRAFT_ID is required" >&2; exit 2; }
 	@test -n "$(CRAFT_VERSION)" || { echo "error: CRAFT_VERSION is required" >&2; exit 2; }
@@ -387,10 +390,9 @@ craft-smoke-test:
 		STAGED_APPIMAGE_RECORD=$(CRAFT_OUT)/app.import \
 		IMAGE_SIZE=$(CRAFT_IMAGE_SIZE) image
 	AETHER_SKIP_MARKERS=AETHER_LINUX_APPIMAGE_EXEC_OK,AETHER_LINUX_OVERLAY_PERSIST_OK,AETHER_LINUX_OVERLAY_ERASE_OK \
-	AETHER_EXTRA_MARKERS=AETHER_GATE3_APP_OK,AETHER_GATE3_DENIAL_OK \
 	AETHER_MEMORY=$(CRAFT_MEMORY) \
 	AETHER_BOOT_TIMEOUT=$(CRAFT_TIMEOUT) \
-	AETHER_REQUIRE_TEXT="AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=$$(stat -c %s '$(CRAFT_APPIMAGE)')|AETHER_GATE3_APP_OK|AETHER_GATE3_DENIAL_OK$(if $(CRAFT_REQUIRE_TEXT),|$(CRAFT_REQUIRE_TEXT))" \
+	AETHER_REQUIRE_TEXT="AETHER_LINUX_APPIMAGE_STAGED_OK|bytes=$$(stat -c %s '$(CRAFT_APPIMAGE)')$(if $(CRAFT_REQUIRE_TEXT),|$(CRAFT_REQUIRE_TEXT))" \
 	$(PYTHON) tools/test-boot.py
 
 # Generic windowed GUI smoke test for a Craft app. Uses the Gate 4 Mesa/lavapipe
