@@ -1482,6 +1482,119 @@ clone_spawn_child:
     syscall
 
 after_clone_process:
+    /* Copy-on-write fork: each side sees only its own writes, from user code,
+       from the kernel (read into a shared page), and after mprotect. */
+    push %rbx
+    push %r12
+    sub $32, %rsp
+    mov $9, %rax                /* mmap(8 KiB, RW, MAP_PRIVATE | MAP_ANONYMOUS) */
+    xor %rdi, %rdi
+    mov $8192, %rsi
+    mov $3, %rdx
+    mov $0x22, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    syscall
+    test %rax, %rax
+    js fail_cow
+    mov %rax, %r12
+    movq $0x1111, 0(%r12)
+    movq $0x3333, 4096(%r12)
+    mov $293, %rax              /* pipe2(fds, 0) */
+    lea 0(%rsp), %rdi
+    xor %rsi, %rsi
+    syscall
+    test %rax, %rax
+    jnz fail_cow
+    mov $57, %rax               /* fork */
+    syscall
+    test %rax, %rax
+    js fail_cow
+    jz cow_child
+    mov %rax, %rbx
+    mov $61, %rax
+    mov %rbx, %rdi
+    lea 8(%rsp), %rsi
+    xor %rdx, %rdx
+    xor %r10, %r10
+    syscall
+    cmp %rbx, %rax
+    jne fail_cow
+    cmpl $0xb00, 8(%rsp)        /* the child saw and changed only its copy */
+    jne fail_cow
+    cmpq $0x1111, 0(%r12)
+    jne fail_cow
+    cmpq $0x3333, 4096(%r12)
+    jne fail_cow
+    movq $0x4444, 0(%r12)       /* the last owner writes in place */
+    cmpq $0x4444, 0(%r12)
+    jne fail_cow
+    mov $3, %rax
+    movslq 0(%rsp), %rdi
+    syscall
+    mov $3, %rax
+    movslq 4(%rsp), %rdi
+    syscall
+    mov $11, %rax
+    mov %r12, %rdi
+    mov $8192, %rsi
+    syscall
+    mov $1, %rax
+    mov $1, %rdi
+    lea cow_message(%rip), %rsi
+    mov $cow_message_len, %rdx
+    syscall
+    add $32, %rsp
+    pop %r12
+    pop %rbx
+    jmp after_cow
+
+cow_child:
+    cmpq $0x1111, 0(%r12)
+    jne 1f
+    mov $10, %rax               /* mprotect(READ) then (READ | WRITE) */
+    mov %r12, %rdi
+    mov $4096, %rsi
+    mov $1, %rdx
+    syscall
+    test %rax, %rax
+    jnz 1f
+    mov $10, %rax
+    mov %r12, %rdi
+    mov $4096, %rsi
+    mov $3, %rdx
+    syscall
+    test %rax, %rax
+    jnz 1f
+    movq $0x2222, 0(%r12)
+    cmpq $0x2222, 0(%r12)
+    jne 1f
+    movq $0x5555, 16(%rsp)      /* the stack is shared copy-on-write too */
+    mov $1, %rax
+    movslq 4(%rsp), %rdi
+    lea 16(%rsp), %rsi
+    mov $8, %rdx
+    syscall
+    cmp $8, %rax
+    jne 1f
+    mov $0, %rax                /* the kernel writes into a shared page */
+    movslq 0(%rsp), %rdi
+    lea 4096(%r12), %rsi
+    mov $8, %rdx
+    syscall
+    cmp $8, %rax
+    jne 1f
+    cmpq $0x5555, 4096(%r12)
+    jne 1f
+    mov $60, %rax
+    mov $11, %rdi
+    syscall
+1:
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+
+after_cow:
     /* Thread + futex: map a shared page, clone, wait for the child. */
     sub $16, %rsp
     movq $0, 0(%rsp)
@@ -4752,6 +4865,10 @@ fail_dir:
     lea dir_failure(%rip), %rsi
     mov $dir_failure_len, %rdx
     jmp report_failure
+fail_cow:
+    lea cow_failure(%rip), %rsi
+    mov $cow_failure_len, %rdx
+    jmp report_failure
 fail_clone_process:
     lea clone_process_failure(%rip), %rsi
     mov $clone_process_failure_len, %rdx
@@ -5395,6 +5512,12 @@ clone_process_message:
 clone_process_failure:
     .ascii "AETHER_LINUX_CLONE_PROCESS_FAIL\n"
     .set clone_process_failure_len, . - clone_process_failure
+cow_message:
+    .ascii "AETHER_LINUX_COW_FORK_OK child=private parent=private kernel_write=ok mprotect=ok\n"
+    .set cow_message_len, . - cow_message
+cow_failure:
+    .ascii "AETHER_LINUX_COW_FORK_FAIL\n"
+    .set cow_failure_len, . - cow_failure
 seccomp_message:
     .ascii "AETHER_LINUX_SECCOMP_OK nnp=ok errno=ok stack=ok trap=ok kill=ok prctl=ok\n"
     .set seccomp_message_len, . - seccomp_message

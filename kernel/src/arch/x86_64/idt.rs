@@ -559,6 +559,18 @@ extern "C" fn exception_handler(frame: *mut InterruptFrame) -> *mut InterruptFra
         );
     }
 
+    // A write to a copy-on-write page, from user code or from the user-copy
+    // routine, gets its own frame and is retried. Error bits 0 and 1: the
+    // page was present and the access was a write.
+    if saved_vector == 14
+        && saved_error & 3 == 3
+        && (is_user
+            || crate::arch::x86_64::usercopy::fixup_for(saved_vector, saved_rip, cr2).is_some())
+        && crate::memory::paging::resolve_cow_fault(cr2)
+    {
+        return frame;
+    }
+
     // A page fault inside the user-copy routine on a user address becomes a
     // short copy (and `EFAULT` for the syscall) instead of a halt.
     if !is_user

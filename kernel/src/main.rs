@@ -348,6 +348,10 @@ pub unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         heap_start,
         heap_bytes / (1024 * 1024)
     );
+    match memory::init_cow() {
+        Some(frames) => serial_line!("boot: copy-on-write fork: {frames} frames tracked"),
+        None => serial_line!("boot: copy-on-write fork unavailable; fork copies eagerly"),
+    }
     serial_line!("AETHER_MM_OK");
     usercopy_selftest();
     net::init();

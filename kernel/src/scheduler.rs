@@ -2725,9 +2725,16 @@ pub fn linux_set_tid_address(pointer: u64) -> i64 {
 /// application's waiters that happen to use the same address. Threads share
 /// a page table and so a key; `MAP_SHARED` memory is the same frame in every
 /// process that maps it, so shared futexes still meet across `fork`.
+/// Private memory shared copy-on-write after `fork` is made private here, as
+/// on Linux, where a private futex never meets one in another process.
 fn futex_key(address: u64) -> Option<u64> {
     let tasks = unsafe { &*TASKS.0.get() };
     let pml4 = PhysFrame::from_address(tasks[CURRENT.load(Ordering::Relaxed)].pml4)?;
+    // A copy-on-write page changes frame on its first write, which would
+    // strand waiters keyed by the old one, so it gets its own frame first.
+    if !paging::settle_cow_page(pml4, address) {
+        return None;
+    }
     paging::user_physical_address(pml4, address)
 }
 
