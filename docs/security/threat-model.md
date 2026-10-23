@@ -159,6 +159,10 @@ bodies still run as kernel modules; moving them to ring 3 is follow-up work.
   kernel and host tooling, but activation of a staged image is not.
 - The installed update counter lives in the writable RAM image; it is not
   protected against an attacker who can rewrite storage.
+- User-installed AppImages ([ADR-019](../decisions/ADR-019-user-installed-applications.md),
+  not implemented yet) are protected by a per-machine install key held by the
+  kernel. Until verified boot, an attacker with offline disk access can read
+  that key, forge install records, or replay an older app version.
 - Package and update test keys are checked into `tests/fixtures` and provide no
   security. A release requires an offline key.
 - Packaged entry points are not executed; only verification, installation, and
