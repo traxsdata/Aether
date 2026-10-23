@@ -1892,6 +1892,8 @@ pub fn linux_seed_exec_vmas(
     interpreter_image: &aether_linux_elf::Image<'_>,
 ) {
     let current = CURRENT.load(Ordering::Relaxed);
+    // SAFETY: Task-table access is serialized by the single-CPU scheduler and
+    // interrupt masking on the system call path.
     let tasks = unsafe { &mut *TASKS.0.get() };
     let Some(task) = tasks.get_mut(current) else {
         return;
@@ -2632,7 +2634,6 @@ pub fn linux_vfork_wait(frame: *mut InterruptFrame, tgid: usize) -> *mut Interru
     yield_current(frame)
 }
 
-/// Replaces the current task's address space after `execve`.
 /// Bounded copy of a Linux executable path for `/proc/self/exe`.
 #[derive(Clone, Copy)]
 struct ExePath {
@@ -2663,6 +2664,8 @@ impl ExePath {
 /// Records the image path after a successful `execve` of the current process.
 pub fn linux_set_exe_path(path: &str) {
     let current = CURRENT.load(Ordering::Relaxed);
+    // SAFETY: Task-table access is serialized by the single-CPU scheduler and
+    // interrupt masking on the system call path.
     let tasks = unsafe { &mut *TASKS.0.get() };
     if let Some(task) = tasks.get_mut(current) {
         task.exe_path = ExePath::new(path);
@@ -2673,6 +2676,8 @@ pub fn linux_set_exe_path(path: &str) {
 /// or `None` when the task has no recorded path (the boot fixtures).
 pub fn linux_exe_path(buffer: &mut [u8; 256]) -> Option<usize> {
     let current = CURRENT.load(Ordering::Relaxed);
+    // SAFETY: Task-table access is serialized by the single-CPU scheduler and
+    // interrupt masking on the system call path.
     let tasks = unsafe { &*TASKS.0.get() };
     let path = &tasks.get(current)?.exe_path;
     let length = usize::from(path.length);
@@ -2683,6 +2688,7 @@ pub fn linux_exe_path(buffer: &mut [u8; 256]) -> Option<usize> {
     Some(length)
 }
 
+/// Replaces the current task's address space after `execve`.
 pub fn linux_replace_image(pml4: PhysFrame) {
     let current = CURRENT.load(Ordering::Relaxed);
     // execve replaces the whole process: other threads of the group would

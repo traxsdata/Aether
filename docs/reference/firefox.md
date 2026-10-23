@@ -61,8 +61,11 @@ Outputs: `build/firefox/firefox.AppImage` (about 112 MB),
 
 ```sh
 export AETHER_VNC_DISPLAY=33        # pick a free display if QEMU is shared
-make firefox-headless-test          # TCG; FIREFOX_TIMEOUT=1800 by default
+make firefox-headless-test          # FIREFOX_TIMEOUT=1800 by default
 ```
+
+Like the other boot harnesses it uses KVM when `/dev/kvm` is usable. Issue
+#107 asks for the run under TCG; set `AETHER_QEMU_ACCEL=tcg` for that.
 
 This boots Aether with the staged Firefox and runs
 

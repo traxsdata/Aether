@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Pinned Firefox ESR release for `make firefox-stage` (tools/stage-firefox.sh).
+# Pinned Firefox ESR release for `make firefox-stage` (tools/stage-firefox.py).
 #
 # The tarball is Mozilla's official Linux x86_64 en-US build. The digest is the
 # line for this file in the release's SHA256SUMS:

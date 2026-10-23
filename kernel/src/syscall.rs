@@ -336,7 +336,11 @@ pub fn linux_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
         8 => scheduler::linux_lseek(first, second as i64, third),
         4 | 6 => linux_stat(pml4, first, second),
         7 => return linux_poll(frame, pml4, first, second, third as i64, 7),
-        271 => return linux_ppoll(frame, pml4, first, second, third),
+        271 => {
+            return linux_ppoll(frame, pml4, first, second, third, unsafe {
+                ((*frame).r10, (*frame).r8)
+            });
+        }
         35 => return linux_nanosleep(frame, pml4, first, second),
         230 => {
             return linux_clock_nanosleep(frame, pml4, first, second, third, unsafe {
@@ -1673,19 +1677,33 @@ fn linux_pipe2(pml4: PhysFrame, fds_pointer: u64, _flags: u64) -> i64 {
 
 /// `ppoll`: `poll` with a `timespec` timeout.
 ///
-/// glibc implements `poll()` with this call, so GLib's main loop (Firefox)
-/// reaches it. The optional signal mask is not swapped in for the wait: as
-/// with `poll`, pending signals interrupt the wait and are delivered on return.
+/// glibc implements `poll()` with this call (with a null mask), so GLib's main
+/// loop (Firefox) reaches it. A non-null signal mask is validated but not yet
+/// swapped in for the wait, the same simplification `epoll_pwait` makes: a
+/// signal that the caller's current mask blocks and the ppoll mask would
+/// unblock does not interrupt the wait. The remaining time is not written back.
 fn linux_ppoll(
     frame: *mut InterruptFrame,
     pml4: PhysFrame,
     fds_pointer: u64,
     count: u64,
     timeout_pointer: u64,
+    (sigmask_pointer, sigset_size): (u64, u64),
 ) -> *mut InterruptFrame {
+    if sigmask_pointer != 0 {
+        if sigset_size != 8 {
+            return linux_result(frame, LINUX_EINVAL);
+        }
+        if read_user_array::<8>(pml4, sigmask_pointer).is_none() {
+            return linux_result(frame, LINUX_EFAULT);
+        }
+    }
     let timeout = if timeout_pointer == 0 {
         -1
     } else {
+        if read_user_array::<16>(pml4, timeout_pointer).is_none() {
+            return linux_result(frame, LINUX_EFAULT);
+        }
         let Some((seconds, nanoseconds)) = read_timespec(pml4, timeout_pointer) else {
             return linux_result(frame, LINUX_EINVAL);
         };
