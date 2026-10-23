@@ -1242,12 +1242,18 @@ pub fn run() -> ! {
                 self_tests_failed()
             }
             // The ring-3 IPC demo must have exercised the bound positive and
-            // negative paths: sends, receives, and at least one denial of
-            // every kind. A user task that exited by claiming success without
-            // producing the evidence fails the boot.
+            // negative paths: sends, receives, and each denial the kernel
+            // enforces from user mode: oversize payload (EINVAL), forged
+            // handle (EBADF), re-transferred capability (EACCES), endpoint
+            // pool exhaustion (ENOSPC), stale handle after close (EBADF),
+            // and a file capability used as an endpoint (EBADF). A full or
+            // empty queue answers `EAGAIN` and is flow control, not a
+            // denial, so those two demo cases are not in this count. A user
+            // task that exited by claiming success without producing the
+            // evidence fails the boot.
             if crate::syscall::ipc_sends() < 8
                 || crate::syscall::ipc_receives() < 8
-                || crate::syscall::ipc_denials() < 8
+                || crate::syscall::ipc_denials() < 6
                 || crate::syscall::ipc_blocks() < 1
                 || crate::syscall::ipc_timeouts() < 1
                 || crate::syscall::ipc_closes() < 1

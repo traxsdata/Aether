@@ -283,7 +283,9 @@ def exercise_iso(iso: Path, device: str, out: Path, timeout: int) -> None:
         state = vm.wait(lambda value: value["focus"] == value["windows"]["Files"]["id"], "focus Files")
         fx, fy, fw, fh = state["windows"]["Files"]["frame"]
         sidebar = max(92, min(138, (fw - 2) // 3))
-        vm.move_to(fx + sidebar // 2, fy + 31 + 46 + 26 + 11)
+        # Home is sidebar row 0 (LOCATIONS order since the unified-UX
+        # rework); the click targets that row's center.
+        vm.move_to(fx + sidebar // 2, fy + 31 + 46 + 11)
         vm.click()
         vm.wait(lambda value: value["path"] == "/home", "open Home from the Files sidebar")
         vm.move_to(fx + 1 + sidebar + 50, fy + 31 + 38 + 11)
