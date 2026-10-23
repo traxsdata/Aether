@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from boot_support import BASE_MARKERS, find_firmware, has_failure
+from boot_support import BASE_MARKERS, find_firmware, has_failure, socket_path
 from qemu_accel import accel_args, describe
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -69,7 +69,9 @@ EXPECT_FAILURE_TEXT = os.environ.get("AETHER_EXPECT_FAILURE_TEXT", "")
 EXPECT_CRASH_SCREEN = os.environ.get("AETHER_EXPECT_CRASH_SCREEN") == "1"
 CRASH_MARKER = "AETHER_CRASH_SCREEN shown=1"
 CRASH_BLUE = (0x0F, 0x3C, 0x8C)
-QMP = BUILD / "qmp.sock"
+# Unix socket paths are capped at 108 bytes (SUN_PATH_MAX); boot_support
+# returns a short path so the harness works from any checkout depth.
+QMP = socket_path("qmp.sock")
 SCREENSHOT = BUILD / "crash-screen.ppm"
 TIMEOUT = int(os.environ.get("AETHER_BOOT_TIMEOUT", "90"))
 # VNC display number for the headless q35 boot. Parallel worktrees can collide

@@ -15,13 +15,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from boot_support import find_firmware, has_failure
+from boot_support import find_firmware, has_failure, socket_path
 from qemu_accel import accel_args, describe
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 IMAGE = BUILD / "aether.img"
-SOCKET = BUILD / "shell.sock"
+# Unix socket paths are capped at 108 bytes (SUN_PATH_MAX), so long checkout
+# directories cannot host them under build/; boot_support gives a short one.
+SOCKET = socket_path("shell.sock")
 VARS = BUILD / "OVMF_VARS.fd"
 
 def qemu_command(code: Path, variables: Path | None) -> list[str]:

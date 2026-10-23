@@ -26,6 +26,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from boot_support import socket_path
 from qemu_accel import accel_args, describe
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -95,7 +97,9 @@ def main() -> int:
     serial = OUT / "serial.log"
     serial.unlink(missing_ok=True)
     SCREENSHOT.unlink(missing_ok=True)
-    qmp_path = OUT / "qmp.sock"
+    # Unix socket paths are capped at 108 bytes (SUN_PATH_MAX); boot_support
+    # returns a short path so the harness works from any checkout depth.
+    qmp_path = socket_path("qmp.sock")
     qmp_path.unlink(missing_ok=True)
     code, variables = firmware()
     variables_copy = OUT / "OVMF_VARS.fd"

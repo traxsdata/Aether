@@ -11,7 +11,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from boot_support import BASE_MARKERS, find_firmware, find_iso, has_failure
+import boot_support
+from boot_support import (
+    BASE_MARKERS,
+    UNIX_SOCKET_PATH_LIMIT,
+    find_firmware,
+    find_iso,
+    has_failure,
+    socket_path,
+)
 from make_vmware_vmx import render, vmx_string
 from desktop_smoke import parse_state, read_ppm
 
@@ -131,6 +139,20 @@ class ToolingTests(unittest.TestCase):
         for path in ('bad\npath', 'bad\rpath', 'bad\x00path'):
             with self.assertRaises(ValueError):
                 vmx_string(path)
+
+    def test_qemu_socket_paths_fit_the_unix_limit_or_fail_explicitly(self):
+        path = socket_path("shell.sock")
+        self.assertLess(len(os.fsencode(path)), UNIX_SOCKET_PATH_LIMIT)
+        self.assertTrue(path.parent.is_dir())
+        self.assertEqual(socket_path("shell.sock"), path)
+        self.assertNotEqual(socket_path("qmp.sock"), path)
+        long_root = Path("/") / ("d" * 150)
+        with patch.object(boot_support, "_socket_dir", long_root):
+            with self.assertRaises(RuntimeError) as caught:
+                socket_path("shell.sock")
+        message = str(caught.exception)
+        self.assertIn(str(long_root / "shell.sock"), message)
+        self.assertIn(str(UNIX_SOCKET_PATH_LIMIT), message)
 
     def test_invalid_firmware_overrides_fail_before_qemu(self):
         with patch.dict(os.environ, {"OVMF_CODE": "/nonexistent/aether-code.fd"}, clear=True):

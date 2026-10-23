@@ -16,7 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from boot_support import BASE_MARKERS, find_firmware, has_failure
+from boot_support import BASE_MARKERS, find_firmware, has_failure, socket_path
 from qemu_accel import accel_args, describe
 
 # Pixels per PS/2 count; mirrors MOUSE_GAIN in kernel/src/input.rs.
@@ -71,8 +71,10 @@ class DesktopVM:
         self.out = out
         out.mkdir(parents=True, exist_ok=True)
         (out / "result.txt").unlink(missing_ok=True)
-        self.serial_path = out / "serial.sock"
-        self.qmp_path = out / "qmp.sock"
+        # Unix socket paths are capped at 108 bytes (SUN_PATH_MAX), so long
+        # checkout directories must not host them under build/.
+        self.serial_path = socket_path("serial.sock")
+        self.qmp_path = socket_path("qmp.sock")
         for path in (self.serial_path, self.qmp_path):
             path.unlink(missing_ok=True)
         self.transcript = bytearray()

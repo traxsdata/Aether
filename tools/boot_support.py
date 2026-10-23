@@ -3,9 +3,41 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
+
+# QEMU rejects `unix:` socket paths of this length or more (SUN_PATH_MAX),
+# which breaks any checkout whose own path is longer than about 80 characters.
+UNIX_SOCKET_PATH_LIMIT = 108
+
+_socket_dir: Path | None = None
+
+
+def socket_path(name: str) -> Path:
+    """A short-lived Unix socket path that fits QEMU's length limit from any checkout.
+
+    Unix socket paths must be less than 108 bytes (SUN_PATH_MAX), but a
+    `<checkout>/build/.../name` path computed from a long checkout directory
+    exceeds that, so QEMU aborts with `UNIX socket path ... is too long`.
+    Socket files therefore live in a process-private directory under /tmp,
+    removed at exit. Logs, screenshots, and other artifacts stay in build/.
+    """
+    global _socket_dir
+    if _socket_dir is None:
+        _socket_dir = Path(tempfile.mkdtemp(prefix="aeth-sock-", dir="/tmp"))
+        atexit.register(shutil.rmtree, _socket_dir, ignore_errors=True)
+    path = _socket_dir / name
+    length = len(os.fsencode(path))
+    if length >= UNIX_SOCKET_PATH_LIMIT:
+        raise RuntimeError(
+            f"Unix socket path too long: {path} is {length} bytes, "
+            f"but QEMU requires paths of fewer than {UNIX_SOCKET_PATH_LIMIT} bytes (SUN_PATH_MAX)"
+        )
+    return path
 
 BASE_MARKERS = (
     "AETHER_MM_OK", "AETHER_USERCOPY_FIXUP_OK", "AETHER_SCHED_OK",
