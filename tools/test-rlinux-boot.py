@@ -14,9 +14,11 @@ The image is not the Aether disk image: `build/rlinux/initramfs.cpio.gz`
 (from tools/build-rlinux-initramfs.sh) carries a busybox /init that mounts
 proc/sys/devtmpfs, prints AETHER-RLINUX: init, and hands over to a shell on
 the serial console. The harness then talks to that shell through QEMU's
-serial chardev: it sends `uname -r; echo AETHER-RLINUX: shell-ok` and waits
-for the marker. It fails on a timeout, a kernel panic, or a missing marker,
-and prints the serial log tail on failure.
+serial chardev: it sends `uname -r; echo "AETHER-RLINUX: shell-$((6 * 7))"`
+and waits for `AETHER-RLINUX: shell-42`, which only a running shell can
+print (the terminal's echo of the typed command doesn't contain it). It
+fails on a timeout, a kernel panic, or a missing marker, and prints the
+serial log tail on failure.
 
 The serial chardev is a socket with a logfile, the same pattern as
 tools/desktop_smoke.py, so the harness can send input (a plain
@@ -45,15 +47,19 @@ SERIAL = RLINUX / "serial.log"
 QEMU_LOG = RLINUX / "qemu.log"
 VARS = RLINUX / "OVMF_VARS.fd"
 
-SHELL_COMMAND = "uname -r; echo AETHER-RLINUX: shell-ok"
+# The shell must *compute* part of the marker: the terminal echoes the typed
+# command back, so a marker that appears literally in the command would
+# "pass" as soon as the line is echoed, even if the shell never ran it.
+SHELL_COMMAND = 'uname -r; echo "AETHER-RLINUX: shell-$((6 * 7))"'
+
 INIT_MARKER = "AETHER-RLINUX: init"
-SHELL_MARKER = "AETHER-RLINUX: shell-ok"
+SHELL_MARKER = "AETHER-RLINUX: shell-42"
 KERNEL_VERSION_MARKER = "Linux version"
 KERNEL_PANIC = "Kernel panic"
 
 # TCG booting an upstream kernel is slow; the deadline covers the whole
 # run (boot, shell handover, command round-trip).
-TIMEOUT = int(os.environ.get("AETHER_RLinux_BOOT_TIMEOUT", "240"))
+TIMEOUT = int(os.environ.get("AETHER_RLINUX_BOOT_TIMEOUT", "240"))
 # Aether's other harnesses default to VNC display 9; this one runs alongside
 # `make ci` and takes display 10 by default.
 VNC_DISPLAY = os.environ.get("AETHER_VNC_DISPLAY", "10")
@@ -220,8 +226,7 @@ def main() -> int:
             print("FAIL: serial log is missing the `Linux version` line", file=sys.stderr)
             return 1
         print(log)
-        # Last matching line per marker: the shell marker also appears in the
-        # echoed input, and its real occurrence is the shell's own output.
+        # Last matching line per marker (the shell's own output is last).
         for marker in (KERNEL_VERSION_MARKER, INIT_MARKER, SHELL_MARKER):
             lines = log.splitlines()
             line = next((entry for entry in reversed(lines) if marker in entry), None)
