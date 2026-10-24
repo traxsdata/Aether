@@ -61,39 +61,6 @@ export PATH
 command -v bindgen >/dev/null 2>&1 \
     || die "bindgen not found in PATH (expected /opt/aether-shared/bin/bindgen)"
 
-# The kernel's rust_is_available.sh requires the rust-src component of the
-# selected toolchain (it compiles core from std sources). Pick the first
-# installed rustup toolchain that has it - on this machine Aether pins the
-# 1.99.1 toolchain without rust-src, while `stable` (same version) has it.
-rust_toolchain_has_src() {
-    tc=$1 # rustup toolchain name, empty = rustc on PATH
-    if [ -n "$tc" ]; then
-        sysroot=$(rustup run "$tc" rustc --print sysroot 2>/dev/null) \
-            || return 1
-    else
-        sysroot=$(rustc --print sysroot 2>/dev/null) || return 1
-    fi
-    test -f "$sysroot/lib/rustlib/src/rust/library/core/src/lib.rs"
-}
-
-if command -v rustup >/dev/null 2>&1; then
-    for tc in stable $(rustup toolchain list 2>/dev/null | awk '{print $1}'); do
-        [ -n "$tc" ] || continue
-        if rust_toolchain_has_src "$tc"; then
-            RUSTUP_TOOLCHAIN=$tc
-            break
-        fi
-    done
-fi
-if [ -z "${RUSTUP_TOOLCHAIN:-}" ]; then
-    rust_toolchain_has_src "" \
-        || die "no usable Rust toolchain: the kernel build needs a rustc with the rust-src component"
-    RUSTUP_TOOLCHAIN=
-else
-    export RUSTUP_TOOLCHAIN
-    echo "kernel rust toolchain: ${RUSTUP_TOOLCHAIN} (rustc + rust-src)"
-fi
-
 RLINUX_LLVM=${RLINUX_LLVM:--21}
 case "$RLINUX_LLVM" in
     1 | -* | */*) ;;
@@ -153,6 +120,44 @@ else
     echo "$RLINUX_SHA" >"$SRC/.aether-rlinux-sha"
 fi
 [ -f "$FRAG" ] || die "config fragment not found: tools/rlinux/aether.config"
+
+# The kernel's rust_is_available.sh requires the rust-src component of the
+# selected toolchain (it compiles core from std sources). Prefer the rustc
+# version rlinux itself pins as its minimum (scripts/min-tool-version.sh),
+# because that is what rlinux's own CI builds and tests with; Aether's
+# rust-toolchain.toml (a newer rustc) would otherwise apply in this subtree.
+# Fall back to the first installed toolchain that has rust-src.
+rust_toolchain_has_src() {
+    tc=$1 # rustup toolchain name, empty = rustc on PATH
+    if [ -n "$tc" ]; then
+        sysroot=$(rustup run "$tc" rustc --print sysroot 2>/dev/null) \
+            || return 1
+    else
+        sysroot=$(rustc --print sysroot 2>/dev/null) || return 1
+    fi
+    test -f "$sysroot/lib/rustlib/src/rust/library/core/src/lib.rs"
+}
+
+kernel_rustc=$(sh "$SRC/scripts/min-tool-version.sh" rustc 2>/dev/null || true)
+if command -v rustup >/dev/null 2>&1; then
+    for tc in $kernel_rustc stable $(rustup toolchain list 2>/dev/null | awk '{print $1}'); do
+        [ -n "$tc" ] || continue
+        if rust_toolchain_has_src "$tc"; then
+            RUSTUP_TOOLCHAIN=$tc
+            break
+        fi
+    done
+fi
+if [ -z "${RUSTUP_TOOLCHAIN:-}" ]; then
+    rust_toolchain_has_src "" \
+        || die "no usable Rust toolchain: the kernel build needs a rustc with the rust-src component"
+    RUSTUP_TOOLCHAIN=
+else
+    export RUSTUP_TOOLCHAIN
+    [ "$RUSTUP_TOOLCHAIN" = "$kernel_rustc" ] \
+        || echo "warning: rlinux's minimum rustc ${kernel_rustc:-?} is not installed with rust-src; using ${RUSTUP_TOOLCHAIN}" >&2
+    echo "kernel rust toolchain: ${RUSTUP_TOOLCHAIN} (rustc + rust-src)"
+fi
 
 # --- configure, verify, build -------------------------------------------------
 cd "$SRC"
