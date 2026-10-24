@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Pinned rlinux commit for the Phase 0 kernel build
+# (tools/build-rlinux-kernel.sh, docs/rlinux-migration.md, issue #185).
+#
+# The pinned commit is rlinux's `main` (kernel 7.3.0 base import plus the
+# first Rust-driver conversions and the CI scaffolding above it). Pin `main`,
+# not a tag: rlinux only develops on `main`. Bump the SHA in one commit when
+# the drivers Aether's boot path needs land, and re-verify
+# tools/rlinux/aether.config against that commit (every symbol must stay =y
+# in the final .config; tools/build-rlinux-kernel.sh fails the build
+# otherwise).
+#
+# Not the original b5ffbb2cb7acb8317dac8d05a9818febfda585c3 (issue #185
+# "start with"): that import commit is missing every master linker script
+# (`arch/*/kernel/vmlinux.lds.S` and friends), so no bzImage can link from
+# it; rlinux restored the files on `main` afterwards (fix/restore-import-files).
+RLINUX_URL=https://github.com/traxsdata/rlinux
+RLINUX_SHA=fb046b319862b583e6777d019c61aed62b625e72

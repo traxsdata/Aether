@@ -15,6 +15,55 @@ Those documents are rewritten in Phase 4 below, once the new boot path is
 proven, not before — the old kernel stays the buildable, working thing until
 there is a real replacement for every piece of it.
 
+## Phase 0: building rlinux
+
+The first Phase 0 step is a reproducible build of the pinned rlinux kernel
+that Aether can later boot (#185; booting itself is #186). It adds build
+tooling only — no change to `kernel/`, `boot/`, or the existing image:
+
+- `tools/pins/rlinux.pin` — the pinned rlinux repo URL and full commit SHA
+  (`main` = kernel 7.3.0 at the time of pinning).
+- `tools/rlinux/aether.config` — Aether's QEMU/VM device profile as a config
+  fragment (EFI boot, console, PS/2 input, stdvga + EFI simple framebuffer,
+  virtio-blk, e1000/e1000e), every symbol `=y`, on top of
+  `x86_64_defconfig`.
+- `tools/build-rlinux-kernel.sh` — fetches the source for the pinned SHA
+  (reused per-SHA from `build/rlinux/src`, from the shared git mirror at
+  `/opt/aether-shared/rlinux-cache/rlinux.git` when available, otherwise
+  from the GitHub archive), configures, checks that **every** fragment
+  symbol is `=y` in the final `.config`, and builds `bzImage`.
+
+Exact commands:
+
+```sh
+# the build (works from a clean tree; reuses build/rlinux/src when the
+# recorded SHA matches)
+make rlinux-kernel
+
+# equivalent, without make:
+sh tools/build-rlinux-kernel.sh
+
+# without the shared mirror (e.g. CI): falls back to the archive download
+RLINUX_MIRROR=/nonexistent sh tools/build-rlinux-kernel.sh
+```
+
+Inside the source tree the kernel is configured and built as:
+
+```sh
+make LLVM=-21 x86_64_defconfig
+sh scripts/kconfig/merge_config.sh -m .config tools/rlinux/aether.config
+make LLVM=-21 olddefconfig
+make LLVM=-21 rustavailable          # must print "Rust is available!"
+make -j"$(nproc)" LLVM=-21 bzImage
+```
+
+`LLVM=-21` is this machine's spelling: it ships clang-21/lld-21 without a
+plain `clang`, and the kernel maps `LLVM=-21` to `clang-21` (its
+`Documentation/kbuild/llvm.rst`); `LLVM=1` would look for plain `clang`.
+The product is `build/rlinux/bzImage` (`CONFIG_RUST=y` verified). The target
+is deliberately **not** part of `make ci` / `tools/ci.sh` while it is Phase 0
+build-time work.
+
 ## Why this is a large migration, not a kernel swap
 
 Aether's `kernel/` is ~28k lines and is not just a kernel in the Linux sense:
