@@ -1,5 +1,11 @@
 # Aether
 
+> **Project frozen (2026-10-24).** Development has moved to
+> [rlinux](https://github.com/traxsdata/rlinux), a Linux kernel with drivers
+> incrementally converted to Rust, running an existing OS (Debian) instead of
+> Aether's own userspace. This repository is kept as a reference; open issues
+> are labelled `on-hold`. See `docs/rlinux-migration.md` for the earlier plan.
+
 Aether is an independent, capability-based desktop operating system for
 x86-64 PCs. It is not a Linux distribution: the kernel, system interfaces, and
 desktop are developed in this repository.

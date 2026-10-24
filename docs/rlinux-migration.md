@@ -1,5 +1,9 @@
 # Migrating Aether onto the rlinux kernel
 
+> **On hold (2026-10-24):** the owner froze Aether. Phase 0 steps 1 and 2
+> (`make rlinux-kernel`, `make rlinux-boot-test`) landed; the remaining phases
+> are paused, and the focus is Debian on rlinux instead.
+
 ## Decision
 
 Aether will stop using its own from-scratch microkernel (`kernel/`) and boot
