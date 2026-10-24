@@ -140,7 +140,7 @@ USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
 .PHONY: all kernel user loader image iso iso-gridcraft craft-apps-stage iso-craft-apps iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test firefox-stage firefox-headless-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test path-length-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
-	runtime-rootfs-pinned runtime-package-test release-check qualify ci clean
+	runtime-rootfs-pinned runtime-package-test release-check qualify rlinux-kernel ci clean
 
 all: image
 
@@ -828,6 +828,13 @@ release-check:
 
 qualify:
 	$(PYTHON) tools/qualify.py
+
+# Phase 0 of the rlinux migration (docs/rlinux-migration.md, issue #185):
+# build the pinned rlinux kernel (bzImage, CONFIG_RUST=y) into build/rlinux/.
+# Deliberately not part of `ci`: this is a ~10 minute kernel build while the
+# migration is still early phase 0.
+rlinux-kernel:
+	sh tools/build-rlinux-kernel.sh
 
 ci:
 	sh tools/ci.sh
