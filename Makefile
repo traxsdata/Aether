@@ -140,7 +140,7 @@ USER_RUSTFLAGS := -C relocation-model=pic -C link-arg=-no-pie
 
 .PHONY: all kernel user loader image iso iso-gridcraft craft-apps-stage iso-craft-apps iso-test vmware-vmx test large-apps-test glibc-test gate3-test photocraft-test craft-smoke-test craft-gui-test firefox-stage firefox-headless-test gate4-portal-test gate4-gui-portal-test gate4-display-test gate4-runtime gate4-runtime-image gate4-image-only gate4-runtime-test gate4-test shell-test terminal-test net-test fault-test usercopy-fault-test smap-fault-test crash-screen-test rollback-test path-length-test \
 	negative-test appimage-stage-tamper-test appimage-stage-missing-test unittest lint docs-check license-check compat-test update-test release release-demo \
-	runtime-rootfs-pinned runtime-package-test release-check qualify rlinux-kernel ci clean
+	runtime-rootfs-pinned runtime-package-test release-check qualify rlinux-kernel rlinux-initramfs rlinux-boot-test ci clean
 
 all: image
 
@@ -835,6 +835,21 @@ qualify:
 # migration is still early phase 0.
 rlinux-kernel:
 	sh tools/build-rlinux-kernel.sh
+
+# Phase 0 of the rlinux migration (docs/rlinux-migration.md, issue #186):
+# the minimal initramfs the boot test uses (host static busybox, its applet
+# symlinks, and an /init that mounts proc/sys/devtmpfs and hands over to a
+# shell on the serial console).
+rlinux-initramfs:
+	sh tools/build-rlinux-initramfs.sh
+
+# Boot the pinned rlinux kernel (make rlinux-kernel) to a shell under
+# QEMU/OVMF through the kernel's EFI stub, then drive the shell over the
+# serial console and verify its reply (issue #186). KVM by default, or
+# AETHER_QEMU_ACCEL=tcg for software emulation. Like rlinux-kernel,
+# deliberately not part of `ci` yet: the migration is still early phase 0.
+rlinux-boot-test: rlinux-initramfs
+	$(PYTHON) tools/test-rlinux-boot.py
 
 ci:
 	sh tools/ci.sh
